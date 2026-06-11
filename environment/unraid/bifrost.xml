@@ -1,0 +1,88 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>bifrost</Name>
+  <Repository>ghcr.io/others-git/bifrost:latest</Repository>
+  <Registry>https://ghcr.io</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/others-git/bifrost/issues</Support>
+  <Project>https://github.com/others-git/bifrost</Project>
+  <Overview>Self-hosted smart home hub for lights. Bridges Philips Hue, Govee, WLED, Tasmota, and Shelly behind one fast web UI and REST API, with a focus on connection reliability: explicit reconnect state machines, polling fallback, and live push to the browser. Single binary, single SQLite file. Hue pairing happens in the UI via the bridge link button.</Overview>
+  <Category>HomeAutomation:</Category>
+  <WebUI>http://[IP]:[PORT:3000]/</WebUI>
+  <TemplateURL/>
+  <Icon>https://raw.githubusercontent.com/others-git/bifrost/main/frontend/public/favicon.svg</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires/>
+
+  <!-- Port: host port → container port. The app listens on 3000 by default
+       (BIND_ADDR below). -->
+  <Config Name="WebUI Port"
+          Target="3000"
+          Default="3000"
+          Mode="tcp"
+          Description="Host port for the web interface."
+          Type="Port"
+          Display="always"
+          Required="true"
+          Mask="false">3000</Config>
+
+  <!-- Volumes -->
+  <Config Name="Data Directory"
+          Target="/data"
+          Default="/mnt/user/appdata/bifrost/data"
+          Mode="rw"
+          Description="Directory for the SQLite database (bifrost.db). All state lives here: password, providers (credentials encrypted), lights, scenes, groups, floor plans."
+          Type="Path"
+          Display="always"
+          Required="true"
+          Mask="false">/mnt/user/appdata/bifrost/data</Config>
+
+  <!-- Environment variables -->
+  <Config Name="Secret Key"
+          Target="BIFROST_SECRET"
+          Default=""
+          Mode=""
+          Description="REQUIRED. Encrypts provider credentials at rest (AES-256-GCM). Generate one with: openssl rand -hex 32. Changing it later orphans stored provider credentials (you would re-add providers)."
+          Type="Variable"
+          Display="always"
+          Required="true"
+          Mask="true"></Config>
+
+  <Config Name="Database URL"
+          Target="DATABASE_URL"
+          Default="sqlite:///data/bifrost.db"
+          Mode=""
+          Description="SQLite connection string. Leave at the default unless you move the Data Directory mapping."
+          Type="Variable"
+          Display="advanced"
+          Required="false"
+          Mask="false">sqlite:///data/bifrost.db</Config>
+
+  <Config Name="Bind Address"
+          Target="BIND_ADDR"
+          Default="0.0.0.0:3000"
+          Mode=""
+          Description="Address and port the app listens on inside the container. Change the WebUI Port mapping above to match if you alter the port."
+          Type="Variable"
+          Display="advanced"
+          Required="false"
+          Mask="false">0.0.0.0:3000</Config>
+
+  <Config Name="Log Level"
+          Target="RUST_LOG"
+          Default="bifrost=info"
+          Mode=""
+          Description="Log filter, e.g. bifrost=info or bifrost=debug."
+          Type="Variable"
+          Display="advanced"
+          Required="false"
+          Mask="false">bifrost=info</Config>
+</Container>
