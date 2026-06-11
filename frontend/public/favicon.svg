@@ -6,13 +6,13 @@
       <stop offset="100%" stop-color="#07070d"/>
     </linearGradient>
 
-    <!-- Full-spectrum light sweeping diagonally along the rune -->
-    <linearGradient id="spectrum" gradientUnits="userSpaceOnUse" x1="9" y1="5" x2="23" y2="27">
+    <!-- Full spectrum across the curtains: violet to ember -->
+    <linearGradient id="spectrum" gradientUnits="userSpaceOnUse" x1="7" y1="0" x2="26" y2="0">
       <stop offset="0%"   stop-color="#a855f7"/>
-      <stop offset="20%"  stop-color="#3b82f6"/>
-      <stop offset="40%"  stop-color="#22d3ee"/>
-      <stop offset="58%"  stop-color="#4ade80"/>
-      <stop offset="75%"  stop-color="#facc15"/>
+      <stop offset="25%"  stop-color="#3b82f6"/>
+      <stop offset="45%"  stop-color="#22d3ee"/>
+      <stop offset="62%"  stop-color="#4ade80"/>
+      <stop offset="82%"  stop-color="#facc15"/>
       <stop offset="100%" stop-color="#f43f5e"/>
     </linearGradient>
 
@@ -24,22 +24,26 @@
   <rect width="32" height="32" rx="7" fill="url(#sky)"/>
 
   <!-- Faint stars -->
-  <circle cx="26.5" cy="20" r="0.5" fill="#e8ecff" opacity="0.5"/>
-  <circle cx="6" cy="25" r="0.45" fill="#e8ecff" opacity="0.45"/>
-  <circle cx="24" cy="11" r="0.4" fill="#e8ecff" opacity="0.4"/>
+  <circle cx="5" cy="8" r="0.45" fill="#e8ecff" opacity="0.5"/>
+  <circle cx="27.5" cy="25" r="0.5" fill="#e8ecff" opacity="0.45"/>
+  <circle cx="6" cy="26" r="0.4" fill="#e8ecff" opacity="0.4"/>
 
   <!-- Valhalla: small four-point star, upper right -->
-  <path d="M26 3.4 L26.55 5.15 L28.3 5.7 L26.55 6.25 L26 8 L25.45 6.25 L23.7 5.7 L25.45 5.15 Z"
+  <path d="M27.4 3.4 L27.95 5.15 L29.7 5.7 L27.95 6.25 L27.4 8 L26.85 6.25 L25.1 5.7 L26.85 5.15 Z"
         fill="#f4f7ff" opacity="0.9"/>
 
-  <!-- Berkana ᛒ — the Bifrost rune, drawn in full-spectrum light -->
+  <!-- Bifrost as aurora: three curtains of full-spectrum light -->
   <!-- Glow underlay -->
-  <g stroke="url(#spectrum)" fill="none" stroke-linecap="round" stroke-linejoin="round"
+  <g stroke="url(#spectrum)" fill="none" stroke-linecap="round"
      opacity="0.22" filter="url(#soften)">
-    <path d="M11 6 V26 M11 6 L21 11 L11 16 L21 21 L11 26" stroke-width="5"/>
+    <path d="M11.5 6.5 C8 11 13.5 15 8.5 22" stroke-width="5.8"/>
+    <path d="M18.5 4.5 C14.5 10 20.5 15.5 15 25.5" stroke-width="6.4"/>
+    <path d="M25 7.5 C21.5 12 26.5 15 21.5 21.5" stroke-width="5.8"/>
   </g>
-  <!-- Rune -->
-  <g stroke="url(#spectrum)" fill="none" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M11 6 V26 M11 6 L21 11 L11 16 L21 21 L11 26" stroke-width="3.4"/>
+  <!-- Curtains -->
+  <g stroke="url(#spectrum)" fill="none" stroke-linecap="round">
+    <path d="M11.5 6.5 C8 11 13.5 15 8.5 22" stroke-width="3.6"/>
+    <path d="M18.5 4.5 C14.5 10 20.5 15.5 15 25.5" stroke-width="4.2"/>
+    <path d="M25 7.5 C21.5 12 26.5 15 21.5 21.5" stroke-width="3.6"/>
   </g>
 </svg>
