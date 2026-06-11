@@ -1,6 +1,6 @@
 import { jsx as _jsx, Fragment as _Fragment, jsxs as _jsxs } from "react/jsx-runtime";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createPlan, getPlan, getPlans, putPlanLayout, putPlanLights, removePlan, setLightState, xyToRgb, } from "../api";
+import { createPlan, getPlan, getPlans, mergePatch, putPlanLayout, putPlanLights, removePlan, setLightState, xyToRgb, } from "../api";
 import { S } from "../styles";
 const TOOLS = [
     { id: "view", label: "View", hint: "Click a light to toggle it. Drag to pan, scroll to zoom." },
@@ -38,11 +38,15 @@ export function FloorPlanPage({ lights }) {
     useEffect(() => {
         const es = new EventSource("/api/events");
         es.addEventListener("light_state", (raw) => {
-            const { device_id, state } = JSON.parse(raw.data);
+            const { device_id, patch } = JSON.parse(raw.data);
             const light = lights.find((l) => l.device_id === device_id);
             if (!light)
                 return;
-            setStatesById((prev) => new Map(prev).set(light.id, state));
+            setStatesById((prev) => {
+                const next = new Map(prev);
+                next.set(light.id, mergePatch(next.get(light.id) ?? light.last_state, patch));
+                return next;
+            });
         });
         es.onerror = () => { };
         return () => es.close();

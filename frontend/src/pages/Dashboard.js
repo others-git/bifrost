@@ -1,6 +1,6 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useEffect, useRef, useState } from "react";
-import { activateScene, createScene, getGroups, getProviders, getScenes, removeScene, rgbToXy, setGroupState, setLightState, } from "../api";
+import { activateScene, createScene, getGroups, getProviders, getScenes, mergePatch, removeScene, rgbToXy, setGroupState, setLightState, } from "../api";
 import { S } from "../styles";
 export function DashboardPage({ lights, onRefresh, onNavigate }) {
     // Local copy so SSE events can update individual lights without a full server round-trip.
@@ -13,8 +13,8 @@ export function DashboardPage({ lights, onRefresh, onNavigate }) {
     useEffect(() => {
         const es = new EventSource("/api/events");
         es.addEventListener("light_state", (raw) => {
-            const { device_id, state } = JSON.parse(raw.data);
-            setLocalLights((prev) => prev.map((l) => (l.device_id === device_id ? { ...l, last_state: state } : l)));
+            const { device_id, patch } = JSON.parse(raw.data);
+            setLocalLights((prev) => prev.map((l) => l.device_id === device_id ? { ...l, last_state: mergePatch(l.last_state, patch) } : l));
         });
         // Browser reconnects automatically on error; nothing to do here.
         es.onerror = () => { };

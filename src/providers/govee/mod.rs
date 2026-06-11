@@ -50,16 +50,41 @@ impl GoveeProvider {
 
 // ── Wire types ─────────────────────────────────────────────────────────────
 
+/// The live API answers `{"requestId", "msg", "code", "data" | "payload"}`;
+/// older documentation showed `"message"` and only `"data"`. Accept both.
 #[derive(Debug, Deserialize)]
 struct GoveeResponse<T> {
     code: i32,
+    #[serde(alias = "msg", default)]
     message: String,
+    #[serde(default = "Option::default")]
     data: Option<T>,
+    #[serde(default = "Option::default")]
+    payload: Option<T>,
 }
 
+impl<T> GoveeResponse<T> {
+    fn body(self) -> Option<T> {
+        self.data.or(self.payload)
+    }
+}
+
+/// `/user/devices` returns `data` as a bare array on the live API;
+/// older docs wrapped it as `{"devices": [...]}`. Accept both.
 #[derive(Debug, Deserialize)]
-struct GoveeDeviceList {
-    devices: Vec<GoveeDevice>,
+#[serde(untagged)]
+enum GoveeDeviceList {
+    Bare(Vec<GoveeDevice>),
+    Wrapped { devices: Vec<GoveeDevice> },
+}
+
+impl GoveeDeviceList {
+    fn into_vec(self) -> Vec<GoveeDevice> {
+        match self {
+            Self::Bare(v) => v,
+            Self::Wrapped { devices } => devices,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,30 +137,38 @@ fn govee_device_to_light(d: GoveeDevice, state: Option<LightState>) -> Light {
     }
 }
 
+/// The live API wraps each capability state as `{"value": ...}`; older docs
+/// showed the bare value. Accept both.
+fn cap_value(state: &Value) -> &Value {
+    state.get("value").unwrap_or(state)
+}
+
 fn parse_govee_state(caps: Vec<GoveeStateCapability>) -> LightState {
     let mut state = LightState::default();
     for cap in caps {
+        let v = cap_value(&cap.state);
         match cap.instance.as_str() {
             "powerSwitch" => {
-                state.on = cap.state.as_u64().unwrap_or(0) == 1;
+                state.on = v.as_u64().unwrap_or(0) == 1;
             }
             "brightness" => {
-                if let Some(v) = cap.state.as_u64() {
-                    state.brightness = Some(v as f32);
+                if let Some(b) = v.as_u64() {
+                    state.brightness = Some(b as f32);
                 }
             }
             "colorRgb" => {
-                if let Some(v) = cap.state.as_u64() {
-                    let r = ((v >> 16) & 0xFF) as u8;
-                    let g = ((v >> 8) & 0xFF) as u8;
-                    let b = (v & 0xFF) as u8;
+                if let Some(rgb) = v.as_u64() {
+                    let r = ((rgb >> 16) & 0xFF) as u8;
+                    let g = ((rgb >> 8) & 0xFF) as u8;
+                    let b = (rgb & 0xFF) as u8;
                     state.color = Some(Color::from_rgb(r, g, b));
                 }
             }
             "colorTemperatureK" => {
-                if let Some(k) = cap.state.as_u64() {
-                    // Convert Kelvin to mirek (1_000_000 / K)
-                    state.color_temp_mirek = Some((1_000_000 / k.max(1)) as u16);
+                // Convert Kelvin to mirek (1_000_000 / K). 0 means "not in
+                // colour-temperature mode" — checked_div skips it.
+                if let Some(m) = v.as_u64().and_then(|k| 1_000_000u64.checked_div(k)) {
+                    state.color_temp_mirek = Some(m as u16);
                 }
             }
             _ => {}
@@ -168,8 +201,8 @@ impl LightProvider for GoveeProvider {
         }
 
         Ok(resp
-            .data
-            .map(|d| d.devices)
+            .body()
+            .map(GoveeDeviceList::into_vec)
             .unwrap_or_default()
             .into_iter()
             .map(|d| govee_device_to_light(d, None))
@@ -259,7 +292,7 @@ impl LightProvider for GoveeProvider {
         }
 
         Ok(resp
-            .data
+            .body()
             .map(|d| parse_govee_state(d.capabilities))
             .unwrap_or_default())
     }
@@ -419,6 +452,77 @@ mod tests {
         let received = server.received_requests().await.unwrap();
         // Two requests: power + brightness.
         assert_eq!(received.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn discover_parses_live_api_shape() {
+        // The live API: "msg" instead of "message", data as a bare array,
+        // capabilities with type+instance+parameters.
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/user/devices"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "requestId": "uuid-1",
+                "msg": "success",
+                "code": 200,
+                "data": [{
+                    "sku": "H6601",
+                    "device": "11:22:33:44:55:66",
+                    "deviceName": "Desk Strip",
+                    "type": "devices.types.light",
+                    "capabilities": [
+                        {"type": "devices.capabilities.on_off", "instance": "powerSwitch", "parameters": {}},
+                        {"type": "devices.capabilities.range", "instance": "brightness", "parameters": {}},
+                        {"type": "devices.capabilities.color_setting", "instance": "colorRgb", "parameters": {}}
+                    ]
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let lights = mock_provider(&server).await.discover().await.unwrap();
+        assert_eq!(lights.len(), 1);
+        assert_eq!(lights[0].name, "Desk Strip");
+        assert!(lights[0].capabilities.dimmable);
+        assert!(lights[0].capabilities.color_rgb);
+    }
+
+    #[tokio::test]
+    async fn get_state_parses_live_api_payload_and_value_wrappers() {
+        // The live API: state under "payload", each value wrapped as {"value": x}.
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/device/state"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "requestId": "uuid-2",
+                "msg": "success",
+                "code": 200,
+                "payload": {
+                    "sku": "H6601",
+                    "device": "11:22:33:44:55:66",
+                    "capabilities": [
+                        {"type": "devices.capabilities.online", "instance": "online", "state": {"value": true}},
+                        {"type": "devices.capabilities.on_off", "instance": "powerSwitch", "state": {"value": 1}},
+                        {"type": "devices.capabilities.range", "instance": "brightness", "state": {"value": 64}},
+                        {"type": "devices.capabilities.color_setting", "instance": "colorTemperatureK", "state": {"value": 0}}
+                    ]
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let state = mock_provider(&server)
+            .await
+            .get_state("11:22:33:44:55:66")
+            .await
+            .unwrap();
+
+        assert!(state.on);
+        assert_eq!(state.brightness, Some(64.0));
+        // colorTemperatureK of 0 means "not in CT mode" — must not become mirek.
+        assert_eq!(state.color_temp_mirek, None);
     }
 
     #[tokio::test]

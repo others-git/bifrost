@@ -7,6 +7,24 @@ export interface LightState {
   color_temp_mirek?: number;
 }
 
+/** Partial state carried by live events — absent fields are unchanged. */
+export interface LightStatePatch {
+  on?: boolean;
+  brightness?: number;
+  color?: { x: number; y: number; brightness: number };
+  color_temp_mirek?: number;
+}
+
+/** Merge a live-event patch into an existing state without losing fields. */
+export function mergePatch(base: LightState | undefined, patch: LightStatePatch): LightState {
+  return {
+    on: patch.on ?? base?.on ?? false,
+    brightness: patch.brightness ?? base?.brightness,
+    color: patch.color ?? base?.color,
+    color_temp_mirek: patch.color_temp_mirek ?? base?.color_temp_mirek,
+  };
+}
+
 export interface LightCapabilities {
   dimmable: boolean;
   color_rgb: boolean;

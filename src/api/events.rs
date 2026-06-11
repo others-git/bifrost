@@ -39,7 +39,7 @@ async fn sse_events(
                 .map(|event| {
                     let data = serde_json::to_string(&serde_json::json!({
                         "device_id": event.device_id,
-                        "state": event.state,
+                        "patch": event.patch,
                     }))
                     .unwrap_or_default();
                     Ok::<Event, Infallible>(Event::default().event("light_state").data(data))

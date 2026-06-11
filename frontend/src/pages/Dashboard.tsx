@@ -5,6 +5,7 @@ import {
   getGroups,
   getProviders,
   getScenes,
+  mergePatch,
   removeScene,
   rgbToXy,
   setGroupState,
@@ -12,6 +13,7 @@ import {
   type Group,
   type Light,
   type LightState,
+  type LightStatePatch,
   type Provider,
   type Scene,
 } from "../api";
@@ -37,12 +39,14 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
     const es = new EventSource("/api/events");
 
     es.addEventListener("light_state", (raw) => {
-      const { device_id, state } = JSON.parse((raw as MessageEvent).data) as {
+      const { device_id, patch } = JSON.parse((raw as MessageEvent).data) as {
         device_id: string;
-        state: LightState;
+        patch: LightStatePatch;
       };
       setLocalLights((prev) =>
-        prev.map((l) => (l.device_id === device_id ? { ...l, last_state: state } : l))
+        prev.map((l) =>
+          l.device_id === device_id ? { ...l, last_state: mergePatch(l.last_state, patch) } : l
+        )
       );
     });
 

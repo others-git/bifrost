@@ -3,6 +3,7 @@ import {
   createPlan,
   getPlan,
   getPlans,
+  mergePatch,
   putPlanLayout,
   putPlanLights,
   removePlan,
@@ -10,6 +11,7 @@ import {
   xyToRgb,
   type Light,
   type LightState,
+  type LightStatePatch,
   type Mount,
   type Placement,
   type PlanDetail,
@@ -66,13 +68,17 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
   useEffect(() => {
     const es = new EventSource("/api/events");
     es.addEventListener("light_state", (raw) => {
-      const { device_id, state } = JSON.parse((raw as MessageEvent).data) as {
+      const { device_id, patch } = JSON.parse((raw as MessageEvent).data) as {
         device_id: string;
-        state: LightState;
+        patch: LightStatePatch;
       };
       const light = lights.find((l) => l.device_id === device_id);
       if (!light) return;
-      setStatesById((prev) => new Map(prev).set(light.id, state));
+      setStatesById((prev) => {
+        const next = new Map(prev);
+        next.set(light.id, mergePatch(next.get(light.id) ?? light.last_state, patch));
+        return next;
+      });
     });
     es.onerror = () => {};
     return () => es.close();

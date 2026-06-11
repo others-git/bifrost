@@ -35,6 +35,57 @@ pub struct LightState {
     pub color_temp_mirek: Option<u16>,
 }
 
+/// A partial light-state update. Hue SSE events only carry the fields that
+/// changed; treating them as full states (with defaults for the rest) was
+/// corrupting stored state — e.g. a brightness-only event implied `on: false`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LightStatePatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brightness: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<Color>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_temp_mirek: Option<u16>,
+}
+
+impl LightStatePatch {
+    /// A patch carrying every field of a full state (used by pollers, whose
+    /// reads are authoritative).
+    pub fn from_full(s: &LightState) -> Self {
+        Self {
+            on: Some(s.on),
+            brightness: s.brightness,
+            color: s.color.clone(),
+            color_temp_mirek: s.color_temp_mirek,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.on.is_none()
+            && self.brightness.is_none()
+            && self.color.is_none()
+            && self.color_temp_mirek.is_none()
+    }
+
+    /// Merge this patch into an existing state, leaving absent fields untouched.
+    pub fn apply_to(&self, state: &mut LightState) {
+        if let Some(on) = self.on {
+            state.on = on;
+        }
+        if let Some(b) = self.brightness {
+            state.brightness = Some(b);
+        }
+        if let Some(c) = &self.color {
+            state.color = Some(c.clone());
+        }
+        if let Some(m) = self.color_temp_mirek {
+            state.color_temp_mirek = Some(m);
+        }
+    }
+}
+
 /// CIE 1931 xy + brightness, as used by Hue. Govee colors are converted to/from RGB.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Color {

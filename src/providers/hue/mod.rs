@@ -124,6 +124,9 @@ struct HueDimming {
 #[derive(Debug, Deserialize, Serialize)]
 struct HueColor {
     xy: HueXy,
+    /// CLIP v2 nests the gamut type inside the color object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gamut_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -183,7 +186,16 @@ fn gamut_from_str(s: &str) -> Option<HueGamut> {
 }
 
 fn hue_resource_to_light(r: HueLightResource) -> Light {
-    let gamut = r.color_gamut_type.as_deref().and_then(gamut_from_str);
+    // CLIP v2 puts gamut_type inside `color`; the top-level field is kept as a
+    // fallback for older firmware.
+    let gamut = r
+        .color
+        .as_ref()
+        .and_then(|c| c.gamut_type.as_deref())
+        .or(r.color_gamut_type.as_deref())
+        .and_then(gamut_from_str);
+    // A light that reports a color object at all is full-RGB capable.
+    let has_color = r.color.is_some();
     let color = r.color.map(|c| {
         let brightness = r
             .dimming
@@ -210,7 +222,7 @@ fn hue_resource_to_light(r: HueLightResource) -> Light {
         },
         capabilities: LightCapabilities {
             dimmable: true,
-            color_rgb: gamut.is_some(),
+            color_rgb: has_color,
             color_temperature: true,
             hue_gamut: gamut,
         },
@@ -248,6 +260,7 @@ impl LightProvider for HueProvider {
             dimming: state.brightness.map(|b| HueDimming { brightness: b }),
             color: state.color.as_ref().map(|c| HueColor {
                 xy: HueXy { x: c.x, y: c.y },
+                gamut_type: None,
             }),
             color_temperature: state
                 .color_temp_mirek
@@ -452,40 +465,40 @@ impl ProviderFactory for HueProviderFactory {
     }
 }
 
-/// Extract a partial `LightState` from a Hue SSE event data item.
-/// Only fields present in the event are populated.
-pub fn parse_light_state_from_event(item: &serde_json::Value) -> crate::models::LightState {
-    let mut state = crate::models::LightState::default();
-
-    if let Some(on) = item
+/// Extract a partial state patch from a Hue SSE event data item.
+/// Hue events only carry the fields that changed — absent fields stay `None`
+/// so the merge leaves existing state untouched.
+pub fn parse_patch_from_event(item: &serde_json::Value) -> crate::models::LightStatePatch {
+    let on = item
         .get("on")
         .and_then(|o| o.get("on"))
-        .and_then(|v| v.as_bool())
-    {
-        state.on = on;
-    }
-    if let Some(b) = item
+        .and_then(|v| v.as_bool());
+    let brightness = item
         .get("dimming")
         .and_then(|d| d.get("brightness"))
         .and_then(|v| v.as_f64())
-    {
-        state.brightness = Some(b as f32);
-    }
-    if let Some(xy) = item.get("color").and_then(|c| c.get("xy")) {
+        .map(|b| b as f32);
+    let color = item.get("color").and_then(|c| c.get("xy")).map(|xy| {
         let x = xy.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
         let y = xy.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-        let brightness = state.brightness.unwrap_or(1.0) / 100.0;
-        state.color = Some(crate::models::Color { x, y, brightness });
-    }
-    if let Some(mirek) = item
+        crate::models::Color {
+            x,
+            y,
+            brightness: brightness.unwrap_or(100.0) / 100.0,
+        }
+    });
+    let color_temp_mirek = item
         .get("color_temperature")
         .and_then(|ct| ct.get("mirek"))
         .and_then(|v| v.as_u64())
-    {
-        state.color_temp_mirek = Some(mirek as u16);
-    }
+        .map(|m| m as u16);
 
-    state
+    crate::models::LightStatePatch {
+        on,
+        brightness,
+        color,
+        color_temp_mirek,
+    }
 }
 
 #[cfg(test)]
@@ -713,14 +726,63 @@ mod tests {
     #[test]
     fn parse_sse_event_extracts_on_off() {
         let item = serde_json::json!({"on": {"on": true}});
-        let state = parse_light_state_from_event(&item);
-        assert!(state.on);
+        let patch = parse_patch_from_event(&item);
+        assert_eq!(patch.on, Some(true));
     }
 
     #[test]
     fn parse_sse_event_extracts_color_temp() {
         let item = serde_json::json!({"color_temperature": {"mirek": 250}});
-        let state = parse_light_state_from_event(&item);
-        assert_eq!(state.color_temp_mirek, Some(250));
+        let patch = parse_patch_from_event(&item);
+        assert_eq!(patch.color_temp_mirek, Some(250));
+    }
+
+    #[test]
+    fn brightness_only_event_leaves_on_state_untouched() {
+        // Regression: this used to produce a full state with on=false,
+        // flipping lights "off" in the UI whenever brightness changed.
+        let item = serde_json::json!({"dimming": {"brightness": 42.0}});
+        let patch = parse_patch_from_event(&item);
+        assert_eq!(patch.on, None);
+        assert_eq!(patch.brightness, Some(42.0));
+
+        let mut state = crate::models::LightState {
+            on: true,
+            brightness: Some(80.0),
+            ..Default::default()
+        };
+        patch.apply_to(&mut state);
+        assert!(state.on, "merge must not turn the light off");
+        assert_eq!(state.brightness, Some(42.0));
+    }
+
+    #[tokio::test]
+    async fn discover_reads_gamut_from_color_object() {
+        // CLIP v2 nests gamut_type inside color; color presence => RGB-capable.
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/clip/v2/resource/light"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "id": "abc",
+                    "metadata": {"name": "Color Bulb"},
+                    "on": {"on": true},
+                    "dimming": {"brightness": 50.0},
+                    "color": {
+                        "xy": {"x": 0.45, "y": 0.41},
+                        "gamut_type": "C"
+                    }
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let lights = mock_provider(&server).await.discover().await.unwrap();
+        assert!(
+            lights[0].capabilities.color_rgb,
+            "color picker capability missing"
+        );
+        assert_eq!(lights[0].capabilities.hue_gamut, Some(HueGamut::C));
     }
 }

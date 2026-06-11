@@ -4,7 +4,7 @@
 //! This module addresses that with an explicit state machine, exponential-backoff
 //! reconnect, polling fallback during outages, and periodic health checks.
 
-use crate::models::LightState;
+use crate::models::{LightState, LightStatePatch};
 use crate::providers::LightProvider;
 use crate::providers::hue::HueProvider;
 use anyhow::Result;
@@ -53,11 +53,13 @@ impl ConnectionState {
     }
 }
 
-/// A light-state update broadcast to all WebSocket clients.
+/// A light-state update broadcast on the event pipeline. Carries a *patch*:
+/// push sources (Hue SSE) only know the changed fields, while pollers send
+/// full-state patches. Consumers merge into existing state.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LightEvent {
     pub device_id: String,
-    pub state: LightState,
+    pub patch: LightStatePatch,
 }
 
 pub struct HueConnectionManager {
@@ -186,10 +188,13 @@ impl HueConnectionManager {
                 let Some(id) = item.get("id").and_then(|v| v.as_str()) else {
                     continue;
                 };
-                let state = crate::providers::hue::parse_light_state_from_event(item);
+                let patch = crate::providers::hue::parse_patch_from_event(item);
+                if patch.is_empty() {
+                    continue; // unrelated resource update (scene, geofence, …)
+                }
                 let _ = self.events.send(LightEvent {
                     device_id: id.to_string(),
-                    state,
+                    patch,
                 });
             }
         }
@@ -205,7 +210,7 @@ impl HueConnectionManager {
         for light in lights {
             let _ = self.events.send(LightEvent {
                 device_id: light.provider_id,
-                state: light.state,
+                patch: LightStatePatch::from_full(&light.state),
             });
         }
         Ok(())
@@ -349,7 +354,7 @@ impl PollingManager {
             };
             let _ = self.events.send(LightEvent {
                 device_id: light.provider_id,
-                state,
+                patch: LightStatePatch::from_full(&state),
             });
             count += 1;
         }
@@ -459,22 +464,41 @@ impl Default for ConnectionRegistry {
 async fn db_writer_task(mut rx: broadcast::Receiver<LightEvent>, db: SqlitePool) {
     loop {
         match rx.recv().await {
-            Ok(event) => {
-                let state_json = serde_json::to_string(&event.state).unwrap_or_default();
-                let _ = sqlx::query(
-                    "UPDATE lights SET last_state = ?, last_seen = datetime('now') WHERE device_id = ?",
-                )
-                .bind(&state_json)
-                .bind(&event.device_id)
-                .execute(&db)
-                .await;
-            }
+            Ok(event) => apply_event_to_db(&event, &db).await,
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 warn!("light event db writer lagged by {n} events");
             }
             Err(broadcast::error::RecvError::Closed) => break,
         }
     }
+}
+
+/// Merge an event's patch into the stored `last_state`. Events are partial —
+/// overwriting would reset fields the event didn't mention.
+async fn apply_event_to_db(event: &LightEvent, db: &SqlitePool) {
+    use sqlx::Row;
+
+    let row = sqlx::query("SELECT last_state FROM lights WHERE device_id = ?")
+        .bind(&event.device_id)
+        .fetch_optional(db)
+        .await;
+
+    let Ok(Some(row)) = row else { return }; // unknown device or db error
+
+    let mut state: LightState = row
+        .get::<Option<String>, _>("last_state")
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    event.patch.apply_to(&mut state);
+
+    let state_json = serde_json::to_string(&state).unwrap_or_default();
+    let _ = sqlx::query(
+        "UPDATE lights SET last_state = ?, last_seen = datetime('now') WHERE device_id = ?",
+    )
+    .bind(&state_json)
+    .bind(&event.device_id)
+    .execute(db)
+    .await;
 }
 
 // ── Backoff ─────────────────────────────────────────────────────────────────
@@ -583,8 +607,8 @@ mod tests {
         let e1 = rx.recv().await.unwrap();
         let e2 = rx.recv().await.unwrap();
         let mut got: Vec<_> = vec![
-            (e1.device_id, e1.state.brightness),
-            (e2.device_id, e2.state.brightness),
+            (e1.device_id, e1.patch.brightness),
+            (e2.device_id, e2.patch.brightness),
         ];
         got.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
@@ -607,8 +631,8 @@ mod tests {
         // get_state failed → falls back to the (default) discovery snapshot.
         let event = rx.recv().await.unwrap();
         assert_eq!(event.device_id, "dev-1");
-        assert!(!event.state.on);
-        assert_eq!(event.state.brightness, None);
+        assert_eq!(event.patch.on, Some(false));
+        assert_eq!(event.patch.brightness, None);
     }
 
     #[tokio::test]
@@ -638,6 +662,53 @@ mod tests {
         provider.fail_discover_after = 0;
         let (mgr, _rx) = PollingManager::new(Box::new(provider), Duration::from_secs(60));
         assert!(mgr.poll_once().await.is_err());
+    }
+
+    // ── DB writer merging ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn partial_event_merges_into_stored_state() {
+        // Regression for the Hue out-of-sync bug: a brightness-only event must
+        // not reset on/color in the stored state.
+        use sqlx::Row;
+        use sqlx::sqlite::SqliteConnectOptions;
+        use std::str::FromStr;
+
+        let opts = SqliteConnectOptions::from_str(":memory:")
+            .unwrap()
+            .foreign_keys(true);
+        let db = SqlitePool::connect_with(opts).await.unwrap();
+        sqlx::migrate!("./migrations").run(&db).await.unwrap();
+
+        sqlx::query("INSERT INTO providers (id, provider_type, name, credentials) VALUES ('p1','hue','H','enc')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO lights (id, provider_id, device_id, name, capabilities, last_state)
+             VALUES ('l1','p1','dev-1','L','{}', ?)",
+        )
+        .bind(r#"{"on":true,"brightness":80.0,"color":null,"color_temp_mirek":null}"#)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let event = LightEvent {
+            device_id: "dev-1".into(),
+            patch: LightStatePatch {
+                brightness: Some(42.0),
+                ..Default::default()
+            },
+        };
+        apply_event_to_db(&event, &db).await;
+
+        let row = sqlx::query("SELECT last_state FROM lights WHERE device_id = 'dev-1'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let state: LightState = serde_json::from_str(&row.get::<String, _>("last_state")).unwrap();
+        assert!(state.on, "brightness event must not flip the light off");
+        assert_eq!(state.brightness, Some(42.0));
     }
 
     // ── Backoff ──────────────────────────────────────────────────────────────

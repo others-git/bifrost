@@ -1,4 +1,13 @@
 // Typed wrappers for every REST endpoint Bifrost exposes.
+/** Merge a live-event patch into an existing state without losing fields. */
+export function mergePatch(base, patch) {
+    return {
+        on: patch.on ?? base?.on ?? false,
+        brightness: patch.brightness ?? base?.brightness,
+        color: patch.color ?? base?.color,
+        color_temp_mirek: patch.color_temp_mirek ?? base?.color_temp_mirek,
+    };
+}
 export async function getSetupStatus() {
     const res = await fetch("/api/setup/status");
     return res.json();
