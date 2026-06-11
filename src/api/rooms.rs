@@ -248,11 +248,7 @@ async fn create_room(
         .flatten()
         .is_some();
     if duplicate {
-        return (
-            StatusCode::CONFLICT,
-            "a room with this name already exists",
-        )
-            .into_response();
+        return (StatusCode::CONFLICT, "a room with this name already exists").into_response();
     }
 
     let id = Uuid::new_v4().to_string();

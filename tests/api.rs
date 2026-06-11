@@ -1775,7 +1775,10 @@ async fn sync_links_existing_room_case_insensitively() {
         .await
         .unwrap();
     let body = helpers::response_json(resp).await;
-    assert_eq!(body["rooms_created"], 0, "case-mismatch duplicated the room");
+    assert_eq!(
+        body["rooms_created"], 0,
+        "case-mismatch duplicated the room"
+    );
     assert_eq!(body["rooms_linked"], 1);
 
     let resp = app
