@@ -1,0 +1,7 @@
+- The "lights" page is largely an unusable mess, lights are not grouped, Hue lights do not have a color selector. Lights are not synced to their actual current color.
+- Govee does not sync state well. A light that is not connected and not available is showing as "on".
+- Planner "Light" support for LED strip
+- resize plan tile size, draggable button on the edge to resize
+- connection is lost on reboot
+- "paint" mode on planner where you have a paint brush and can color lights. allow scene to be saved from current lights.
+- multiple rooms with same name, case insensitively (Living room, Living Room) (Office, Office) are showing up. Need a fix, like ability to "merge" / "link" rooms or something
