@@ -149,7 +149,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
   const placedIds = new Set(placements.map((p) => p.light_id));
 
   return (
-    <div style={{ padding: "1.5rem 2rem", maxWidth: 1100, margin: "0 auto" }}>
+    <div style={{ padding: "1.5rem 2rem" }}>
       {/* Plan switcher row */}
       <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "0.9rem", flexWrap: "wrap" }}>
         {plans.map((p) => (
@@ -331,7 +331,15 @@ function PlanCanvas({
     const dpr = window.devicePixelRatio || 1;
     const cssW = canvas.clientWidth;
     const cssH = canvas.clientHeight;
-    if (canvas.width !== cssW * dpr) { canvas.width = cssW * dpr; canvas.height = cssH * dpr; }
+    // Round before comparing: with fractional DPR an int-vs-float comparison
+    // is always unequal, and rewriting the width attribute every frame fed a
+    // flexbox min-width:auto growth loop.
+    const targetW = Math.round(cssW * dpr);
+    const targetH = Math.round(cssH * dpr);
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+      canvas.width = targetW;
+      canvas.height = targetH;
+    }
 
     let { cell, ox, oy } = view;
     if (cell === 0) {
@@ -443,9 +451,13 @@ function PlanCanvas({
 
   useEffect(() => { draw(); }, [draw]);
   useEffect(() => {
-    const onResize = () => draw();
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
+    // Redraw whenever the canvas box changes (window resize, palette
+    // appearing/disappearing) — ResizeObserver catches both.
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ro = new ResizeObserver(() => draw());
+    ro.observe(canvas);
+    return () => ro.disconnect();
   }, [draw]);
 
   // Reset the fit when switching plans.
@@ -579,23 +591,27 @@ function PlanCanvas({
   }
 
   return (
-    <canvas
-      ref={canvasRef}
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
-      onWheel={handleWheel}
-      onContextMenu={(e) => e.preventDefault()}
-      style={{
-        flex: 1,
-        height: "65vh",
-        minHeight: 360,
-        borderRadius: 10,
-        border: "1px solid #262626",
-        touchAction: "none",
-        cursor: tool === "view" ? "grab" : "crosshair",
-        display: "block",
-      }}
-    />
+    // minWidth: 0 stops the canvas's intrinsic width (set for DPR sharpness)
+    // from widening this flex item — without it the layout grows every frame.
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <canvas
+        ref={canvasRef}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onWheel={handleWheel}
+        onContextMenu={(e) => e.preventDefault()}
+        style={{
+          width: "100%",
+          height: "calc(100vh - 250px)",
+          minHeight: 360,
+          borderRadius: 10,
+          border: "1px solid #262626",
+          touchAction: "none",
+          cursor: tool === "view" ? "grab" : "crosshair",
+          display: "block",
+        }}
+      />
+    </div>
   );
 }

@@ -118,7 +118,7 @@ export function FloorPlanPage({ lights }) {
         await setLightState(lightId, next);
     }
     const placedIds = new Set(placements.map((p) => p.light_id));
-    return (_jsxs("div", { style: { padding: "1.5rem 2rem", maxWidth: 1100, margin: "0 auto" }, children: [_jsxs("div", { style: { display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "0.9rem", flexWrap: "wrap" }, children: [plans.map((p) => (_jsx("button", { onClick: () => setPlanId(p.id), style: { ...S.buttonGhost, ...(p.id === planId ? { borderColor: "#f90", color: "#f90" } : {}) }, children: p.name }, p.id))), _jsx("button", { onClick: handleCreate, style: S.buttonGhost, children: "+ New plan" }), plan && (_jsxs(_Fragment, { children: [_jsx("span", { style: { flex: 1 } }), _jsx("button", { onClick: handleSave, disabled: !dirty, style: dirty ? S.button : S.buttonGhost, children: dirty ? "Save changes" : "Saved" }), _jsx("button", { onClick: handleDelete, style: S.buttonDanger, children: "Delete" })] }))] }), toast && (_jsx("div", { style: { background: "#1e3a1e", border: "1px solid #2a5a2a", borderRadius: 8, padding: "0.5rem 1rem", marginBottom: "0.75rem", color: "#8f8", fontSize: "0.875rem" }, children: toast })), !plan ? (_jsx("p", { style: { color: "#666" }, children: "No floor plans yet. Create one, paint your layout, then place your lights on it." })) : (_jsxs(_Fragment, { children: [_jsxs("div", { style: { display: "flex", gap: "0.4rem", marginBottom: "0.5rem", alignItems: "center", flexWrap: "wrap" }, children: [TOOLS.map((t) => (_jsx("button", { onClick: () => { setTool(t.id); setPopover(null); }, style: { ...S.buttonGhost, ...(tool === t.id ? { borderColor: "#f90", color: "#f90" } : {}) }, children: t.label }, t.id))), _jsx("span", { style: { color: "#666", fontSize: "0.78rem", marginLeft: "0.5rem" }, children: TOOLS.find((t) => t.id === tool)?.hint })] }), _jsxs("div", { style: { display: "flex", gap: "1rem", alignItems: "flex-start" }, children: [_jsx(PlanCanvas, { plan: plan, tiles: tiles, walls: walls, placements: placements, statesById: statesById, tool: tool, selectedLight: selectedLight, onMutate: (fn) => { fn(); setDirty(true); setPopover(null); }, setTiles: setTiles, setWalls: setWalls, setPlacements: setPlacements, onLightClick: (pls, px, py) => {
+    return (_jsxs("div", { style: { padding: "1.5rem 2rem" }, children: [_jsxs("div", { style: { display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "0.9rem", flexWrap: "wrap" }, children: [plans.map((p) => (_jsx("button", { onClick: () => setPlanId(p.id), style: { ...S.buttonGhost, ...(p.id === planId ? { borderColor: "#f90", color: "#f90" } : {}) }, children: p.name }, p.id))), _jsx("button", { onClick: handleCreate, style: S.buttonGhost, children: "+ New plan" }), plan && (_jsxs(_Fragment, { children: [_jsx("span", { style: { flex: 1 } }), _jsx("button", { onClick: handleSave, disabled: !dirty, style: dirty ? S.button : S.buttonGhost, children: dirty ? "Save changes" : "Saved" }), _jsx("button", { onClick: handleDelete, style: S.buttonDanger, children: "Delete" })] }))] }), toast && (_jsx("div", { style: { background: "#1e3a1e", border: "1px solid #2a5a2a", borderRadius: 8, padding: "0.5rem 1rem", marginBottom: "0.75rem", color: "#8f8", fontSize: "0.875rem" }, children: toast })), !plan ? (_jsx("p", { style: { color: "#666" }, children: "No floor plans yet. Create one, paint your layout, then place your lights on it." })) : (_jsxs(_Fragment, { children: [_jsxs("div", { style: { display: "flex", gap: "0.4rem", marginBottom: "0.5rem", alignItems: "center", flexWrap: "wrap" }, children: [TOOLS.map((t) => (_jsx("button", { onClick: () => { setTool(t.id); setPopover(null); }, style: { ...S.buttonGhost, ...(tool === t.id ? { borderColor: "#f90", color: "#f90" } : {}) }, children: t.label }, t.id))), _jsx("span", { style: { color: "#666", fontSize: "0.78rem", marginLeft: "0.5rem" }, children: TOOLS.find((t) => t.id === tool)?.hint })] }), _jsxs("div", { style: { display: "flex", gap: "1rem", alignItems: "flex-start" }, children: [_jsx(PlanCanvas, { plan: plan, tiles: tiles, walls: walls, placements: placements, statesById: statesById, tool: tool, selectedLight: selectedLight, onMutate: (fn) => { fn(); setDirty(true); setPopover(null); }, setTiles: setTiles, setWalls: setWalls, setPlacements: setPlacements, onLightClick: (pls, px, py) => {
                                     if (pls.length === 1)
                                         toggleLight(pls[0].light_id);
                                     else
@@ -162,9 +162,14 @@ function PlanCanvas({ plan, tiles, walls, placements, statesById, tool, selected
         const dpr = window.devicePixelRatio || 1;
         const cssW = canvas.clientWidth;
         const cssH = canvas.clientHeight;
-        if (canvas.width !== cssW * dpr) {
-            canvas.width = cssW * dpr;
-            canvas.height = cssH * dpr;
+        // Round before comparing: with fractional DPR an int-vs-float comparison
+        // is always unequal, and rewriting the width attribute every frame fed a
+        // flexbox min-width:auto growth loop.
+        const targetW = Math.round(cssW * dpr);
+        const targetH = Math.round(cssH * dpr);
+        if (canvas.width !== targetW || canvas.height !== targetH) {
+            canvas.width = targetW;
+            canvas.height = targetH;
         }
         let { cell, ox, oy } = view;
         if (cell === 0) {
@@ -270,9 +275,14 @@ function PlanCanvas({ plan, tiles, walls, placements, statesById, tool, selected
     }, [view, plan, tiles, walls, placements, statesById]);
     useEffect(() => { draw(); }, [draw]);
     useEffect(() => {
-        const onResize = () => draw();
-        window.addEventListener("resize", onResize);
-        return () => window.removeEventListener("resize", onResize);
+        // Redraw whenever the canvas box changes (window resize, palette
+        // appearing/disappearing) — ResizeObserver catches both.
+        const canvas = canvasRef.current;
+        if (!canvas)
+            return;
+        const ro = new ResizeObserver(() => draw());
+        ro.observe(canvas);
+        return () => ro.disconnect();
     }, [draw]);
     // Reset the fit when switching plans.
     useEffect(() => { setView({ cell: 0, ox: 0, oy: 0 }); }, [plan.id]);
@@ -403,14 +413,17 @@ function PlanCanvas({ plan, tiles, walls, placements, statesById, tool, selected
             return { cell, ox: mx - (mx - v.ox) * scale, oy: my - (my - v.oy) * scale };
         });
     }
-    return (_jsx("canvas", { ref: canvasRef, onPointerDown: handlePointerDown, onPointerMove: handlePointerMove, onPointerUp: handlePointerUp, onWheel: handleWheel, onContextMenu: (e) => e.preventDefault(), style: {
-            flex: 1,
-            height: "65vh",
-            minHeight: 360,
-            borderRadius: 10,
-            border: "1px solid #262626",
-            touchAction: "none",
-            cursor: tool === "view" ? "grab" : "crosshair",
-            display: "block",
-        } }));
+    return (
+    // minWidth: 0 stops the canvas's intrinsic width (set for DPR sharpness)
+    // from widening this flex item — without it the layout grows every frame.
+    _jsx("div", { style: { flex: 1, minWidth: 0 }, children: _jsx("canvas", { ref: canvasRef, onPointerDown: handlePointerDown, onPointerMove: handlePointerMove, onPointerUp: handlePointerUp, onWheel: handleWheel, onContextMenu: (e) => e.preventDefault(), style: {
+                width: "100%",
+                height: "calc(100vh - 250px)",
+                minHeight: 360,
+                borderRadius: 10,
+                border: "1px solid #262626",
+                touchAction: "none",
+                cursor: tool === "view" ? "grab" : "crosshair",
+                display: "block",
+            } }) }));
 }
