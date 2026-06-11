@@ -14,7 +14,7 @@ Bifrost bridges your light ecosystems — Philips Hue, Govee, WLED, Tasmota, She
 
 ## Why
 
-Home Assistant is a great platform, but its Hue integration is known to silently drop the bridge's event stream. Bifrost treats the connection as the product:
+Smart lighting lives and dies by connection reliability: event streams drop silently, states go stale, and lights stop responding until someone notices. Bifrost treats the connection as the product:
 
 - The Hue SSE stream is owned by a dedicated connection manager with a visible state machine (`connected` / `reconnecting` / `failed`), exponential backoff with jitter, health-check pings, and polling fallback during outages.
 - Providers without a push channel (Govee, WLED, Tasmota, Shelly) are kept fresh by a polling manager that feeds the same event pipeline — the UI updates live either way.
