@@ -13,7 +13,7 @@
   <Category>HomeAutomation:</Category>
   <WebUI>http://[IP]:[PORT:3000]/</WebUI>
   <TemplateURL/>
-  <Icon>https://raw.githubusercontent.com/others-git/bifrost/main/frontend/public/favicon.svg</Icon>
+  <Icon>https://raw.githubusercontent.com/others-git/bifrost/main/assets/icon.png</Icon>
   <ExtraParams/>
   <PostArgs/>
   <CPUset/>
