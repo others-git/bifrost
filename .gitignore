@@ -1,0 +1,12 @@
+/target
+/.env
+/references/
+
+# Runtime database (created on first run)
+bifrost.db
+
+# Frontend build output — rebuilt by CI and Docker; not committed
+/frontend/dist/
+
+# Node dependencies
+/frontend/node_modules/

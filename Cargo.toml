@@ -1,0 +1,72 @@
+[package]
+name = "bifrost"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "bifrost"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bifrost"
+path = "src/main.rs"
+
+[dependencies]
+# async runtime
+tokio = { version = "1", features = ["full"] }
+
+# web framework
+axum = { version = "0.8", features = ["ws", "macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
+
+# serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# database
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "uuid", "chrono"] }
+
+# error handling
+anyhow = "1"
+thiserror = "2"
+
+# config / env
+dotenvy = "0.15"
+
+# logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# types
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# async trait objects
+async-trait = "0.1"
+
+# SSE (Hue v2 event stream)
+tokio-stream = { version = "0.1", features = ["sync"] }
+eventsource-stream = "0.2"
+
+# credential encryption (AES-256-GCM)
+aes-gcm = "0.10"
+
+# password hashing (argon2)
+argon2 = "0.5"
+
+# static file embedding (frontend dist)
+rust-embed = { version = "8", features = ["mime-guess"] }
+
+# random bytes (nonce generation)
+rand = "0.8"
+hex = "0.4"
+futures-util = "0.3"
+
+[dev-dependencies]
+wiremock = "0.6"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

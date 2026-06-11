@@ -1,0 +1,259 @@
+pub mod govee;
+pub mod hue;
+pub mod shelly;
+pub mod tasmota;
+pub mod wled;
+
+use crate::models::{Light, LightState};
+use anyhow::{Result, anyhow};
+use async_trait::async_trait;
+use serde::Serialize;
+use std::collections::HashMap;
+
+// ── Core provider trait ─────────────────────────────────────────────────────
+
+/// Runtime interface every provider must implement.
+#[async_trait]
+pub trait LightProvider: Send + Sync {
+    fn name(&self) -> &str;
+    async fn discover(&self) -> Result<Vec<Light>>;
+    async fn set_state(&self, device_id: &str, state: &LightState) -> Result<()>;
+    async fn get_state(&self, device_id: &str) -> Result<LightState>;
+}
+
+// ── Credential schema (for the setup UI) ───────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CredentialField {
+    pub name: &'static str,
+    pub label: &'static str,
+    pub kind: FieldKind,
+    pub required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FieldKind {
+    Text,
+    Password,
+    IpAddress,
+    Url,
+}
+
+// ── Factory trait ───────────────────────────────────────────────────────────
+
+/// A factory knows how to construct one type of provider from its credentials.
+/// Implement this — not `LightProvider` directly — when adding a new integration.
+pub trait ProviderFactory: Send + Sync {
+    /// The stable string key stored in the database (e.g. `"hue"`, `"govee"`).
+    fn provider_type(&self) -> &'static str;
+
+    /// Build a live provider from already-decrypted credentials JSON.
+    fn build(&self, credentials_json: &str) -> Result<Box<dyn LightProvider>>;
+
+    /// Describe the credential fields the UI must collect before calling `add_provider`.
+    fn credentials_schema(&self) -> &'static [CredentialField];
+}
+
+// ── Registry ────────────────────────────────────────────────────────────────
+
+/// Central registry. Add new providers once here; the rest of the app needs no changes.
+pub struct ProviderRegistry {
+    factories: HashMap<&'static str, Box<dyn ProviderFactory>>,
+}
+
+impl ProviderRegistry {
+    pub fn new() -> Self {
+        Self {
+            factories: HashMap::new(),
+        }
+    }
+
+    pub fn register<F: ProviderFactory + 'static>(&mut self, factory: F) {
+        self.factories
+            .insert(factory.provider_type(), Box::new(factory));
+    }
+
+    /// Build a live provider from a type string + decrypted credentials JSON.
+    pub fn build(
+        &self,
+        provider_type: &str,
+        credentials_json: &str,
+    ) -> Result<Box<dyn LightProvider>> {
+        self.factories
+            .get(provider_type)
+            .ok_or_else(|| anyhow!("unknown provider type: {provider_type}"))?
+            .build(credentials_json)
+    }
+
+    /// Returns true if `provider_type` is registered.
+    pub fn is_known(&self, provider_type: &str) -> bool {
+        self.factories.contains_key(provider_type)
+    }
+
+    /// All registered provider types with their UI schemas, sorted by type name.
+    pub fn all_types(&self) -> Vec<ProviderTypeInfo> {
+        let mut types: Vec<_> = self
+            .factories
+            .values()
+            .map(|f| ProviderTypeInfo {
+                provider_type: f.provider_type(),
+                schema: f.credentials_schema().to_vec(),
+            })
+            .collect();
+        types.sort_by_key(|t| t.provider_type);
+        types
+    }
+}
+
+impl Default for ProviderRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProviderTypeInfo {
+    pub provider_type: &'static str,
+    pub schema: Vec<CredentialField>,
+}
+
+// ── Built-in provider registration ─────────────────────────────────────────
+
+/// Returns a registry pre-loaded with every built-in provider.
+/// Call this once in main; pass the result into AppState.
+pub fn default_registry() -> ProviderRegistry {
+    let mut r = ProviderRegistry::new();
+    r.register(hue::HueProviderFactory);
+    r.register(govee::GoveeProviderFactory);
+    r.register(shelly::ShellyProviderFactory);
+    r.register(tasmota::TasmotaProviderFactory);
+    r.register(wled::WledProviderFactory);
+    r
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::models::{Light, LightState};
+    use anyhow::Result;
+
+    // ── Minimal mock provider for registry tests ────────────────────────────
+
+    struct MockProvider;
+
+    #[async_trait::async_trait]
+    impl LightProvider for MockProvider {
+        fn name(&self) -> &str {
+            "mock"
+        }
+        async fn discover(&self) -> Result<Vec<Light>> {
+            Ok(vec![])
+        }
+        async fn set_state(&self, _id: &str, _s: &LightState) -> Result<()> {
+            Ok(())
+        }
+        async fn get_state(&self, _id: &str) -> Result<LightState> {
+            Ok(LightState::default())
+        }
+    }
+
+    pub struct MockProviderFactory;
+
+    impl ProviderFactory for MockProviderFactory {
+        fn provider_type(&self) -> &'static str {
+            "mock"
+        }
+
+        fn build(&self, _credentials_json: &str) -> Result<Box<dyn LightProvider>> {
+            Ok(Box::new(MockProvider))
+        }
+
+        fn credentials_schema(&self) -> &'static [CredentialField] {
+            &[CredentialField {
+                name: "token",
+                label: "Token",
+                kind: FieldKind::Password,
+                required: true,
+                hint: None,
+            }]
+        }
+    }
+
+    // ── Registry tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn register_and_build_known_type() {
+        let mut reg = ProviderRegistry::new();
+        reg.register(MockProviderFactory);
+        assert!(reg.build("mock", "{}").is_ok());
+    }
+
+    #[test]
+    fn build_unknown_type_returns_error() {
+        let reg = ProviderRegistry::new();
+        let err = reg
+            .build("nonexistent", "{}")
+            .err()
+            .expect("expected an error");
+        assert!(err.to_string().contains("nonexistent"));
+    }
+
+    #[test]
+    fn is_known_reflects_registered_types() {
+        let mut reg = ProviderRegistry::new();
+        assert!(!reg.is_known("mock"));
+        reg.register(MockProviderFactory);
+        assert!(reg.is_known("mock"));
+    }
+
+    #[test]
+    fn all_types_sorted_alphabetically() {
+        let reg = default_registry();
+        let types = reg.all_types();
+        let names: Vec<_> = types.iter().map(|t| t.provider_type).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(names, sorted);
+    }
+
+    #[test]
+    fn default_registry_contains_hue_and_govee() {
+        let reg = default_registry();
+        assert!(reg.is_known("hue"));
+        assert!(reg.is_known("govee"));
+    }
+
+    #[test]
+    fn default_registry_contains_wled() {
+        let reg = default_registry();
+        assert!(reg.is_known("wled"));
+    }
+
+    #[test]
+    fn default_registry_contains_tasmota_and_shelly() {
+        let reg = default_registry();
+        assert!(reg.is_known("tasmota"));
+        assert!(reg.is_known("shelly"));
+    }
+
+    #[test]
+    fn credentials_schema_describes_required_fields() {
+        let reg = default_registry();
+        let types = reg.all_types();
+        for t in &types {
+            assert!(
+                !t.schema.is_empty(),
+                "provider '{}' has no credential fields",
+                t.provider_type
+            );
+            assert!(
+                t.schema.iter().any(|f| f.required),
+                "provider '{}' has no required fields",
+                t.provider_type
+            );
+        }
+    }
+}
