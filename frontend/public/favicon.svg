@@ -1,25 +1,26 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <!-- Dark rounded background -->
-  <rect width="32" height="32" rx="6" fill="#111"/>
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffdba6" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#ff9900" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
 
-  <!-- Bifrost arch — the rainbow bridge -->
-  <path d="M3 28 Q16 4 29 28"
-        stroke="#ff9900" stroke-width="3.5"
-        fill="none" stroke-linecap="round"/>
+  <!-- Dark rounded background (matches app body #0f0f0f) -->
+  <rect width="32" height="32" rx="7" fill="#0f0f0f"/>
 
-  <!-- Three hanging light nodes (smart devices) -->
-  <!-- Left -->
-  <line x1="10" y1="19" x2="10" y2="23.5"
-        stroke="#ff9900" stroke-width="1.5" stroke-linecap="round"/>
-  <circle cx="10" cy="25.5" r="2.2" fill="#ff9900"/>
+  <!-- Bifrost: the rainbow bridge, in warm brand hues -->
+  <!-- Outer band — gold -->
+  <path d="M3 29.2 A13 18.2 0 0 1 29 29.2"
+        stroke="#ffd166" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+  <!-- Middle band — brand orange -->
+  <path d="M7.1 29.2 A8.9 13.1 0 0 1 24.9 29.2"
+        stroke="#ff9900" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+  <!-- Inner band — ember -->
+  <path d="M11.2 29.2 A4.8 8 0 0 1 20.8 29.2"
+        stroke="#ff5a1f" stroke-width="2.5" fill="none" stroke-linecap="round"/>
 
-  <!-- Centre (lowest point of arch) -->
-  <line x1="16" y1="16" x2="16" y2="20.5"
-        stroke="#ff9900" stroke-width="1.5" stroke-linecap="round"/>
-  <circle cx="16" cy="22.5" r="2.2" fill="#ff9900"/>
-
-  <!-- Right -->
-  <line x1="22" y1="19" x2="22" y2="23.5"
-        stroke="#ff9900" stroke-width="1.5" stroke-linecap="round"/>
-  <circle cx="22" cy="25.5" r="2.2" fill="#ff9900"/>
+  <!-- Smart light glowing beneath the arch -->
+  <circle cx="16" cy="25.4" r="6" fill="url(#glow)"/>
+  <circle cx="16" cy="25.4" r="2.3" fill="#fff4e0"/>
 </svg>
