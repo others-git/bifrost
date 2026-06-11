@@ -339,38 +339,56 @@ A tile-based floor-plan editor that doubles as a live spatial dashboard:
 paint your house layout, drop your real lights onto it, then watch them glow
 with their actual state and click them to control.
 
+### Design decisions (agreed 2026-06-11)
+
+- **Walls are edges, not tiles** — thin segments on tile boundaries, true
+  Sims style. No floor space lost; doors are gaps in a wall run.
+- **Lights attach to mount points** — each tile has 5: `center` (ceiling /
+  floor lamps) + `n/s/e/w` edges (wall-mounted, naturally aligned with edge
+  walls). Multiple lights on the same mount render as one dot with a count
+  badge (e.g. a 3-bulb fixture); clicking expands a per-light popover.
+- **Modest-house sizing** — dimensions up to 128×128 tiles (a 50×40 plan ≈
+  2 000 sq ft floor). Multiple floors = multiple plans with a switcher.
+
 ### 7.1 Data model
 
 ```sql
 -- migrations/0004_floor_plans.sql
--- floor_plans: id, name, width, height (tiles), created_at
--- plan_tiles:  plan_id, x, y, kind ('floor' | 'wall')   -- sparse; absent = empty
--- plan_lights: plan_id, light_id, x, y                  -- one placement per light per plan
+-- floor_plans:  id, name, width, height (1–128), created_at
+-- plan_tiles:   plan_id, x, y                  -- sparse; a row = floor tile
+-- plan_walls:   plan_id, x, y, dir ('h'|'v')   -- 'h' = top edge of tile (x,y),
+--                                              -- 'v' = left edge of tile (x,y);
+--                                              -- x ≤ width / y ≤ height so the
+--                                              -- far boundary edges exist too
+-- plan_lights:  plan_id, light_id, x, y, mount ('c'|'n'|'s'|'e'|'w')
+--               PK (plan_id, light_id) — one placement per light per plan;
+--               several lights MAY share (x, y, mount) → cluster
 ```
 
-Grid size soft-capped (e.g. 64×64) to keep payloads and rendering sane.
+All children CASCADE on plan delete; placements vanish when a light is deleted.
 
 ### 7.2 API
 
 ```
-GET    /api/plans                     list (id, name, dimensions, counts)
-POST   /api/plans                     { name, width, height }
-GET    /api/plans/{id}                full plan: tiles + light placements
-PUT    /api/plans/{id}/tiles          replace tile set (bulk save from editor)
-PUT    /api/plans/{id}/lights         replace light placements
+GET    /api/plans                     list (id, name, dimensions, light count)
+POST   /api/plans                     { name, width, height }       422 on bad dims
+GET    /api/plans/{id}                { ..., tiles, walls, lights }
+PUT    /api/plans/{id}/layout         { tiles, walls } bulk replace (editor save)
+PUT    /api/plans/{id}/lights         { placements } replace        422 unknown light
 DELETE /api/plans/{id}
 ```
 
 Standard rules: session auth, 401 tests, happy-path tests against in-memory
-SQLite. Placements referencing deleted lights vanish via FK CASCADE (enabled
-in 5.1).
+SQLite, out-of-bounds coordinates rejected with 422.
 
 ### 7.3 Editor (frontend)
 
 - Canvas-rendered grid (one `<canvas>`, not 4 096 divs), pan/zoom
-- Tools: paint floor, paint wall, erase — click-drag like the Sims build mode
-- Light palette: unplaced lights listed at the side; drag onto a tile to place
-- Save = bulk `PUT` of tiles + placements
+- Tools: paint floor (drag over tiles), draw wall (drag along tile
+  boundaries — pointer snaps to the nearest edge), erase
+- Light palette: unplaced lights listed at the side; drag onto a tile,
+  release near an edge to wall-mount or near the middle for `center`
+- Save = `PUT /layout` + `PUT /lights`
 
 ### 7.4 Live view (the payoff)
 

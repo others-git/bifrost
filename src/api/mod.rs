@@ -2,6 +2,7 @@ pub mod auth;
 pub mod events;
 pub mod groups;
 pub mod lights;
+pub mod plans;
 pub mod providers;
 pub mod scenes;
 pub mod setup;
@@ -18,6 +19,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .nest("/events", events::router())
         .nest("/groups", groups::router())
         .nest("/lights", lights::router())
+        .nest("/plans", plans::router())
         .nest("/providers", providers::router())
         .nest("/scenes", scenes::router())
         .nest("/setup", setup::router())

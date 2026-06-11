@@ -846,3 +846,301 @@ async fn delete_group_removes_it() {
         .unwrap();
     assert_eq!(helpers::response_json(resp).await, serde_json::json!([]));
 }
+
+// ── Floor plans ──────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn plans_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/plans")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn create_plan_and_list() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/plans",
+            &cookie,
+            r#"{"name":"Ground Floor","width":50,"height":40}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/plans", &cookie))
+        .await
+        .unwrap();
+    let plans = helpers::response_json(resp).await;
+    assert_eq!(plans[0]["name"], "Ground Floor");
+    assert_eq!(plans[0]["width"], 50);
+    assert_eq!(plans[0]["height"], 40);
+    assert_eq!(plans[0]["lights"], 0);
+}
+
+#[tokio::test]
+async fn create_plan_rejects_bad_dimensions() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    for body in [
+        r#"{"name":"Bad","width":0,"height":40}"#,
+        r#"{"name":"Bad","width":50,"height":129}"#,
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(helpers::authed_post("/api/plans", &cookie, body))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "body: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn layout_roundtrips_tiles_and_walls() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/plans",
+            &cookie,
+            r#"{"name":"P","width":10,"height":10}"#,
+        ))
+        .await
+        .unwrap();
+    let plan_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Two floor tiles; an 'h' wall on the top edge of (0,0); a 'v' wall on the
+    // far right boundary (x == width is legal for 'v').
+    let layout = r#"{
+        "tiles": [[0,0],[1,0]],
+        "walls": [{"x":0,"y":0,"dir":"h"},{"x":10,"y":3,"dir":"v"}]
+    }"#;
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/plans/{plan_id}/layout"),
+            &cookie,
+            layout,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(helpers::authed_get(
+            &format!("/api/plans/{plan_id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    let plan = helpers::response_json(resp).await;
+    assert_eq!(plan["tiles"].as_array().unwrap().len(), 2);
+    assert_eq!(plan["walls"].as_array().unwrap().len(), 2);
+    assert_eq!(plan["walls"][1]["x"], 10);
+    assert_eq!(plan["walls"][1]["dir"], "v");
+}
+
+#[tokio::test]
+async fn layout_rejects_out_of_bounds_tile() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/plans",
+            &cookie,
+            r#"{"name":"P","width":10,"height":10}"#,
+        ))
+        .await
+        .unwrap();
+    let plan_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/plans/{plan_id}/layout"),
+            &cookie,
+            r#"{"tiles":[[10,0]],"walls":[]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn lights_placement_roundtrips_with_mount() {
+    let bridge = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/plans",
+            &cookie,
+            r#"{"name":"P","width":10,"height":10}"#,
+        ))
+        .await
+        .unwrap();
+    let plan_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = format!(r#"{{"placements":[{{"light_id":"{light_id}","x":3,"y":4,"mount":"n"}}]}}"#);
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/plans/{plan_id}/lights"),
+            &cookie,
+            &body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(helpers::authed_get(
+            &format!("/api/plans/{plan_id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    let plan = helpers::response_json(resp).await;
+    assert_eq!(plan["lights"][0]["light_id"], light_id);
+    assert_eq!(plan["lights"][0]["x"], 3);
+    assert_eq!(plan["lights"][0]["mount"], "n");
+}
+
+#[tokio::test]
+async fn lights_placement_rejects_unknown_light() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/plans",
+            &cookie,
+            r#"{"name":"P","width":10,"height":10}"#,
+        ))
+        .await
+        .unwrap();
+    let plan_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/plans/{plan_id}/lights"),
+            &cookie,
+            r#"{"placements":[{"light_id":"ghost","x":1,"y":1,"mount":"c"}]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn get_unknown_plan_returns_404() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .oneshot(helpers::authed_get("/api/plans/nope", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn delete_plan_cascades_children() {
+    let bridge = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/plans",
+            &cookie,
+            r#"{"name":"P","width":10,"height":10}"#,
+        ))
+        .await
+        .unwrap();
+    let plan_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let _ = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/plans/{plan_id}/layout"),
+            &cookie,
+            r#"{"tiles":[[0,0]],"walls":[{"x":0,"y":0,"dir":"h"}]}"#,
+        ))
+        .await
+        .unwrap();
+    let body = format!(r#"{{"placements":[{{"light_id":"{light_id}","x":0,"y":0,"mount":"c"}}]}}"#);
+    let _ = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/plans/{plan_id}/lights"),
+            &cookie,
+            &body,
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_delete(
+            &format!("/api/plans/{plan_id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(helpers::authed_get(
+            &format!("/api/plans/{plan_id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
