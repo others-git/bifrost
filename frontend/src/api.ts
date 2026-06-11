@@ -129,6 +129,39 @@ export async function removeProvider(id: string): Promise<void> {
   await fetch(`/api/providers/${id}`, { method: "DELETE" });
 }
 
+export interface Scene {
+  id: string;
+  name: string;
+  created_at: string;
+  lights: number;
+}
+
+export async function getScenes(): Promise<Scene[]> {
+  const res = await fetch("/api/scenes");
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function createScene(name: string): Promise<{ id: string; lights: number }> {
+  const res = await fetch("/api/scenes", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function activateScene(id: string): Promise<{ applied: number; failed: number }> {
+  const res = await fetch(`/api/scenes/${id}/activate`, { method: "POST" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function removeScene(id: string): Promise<void> {
+  await fetch(`/api/scenes/${id}`, { method: "DELETE" });
+}
+
 export type HuePairResult =
   | { app_key: string }
   | { error: "link_button_not_pressed" | "bridge_unreachable"; message: string };

@@ -1,7 +1,9 @@
 pub mod auth;
 pub mod events;
+pub mod groups;
 pub mod lights;
 pub mod providers;
+pub mod scenes;
 pub mod setup;
 
 use crate::AppState;
@@ -14,8 +16,10 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .nest("/auth", auth::router())
         .nest("/events", events::router())
+        .nest("/groups", groups::router())
         .nest("/lights", lights::router())
         .nest("/providers", providers::router())
+        .nest("/scenes", scenes::router())
         .nest("/setup", setup::router())
         .route("/health", get(health))
 }
@@ -47,16 +51,12 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     for row in &rows {
         let id: String = row.get("id");
         let name: String = row.get("name");
-        let provider_type: String = row.get("provider_type");
 
-        let conn_state = if provider_type == "hue" {
-            if let Some(lock) = connections.get_state_lock(&id) {
-                lock.read().await.label().to_string()
-            } else {
-                "not_started".to_string()
-            }
+        // Every enabled provider has a manager (SSE or polling) with a state lock.
+        let conn_state = if let Some(lock) = connections.get_state_lock(&id) {
+            lock.read().await.label().to_string()
         } else {
-            "ok".to_string()
+            "not_started".to_string()
         };
 
         providers.push(ProviderHealth {

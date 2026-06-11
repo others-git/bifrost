@@ -481,3 +481,350 @@ async fn hue_pair_returns_502_when_bridge_unreachable() {
 
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 }
+
+// ── Scenes ───────────────────────────────────────────────────────────────────
+
+async fn wled_mock() -> wiremock::MockServer {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/json/state"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"on": true})))
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn scenes_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/scenes")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn create_scene_snapshots_current_light_states() {
+    let bridge = wled_mock().await;
+    let (app, _light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/scenes",
+            &cookie,
+            r#"{"name":"Movie Night"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["lights"], 1);
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/scenes", &cookie))
+        .await
+        .unwrap();
+    let scenes = helpers::response_json(resp).await;
+    assert_eq!(scenes[0]["name"], "Movie Night");
+    assert_eq!(scenes[0]["lights"], 1);
+}
+
+#[tokio::test]
+async fn create_scene_rejects_empty_name() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .oneshot(helpers::authed_post(
+            "/api/scenes",
+            &cookie,
+            r#"{"name":"  "}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn activate_scene_applies_states_via_provider() {
+    let bridge = wled_mock().await;
+    let (app, _light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/scenes",
+            &cookie,
+            r#"{"name":"Evening"}"#,
+        ))
+        .await
+        .unwrap();
+    let scene_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .oneshot(helpers::authed_post(
+            &format!("/api/scenes/{scene_id}/activate"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["applied"], 1);
+    assert_eq!(body["failed"], 0);
+
+    // The provider actually received the state write.
+    let requests = bridge.received_requests().await.unwrap();
+    assert!(
+        requests.iter().any(|r| r.url.path() == "/json/state"),
+        "no set_state call reached the device"
+    );
+}
+
+#[tokio::test]
+async fn activate_unknown_scene_returns_404() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .oneshot(helpers::authed_post(
+            "/api/scenes/nope/activate",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn delete_scene_removes_it() {
+    let bridge = wled_mock().await;
+    let (app, _light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/scenes",
+            &cookie,
+            r#"{"name":"Temp"}"#,
+        ))
+        .await
+        .unwrap();
+    let scene_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_delete(
+            &format!("/api/scenes/{scene_id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/scenes", &cookie))
+        .await
+        .unwrap();
+    let scenes = helpers::response_json(resp).await;
+    assert_eq!(scenes, serde_json::json!([]));
+}
+
+// ── Groups ───────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn groups_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/groups")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn create_group_with_members_and_list() {
+    let bridge = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let body = format!(r#"{{"name":"Living Room","light_ids":["{light_id}"]}}"#);
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post("/api/groups", &cookie, &body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/groups", &cookie))
+        .await
+        .unwrap();
+    let groups = helpers::response_json(resp).await;
+    assert_eq!(groups[0]["name"], "Living Room");
+    assert_eq!(groups[0]["light_ids"][0], light_id);
+}
+
+#[tokio::test]
+async fn create_group_rejects_empty_name() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .oneshot(helpers::authed_post(
+            "/api/groups",
+            &cookie,
+            r#"{"name":""}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn set_group_state_applies_to_all_members() {
+    let bridge = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let body = format!(r#"{{"name":"All","light_ids":["{light_id}"]}}"#);
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post("/api/groups", &cookie, &body))
+        .await
+        .unwrap();
+    let group_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/groups/{group_id}/state"),
+            &cookie,
+            r#"{"on":false}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["applied"], 1);
+    assert_eq!(body["failed"], 0);
+
+    let requests = bridge.received_requests().await.unwrap();
+    assert!(requests.iter().any(|r| r.url.path() == "/json/state"));
+}
+
+#[tokio::test]
+async fn set_group_state_unknown_group_returns_404() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/groups/nope/state",
+            &cookie,
+            r#"{"on":true}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn set_members_replaces_membership() {
+    let bridge = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let body = format!(r#"{{"name":"G","light_ids":["{light_id}"]}}"#);
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post("/api/groups", &cookie, &body))
+        .await
+        .unwrap();
+    let group_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Replace membership with the empty set.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/groups/{group_id}/lights"),
+            &cookie,
+            r#"{"light_ids":[]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/groups", &cookie))
+        .await
+        .unwrap();
+    let groups = helpers::response_json(resp).await;
+    assert_eq!(groups[0]["light_ids"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn delete_group_removes_it() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/groups",
+            &cookie,
+            r#"{"name":"Temp"}"#,
+        ))
+        .await
+        .unwrap();
+    let group_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_delete(
+            &format!("/api/groups/{group_id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/groups", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(helpers::response_json(resp).await, serde_json::json!([]));
+}

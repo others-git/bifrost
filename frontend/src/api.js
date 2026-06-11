@@ -70,6 +70,31 @@ export async function addProvider(name, provider_type, credentials) {
 export async function removeProvider(id) {
     await fetch(`/api/providers/${id}`, { method: "DELETE" });
 }
+export async function getScenes() {
+    const res = await fetch("/api/scenes");
+    if (!res.ok)
+        return [];
+    return res.json();
+}
+export async function createScene(name) {
+    const res = await fetch("/api/scenes", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+    });
+    if (!res.ok)
+        throw new Error(`HTTP ${res.status}`);
+    return res.json();
+}
+export async function activateScene(id) {
+    const res = await fetch(`/api/scenes/${id}/activate`, { method: "POST" });
+    if (!res.ok)
+        throw new Error(`HTTP ${res.status}`);
+    return res.json();
+}
+export async function removeScene(id) {
+    await fetch(`/api/scenes/${id}`, { method: "DELETE" });
+}
 /** One Hue link-button pairing attempt. 409 means the button wasn't pressed yet. */
 export async function pairHueBridge(bridgeIp) {
     const res = await fetch("/api/providers/hue/pair", {

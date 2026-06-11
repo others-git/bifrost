@@ -1,5 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { rgbToXy, setLightState, type Light, type LightState } from "../api";
+import {
+  activateScene,
+  createScene,
+  getScenes,
+  removeScene,
+  rgbToXy,
+  setLightState,
+  type Light,
+  type LightState,
+  type Scene,
+} from "../api";
 import { S } from "../styles";
 
 interface Props {
@@ -43,6 +53,7 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
 
   return (
     <div style={{ padding: "2rem", maxWidth: 960, margin: "0 auto" }}>
+      {localLights.length > 0 && <SceneBar onActivated={onRefresh} />}
       {localLights.length === 0 ? (
         <div style={{ textAlign: "center", padding: "4rem 0", color: "#666" }}>
           <p style={{ margin: "0 0 0.75rem" }}>No lights found.</p>
@@ -82,6 +93,67 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function SceneBar({ onActivated }: { onActivated: () => void }) {
+  const [scenes, setScenes] = useState<Scene[]>([]);
+  const [busy, setBusy] = useState("");
+
+  async function load() {
+    setScenes(await getScenes());
+  }
+
+  useEffect(() => { load(); }, []);
+
+  async function handleActivate(id: string) {
+    setBusy(id);
+    try {
+      await activateScene(id);
+      onActivated(); // refresh light states from the server
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function handleSave() {
+    const name = window.prompt("Scene name (saves the current state of all lights):");
+    if (!name?.trim()) return;
+    await createScene(name.trim());
+    await load();
+  }
+
+  async function handleRemove(id: string, name: string) {
+    if (!window.confirm(`Delete scene "${name}"?`)) return;
+    await removeScene(id);
+    await load();
+  }
+
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center", marginBottom: "1.25rem" }}>
+      {scenes.map((s) => (
+        <span key={s.id} style={{ display: "inline-flex" }}>
+          <button
+            onClick={() => handleActivate(s.id)}
+            disabled={busy === s.id}
+            title={`Apply "${s.name}" (${s.lights} light${s.lights !== 1 ? "s" : ""})`}
+            style={{ ...S.buttonGhost, borderRadius: "6px 0 0 6px" }}
+          >
+            {busy === s.id ? "…" : s.name}
+          </button>
+          <button
+            onClick={() => handleRemove(s.id, s.name)}
+            title="Delete scene"
+            style={{ ...S.buttonGhost, borderRadius: "0 6px 6px 0", borderLeft: "none", padding: "0.45rem 0.55rem", color: "#866" }}
+          >
+            ×
+          </button>
+        </span>
+      ))}
+      <button onClick={handleSave} style={S.buttonGhost} title="Save the current light states as a scene">
+        + Save scene
+      </button>
     </div>
   );
 }

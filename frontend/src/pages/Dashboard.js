@@ -1,6 +1,6 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useEffect, useRef, useState } from "react";
-import { rgbToXy, setLightState } from "../api";
+import { activateScene, createScene, getScenes, removeScene, rgbToXy, setLightState, } from "../api";
 import { S } from "../styles";
 export function DashboardPage({ lights, onRefresh, onNavigate }) {
     // Local copy so SSE events can update individual lights without a full server round-trip.
@@ -21,18 +21,50 @@ export function DashboardPage({ lights, onRefresh, onNavigate }) {
     function handleLocalUpdate(id, state) {
         setLocalLights((prev) => prev.map((l) => (l.id === id ? { ...l, last_state: state } : l)));
     }
-    return (_jsx("div", { style: { padding: "2rem", maxWidth: 960, margin: "0 auto" }, children: localLights.length === 0 ? (_jsxs("div", { style: { textAlign: "center", padding: "4rem 0", color: "#666" }, children: [_jsx("p", { style: { margin: "0 0 0.75rem" }, children: "No lights found." }), _jsxs("p", { style: { margin: 0, fontSize: "0.875rem" }, children: ["Add a provider in", " ", _jsx("button", { onClick: () => onNavigate("settings"), style: {
-                                background: "none",
-                                border: "none",
-                                color: "#f90",
-                                cursor: "pointer",
-                                fontSize: "0.875rem",
-                                padding: 0,
-                            }, children: "Settings" }), " ", "and run discovery."] })] })) : (_jsx("div", { style: {
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
-                gap: "1rem",
-            }, children: localLights.map((light) => (_jsx(LightCard, { light: light, onLocalUpdate: handleLocalUpdate, onChanged: onRefresh }, light.id))) })) }));
+    return (_jsxs("div", { style: { padding: "2rem", maxWidth: 960, margin: "0 auto" }, children: [localLights.length > 0 && _jsx(SceneBar, { onActivated: onRefresh }), localLights.length === 0 ? (_jsxs("div", { style: { textAlign: "center", padding: "4rem 0", color: "#666" }, children: [_jsx("p", { style: { margin: "0 0 0.75rem" }, children: "No lights found." }), _jsxs("p", { style: { margin: 0, fontSize: "0.875rem" }, children: ["Add a provider in", " ", _jsx("button", { onClick: () => onNavigate("settings"), style: {
+                                    background: "none",
+                                    border: "none",
+                                    color: "#f90",
+                                    cursor: "pointer",
+                                    fontSize: "0.875rem",
+                                    padding: 0,
+                                }, children: "Settings" }), " ", "and run discovery."] })] })) : (_jsx("div", { style: {
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
+                    gap: "1rem",
+                }, children: localLights.map((light) => (_jsx(LightCard, { light: light, onLocalUpdate: handleLocalUpdate, onChanged: onRefresh }, light.id))) }))] }));
+}
+function SceneBar({ onActivated }) {
+    const [scenes, setScenes] = useState([]);
+    const [busy, setBusy] = useState("");
+    async function load() {
+        setScenes(await getScenes());
+    }
+    useEffect(() => { load(); }, []);
+    async function handleActivate(id) {
+        setBusy(id);
+        try {
+            await activateScene(id);
+            onActivated(); // refresh light states from the server
+        }
+        finally {
+            setBusy("");
+        }
+    }
+    async function handleSave() {
+        const name = window.prompt("Scene name (saves the current state of all lights):");
+        if (!name?.trim())
+            return;
+        await createScene(name.trim());
+        await load();
+    }
+    async function handleRemove(id, name) {
+        if (!window.confirm(`Delete scene "${name}"?`))
+            return;
+        await removeScene(id);
+        await load();
+    }
+    return (_jsxs("div", { style: { display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center", marginBottom: "1.25rem" }, children: [scenes.map((s) => (_jsxs("span", { style: { display: "inline-flex" }, children: [_jsx("button", { onClick: () => handleActivate(s.id), disabled: busy === s.id, title: `Apply "${s.name}" (${s.lights} light${s.lights !== 1 ? "s" : ""})`, style: { ...S.buttonGhost, borderRadius: "6px 0 0 6px" }, children: busy === s.id ? "…" : s.name }), _jsx("button", { onClick: () => handleRemove(s.id, s.name), title: "Delete scene", style: { ...S.buttonGhost, borderRadius: "0 6px 6px 0", borderLeft: "none", padding: "0.45rem 0.55rem", color: "#866" }, children: "\u00D7" })] }, s.id))), _jsx("button", { onClick: handleSave, style: S.buttonGhost, title: "Save the current light states as a scene", children: "+ Save scene" })] }));
 }
 function LightCard({ light, onLocalUpdate, onChanged, }) {
     const serverBrightness = light.last_state?.brightness ?? 100;

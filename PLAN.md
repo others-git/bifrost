@@ -229,24 +229,28 @@ The registry pattern makes this mechanical. Each new provider is:
 
 ## Milestone 5 — Production Readiness
 
-### 5.1 Scenes
+### 5.1 Scenes ✅ DONE
 
-```sql
--- scenes table: id, name, created_at
--- scene_entries table: scene_id, light_id, state JSON
-```
+`migrations/0003_scenes_and_groups.sql` + `src/api/scenes.rs`. 106 tests green.
 
-- `POST /api/scenes` — save current light states as a named scene
-- `POST /api/scenes/{id}/activate` — apply all states in parallel
+- [x] `GET /api/scenes` — list with per-scene light counts
+- [x] `POST /api/scenes {name}` — snapshot `last_state` of every light
+- [x] `POST /api/scenes/{id}/activate` — apply all entries in parallel via providers; returns `{applied, failed}`
+- [x] `DELETE /api/scenes/{id}`
+- [x] Dashboard scene bar: activate / save / delete
+- [x] FK enforcement enabled on the SQLite pool (`foreign_keys(true)`) — the schema's `ON DELETE CASCADE` clauses were inert before this
+- [x] Tests: 401, snapshot, empty-name 422, activate-via-wiremock-device, 404, delete
 
-### 5.2 Light groups / rooms
+### 5.2 Light groups / rooms ✅ DONE (API)
 
-```sql
--- groups table: id, name
--- group_lights table: group_id, light_id
-```
+`src/api/groups.rs`:
 
-- `PUT /api/groups/{id}/state` — broadcast a state to all lights in the group
+- [x] `GET /api/groups` — list with member light IDs
+- [x] `POST /api/groups {name, light_ids}` / `DELETE /api/groups/{id}`
+- [x] `PUT /api/groups/{id}/lights` — replace membership
+- [x] `PUT /api/groups/{id}/state` — broadcast a state to all members in parallel; `{applied, failed}`
+- [x] Tests: 401, create+list, empty-name 422, group state via wiremock device, 404, membership replace, delete
+- [ ] Groups UI (assign lights to rooms in Settings, group cards on Dashboard)
 
 ### 5.3 Schedules / automations
 
