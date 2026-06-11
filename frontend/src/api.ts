@@ -5,6 +5,8 @@ export interface LightState {
   brightness?: number;
   color?: { x: number; y: number; brightness: number };
   color_temp_mirek?: number;
+  /** Provider-reported reachability; undefined when the provider doesn't say. */
+  reachable?: boolean;
 }
 
 /** Partial state carried by live events — absent fields are unchanged. */
@@ -13,6 +15,7 @@ export interface LightStatePatch {
   brightness?: number;
   color?: { x: number; y: number; brightness: number };
   color_temp_mirek?: number;
+  reachable?: boolean;
 }
 
 /** Merge a live-event patch into an existing state without losing fields. */
@@ -22,6 +25,7 @@ export function mergePatch(base: LightState | undefined, patch: LightStatePatch)
     brightness: patch.brightness ?? base?.brightness,
     color: patch.color ?? base?.color,
     color_temp_mirek: patch.color_temp_mirek ?? base?.color_temp_mirek,
+    reachable: patch.reachable ?? base?.reachable,
   };
 }
 
@@ -252,8 +256,18 @@ export async function createRoom(name: string, light_ids: string[]): Promise<{ i
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name, light_ids }),
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
   return res.json();
+}
+
+/** Merge `sourceRoomId` into `targetRoomId` (links, lights, scenes, plan regions move; source is deleted). */
+export async function mergeRooms(targetRoomId: string, sourceRoomId: string): Promise<void> {
+  const res = await fetch(`/api/rooms/${targetRoomId}/merge`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ source_room_id: sourceRoomId }),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
 }
 
 export async function removeRoom(id: string): Promise<void> {
@@ -348,6 +362,9 @@ export interface Placement {
   x: number;
   y: number;
   mount: Mount;
+  /** Vertices an LED strip passes through after its start tile (corners
+   * supported); absent for a point light. */
+  points?: [number, number][];
 }
 
 export interface PlanSummary {
@@ -413,6 +430,16 @@ export async function putPlanLayout(id: string, tiles: [number, number][], walls
   if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
 }
 
+/** Resize the plan grid. The server prunes content outside the new bounds. */
+export async function putPlanSize(id: string, width: number, height: number): Promise<void> {
+  const res = await fetch(`/api/plans/${id}/size`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ width, height }),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+}
+
 export async function putPlanLights(id: string, placements: Placement[]): Promise<void> {
   const res = await fetch(`/api/plans/${id}/lights`, {
     method: "PUT",
@@ -449,6 +476,10 @@ export function xyToRgb(x: number, y: number, brightness: number): [number, numb
   b = gam(Math.max(0, b));
   const m = Math.max(r, g, b, 1); // normalize overshoot instead of clipping hue
   return [Math.round((r / m) * 255), Math.round((g / m) * 255), Math.round((b / m) * 255)];
+}
+
+export function rgbToHex(r: number, g: number, b: number): string {
+  return "#" + [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("");
 }
 
 export type HuePairResult =

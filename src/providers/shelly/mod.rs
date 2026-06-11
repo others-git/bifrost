@@ -27,7 +27,11 @@ pub struct ShellyProvider {
 
 impl ShellyProvider {
     fn new_with_base(base_url: impl Into<String>) -> Result<Self> {
-        let client = Client::builder().build()?;
+        // Bounded so a powered-off device fails the poll fast instead of hanging it.
+        let client = Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(15))
+            .build()?;
         Ok(Self {
             client,
             base_url: base_url.into(),
@@ -168,6 +172,7 @@ fn shelly_to_light_state(l: &ShellyLight) -> LightState {
         brightness: l.brightness.map(|b| b as f32),
         color: None,
         color_temp_mirek: None,
+        reachable: None,
     }
 }
 

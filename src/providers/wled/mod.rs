@@ -7,7 +7,7 @@
 //!
 //! Key endpoints used:
 //! - `GET  /json/info`  — device name
-//! - `GET  /json/state` — on/off, brightness (0–255), segment colours ([R,G,B])
+//! - `GET  /json/state` — on/off, brightness (0–255), segment colors ([R,G,B])
 //! - `POST /json/state` — update state
 
 use crate::models::{Color, Light, LightCapabilities, LightState, Provider};
@@ -27,7 +27,11 @@ pub struct WledProvider {
 
 impl WledProvider {
     fn new_with_base(base_url: impl Into<String>) -> Result<Self> {
-        let client = Client::builder().build()?;
+        // Bounded so a powered-off device fails the poll fast instead of hanging it.
+        let client = Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(15))
+            .build()?;
         Ok(Self {
             client,
             base_url: base_url.into(),
@@ -74,7 +78,7 @@ struct WledState {
 
 #[derive(Debug, Deserialize)]
 struct WledSegment {
-    /// Colour slots: col[0] = primary, col[1] = secondary, col[2] = tertiary.
+    /// Color slots: col[0] = primary, col[1] = secondary, col[2] = tertiary.
     col: Option<Vec<Vec<u8>>>,
 }
 
@@ -98,6 +102,7 @@ fn parse_wled_state(s: &WledState) -> LightState {
         brightness: Some(brightness),
         color,
         color_temp_mirek: None,
+        reachable: None,
     }
 }
 
@@ -347,7 +352,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_state_includes_segment_colour_when_present() {
+    async fn set_state_includes_segment_color_when_present() {
         let server = MockServer::start().await;
 
         Mock::given(method("POST"))
@@ -361,6 +366,7 @@ mod tests {
             brightness: Some(100.0),
             color: Some(Color::from_rgb(255, 0, 0)),
             color_temp_mirek: None,
+            reachable: None,
         };
         WledProvider::new_for_test(server.uri())
             .unwrap()

@@ -37,7 +37,12 @@ impl GoveeProvider {
             "Govee-API-Key",
             header::HeaderValue::from_str(api_key.as_ref())?,
         );
-        let client = Client::builder().default_headers(headers).build()?;
+        // Bounded so a cloud outage fails the poll fast instead of hanging it.
+        let client = Client::builder()
+            .default_headers(headers)
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
         Ok(Self {
             client,
             base_url: base_url.into(),
@@ -196,6 +201,12 @@ fn parse_govee_state(caps: Vec<GoveeStateCapability>) -> LightState {
     for cap in caps {
         let v = cap_value(&cap.state);
         match cap.instance.as_str() {
+            "online" => {
+                // false as a bool or the string "false" — the live API has
+                // been seen returning both.
+                let online = v.as_bool().or_else(|| v.as_str().map(|s| s == "true"));
+                state.reachable = online;
+            }
             "powerSwitch" => {
                 state.on = v.as_u64().unwrap_or(0) == 1;
             }
@@ -214,13 +225,18 @@ fn parse_govee_state(caps: Vec<GoveeStateCapability>) -> LightState {
             }
             "colorTemperatureK" => {
                 // Convert Kelvin to mirek (1_000_000 / K). 0 means "not in
-                // colour-temperature mode" — checked_div skips it.
+                // color-temperature mode" — checked_div skips it.
                 if let Some(m) = v.as_u64().and_then(|k| 1_000_000u64.checked_div(k)) {
                     state.color_temp_mirek = Some(m as u16);
                 }
             }
             _ => {}
         }
+    }
+    // The cloud API reports the *last known* power state for offline devices.
+    // An unreachable light isn't emitting anything — report it as off.
+    if state.reachable == Some(false) {
+        state.on = false;
     }
     state
 }
@@ -588,6 +604,86 @@ mod tests {
         assert_eq!(state.brightness, Some(64.0));
         // colorTemperatureK of 0 means "not in CT mode" — must not become mirek.
         assert_eq!(state.color_temp_mirek, None);
+    }
+
+    #[tokio::test]
+    async fn get_state_offline_device_reports_off_and_unreachable() {
+        // Offline devices return their *last known* power state — the API
+        // happily says powerSwitch=1 for a light that's unplugged. The
+        // `online: false` capability must win.
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/user/devices"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(device_list_response()))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/device/state"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "requestId": "uuid-3",
+                "msg": "success",
+                "code": 200,
+                "payload": {
+                    "sku": "H6159",
+                    "device": "AA:BB:CC:DD:EE:FF",
+                    "capabilities": [
+                        {"type": "devices.capabilities.online", "instance": "online", "state": {"value": false}},
+                        {"type": "devices.capabilities.on_off", "instance": "powerSwitch", "state": {"value": 1}},
+                        {"type": "devices.capabilities.range", "instance": "brightness", "state": {"value": 80}}
+                    ]
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let state = mock_provider(&server)
+            .await
+            .get_state("AA:BB:CC:DD:EE:FF")
+            .await
+            .unwrap();
+
+        assert_eq!(state.reachable, Some(false));
+        assert!(!state.on, "offline light must not report as on");
+    }
+
+    #[tokio::test]
+    async fn get_state_online_device_reports_reachable() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/user/devices"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(device_list_response()))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/device/state"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "requestId": "uuid-4",
+                "msg": "success",
+                "code": 200,
+                "payload": {
+                    "sku": "H6159",
+                    "device": "AA:BB:CC:DD:EE:FF",
+                    "capabilities": [
+                        {"type": "devices.capabilities.online", "instance": "online", "state": {"value": true}},
+                        {"type": "devices.capabilities.on_off", "instance": "powerSwitch", "state": {"value": 1}}
+                    ]
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let state = mock_provider(&server)
+            .await
+            .get_state("AA:BB:CC:DD:EE:FF")
+            .await
+            .unwrap();
+
+        assert_eq!(state.reachable, Some(true));
+        assert!(state.on);
     }
 
     #[tokio::test]

@@ -27,7 +27,11 @@ pub struct TasmotaProvider {
 
 impl TasmotaProvider {
     fn new_with_base(base_url: impl Into<String>) -> Result<Self> {
-        let client = Client::builder().build()?;
+        // Bounded so a powered-off device fails the poll fast instead of hanging it.
+        let client = Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(15))
+            .build()?;
         Ok(Self {
             client,
             base_url: base_url.into(),
@@ -113,6 +117,7 @@ fn parse_tasmota_state(s: &TasmotaState) -> LightState {
         brightness,
         color,
         color_temp_mirek: None,
+        reachable: None,
     }
 }
 
@@ -403,6 +408,7 @@ mod tests {
             brightness: Some(100.0),
             color: Some(Color::from_rgb(255, 0, 0)),
             color_temp_mirek: None,
+            reachable: None,
         };
         TasmotaProvider::new_for_test(server.uri())
             .unwrap()

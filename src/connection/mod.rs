@@ -135,6 +135,13 @@ impl HueConnectionManager {
         };
         info!("hue: SSE connected");
 
+        // Resync once on (re)connect: anything that changed while the stream
+        // was down (app restart, bridge reboot) produced no events, so stored
+        // state may be stale until the next change otherwise.
+        if let Err(e) = self.poll_all_lights().await {
+            warn!("hue: initial resync after connect failed: {e:#}");
+        }
+
         let mut health_tick = tokio::time::interval(HEALTH_CHECK_INTERVAL);
 
         tokio::pin!(stream);

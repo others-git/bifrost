@@ -100,7 +100,7 @@ function NavTray({
 
   const items: { id: "dashboard" | "plan" | "settings"; glyph: string; label: string }[] = [
     { id: "dashboard", glyph: "◉", label: "Lights" },
-    { id: "plan", glyph: "▦", label: "Plan" },
+    { id: "plan", glyph: "▦", label: "Floor Plan" },
     { id: "settings", glyph: "⚙", label: "Settings" },
   ];
 

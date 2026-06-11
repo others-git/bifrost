@@ -7,9 +7,11 @@ import {
   getScenes,
   mergePatch,
   removeScene,
+  rgbToHex,
   rgbToXy,
   setLightState,
   setRoomState,
+  xyToRgb,
   type Light,
   type LightState,
   type LightStatePatch,
@@ -17,6 +19,8 @@ import {
   type Room,
   type Scene,
 } from "../api";
+import { hexToRgb, LightEditor } from "../components/LightEditor";
+import { useDialogs } from "../components/dialogs";
 import { S } from "../styles";
 
 interface Props {
@@ -29,10 +33,13 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
   // Local copy so SSE events can update individual lights without a full server round-trip.
   const [localLights, setLocalLights] = useState<Light[]>(lights);
   const [providers, setProviders] = useState<Provider[]>([]);
+  const [rooms, setRooms] = useState<Room[]>([]);
 
   // Keep in sync when the parent does a full refresh (authoritative server state wins).
   useEffect(() => { setLocalLights(lights); }, [lights]);
   useEffect(() => { getProviders().then(setProviders); }, []);
+  // Re-fetch rooms alongside light refreshes so membership stays current.
+  useEffect(() => { getRooms().then(setRooms); }, [lights]);
 
   // Real-time light state from Hue SSE → our SSE → browser.
   useEffect(() => {
@@ -65,7 +72,6 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
   return (
     <div style={{ padding: "2rem", maxWidth: 960, margin: "0 auto" }}>
       {localLights.length > 0 && <SceneBar onActivated={onRefresh} />}
-      {localLights.length > 0 && <RoomBar onChanged={onRefresh} />}
       {localLights.length === 0 ? (
         <div style={{ textAlign: "center", padding: "4rem 0", color: "#666" }}>
           <p style={{ margin: "0 0 0.75rem" }}>No lights found.</p>
@@ -88,8 +94,9 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
           </p>
         </div>
       ) : (
-        <ProviderSections
+        <RoomSections
           lights={localLights}
+          rooms={rooms}
           providers={providers}
           onLocalUpdate={handleLocalUpdate}
           onChanged={onRefresh}
@@ -99,69 +106,161 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
   );
 }
 
-/** Lights grouped under one section per provider. */
-function ProviderSections({
+/**
+ * Lights grouped under one section per room, with all-on/all-off in the
+ * header. Lights that belong to no room fall back to per-provider sections.
+ */
+function RoomSections({
   lights,
+  rooms,
   providers,
   onLocalUpdate,
   onChanged,
 }: {
   lights: Light[];
+  rooms: Room[];
   providers: Provider[];
   onLocalUpdate: (id: string, state: LightState) => void;
   onChanged: () => void;
 }) {
+  const lightById = new Map(lights.map((l) => [l.id, l]));
+  const assigned = new Set<string>();
+
+  const roomSections = rooms
+    .map((room) => {
+      const members = room.light_ids
+        .map((id) => lightById.get(id))
+        .filter((l): l is Light => l !== undefined);
+      for (const l of members) assigned.add(l.id);
+      return { room, members };
+    })
+    .filter((s) => s.members.length > 0)
+    .sort((a, b) => a.room.name.localeCompare(b.room.name));
+
   const providerName = new Map(providers.map((p) => [p.id, p.name]));
-  const sections = new Map<string, Light[]>();
+  const leftovers = new Map<string, Light[]>();
   for (const l of lights) {
-    sections.set(l.provider_id, [...(sections.get(l.provider_id) ?? []), l]);
+    if (assigned.has(l.id)) continue;
+    leftovers.set(l.provider_id, [...(leftovers.get(l.provider_id) ?? []), l]);
   }
-  const ordered = [...sections.entries()].sort((a, b) =>
+  const leftoverSections = [...leftovers.entries()].sort((a, b) =>
     (providerName.get(a[0]) ?? "").localeCompare(providerName.get(b[0]) ?? ""),
   );
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
-      {ordered.map(([providerId, sectionLights]) => (
-        <section key={providerId}>
-          <h2
-            style={{
-              margin: "0 0 0.6rem",
-              fontSize: "0.8rem",
-              fontWeight: 600,
-              color: "#777",
-              textTransform: "uppercase",
-              letterSpacing: "0.08em",
-            }}
-          >
-            {providerName.get(providerId) ?? "Other"}
-            <span style={{ color: "#555", marginLeft: "0.5rem", textTransform: "none", letterSpacing: 0 }}>
-              {sectionLights.length} light{sectionLights.length !== 1 ? "s" : ""}
-            </span>
-          </h2>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
-              gap: "1rem",
-            }}
-          >
-            {sectionLights.map((light) => (
-              <LightCard
-                key={light.id}
-                light={light}
-                onLocalUpdate={onLocalUpdate}
-                onChanged={onChanged}
-              />
-            ))}
-          </div>
-        </section>
+      {roomSections.map(({ room, members }) => (
+        <LightSection
+          key={room.id}
+          title={room.name}
+          lights={members}
+          roomId={room.id}
+          onLocalUpdate={onLocalUpdate}
+          onChanged={onChanged}
+        />
+      ))}
+      {leftoverSections.map(([providerId, sectionLights]) => (
+        <LightSection
+          key={providerId}
+          title={roomSections.length > 0
+            ? `${providerName.get(providerId) ?? "Other"} — no room`
+            : providerName.get(providerId) ?? "Other"}
+          lights={sectionLights}
+          onLocalUpdate={onLocalUpdate}
+          onChanged={onChanged}
+        />
       ))}
     </div>
   );
 }
 
+function LightSection({
+  title,
+  lights,
+  roomId,
+  onLocalUpdate,
+  onChanged,
+}: {
+  title: string;
+  lights: Light[];
+  /** When set, the header gets room-wide On/Off buttons. */
+  roomId?: string;
+  onLocalUpdate: (id: string, state: LightState) => void;
+  onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  async function setAll(on: boolean) {
+    if (!roomId) return;
+    setBusy(true);
+    try {
+      await setRoomState(roomId, { on });
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section>
+      <h2
+        style={{
+          margin: "0 0 0.6rem",
+          fontSize: "0.8rem",
+          fontWeight: 600,
+          color: "#777",
+          textTransform: "uppercase",
+          letterSpacing: "0.08em",
+          display: "flex",
+          alignItems: "center",
+          gap: "0.5rem",
+        }}
+      >
+        {title}
+        <span style={{ color: "#555", textTransform: "none", letterSpacing: 0 }}>
+          {lights.length} light{lights.length !== 1 ? "s" : ""}
+        </span>
+        {roomId && (
+          <span style={{ display: "inline-flex", gap: "0.35rem", marginLeft: "auto" }}>
+            <button
+              onClick={() => setAll(true)}
+              disabled={busy}
+              style={{ ...S.buttonGhost, padding: "0.2rem 0.55rem", fontSize: "0.72rem" }}
+            >
+              On
+            </button>
+            <button
+              onClick={() => setAll(false)}
+              disabled={busy}
+              style={{ ...S.buttonGhost, padding: "0.2rem 0.55rem", fontSize: "0.72rem" }}
+            >
+              Off
+            </button>
+          </span>
+        )}
+      </h2>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
+          gap: "1rem",
+        }}
+      >
+        {lights.map((light) => (
+          <LightCard
+            key={light.id}
+            light={light}
+            onLocalUpdate={onLocalUpdate}
+            onChanged={onChanged}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function SceneBar({ onActivated }: { onActivated: () => void }) {
+  const dialogs = useDialogs();
   const [scenes, setScenes] = useState<Scene[]>([]);
   const [busy, setBusy] = useState("");
 
@@ -182,14 +281,25 @@ function SceneBar({ onActivated }: { onActivated: () => void }) {
   }
 
   async function handleSave() {
-    const name = window.prompt("Scene name (saves the current state of all lights):");
+    const name = await dialogs.prompt({
+      title: "Save scene",
+      message: "Saves the current state of all lights.",
+      placeholder: "Scene name",
+      confirmLabel: "Save",
+    });
     if (!name?.trim()) return;
     await createScene(name.trim());
     await load();
   }
 
   async function handleRemove(id: string, name: string) {
-    if (!window.confirm(`Delete scene "${name}"?`)) return;
+    const ok = await dialogs.confirm({
+      title: "Delete scene",
+      message: `Delete scene "${name}"?`,
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
     await removeScene(id);
     await load();
   }
@@ -218,54 +328,7 @@ function SceneBar({ onActivated }: { onActivated: () => void }) {
       <button onClick={handleSave} style={S.buttonGhost} title="Save the current light states as a scene">
         + Save scene
       </button>
-    </div>
-  );
-}
-
-function RoomBar({ onChanged }: { onChanged: () => void }) {
-  const [rooms, setRooms] = useState<Room[]>([]);
-  const [busy, setBusy] = useState("");
-
-  useEffect(() => {
-    getRooms().then(setRooms);
-  }, []);
-
-  async function setAll(id: string, on: boolean) {
-    setBusy(id);
-    try {
-      await setRoomState(id, { on });
-      onChanged();
-    } finally {
-      setBusy("");
-    }
-  }
-
-  if (rooms.length === 0) return null;
-
-  return (
-    <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center", marginBottom: "1.25rem" }}>
-      {rooms.map((r) => (
-        <span
-          key={r.id}
-          style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem", border: "1px solid #333", borderRadius: 6, padding: "0.3rem 0.3rem 0.3rem 0.7rem" }}
-        >
-          <span style={{ fontSize: "0.85rem", color: "#ccc" }}>{r.name}</span>
-          <button
-            onClick={() => setAll(r.id, true)}
-            disabled={busy === r.id || r.light_ids.length === 0}
-            style={{ ...S.buttonGhost, padding: "0.25rem 0.55rem", fontSize: "0.75rem" }}
-          >
-            On
-          </button>
-          <button
-            onClick={() => setAll(r.id, false)}
-            disabled={busy === r.id || r.light_ids.length === 0}
-            style={{ ...S.buttonGhost, padding: "0.25rem 0.55rem", fontSize: "0.75rem" }}
-          >
-            Off
-          </button>
-        </span>
-      ))}
+      {dialogs.element}
     </div>
   );
 }
@@ -279,26 +342,29 @@ function LightCard({
   onLocalUpdate: (id: string, state: LightState) => void;
   onChanged: () => void;
 }) {
-  const serverBrightness = light.last_state?.brightness ?? 100;
-  const [localBrightness, setLocalBrightness] = useState(serverBrightness);
-  const [localHex, setLocalHex] = useState("#ffb84d");
+  const cardRef = useRef<HTMLDivElement>(null);
+  const [editing, setEditing] = useState(false);
   const commitTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const colorTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const isOn = light.last_state?.on ?? false;
+  const offline = light.last_state?.reachable === false;
 
-  // Sync slider when a server update (refresh or SSE) changes brightness.
-  useEffect(() => { setLocalBrightness(serverBrightness); }, [serverBrightness]);
+  const serverColor = light.last_state?.color;
+  const hex = serverColor
+    ? rgbToHex(...xyToRgb(serverColor.x, serverColor.y, serverColor.brightness))
+    : "#ffb84d";
+  const brightness = light.last_state?.brightness ?? 100;
+  const editable = !offline && (light.capabilities.color_rgb || light.capabilities.dimmable);
 
-  function handleColorChange(hex: string) {
-    setLocalHex(hex);
-    const r = parseInt(hex.slice(1, 3), 16);
-    const g = parseInt(hex.slice(3, 5), 16);
-    const b = parseInt(hex.slice(5, 7), 16);
-    const color = rgbToXy(r, g, b);
-    const next: LightState = { ...(light.last_state ?? { on: true }), on: true, color };
+  function handleEditorChange(nextHex: string, nextBrightness: number) {
+    const next: LightState = {
+      ...(light.last_state ?? { on: true }),
+      on: true,
+      brightness: light.capabilities.dimmable ? nextBrightness : light.last_state?.brightness,
+      color: light.capabilities.color_rgb ? rgbToXy(...hexToRgb(nextHex)) : light.last_state?.color,
+    };
     onLocalUpdate(light.id, next);
-    clearTimeout(colorTimer.current);
-    colorTimer.current = setTimeout(() => { setLightState(light.id, next); }, 200);
+    clearTimeout(commitTimer.current);
+    commitTimer.current = setTimeout(() => { setLightState(light.id, next); }, 200);
   }
 
   async function toggle() {
@@ -308,83 +374,89 @@ function LightCard({
     onChanged();                      // fallback full refresh (catches Govee etc.)
   }
 
-  function handleBrightnessChange(value: number) {
-    setLocalBrightness(value);
-    onLocalUpdate(light.id, { ...(light.last_state ?? { on: true }), on: true, brightness: value });
-    clearTimeout(commitTimer.current);
-    commitTimer.current = setTimeout(async () => {
-      await setLightState(light.id, {
-        ...(light.last_state ?? { on: true }),
-        on: true,
-        brightness: value,
-      });
-    }, 200);
-  }
-
   return (
-    <div style={{ ...S.card, opacity: isOn ? 1 : 0.6, transition: "opacity 0.2s" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span
-          style={{
-            fontWeight: 600,
-            fontSize: "0.95rem",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {light.name}
-        </span>
-        <Toggle on={isOn} onToggle={toggle} />
+    <>
+      <div
+        ref={cardRef}
+        onClick={() => { if (editable) setEditing(true); }}
+        title={editable ? "Open the light editor" : undefined}
+        style={{
+          ...S.card,
+          flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "0.75rem",
+          cursor: editable ? "pointer" : "default",
+          opacity: offline ? 0.45 : isOn ? 1 : 0.6,
+          transition: "opacity 0.2s",
+          ...(editing ? { outline: "1px solid #f90" } : {}),
+        }}
+      >
+        <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+          <span
+            style={{
+              fontWeight: 600,
+              fontSize: "0.95rem",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {light.name}
+          </span>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem", fontSize: "0.75rem", color: "#888" }}>
+            {isOn && light.capabilities.color_rgb && (
+              <span style={{ width: 10, height: 10, borderRadius: "50%", background: hex, border: "1px solid rgba(255,255,255,0.25)", display: "inline-block" }} />
+            )}
+            {isOn ? (light.capabilities.dimmable ? `${brightness}%` : "on") : "off"}
+          </span>
+        </div>
+        {offline ? (
+          <span
+            title="The provider reports this device as unreachable"
+            style={{
+              flexShrink: 0,
+              fontSize: "0.7rem",
+              color: "#c66",
+              border: "1px solid #533",
+              borderRadius: 4,
+              padding: "0.1rem 0.4rem",
+            }}
+          >
+            offline
+          </span>
+        ) : (
+          <VerticalToggle on={isOn} onToggle={toggle} />
+        )}
       </div>
-      {light.capabilities.dimmable && (
-        <input
-          type="range"
-          min={1}
-          max={100}
-          value={localBrightness}
-          disabled={!isOn}
-          onChange={(e) => handleBrightnessChange(Number(e.target.value))}
-          style={{
-            width: "100%",
-            marginTop: "0.25rem",
-            accentColor: "#f90",
-            cursor: isOn ? "pointer" : "default",
-          }}
+      {editing && cardRef.current && (
+        <LightEditor
+          anchor={cardRef.current}
+          title={light.name}
+          initialHex={hex}
+          initialBrightness={brightness}
+          showColor={light.capabilities.color_rgb}
+          showBrightness={light.capabilities.dimmable}
+          on={isOn}
+          onToggle={toggle}
+          onChange={handleEditorChange}
+          onClose={() => setEditing(false)}
         />
       )}
-      {light.capabilities.color_rgb && (
-        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.4rem" }}>
-          <input
-            type="color"
-            value={localHex}
-            disabled={!isOn}
-            onChange={(e) => handleColorChange(e.target.value)}
-            style={{
-              width: 36,
-              height: 24,
-              padding: 0,
-              border: "1px solid #444",
-              borderRadius: 4,
-              background: "none",
-              cursor: isOn ? "pointer" : "default",
-            }}
-          />
-          <span style={{ fontSize: "0.75rem", color: "#888" }}>Color</span>
-        </div>
-      )}
-    </div>
+    </>
   );
 }
 
-function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
+/** On/off as a vertical sliding switch — up is on. */
+function VerticalToggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
   return (
     <button
-      onClick={onToggle}
+      onClick={(e) => { e.stopPropagation(); onToggle(); }}
+      aria-label={on ? "Turn off" : "Turn on"}
       style={{
         flexShrink: 0,
-        width: 44,
-        height: 24,
+        width: 24,
+        height: 44,
         borderRadius: 12,
         border: "none",
         cursor: "pointer",
@@ -396,13 +468,13 @@ function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
       <span
         style={{
           position: "absolute",
-          top: 3,
-          left: on ? 23 : 3,
+          left: 3,
+          top: on ? 3 : 23,
           width: 18,
           height: 18,
           borderRadius: "50%",
           background: "#fff",
-          transition: "left 0.2s",
+          transition: "top 0.2s",
         }}
       />
     </button>

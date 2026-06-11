@@ -33,6 +33,11 @@ pub struct LightState {
     pub color: Option<Color>,
     /// Color temperature in mirek (153–500 ≈ 6500K–2000K).
     pub color_temp_mirek: Option<u16>,
+    /// Whether the device is reachable by its provider (None = the provider
+    /// doesn't report it). An unreachable light also reports `on: false` —
+    /// cloud APIs return stale power state for offline devices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reachable: Option<bool>,
 }
 
 /// A partial light-state update. Hue SSE events only carry the fields that
@@ -48,6 +53,8 @@ pub struct LightStatePatch {
     pub color: Option<Color>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color_temp_mirek: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reachable: Option<bool>,
 }
 
 impl LightStatePatch {
@@ -59,6 +66,7 @@ impl LightStatePatch {
             brightness: s.brightness,
             color: s.color.clone(),
             color_temp_mirek: s.color_temp_mirek,
+            reachable: s.reachable,
         }
     }
 
@@ -67,6 +75,7 @@ impl LightStatePatch {
             && self.brightness.is_none()
             && self.color.is_none()
             && self.color_temp_mirek.is_none()
+            && self.reachable.is_none()
     }
 
     /// Merge this patch into an existing state, leaving absent fields untouched.
@@ -82,6 +91,9 @@ impl LightStatePatch {
         }
         if let Some(m) = self.color_temp_mirek {
             state.color_temp_mirek = Some(m);
+        }
+        if let Some(r) = self.reachable {
+            state.reachable = Some(r);
         }
     }
 }

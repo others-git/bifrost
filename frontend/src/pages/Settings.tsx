@@ -11,6 +11,7 @@ import {
   syncProviderGroups,
   pairHueBridge,
   getRooms,
+  mergeRooms,
   removeRoom,
   removeProvider,
   setRoomDirectLights,
@@ -24,6 +25,7 @@ import {
   type Provider,
   type ProviderType,
 } from "../api";
+import { useDialogs } from "../components/dialogs";
 import { S } from "../styles";
 
 interface Props {
@@ -31,6 +33,7 @@ interface Props {
 }
 
 export function SettingsPage({ onNavigate: _onNavigate }: Props) {
+  const dialogs = useDialogs();
   const [providers, setProviders] = useState<Provider[]>([]);
   const [types, setTypes] = useState<ProviderType[]>([]);
   const [showAdd, setShowAdd] = useState(false);
@@ -51,7 +54,13 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
   }
 
   async function handleRemove(id: string) {
-    if (!window.confirm("Remove this provider? Associated lights will be deleted.")) return;
+    const ok = await dialogs.confirm({
+      title: "Remove provider",
+      message: "Remove this provider? Associated lights will be deleted.",
+      confirmLabel: "Remove",
+      danger: true,
+    });
+    if (!ok) return;
     await removeProvider(id);
     await loadProviders();
   }
@@ -126,6 +135,7 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
       )}
 
       <RoomsSection />
+      {dialogs.element}
     </div>
   );
 }
@@ -133,6 +143,7 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
 // ── Rooms ────────────────────────────────────────────────────────────────────
 
 function RoomsSection() {
+  const dialogs = useDialogs();
   const [rooms, setRooms] = useState<Room[]>([]);
   const [providerGroups, setProviderGroups] = useState<ProviderGroupInfo[]>([]);
   const [lights, setLights] = useState<Light[]>([]);
@@ -148,7 +159,13 @@ function RoomsSection() {
   useEffect(() => { load(); }, []);
 
   async function handleRemove(id: string, name: string) {
-    if (!window.confirm(`Delete room "${name}"? Its scenes and plan bindings go with it.`)) return;
+    const ok = await dialogs.confirm({
+      title: "Delete room",
+      message: `Delete room "${name}"? Its scenes and plan bindings go with it.`,
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
     await removeRoom(id);
     await load();
   }
@@ -171,6 +188,7 @@ function RoomsSection() {
           <RoomCard
             key={room.id}
             room={room}
+            allRooms={rooms}
             lights={lights}
             providerGroups={providerGroups}
             onChanged={load}
@@ -189,7 +207,15 @@ function RoomsSection() {
             initialLinks={[]}
             submitLabel="Create"
             onSubmit={async (name, directIds, _linkIds) => {
-              await createRoom(name, directIds);
+              try {
+                await createRoom(name, directIds);
+              } catch (e) {
+                await dialogs.alert({
+                  title: "Could not create room",
+                  message: e instanceof Error ? e.message : String(e),
+                });
+                return;
+              }
               setShowAdd(false);
               await load();
             }}
@@ -201,24 +227,53 @@ function RoomsSection() {
           + Add Room
         </button>
       )}
+      {dialogs.element}
     </div>
   );
 }
 
 function RoomCard({
   room,
+  allRooms,
   lights,
   providerGroups,
   onChanged,
   onRemove,
 }: {
   room: Room;
+  allRooms: Room[];
   lights: Light[];
   providerGroups: ProviderGroupInfo[];
   onChanged: () => Promise<void>;
   onRemove: () => void;
 }) {
+  const dialogs = useDialogs();
   const [editing, setEditing] = useState(false);
+  const [merging, setMerging] = useState(false);
+  const mergeCandidates = allRooms.filter((r) => r.id !== room.id);
+
+  async function handleMerge(sourceId: string) {
+    const source = mergeCandidates.find((r) => r.id === sourceId);
+    if (!source) return;
+    const ok = await dialogs.confirm({
+      title: "Merge rooms",
+      message: `Merge "${source.name}" into "${room.name}"? Its links, lights, scenes, and plan regions move here, then "${source.name}" is deleted.`,
+      confirmLabel: "Merge",
+    });
+    if (!ok) return;
+    setMerging(true);
+    try {
+      await mergeRooms(room.id, sourceId);
+      await onChanged();
+    } catch (e) {
+      await dialogs.alert({
+        title: "Merge failed",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setMerging(false);
+    }
+  }
 
   if (editing) {
     return (
@@ -259,6 +314,20 @@ function RoomCard({
         </div>
       </div>
       <div style={{ display: "flex", gap: "0.5rem", flexShrink: 0 }}>
+        {mergeCandidates.length > 0 && (
+          <select
+            value=""
+            disabled={merging}
+            onChange={(e) => { if (e.target.value) handleMerge(e.target.value); }}
+            title="Absorb another room into this one (its links, lights, scenes, and plan regions move here)"
+            style={{ ...S.input, width: "auto", padding: "0.3rem 0.5rem", fontSize: "0.8rem", cursor: "pointer" }}
+          >
+            <option value="">{merging ? "Merging…" : "Merge in…"}</option>
+            {mergeCandidates.map((r) => (
+              <option key={r.id} value={r.id}>{r.name}</option>
+            ))}
+          </select>
+        )}
         <button onClick={() => setEditing(true)} style={S.buttonGhost}>Edit</button>
         <button onClick={onRemove} style={S.buttonDanger}>Remove</button>
       </div>

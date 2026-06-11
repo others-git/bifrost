@@ -29,6 +29,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(list_rooms).post(create_room))
         .route("/{id}", delete(remove_room))
+        .route("/{id}/merge", post(merge_rooms))
         .route("/{id}/lights", put(set_direct_lights))
         .route("/{id}/links", put(set_links))
         .route("/{id}/state", put(set_room_state))
@@ -237,6 +238,23 @@ async fn create_room(
         return (StatusCode::UNPROCESSABLE_ENTITY, "room name is required").into_response();
     }
 
+    // Case-insensitive duplicate guard: "office" next to "Office" is how
+    // unmergeable near-duplicates were born.
+    let duplicate = sqlx::query("SELECT 1 FROM rooms WHERE name = ? COLLATE NOCASE")
+        .bind(req.name.trim())
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    if duplicate {
+        return (
+            StatusCode::CONFLICT,
+            "a room with this name already exists",
+        )
+            .into_response();
+    }
+
     let id = Uuid::new_v4().to_string();
     if let Err(e) = sqlx::query("INSERT INTO rooms (id, name) VALUES (?, ?)")
         .bind(&id)
@@ -270,6 +288,75 @@ async fn remove_room(
 
     let _ = sqlx::query("DELETE FROM rooms WHERE id = ?")
         .bind(&id)
+        .execute(&state.db)
+        .await;
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct MergeRequest {
+    /// The room to absorb. Its links, direct lights, scenes, and plan-region
+    /// bindings move to `{id}` (the target), then it is deleted.
+    source_room_id: String,
+}
+
+/// Merge `source_room_id` into the target room. The target keeps its own
+/// name; everything the source owned is re-pointed (memberships dedupe via
+/// INSERT OR IGNORE).
+async fn merge_rooms(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<MergeRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if req.source_room_id == id {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "cannot merge a room into itself",
+        )
+            .into_response();
+    }
+    if !room_exists(&state, &id).await || !room_exists(&state, &req.source_room_id).await {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    // Links and direct lights: copy with dedupe, then let the source's
+    // rows die with the room (ON DELETE CASCADE).
+    let _ = sqlx::query(
+        "INSERT OR IGNORE INTO room_links (room_id, provider_group_id)
+         SELECT ?, provider_group_id FROM room_links WHERE room_id = ?",
+    )
+    .bind(&id)
+    .bind(&req.source_room_id)
+    .execute(&state.db)
+    .await;
+    let _ = sqlx::query(
+        "INSERT OR IGNORE INTO room_lights (room_id, light_id)
+         SELECT ?, light_id FROM room_lights WHERE room_id = ?",
+    )
+    .bind(&id)
+    .bind(&req.source_room_id)
+    .execute(&state.db)
+    .await;
+
+    // Scenes and plan-region bindings move wholesale.
+    let _ = sqlx::query("UPDATE room_scenes SET room_id = ? WHERE room_id = ?")
+        .bind(&id)
+        .bind(&req.source_room_id)
+        .execute(&state.db)
+        .await;
+    let _ = sqlx::query("UPDATE plan_rooms SET room_id = ? WHERE room_id = ?")
+        .bind(&id)
+        .bind(&req.source_room_id)
+        .execute(&state.db)
+        .await;
+
+    let _ = sqlx::query("DELETE FROM rooms WHERE id = ?")
+        .bind(&req.source_room_id)
         .execute(&state.db)
         .await;
 
@@ -623,7 +710,7 @@ async fn create_scene(
         if parse_hex_color(c).is_none() {
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
-                format!("'{c}' is not a #rrggbb colour"),
+                format!("'{c}' is not a #rrggbb color"),
             )
                 .into_response();
         }
@@ -734,6 +821,7 @@ async fn apply_scene(
                 Some(colors[i % colors.len()].clone())
             },
             color_temp_mirek: None,
+            reachable: None,
         };
         let target_json = serde_json::to_string(&target).unwrap_or_default();
 

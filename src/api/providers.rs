@@ -419,10 +419,14 @@ async fn sync_groups(
             .flatten()
             .is_some();
         if !linked {
-            let room_id = match sqlx::query("SELECT id, inherited_name FROM rooms WHERE name = ?")
-                .bind(&pg.name)
-                .fetch_optional(&state.db)
-                .await
+            // Case-insensitive: "Living room" must link the Hue "Living Room"
+            // rather than spawning a duplicate.
+            let room_id = match sqlx::query(
+                "SELECT id, inherited_name FROM rooms WHERE name = ? COLLATE NOCASE",
+            )
+            .bind(&pg.name)
+            .fetch_optional(&state.db)
+            .await
             {
                 Ok(Some(r)) => {
                     let rid: String = r.get("id");

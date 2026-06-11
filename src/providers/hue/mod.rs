@@ -18,6 +18,11 @@ use reqwest::{Client, header};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Per-request deadline for plain REST calls. NOT applied to the SSE stream,
+/// which is long-lived by design (its liveness is the connection manager's
+/// health-check job).
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 pub struct HueProvider {
     client: Client,
     /// Base URL for the bridge, e.g. `https://192.168.1.10`.
@@ -50,9 +55,14 @@ impl HueProvider {
             "hue-application-key",
             header::HeaderValue::from_str(&app_key)?,
         );
+        // connect_timeout only bounds connection establishment, so it is safe
+        // for the long-lived SSE stream; without it a powered-off bridge (or a
+        // host that rebooted before the network came up) leaves connect
+        // attempts hanging in TCP retries for minutes per attempt.
         let client = Client::builder()
             .default_headers(headers)
             .danger_accept_invalid_certs(accept_invalid_certs)
+            .connect_timeout(std::time::Duration::from_secs(10))
             .build()?;
         Ok(Self {
             client,
@@ -232,6 +242,7 @@ fn hue_resource_to_light(r: HueLightResource) -> Light {
             brightness: r.dimming.map(|d| d.brightness),
             color,
             color_temp_mirek: r.color_temperature.and_then(|ct| ct.mirek),
+            reachable: None,
         },
         capabilities: LightCapabilities {
             dimmable: true,
@@ -256,6 +267,7 @@ impl LightProvider for HueProvider {
         let resp: HueListResponse<HueLightResource> = self
             .client
             .get(&url)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .context("Hue discover request failed")?
@@ -283,6 +295,7 @@ impl LightProvider for HueProvider {
         self.client
             .put(&url)
             .json(&body)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .context("Hue set_state request failed")?
@@ -296,6 +309,7 @@ impl LightProvider for HueProvider {
         let resp: HueListResponse<HueLightResource> = self
             .client
             .get(&url)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await?
             .error_for_status()?
@@ -315,6 +329,7 @@ impl LightProvider for HueProvider {
         let rooms: HueListResponse<HueGroupResource> = self
             .client
             .get(self.resource_url("/room"))
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .context("Hue room request failed")?
@@ -325,6 +340,7 @@ impl LightProvider for HueProvider {
         let devices: HueListResponse<HueDeviceResource> = self
             .client
             .get(self.resource_url("/device"))
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .context("Hue device request failed")?
@@ -335,6 +351,7 @@ impl LightProvider for HueProvider {
         let zones: HueListResponse<HueGroupResource> = self
             .client
             .get(self.resource_url("/zone"))
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .context("Hue zone request failed")?
@@ -420,6 +437,7 @@ impl LightProvider for HueProvider {
         self.client
             .put(&url)
             .json(&body)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .context("Hue grouped_light request failed")?
@@ -545,6 +563,7 @@ pub fn parse_patch_from_event(item: &serde_json::Value) -> crate::models::LightS
         brightness,
         color,
         color_temp_mirek,
+        reachable: None,
     }
 }
 
@@ -616,6 +635,7 @@ mod tests {
             brightness: Some(50.0),
             color: None,
             color_temp_mirek: Some(370),
+            reachable: None,
         };
         mock_provider(&server)
             .await

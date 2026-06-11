@@ -406,10 +406,77 @@ SQLite, out-of-bounds coordinates rejected with 422.
 - [x] Stretch realized as **planner rooms**: paint named tile regions with the
   Rooms tool (tinted overlays + labels); each room auto-maintains a group
   whose membership mirrors the lights placed on its tiles (synced on room and
-  placement saves; group deleted with the room). Room controller panel left
-  of the canvas in view mode: per-room On/Off and scene apply scoped to the
-  room via `POST /api/scenes/{id}/activate {light_ids}`.
-- [ ] Stretch: brightness/color popover on placed lights (reuse LightCard)
+  placement saves; group deleted with the room). Room controller panel beside
+  the canvas in view mode (right side as of Milestone 8): per-room On/Off and
+  scene apply scoped to the room via `POST /api/scenes/{id}/activate {light_ids}`.
+- [x] Stretch realized as the **shared light editor** (Milestone 8.1) — clicking
+  a placed light (or room) opens the anchored color-wheel editor.
+
+---
+
+## Milestone 8 — UI overhaul + shared light editor ✅ DONE
+
+154 tests green (`cargo test`), frontend `tsc && vite build` clean. The planner
+and dashboard grew a consistent, app-quality control surface.
+
+- [x] **LED strip cornering** — strips are polylines, not single end-tiles.
+  `migrations/0009_strip_corners.sql` replaces the `x2/y2` end tile with a JSON
+  `points` vertex list (existing straight strips migrate automatically). Drag
+  while placing to lay the run; straight motion stretches a segment, turning
+  adds a corner, backtracking removes one. Server validates every vertex and
+  prunes them on resize via `json_each`.
+- [x] **Anchored light editor** (`frontend/src/components/LightEditor.tsx`) — a
+  popover that docks beside whatever opened it (never floats centre-screen),
+  with a Hue-style hue/saturation color wheel, a vertical brightness bar, quick
+  swatches, and a power switch. Reused for dashboard lights, planner lights,
+  whole rooms, scene-palette colors, and the paint brush.
+- [x] **In-app dialogs** (`frontend/src/components/dialogs.tsx`) — promise-based
+  `confirm` / `prompt` / `alert` modals replace every `window.*` popup across
+  the dashboard, settings, and planner. New floor plan uses a proper form.
+- [x] **Planner sidebars normalized to the right**; the room controller moved
+  off the left and rooms gained the shared editor (a "Color…" action).
+- [x] **Lights page** — each card is a button opening the editor (only the
+  controls the light supports), with a compact status line and a **vertical**
+  sliding on/off switch.
+- [x] **"Plan" renamed "Floor Plan"** across the nav and page copy.
+
+### Remaining UI feedback (next)
+
+- [ ] **Scenes as a first-class object** — a dedicated **Scenes** page in the
+  nav (below Lights, above Floor Plan) aggregating room palette scenes and
+  global snapshots, with a cleaner creator and more Hue-like preset defaults.
+- [ ] **Hue color wheel missing** — some Hue lights don't expose `color_rgb`;
+  verify capability detection against the CLIP v2 reference
+  (`references/hue_api_reference.pdf`) — a light reporting a `color` object is
+  full-RGB, but discovery vs. SSE-refresh paths must agree.
+- [ ] **Strips should hug the mounted wall around corners** — today a cornered
+  run bends at tile centres and visually crosses walls when it turns. Render
+  wall-mounted strips along the mounted edge with corners at tile corners, so a
+  strip can follow the inner trim of a hallway.
+- [ ] **Rooms as buttons with toggle switches** — render rooms like lights
+  (click opens the editor) with a sliding on/off toggle instead of On/Off
+  buttons; tidy the scene creator further.
+
+---
+
+## Milestone 9 — Public API for other apps
+
+> From the TODO: a documented, key-authenticated API so external apps can drive
+> Bifrost. Full access, no RBAC — this is a single-tenant LAN hub.
+
+- [ ] **API keys** — generate client keys (Settings); accept them via an
+  `Authorization` header as an alternative to the session cookie. Stored
+  hashed, listable and revocable. Full access to lights and rooms.
+- [ ] **Documented surface** — a reference in the repo (e.g. `API.md` or an
+  OpenAPI doc) covering every endpoint, kept in step with the code.
+- [ ] **Parity with the UI** — everything doable in the UI is reachable via the
+  API, **including scenes** (snapshot + room palette scenes).
+- [ ] **Scope** — expose Bifrost-abstracted **rooms** (not raw provider groups)
+  and individual lights. The Floor Plan is explicitly **out** of the public API
+  for now.
+- [ ] Standard rules apply: each new route gets a happy-path test and a
+  no-credentials-returns-401 test; key generation/verification gets crypto
+  roundtrip + failure-mode coverage.
 
 ---
 

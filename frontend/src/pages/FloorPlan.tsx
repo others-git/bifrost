@@ -12,7 +12,10 @@ import {
   putPlanLayout,
   putPlanLights,
   putPlanRooms,
+  putPlanSize,
   removePlan,
+  rgbToHex,
+  rgbToXy,
   setLightState,
   setRoomState,
   xyToRgb,
@@ -26,17 +29,20 @@ import {
   type Room,
   type RoomScene,
 } from "../api";
+import { ColorWheel, hexToHs, hexToRgb, hsvToRgb, LightEditor } from "../components/LightEditor";
+import { Modal, useDialogs, type Dialogs } from "../components/dialogs";
 import { S } from "../styles";
 
-type Tool = "view" | "floor" | "wall" | "erase" | "place" | "room";
+type Tool = "view" | "floor" | "wall" | "erase" | "place" | "room" | "paint";
 
 const TOOLS: { id: Tool; label: string; hint: string }[] = [
-  { id: "view", label: "View", hint: "Click a light to toggle it. Drag to pan, scroll to zoom." },
+  { id: "view", label: "View", hint: "Click a light to open its editor. Drag to pan, scroll to zoom." },
   { id: "floor", label: "Floor", hint: "Click-drag to paint floor tiles." },
   { id: "wall", label: "Wall", hint: "Click-drag along tile boundaries to draw walls. Leave gaps for doors." },
   { id: "erase", label: "Erase", hint: "Click-drag to remove tiles, walls, and room assignments." },
-  { id: "place", label: "Lights", hint: "Pick a light from the palette, then click a tile — near an edge wall-mounts it, the middle ceiling-mounts it. Click a placed light to remove it." },
+  { id: "place", label: "Lights", hint: "Pick a light from the palette, then click a tile — near an edge wall-mounts it, the middle ceiling-mounts it. Drag across tiles to lay an LED strip. Click a placed light to remove it." },
   { id: "room", label: "Rooms", hint: "Pick or create a room on the right, then click-drag tiles to paint it. A tile belongs to one room." },
+  { id: "paint", label: "Paint", hint: "Pick a color and brightness on the right, then click or brush across lights to color them live." },
 ];
 
 const ROOM_COLORS = ["#8b5cf6", "#3b82f6", "#22d3ee", "#4ade80", "#facc15", "#fb923c", "#f43f5e"];
@@ -56,7 +62,13 @@ interface Popover {
   placements: Placement[];
 }
 
+/** What the shared light editor is currently pointed at. */
+type EditorTarget =
+  | { kind: "light"; id: string; anchor: HTMLElement | { x: number; y: number } }
+  | { kind: "room"; roomId: string; anchor: HTMLElement };
+
 export function FloorPlanPage({ lights }: { lights: Light[] }) {
+  const dialogs = useDialogs();
   const [plans, setPlans] = useState<PlanSummary[]>([]);
   const [planId, setPlanId] = useState<string>("");
   const [plan, setPlan] = useState<PlanDetail | null>(null);
@@ -71,7 +83,12 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
   const [tool, setTool] = useState<Tool>("view");
   const [selectedLight, setSelectedLight] = useState<string>("");
   const [selectedRoom, setSelectedRoom] = useState<string>("");
+  const [paintColor, setPaintColor] = useState("#ff9900");
+  const [paintBrightness, setPaintBrightness] = useState(100);
   const [popover, setPopover] = useState<Popover | null>(null);
+  const [editor, setEditor] = useState<EditorTarget | null>(null);
+  const [showNewPlan, setShowNewPlan] = useState(false);
+  const editTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const [toast, setToast] = useState("");
 
   const [allRooms, setAllRooms] = useState<Room[]>([]);
@@ -144,20 +161,22 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
     setTimeout(() => setToast(""), 3000);
   }
 
-  async function handleCreate() {
-    const name = window.prompt("Plan name (e.g. Ground Floor):");
-    if (!name?.trim()) return;
-    const dims = window.prompt("Size in feet, width x height (max 128):", "50x40");
-    const m = dims?.match(/^\s*(\d+)\s*[x×]\s*(\d+)\s*$/);
-    if (!m) return;
-    const { id } = await createPlan(name.trim(), Number(m[1]), Number(m[2]));
+  async function handleCreate(name: string, width: number, height: number) {
+    const { id } = await createPlan(name, width, height);
+    setShowNewPlan(false);
     await loadPlans();
     setPlanId(id);
   }
 
   async function handleDelete() {
     if (!plan) return;
-    if (!window.confirm(`Delete plan "${plan.name}"?`)) return;
+    const ok = await dialogs.confirm({
+      title: "Delete floor plan",
+      message: `Delete floor plan "${plan.name}"?`,
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
     await removePlan(plan.id);
     setPlanId("");
     await loadPlans();
@@ -188,9 +207,94 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
     }
   }
 
+  async function handleResize(w: number, h: number) {
+    if (!plan) return;
+    const lostTiles = [...tiles].filter((k) => {
+      const [x, y] = k.split(",").map(Number);
+      return x >= w || y >= h;
+    }).length;
+    const lostLights = placements.filter(
+      (p) => p.x >= w || p.y >= h || p.points?.some(([vx, vy]) => vx >= w || vy >= h),
+    ).length;
+    if (lostTiles > 0 || lostLights > 0) {
+      const ok = await dialogs.confirm({
+        title: "Shrink plan",
+        message: `Shrinking to ${w}×${h} removes ${lostTiles} tile(s) and ${lostLights} placed light(s) outside the new bounds. Continue?`,
+        confirmLabel: "Shrink",
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    try {
+      // Commit pending edits first — resizing reloads the plan from the server.
+      if (dirty) await handleSave();
+      await putPlanSize(plan.id, w, h);
+      await loadPlan(plan.id);
+      await loadPlans();
+      showToast(`Resized to ${w}×${h}.`);
+    } catch (e) {
+      showToast(`Resize failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
   async function toggleLight(lightId: string) {
     const current = statesById.get(lightId) ?? { on: false };
     const next = { ...current, on: !current.on };
+    setStatesById((prev) => new Map(prev).set(lightId, next)); // optimistic
+    await setLightState(lightId, next);
+  }
+
+  async function setRoom(room: Room, on: boolean) {
+    setStatesById((prev) => {
+      const next = new Map(prev);
+      for (const id of room.light_ids) {
+        next.set(id, { ...(next.get(id) ?? { on: false }), on });
+      }
+      return next;
+    });
+    await setRoomState(room.id, { on });
+  }
+
+  /** Live edits from the shared editor — optimistic locally, debounced to the API. */
+  function editorChange(target: EditorTarget, hex: string, brightness: number) {
+    const color = rgbToXy(...hexToRgb(hex));
+    if (target.kind === "light") {
+      const next: LightState = {
+        ...(statesById.get(target.id) ?? {}),
+        on: true,
+        color,
+        brightness,
+      };
+      setStatesById((prev) => new Map(prev).set(target.id, next));
+      clearTimeout(editTimer.current);
+      editTimer.current = setTimeout(() => { setLightState(target.id, next); }, 200);
+    } else {
+      const room = allRooms.find((r) => r.id === target.roomId);
+      if (!room) return;
+      setStatesById((prev) => {
+        const next = new Map(prev);
+        for (const id of room.light_ids) {
+          next.set(id, { ...(next.get(id) ?? {}), on: true, color, brightness });
+        }
+        return next;
+      });
+      clearTimeout(editTimer.current);
+      editTimer.current = setTimeout(() => {
+        setRoomState(room.id, { on: true, color, brightness });
+      }, 250);
+    }
+  }
+
+  async function paintLight(lightId: string) {
+    const r = parseInt(paintColor.slice(1, 3), 16);
+    const g = parseInt(paintColor.slice(3, 5), 16);
+    const b = parseInt(paintColor.slice(5, 7), 16);
+    const next: LightState = {
+      ...(statesById.get(lightId) ?? {}),
+      on: true,
+      color: rgbToXy(r, g, b),
+      brightness: paintBrightness,
+    };
     setStatesById((prev) => new Map(prev).set(lightId, next)); // optimistic
     await setLightState(lightId, next);
   }
@@ -216,7 +320,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
             {p.name}
           </button>
         ))}
-        <button onClick={handleCreate} style={S.buttonGhost}>+ New plan</button>
+        <button onClick={() => setShowNewPlan(true)} style={S.buttonGhost}>+ New floor plan</button>
         {plan && (
           <>
             <span style={{ flex: 1 }} />
@@ -250,7 +354,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
             {TOOLS.map((t) => (
               <button
                 key={t.id}
-                onClick={() => { setTool(t.id); setPopover(null); }}
+                onClick={() => { setTool(t.id); setPopover(null); setEditor(null); }}
                 style={{ ...S.buttonGhost, ...(tool === t.id ? { borderColor: "#f90", color: "#f90" } : {}) }}
               >
                 {t.label}
@@ -262,23 +366,6 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
           </div>
 
           <div style={{ display: "flex", gap: "1rem", alignItems: "flex-start" }}>
-            {tool === "view" && plan.rooms.length > 0 && (
-              <RoomController
-                plan={plan}
-                rooms={allRooms}
-                onSetRoom={async (room, on) => {
-                  setStatesById((prev) => {
-                    const next = new Map(prev);
-                    for (const id of room.light_ids) {
-                      next.set(id, { ...(next.get(id) ?? { on: false }), on });
-                    }
-                    return next;
-                  });
-                  await setRoomState(room.id, { on });
-                }}
-              />
-            )}
-
             <PlanCanvas
               plan={plan}
               tiles={tiles}
@@ -295,10 +382,26 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
               setPlacements={setPlacements}
               setRooms={setRooms}
               onLightClick={(pls, px, py) => {
-                if (pls.length === 1) toggleLight(pls[0].light_id);
-                else setPopover({ px, py, placements: pls });
+                if (pls.length === 1) {
+                  setEditor({ kind: "light", id: pls[0].light_id, anchor: { x: px, y: py } });
+                } else {
+                  setPopover({ px, py, placements: pls });
+                }
               }}
+              onResize={handleResize}
+              onPaint={paintLight}
             />
+
+            {tool === "view" && plan.rooms.length > 0 && (
+              <RoomController
+                plan={plan}
+                rooms={allRooms}
+                statesById={statesById}
+                dialogs={dialogs}
+                onSetRoom={setRoom}
+                onEditRoom={(room, anchor) => setEditor({ kind: "room", roomId: room.id, anchor })}
+              />
+            )}
 
             {tool === "place" && (
               <div style={{ width: 220, flexShrink: 0 }}>
@@ -326,30 +429,76 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
               </div>
             )}
 
+            {tool === "paint" && (
+              <div style={{ width: 220, flexShrink: 0, display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+                <h3 style={{ margin: 0, fontSize: "0.9rem", color: "#aaa" }}>Brush</h3>
+                {(() => {
+                  const [bh, bs] = hexToHs(paintColor);
+                  return (
+                    <ColorWheel
+                      size={180}
+                      hue={bh}
+                      sat={bs}
+                      onPick={(h, s) => setPaintColor(rgbToHex(...hsvToRgb(h, s, 1)))}
+                    />
+                  );
+                })()}
+                <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.75rem", color: "#888" }}>
+                  <input
+                    type="range"
+                    min={1}
+                    max={100}
+                    value={paintBrightness}
+                    onChange={(e) => setPaintBrightness(Number(e.target.value))}
+                    style={{ flex: 1, accentColor: "#f90" }}
+                  />
+                  <span style={{ width: 36, textAlign: "right" }}>{paintBrightness}%</span>
+                </label>
+                <span style={{ color: "#666", fontSize: "0.75rem" }}>
+                  Brush across lights on the plan to apply. Save the result as a
+                  room scene with “Save current” in View mode.
+                </span>
+              </div>
+            )}
+
             {tool === "room" && (
               <RoomEditorPanel
                 rooms={rooms}
                 selectedRoom={selectedRoom}
                 onSelect={setSelectedRoom}
-                onCreate={() => {
-                  const name = window.prompt("Room name:");
+                onCreate={async () => {
+                  const name = await dialogs.prompt({
+                    title: "New room",
+                    placeholder: "Room name",
+                    confirmLabel: "Create",
+                  });
                   if (!name?.trim()) return;
-                  const room: EditRoom = { id: "", name: name.trim(), tiles: new Set() };
                   // Local placeholder id so selection works before save.
-                  room.id = `new-${Date.now()}`;
+                  const room: EditRoom = { id: `new-${Date.now()}`, name: name.trim(), tiles: new Set() };
                   setRooms((prev) => [...prev, room]);
                   setSelectedRoom(room.id);
                   setDirty(true);
                 }}
-                onRename={(id) => {
+                onRename={async (id) => {
                   const room = rooms.find((r) => r.id === id);
-                  const name = window.prompt("Room name:", room?.name ?? "");
+                  const name = await dialogs.prompt({
+                    title: "Rename room",
+                    initial: room?.name ?? "",
+                    placeholder: "Room name",
+                    confirmLabel: "Rename",
+                  });
                   if (!name?.trim()) return;
                   setRooms((prev) => prev.map((r) => (r.id === id ? { ...r, name: name.trim() } : r)));
                   setDirty(true);
                 }}
-                onDelete={(id) => {
-                  if (!window.confirm("Remove this room? Its auto-group is deleted on save.")) return;
+                onDelete={async (id) => {
+                  const ok = await dialogs.confirm({
+                    title: "Remove room",
+                    message: "Remove this room? Its auto-group is deleted on save.",
+                    confirmLabel: "Remove",
+                    danger: true,
+                  });
+                  if (!ok) return;
                   setRooms((prev) => prev.filter((r) => r.id !== id));
                   if (selectedRoom === id) setSelectedRoom("");
                   setDirty(true);
@@ -381,7 +530,10 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                 return (
                   <button
                     key={p.light_id}
-                    onClick={() => toggleLight(p.light_id)}
+                    onClick={() => {
+                      setEditor({ kind: "light", id: p.light_id, anchor: { x: popover.px, y: popover.py } });
+                      setPopover(null);
+                    }}
                     style={{ ...S.buttonGhost, fontSize: "0.8rem", textAlign: "left", color: on ? "#f90" : "#888" }}
                   >
                     {on ? "● " : "○ "}{light ? lightLabel(light) : p.light_id}
@@ -395,11 +547,121 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
           )}
         </>
       )}
+
+      {editor && (() => {
+        if (editor.kind === "light") {
+          const light = lights.find((l) => l.id === editor.id);
+          const st = statesById.get(editor.id);
+          const hex = st?.color
+            ? rgbToHex(...xyToRgb(st.color.x, st.color.y, st.color.brightness))
+            : "#ffb84d";
+          return (
+            <LightEditor
+              anchor={editor.anchor}
+              title={light ? lightLabel(light) : "Light"}
+              initialHex={hex}
+              initialBrightness={st?.brightness ?? 100}
+              showColor={light?.capabilities.color_rgb ?? true}
+              showBrightness={light?.capabilities.dimmable ?? true}
+              on={st?.on ?? false}
+              onToggle={() => toggleLight(editor.id)}
+              onChange={(h, b) => editorChange(editor, h, b)}
+              onClose={() => setEditor(null)}
+            />
+          );
+        }
+        const room = allRooms.find((r) => r.id === editor.roomId);
+        if (!room) return null;
+        const anyOn = room.light_ids.some((id) => statesById.get(id)?.on);
+        const litColor = room.light_ids
+          .map((id) => statesById.get(id))
+          .find((st) => st?.on && st.color)?.color;
+        const hex = litColor
+          ? rgbToHex(...xyToRgb(litColor.x, litColor.y, litColor.brightness))
+          : "#ffb84d";
+        return (
+          <LightEditor
+            anchor={editor.anchor}
+            title={room.name}
+            initialHex={hex}
+            initialBrightness={statesById.get(room.light_ids[0] ?? "")?.brightness ?? 100}
+            on={anyOn}
+            onToggle={() => setRoom(room, !anyOn)}
+            onChange={(h, b) => editorChange(editor, h, b)}
+            onClose={() => setEditor(null)}
+          />
+        );
+      })()}
+
+      {showNewPlan && <NewPlanDialog onCreate={handleCreate} onClose={() => setShowNewPlan(false)} />}
+      {dialogs.element}
     </div>
   );
 }
 
-// ── Room controller (left of canvas, view mode) ─────────────────────────────
+/** Name + dimensions form for a new floor plan. */
+function NewPlanDialog({
+  onCreate,
+  onClose,
+}: {
+  onCreate: (name: string, width: number, height: number) => Promise<void>;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [width, setWidth] = useState(50);
+  const [height, setHeight] = useState(40);
+  const [busy, setBusy] = useState(false);
+  const valid =
+    name.trim().length > 0 && width >= 1 && width <= 128 && height >= 1 && height <= 128;
+
+  async function submit() {
+    if (!valid || busy) return;
+    setBusy(true);
+    try {
+      await onCreate(name.trim(), width, height);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const dimInput = (value: number, set: (v: number) => void) => (
+    <input
+      type="number"
+      min={1}
+      max={128}
+      value={value}
+      onChange={(e) => set(Number(e.target.value))}
+      style={{ ...S.input, width: 80 }}
+    />
+  );
+
+  return (
+    <Modal title="New floor plan" onClose={onClose}>
+      <input
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+        placeholder="Plan name (e.g. Ground Floor)"
+        autoFocus
+        style={S.input}
+      />
+      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.875rem", color: "#aaa" }}>
+        {dimInput(width, setWidth)}
+        ×
+        {dimInput(height, setHeight)}
+        <span style={{ color: "#666", fontSize: "0.78rem" }}>feet — one tile per foot, max 128</span>
+      </div>
+      <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end", marginTop: "0.25rem" }}>
+        <button onClick={onClose} style={S.buttonGhost}>Cancel</button>
+        <button onClick={submit} disabled={!valid || busy} style={S.button}>
+          {busy ? "Creating…" : "Create"}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+// ── Room controller (right of canvas, view mode) ────────────────────────────
 
 const SCENE_PRESETS: { name: string; brightness: number; palette: string[] }[] = [
   { name: "Relax", brightness: 55, palette: ["#ffb46b"] },
@@ -413,11 +675,17 @@ const SCENE_PRESETS: { name: string; brightness: number; palette: string[] }[] =
 function RoomController({
   plan,
   rooms,
+  statesById,
+  dialogs,
   onSetRoom,
+  onEditRoom,
 }: {
   plan: PlanDetail;
   rooms: Room[];
+  statesById: Map<string, LightState>;
+  dialogs: Dialogs;
   onSetRoom: (room: Room, on: boolean) => Promise<void>;
+  onEditRoom: (room: Room, anchor: HTMLElement) => void;
 }) {
   const [busy, setBusy] = useState("");
 
@@ -461,8 +729,16 @@ function RoomController({
               >
                 Off
               </button>
+              <button
+                onClick={(e) => onEditRoom(room, e.currentTarget)}
+                disabled={count === 0}
+                title="Set the whole room's color and brightness"
+                style={{ ...S.buttonGhost, padding: "0.3rem 0.6rem", fontSize: "0.78rem", marginLeft: "auto" }}
+              >
+                Color…
+              </button>
             </div>
-            <RoomScenes roomId={room.id} disabled={count === 0} />
+            <RoomScenes room={room} statesById={statesById} dialogs={dialogs} disabled={count === 0} />
           </div>
         );
       })}
@@ -471,7 +747,18 @@ function RoomController({
 }
 
 /** Palette scene chips + inline editor for one room. */
-function RoomScenes({ roomId, disabled }: { roomId: string; disabled: boolean }) {
+function RoomScenes({
+  room,
+  statesById,
+  dialogs,
+  disabled,
+}: {
+  room: Room;
+  statesById: Map<string, LightState>;
+  dialogs: Dialogs;
+  disabled: boolean;
+}) {
+  const roomId = room.id;
   const [scenes, setScenes] = useState<RoomScene[]>([]);
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState("");
@@ -480,6 +767,44 @@ function RoomScenes({ roomId, disabled }: { roomId: string; disabled: boolean })
     setScenes(await getRoomScenes(roomId));
   }
   useEffect(() => { load(); }, [roomId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Capture the lights as they are now (e.g. after painting) into a scene. */
+  async function saveCurrent() {
+    // light_ids come name-ordered — the same order apply uses to spread the
+    // palette round-robin — so one entry per lit light replays faithfully.
+    const palette: string[] = [];
+    let brightnessSum = 0;
+    let litCount = 0;
+    for (const id of room.light_ids) {
+      const st = statesById.get(id);
+      if (!st?.on) continue;
+      litCount++;
+      brightnessSum += st.brightness ?? 100;
+      if (st.color) {
+        palette.push(rgbToHex(...xyToRgb(st.color.x, st.color.y, st.color.brightness)));
+      }
+    }
+    if (litCount === 0) {
+      await dialogs.alert({
+        title: "Nothing to save",
+        message: "No lights in this room are on — turn on or paint some first.",
+      });
+      return;
+    }
+    const name = await dialogs.prompt({
+      title: "Save current as scene",
+      message: "Saves the room's current colors and brightness.",
+      placeholder: "Scene name",
+      confirmLabel: "Save",
+    });
+    if (!name?.trim()) return;
+    await createRoomScene(roomId, {
+      name: name.trim(),
+      brightness: Math.round(brightnessSum / litCount),
+      palette,
+    });
+    await load();
+  }
 
   async function apply(sceneId: string) {
     setBusy(sceneId);
@@ -491,7 +816,13 @@ function RoomScenes({ roomId, disabled }: { roomId: string; disabled: boolean })
   }
 
   async function remove(scene: RoomScene) {
-    if (!window.confirm(`Delete scene "${scene.name}"?`)) return;
+    const ok = await dialogs.confirm({
+      title: "Delete scene",
+      message: `Delete scene "${scene.name}"?`,
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
     await deleteRoomScene(roomId, scene.id);
     await load();
   }
@@ -533,6 +864,14 @@ function RoomScenes({ roomId, disabled }: { roomId: string; disabled: boolean })
         >
           {editing ? "Close" : "+ Scene"}
         </button>
+        <button
+          onClick={saveCurrent}
+          disabled={disabled}
+          title="Save the room's current light colors and brightness as a scene"
+          style={{ ...S.buttonGhost, padding: "0.25rem 0.5rem", fontSize: "0.75rem" }}
+        >
+          Save current
+        </button>
       </div>
       {editing && (
         <SceneEditor
@@ -568,6 +907,7 @@ function SceneEditor({
   const [brightness, setBrightness] = useState(80);
   const [palette, setPalette] = useState<string[]>(["#ff9900"]);
   const [saving, setSaving] = useState(false);
+  const [colorEdit, setColorEdit] = useState<{ index: number; anchor: HTMLElement } | null>(null);
 
   function setColor(i: number, value: string) {
     setPalette((prev) => prev.map((c, j) => (j === i ? value : c)));
@@ -623,16 +963,15 @@ function SceneEditor({
         <span style={{ fontSize: "0.75rem", color: "#888" }}>Palette</span>
         {palette.map((c, i) => (
           <span key={i} style={{ display: "inline-flex", alignItems: "center" }}>
-            <input
-              type="color"
-              value={c}
-              onChange={(e) => setColor(i, e.target.value)}
-              style={{ width: 26, height: 22, padding: 0, border: "1px solid #444", borderRadius: 4, background: "none", cursor: "pointer" }}
+            <button
+              onClick={(e) => setColorEdit({ index: i, anchor: e.currentTarget })}
+              title="Edit color"
+              style={{ width: 26, height: 22, padding: 0, border: "1px solid #444", borderRadius: 4, background: c, cursor: "pointer" }}
             />
             {palette.length > 1 && (
               <button
                 onClick={() => setPalette((prev) => prev.filter((_, j) => j !== i))}
-                title="Remove colour"
+                title="Remove color"
                 style={{ background: "none", border: "none", color: "#866", cursor: "pointer", fontSize: "0.7rem", padding: "0 0.15rem" }}
               >
                 ×
@@ -650,12 +989,23 @@ function SceneEditor({
         )}
       </div>
       <span style={{ fontSize: "0.68rem", color: "#555" }}>
-        Colours are spread across the room's lights in turn.
+        Colors are spread across the room's lights in turn.
       </span>
 
       <button onClick={save} disabled={saving || !name.trim()} style={{ ...S.button, padding: "0.35rem 0.7rem", fontSize: "0.78rem" }}>
         {saving ? "Saving…" : "Save scene"}
       </button>
+
+      {colorEdit && (
+        <LightEditor
+          anchor={colorEdit.anchor}
+          title="Palette color"
+          initialHex={palette[colorEdit.index]}
+          showBrightness={false}
+          onChange={(hex) => setColor(colorEdit.index, hex)}
+          onClose={() => setColorEdit(null)}
+        />
+      )}
     </div>
   );
 }
@@ -710,6 +1060,14 @@ function RoomEditorPanel({
 
 // ── Canvas ───────────────────────────────────────────────────────────────────
 
+/** Distance from point (px, py) to the segment (x1, y1)–(x2, y2), in tile units. */
+function distToSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
+  const dx = x2 - x1, dy = y2 - y1;
+  const lenSq = dx * dx + dy * dy;
+  const t = lenSq === 0 ? 0 : Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lenSq));
+  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+}
+
 function PlanCanvas({
   plan,
   tiles,
@@ -726,6 +1084,8 @@ function PlanCanvas({
   setPlacements,
   setRooms,
   onLightClick,
+  onResize,
+  onPaint,
 }: {
   plan: PlanDetail;
   tiles: Set<string>;
@@ -742,10 +1102,27 @@ function PlanCanvas({
   setPlacements: React.Dispatch<React.SetStateAction<Placement[]>>;
   setRooms: React.Dispatch<React.SetStateAction<EditRoom[]>>;
   onLightClick: (placements: Placement[], px: number, py: number) => void;
+  onResize: (width: number, height: number) => void;
+  onPaint: (lightId: string) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [view, setView] = useState({ cell: 0, ox: 0, oy: 0 }); // cell=0 → fit on first draw
-  const drag = useRef<{ px: number; py: number; moved: boolean; panning: boolean } | null>(null);
+  const drag = useRef<{
+    px: number;
+    py: number;
+    moved: boolean;
+    panning: boolean;
+    resizing?: boolean;
+    /** Light id being placed — dragging extends it into a strip. */
+    placing?: string;
+    /** Strip vertices laid so far (including the start tile); collinear
+     * moves extend the last segment, direction changes add a corner. */
+    path?: [number, number][];
+    /** Lights already painted during this brush stroke. */
+    painted?: Set<string>;
+  } | null>(null);
+  // Live grid size while the corner handle is being dragged.
+  const [pendingSize, setPendingSize] = useState<{ w: number; h: number } | null>(null);
 
   // Mount-point position within a tile, in tile units.
   const mountOffset = (m: Mount): [number, number] =>
@@ -802,19 +1179,21 @@ function PlanCanvas({
       ctx.globalAlpha = 1;
     });
 
-    // Grid
+    // Grid (drawn at the pending size while the resize handle is dragged)
+    const gridW = pendingSize?.w ?? plan.width;
+    const gridH = pendingSize?.h ?? plan.height;
     ctx.strokeStyle = "rgba(255,255,255,0.05)";
     ctx.lineWidth = 1;
-    for (let x = 0; x <= plan.width; x++) {
+    for (let x = 0; x <= gridW; x++) {
       ctx.beginPath();
       ctx.moveTo(ox + x * cell, oy);
-      ctx.lineTo(ox + x * cell, oy + plan.height * cell);
+      ctx.lineTo(ox + x * cell, oy + gridH * cell);
       ctx.stroke();
     }
-    for (let y = 0; y <= plan.height; y++) {
+    for (let y = 0; y <= gridH; y++) {
       ctx.beginPath();
       ctx.moveTo(ox, oy + y * cell);
-      ctx.lineTo(ox + plan.width * cell, oy + y * cell);
+      ctx.lineTo(ox + gridW * cell, oy + y * cell);
       ctx.stroke();
     }
 
@@ -856,9 +1235,43 @@ function PlanCanvas({
       });
     }
 
-    // Lights, clustered by (x, y, mount)
+    // LED strips: a polyline through the mount points of every vertex.
+    for (const p of placements) {
+      if (!p.points || p.points.length === 0) continue;
+      const [mx, my] = mountOffset(p.mount);
+      const run = new Path2D();
+      run.moveTo(ox + (p.x + mx) * cell, oy + (p.y + my) * cell);
+      for (const [vx, vy] of p.points) {
+        run.lineTo(ox + (vx + mx) * cell, oy + (vy + my) * cell);
+      }
+      const st = statesById.get(p.light_id);
+      let color = "#3a3d45";
+      if (st?.on) {
+        if (st.color) {
+          const [rr, gg, bb] = xyToRgb(st.color.x, st.color.y, Math.max(st.color.brightness, 0.25));
+          color = `rgb(${rr},${gg},${bb})`;
+        } else {
+          color = "#ffd9a0";
+        }
+        ctx.strokeStyle = color;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.globalAlpha = 0.3 * Math.min(1, ((st.brightness ?? 100) / 100) + 0.3);
+        ctx.lineWidth = Math.max(9, cell * 0.55);
+        ctx.stroke(run);
+        ctx.globalAlpha = 1;
+      }
+      ctx.strokeStyle = color;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.lineWidth = Math.max(3, cell * 0.14);
+      ctx.stroke(run);
+    }
+
+    // Point lights, clustered by (x, y, mount)
     const clusters = new Map<string, Placement[]>();
     for (const p of placements) {
+      if (p.points && p.points.length > 0) continue;
       const k = `${p.x},${p.y},${p.mount}`;
       clusters.set(k, [...(clusters.get(k) ?? []), p]);
     }
@@ -905,7 +1318,36 @@ function PlanCanvas({
         ctx.fillText(`×${group.length}`, cx + r + 2, cy);
       }
     }
-  }, [view, plan, tiles, walls, placements, rooms, selectedRoom, tool, statesById]);
+
+    // Resize handle on the bottom-right grid corner; outline + size readout
+    // while dragging.
+    const hx = ox + gridW * cell;
+    const hy = oy + gridH * cell;
+    if (pendingSize) {
+      ctx.strokeStyle = "#f90";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([5, 4]);
+      ctx.strokeRect(ox, oy, gridW * cell, gridH * cell);
+      ctx.setLineDash([]);
+      ctx.font = "600 12px system-ui";
+      ctx.textAlign = "right";
+      ctx.textBaseline = "bottom";
+      ctx.fillStyle = "#f90";
+      ctx.fillText(`${gridW} × ${gridH}`, hx - 12, hy - 6);
+    }
+    ctx.fillStyle = pendingSize ? "#f90" : "#555";
+    ctx.strokeStyle = "#0d0d0f";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(hx, hy, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#0d0d0f";
+    ctx.font = "700 9px system-ui";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("⤡", hx, hy + 0.5);
+  }, [view, plan, tiles, walls, placements, rooms, selectedRoom, tool, statesById, pendingSize]);
 
   useEffect(() => { draw(); }, [draw]);
   useEffect(() => {
@@ -1008,20 +1450,51 @@ function PlanCanvas({
           { light_id: selectedLight, x: tx, y: ty, mount },
         ]),
       );
+      if (drag.current) {
+        drag.current.placing = selectedLight;
+        drag.current.path = [[tx, ty]];
+      }
+    } else if (tool === "paint") {
+      const hit = hitPlacement(gx, gy);
+      // Paint each light once per brush stroke, not per pointer event.
+      if (hit && drag.current && !drag.current.painted?.has(hit.light_id)) {
+        (drag.current.painted ??= new Set()).add(hit.light_id);
+        onPaint(hit.light_id);
+      }
     }
   }
 
   function hitPlacement(gx: number, gy: number): Placement | null {
     for (const p of placements) {
       const [mx, my] = mountOffset(p.mount);
-      const dx = gx - (p.x + mx), dy = gy - (p.y + my);
-      if (Math.hypot(dx, dy) < 0.3) return p;
+      if (p.points && p.points.length > 0) {
+        const verts: [number, number][] = [[p.x, p.y], ...p.points];
+        for (let i = 1; i < verts.length; i++) {
+          const [ax, ay] = verts[i - 1];
+          const [bx, by] = verts[i];
+          if (distToSegment(gx, gy, ax + mx, ay + my, bx + mx, by + my) < 0.3) return p;
+        }
+      } else {
+        const dx = gx - (p.x + mx), dy = gy - (p.y + my);
+        if (Math.hypot(dx, dy) < 0.3) return p;
+      }
     }
     return null;
   }
 
   function handlePointerDown(e: React.PointerEvent) {
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
+
+    // The corner resize handle wins over any tool.
+    const rect = canvasRef.current!.getBoundingClientRect();
+    const hx = view.ox + plan.width * view.cell;
+    const hy = view.oy + plan.height * view.cell;
+    if (Math.hypot(e.clientX - rect.left - hx, e.clientY - rect.top - hy) < 12) {
+      drag.current = { px: e.clientX, py: e.clientY, moved: false, panning: false, resizing: true };
+      setPendingSize({ w: plan.width, h: plan.height });
+      return;
+    }
+
     const panning = e.button === 1 || e.button === 2 || tool === "view";
     drag.current = { px: e.clientX, py: e.clientY, moved: false, panning };
     if (!panning) {
@@ -1036,17 +1509,67 @@ function PlanCanvas({
     const dy = e.clientY - drag.current.py;
     if (Math.hypot(dx, dy) > 4) drag.current.moved = true;
 
+    if (drag.current.resizing) {
+      const { gx, gy } = toGrid(e);
+      setPendingSize({
+        w: Math.max(1, Math.min(128, Math.round(gx))),
+        h: Math.max(1, Math.min(128, Math.round(gy))),
+      });
+      return;
+    }
+
+    // Dragging a just-placed light extends it into a strip. Collinear motion
+    // stretches the current segment; changing direction starts a corner;
+    // backing onto the previous vertex undoes one.
+    if (drag.current.placing && drag.current.path && tool === "place") {
+      const { gx, gy } = toGrid(e);
+      const ex = Math.max(0, Math.min(plan.width - 1, Math.floor(gx)));
+      const ey = Math.max(0, Math.min(plan.height - 1, Math.floor(gy)));
+      const path = drag.current.path;
+      const last = path[path.length - 1];
+      if (ex !== last[0] || ey !== last[1]) {
+        const prev = path.length >= 2 ? path[path.length - 2] : null;
+        if (prev && ex === prev[0] && ey === prev[1]) {
+          path.pop();
+        } else if (
+          prev &&
+          (last[0] - prev[0]) * (ey - last[1]) === (last[1] - prev[1]) * (ex - last[0])
+        ) {
+          path[path.length - 1] = [ex, ey];
+        } else {
+          path.push([ex, ey]);
+        }
+        const lightId = drag.current.placing;
+        const points = path.length > 1 ? path.slice(1) : undefined;
+        onMutate(() =>
+          setPlacements((prev2) =>
+            prev2.map((p) => (p.light_id === lightId ? { ...p, points } : p)),
+          ),
+        );
+      }
+      return;
+    }
+
     if (drag.current.panning && drag.current.moved) {
       setView((v) => ({ ...v, ox: v.ox + dx, oy: v.oy + dy }));
       drag.current.px = e.clientX;
       drag.current.py = e.clientY;
-    } else if (!drag.current.panning && (tool === "floor" || tool === "wall" || tool === "erase" || tool === "room")) {
+    } else if (!drag.current.panning && (tool === "floor" || tool === "wall" || tool === "erase" || tool === "room" || tool === "paint")) {
       const { gx, gy } = toGrid(e);
       applyTool(gx, gy, e);
     }
   }
 
   function handlePointerUp(e: React.PointerEvent) {
+    if (drag.current?.resizing) {
+      drag.current = null;
+      const next = pendingSize;
+      setPendingSize(null);
+      if (next && (next.w !== plan.width || next.h !== plan.height)) {
+        onResize(next.w, next.h);
+      }
+      return;
+    }
     const wasClick = drag.current && !drag.current.moved;
     const wasPanning = drag.current?.panning;
     drag.current = null;

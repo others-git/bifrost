@@ -27,6 +27,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{id}/layout", put(set_layout))
         .route("/{id}/lights", put(set_lights))
         .route("/{id}/rooms", put(set_rooms))
+        .route("/{id}/size", put(set_size))
 }
 
 // ── Wire types ──────────────────────────────────────────────────────────────
@@ -92,6 +93,10 @@ struct Placement {
     x: i64,
     y: i64,
     mount: Mount,
+    /// Vertices an LED strip passes through after its start tile — straight
+    /// runs have one, cornered runs more. None for a point light.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    points: Option<Vec<[i64; 2]>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -244,25 +249,29 @@ async fn get_plan(
         })
         .collect();
 
-    let lights = sqlx::query("SELECT light_id, x, y, mount FROM plan_lights WHERE plan_id = ?")
-        .bind(&id)
-        .fetch_all(&state.db)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|r| Placement {
-            light_id: r.get("light_id"),
-            x: r.get("x"),
-            y: r.get("y"),
-            mount: match r.get::<String, _>("mount").as_str() {
-                "n" => Mount::N,
-                "s" => Mount::S,
-                "e" => Mount::E,
-                "w" => Mount::W,
-                _ => Mount::C,
-            },
-        })
-        .collect();
+    let lights =
+        sqlx::query("SELECT light_id, x, y, mount, points FROM plan_lights WHERE plan_id = ?")
+            .bind(&id)
+            .fetch_all(&state.db)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| Placement {
+                light_id: r.get("light_id"),
+                x: r.get("x"),
+                y: r.get("y"),
+                mount: match r.get::<String, _>("mount").as_str() {
+                    "n" => Mount::N,
+                    "s" => Mount::S,
+                    "e" => Mount::E,
+                    "w" => Mount::W,
+                    _ => Mount::C,
+                },
+                points: r
+                    .get::<Option<String>, _>("points")
+                    .and_then(|j| serde_json::from_str(&j).ok()),
+            })
+            .collect();
 
     let rooms = load_rooms(&state, &id).await;
 
@@ -412,6 +421,92 @@ fn first_out_of_bounds(req: &SetLayoutRequest, width: i64, height: i64) -> Optio
 }
 
 #[derive(Deserialize)]
+struct SetSizeRequest {
+    width: i64,
+    height: i64,
+}
+
+/// Resize the plan grid. Content that falls outside the new bounds (tiles,
+/// walls, light placements, room-region tiles) is pruned.
+async fn set_size(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<SetSizeRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !(1..=MAX_DIM).contains(&req.width) || !(1..=MAX_DIM).contains(&req.height) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("width and height must be between 1 and {MAX_DIM}"),
+        )
+            .into_response();
+    }
+    if plan_dims(&state, &id).await.is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let _ = sqlx::query("UPDATE floor_plans SET width = ?, height = ? WHERE id = ?")
+        .bind(req.width)
+        .bind(req.height)
+        .bind(&id)
+        .execute(&state.db)
+        .await;
+
+    let _ = sqlx::query("DELETE FROM plan_tiles WHERE plan_id = ? AND (x >= ? OR y >= ?)")
+        .bind(&id)
+        .bind(req.width)
+        .bind(req.height)
+        .execute(&state.db)
+        .await;
+    // Wall coordinates may reach the far boundary (x == width for 'v',
+    // y == height for 'h') — same rule as layout validation.
+    let _ = sqlx::query(
+        "DELETE FROM plan_walls WHERE plan_id = ? AND (
+            (dir = 'h' AND (x >= ? OR y > ?)) OR
+            (dir = 'v' AND (x > ? OR y >= ?))
+         )",
+    )
+    .bind(&id)
+    .bind(req.width)
+    .bind(req.height)
+    .bind(req.width)
+    .bind(req.height)
+    .execute(&state.db)
+    .await;
+    // Any vertex outside removes the whole placement (strips included).
+    let _ = sqlx::query(
+        "DELETE FROM plan_lights WHERE plan_id = ?1 AND (
+            x >= ?2 OR y >= ?3 OR (
+                points IS NOT NULL AND EXISTS (
+                    SELECT 1 FROM json_each(plan_lights.points)
+                    WHERE json_extract(json_each.value, '$[0]') >= ?2
+                       OR json_extract(json_each.value, '$[1]') >= ?3
+                )
+            )
+         )",
+    )
+    .bind(&id)
+    .bind(req.width)
+    .bind(req.height)
+    .execute(&state.db)
+    .await;
+    let _ = sqlx::query(
+        "DELETE FROM plan_room_tiles WHERE room_id IN (SELECT id FROM plan_rooms WHERE plan_id = ?)
+         AND (x >= ? OR y >= ?)",
+    )
+    .bind(&id)
+    .bind(req.width)
+    .bind(req.height)
+    .execute(&state.db)
+    .await;
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
 struct SetLightsRequest {
     placements: Vec<Placement>,
 }
@@ -432,15 +527,18 @@ async fn set_lights(
     };
 
     for p in &req.placements {
-        if !(0..width).contains(&p.x) || !(0..height).contains(&p.y) {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!(
-                    "placement ({}, {}) is outside the {width}x{height} grid",
-                    p.x, p.y
-                ),
-            )
-                .into_response();
+        let mut vertices = vec![[p.x, p.y]];
+        if let Some(points) = &p.points {
+            vertices.extend(points.iter().copied());
+        }
+        for [x, y] in vertices {
+            if !(0..width).contains(&x) || !(0..height).contains(&y) {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("placement ({x}, {y}) is outside the {width}x{height} grid"),
+                )
+                    .into_response();
+            }
         }
         let known = sqlx::query("SELECT 1 FROM lights WHERE id = ?")
             .bind(&p.light_id)
@@ -464,14 +562,20 @@ async fn set_lights(
         .await;
 
     for p in &req.placements {
+        let points_json = p
+            .points
+            .as_ref()
+            .filter(|pts| !pts.is_empty())
+            .map(|pts| serde_json::to_string(pts).unwrap_or_else(|_| "[]".into()));
         let _ = sqlx::query(
-            "INSERT OR REPLACE INTO plan_lights (plan_id, light_id, x, y, mount) VALUES (?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO plan_lights (plan_id, light_id, x, y, mount, points) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&p.light_id)
         .bind(p.x)
         .bind(p.y)
         .bind(p.mount.as_str())
+        .bind(points_json)
         .execute(&state.db)
         .await;
     }
@@ -558,14 +662,29 @@ async fn set_rooms(
                 Some(rid.clone())
             }
             _ => {
-                // New region (or binding lost) → create a Room for it.
-                let rid = Uuid::new_v4().to_string();
-                let _ = sqlx::query("INSERT INTO rooms (id, name) VALUES (?, ?)")
-                    .bind(&rid)
-                    .bind(room.name.trim())
-                    .execute(&state.db)
-                    .await;
-                Some(rid)
+                // New region (or binding lost) → bind to the same-named Room
+                // if one exists (case-insensitive), else create one. Painting
+                // an "office" region must not duplicate the synced "Office".
+                let existing_room =
+                    sqlx::query("SELECT id FROM rooms WHERE name = ? COLLATE NOCASE")
+                        .bind(room.name.trim())
+                        .fetch_optional(&state.db)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|r| r.get::<String, _>("id"));
+                match existing_room {
+                    Some(rid) => Some(rid),
+                    None => {
+                        let rid = Uuid::new_v4().to_string();
+                        let _ = sqlx::query("INSERT INTO rooms (id, name) VALUES (?, ?)")
+                            .bind(&rid)
+                            .bind(room.name.trim())
+                            .execute(&state.db)
+                            .await;
+                        Some(rid)
+                    }
+                }
             }
         };
 

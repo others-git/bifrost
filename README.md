@@ -78,16 +78,23 @@ BIFROST_SECRET=$(openssl rand -hex 32) cargo run --release
    - **WLED / Tasmota / Shelly**: just the device IP.
 3. **Discover** — runs automatically after adding; lights appear on the
    dashboard with live on/off, brightness, and full-RGB color controls.
-4. **Scenes** — set your lights how you like them, then *+ Save scene* on the
+4. **Tune a light** — click any light card to open the editor: a Hue-style
+   color wheel and a vertical brightness bar, anchored next to the light.
+   Brightness and color commit with a short debounce.
+5. **Scenes** — set your lights how you like them, then *+ Save scene* on the
    dashboard. Activating a scene re-applies every captured state in parallel.
-5. **Groups** — Settings → Groups: pick lights into a room; the dashboard
-   gets per-group On/Off chips.
-6. **Floor plan** — the *Plan* tab. Paint your house layout (floor tiles +
+   Rooms also carry palette scenes (a name + brightness + colors spread across
+   the room's lights), with Hue-like presets.
+6. **Rooms** — Settings → Rooms: combine synced provider rooms/zones with
+   directly assigned lights; the dashboard groups lights by room with per-room
+   On/Off.
+7. **Floor plan** — the *Floor Plan* tab. Paint your house layout (floor tiles +
    thin walls, Sims-style), then place your real lights on it — wall-mounted
-   on edges or ceiling-mounted in tile centres. The plan doubles as a live
-   dashboard: lights glow with their actual color and brightness, update in
-   real time, and toggle on click. Multiple lights on one spot (a multi-bulb
-   fixture) cluster into a single dot with a ×N badge.
+   on edges or ceiling-mounted in tile centres, and drag to lay an LED strip
+   that can corner. The plan doubles as a live dashboard: lights glow with
+   their actual color and brightness, update in real time, and open the editor
+   on click. Multiple lights on one spot (a multi-bulb fixture) cluster into a
+   single dot with a ×N badge.
 
 ## Configuration
 
@@ -133,18 +140,24 @@ GET  /api/providers/{id}/status      connection state machine snapshot
 
 GET/POST /api/scenes                 list / snapshot current states
 POST /api/scenes/{id}/activate       apply in parallel
-GET/POST /api/groups                 list / create
-PUT  /api/groups/{id}/state          broadcast one state to all members
+
+GET/POST /api/rooms                  list / create rooms (links + direct lights)
+PUT  /api/rooms/{id}/state           broadcast one state to all members
+POST /api/rooms/{id}/merge           absorb another room
+GET/POST /api/rooms/{id}/scenes      list / create palette scenes
+POST /api/rooms/{id}/scenes/{sid}/apply   apply a palette scene
 
 GET/POST /api/plans                  floor plans
 PUT  /api/plans/{id}/layout          tiles + walls (bulk editor save)
-PUT  /api/plans/{id}/lights          light placements (tile + mount point)
+PUT  /api/plans/{id}/size            resize the grid (prunes out-of-bounds)
+PUT  /api/plans/{id}/lights          light placements (tile + mount + strip)
+PUT  /api/plans/{id}/rooms           painted room regions
 ```
 
 ## Development
 
 ```sh
-cargo test                                 # 116 tests: unit + wiremock + API integration
+cargo test                                 # 154 tests: unit + wiremock + API integration
 cargo clippy --all-targets -- -D warnings  # CI-enforced
 cd frontend && npm run build               # tsc + vite
 ```
@@ -227,7 +240,7 @@ ownership).
 ### Room scenes
 
 Hue-like palette scenes hang off rooms: a name, an optional brightness, and
-a colour palette distributed round-robin across the room's lights (stable
+a color palette distributed round-robin across the room's lights (stable
 order). The plan-view room controller has chips to apply them, an inline
 editor, and presets (Relax, Energize, Read, Nightlight, Sunset, Aurora).
 

@@ -1,7 +1,22 @@
-- The "lights" page is largely an unusable mess, lights are not grouped, Hue lights do not have a color selector. Lights are not synced to their actual current color.
-- Govee does not sync state well. A light that is not connected and not available is showing as "on".
-- Planner "Light" support for LED strip
-- resize plan tile size, draggable button on the edge to resize
-- connection is lost on reboot
-- "paint" mode on planner where you have a paint brush and can color lights. allow scene to be saved from current lights.
-- multiple rooms with same name, case insensitively (Living room, Living Room) (Office, Office) are showing up. Need a fix, like ability to "merge" / "link" rooms or something
+Make Scenes a higher class object, add a Scenes page, below Lights and above Floor Plan. Add some more defaults, like Hue.
+
+Hue lights are not getting a color wheel. Lets make sure we're polling the Hue API correctly, `references/hue_api_reference.pdf` is a downloaded pdf of the login-locked hue API reference.
+
+LED corning seems to only bend on the center of a tile. when it then transitions to another "wall", it appears on the "far" side of the wall. (like went through the wall ) if that makes sense. I'd like for it to be able to visually represent, for example, the strip running along the inner trim of a hallway.
+
+Rooms should be buttons (much like lights), with an on/off toggle (not buttons). Lets also make the scene creator a lot cleaner.
+
+---
+
+### 8 API for other apps
+
+- API should be documented properly in the repo. 
+ - we generate client API keys, no rbac just full access to lights and rooms.
+
+We expose Bifrost-abstracted "rooms" only (not provider groups), and individual lights.
+
+Everything we can do in the UI should be available through the API - including scene support.
+
+The Floor Plan is not available through API.
+
+
