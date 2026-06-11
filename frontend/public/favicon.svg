@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Dark rounded background -->
+  <rect width="32" height="32" rx="6" fill="#111"/>
+
+  <!-- Bifrost arch — the rainbow bridge -->
+  <path d="M3 28 Q16 4 29 28"
+        stroke="#ff9900" stroke-width="3.5"
+        fill="none" stroke-linecap="round"/>
+
+  <!-- Three hanging light nodes (smart devices) -->
+  <!-- Left -->
+  <line x1="10" y1="19" x2="10" y2="23.5"
+        stroke="#ff9900" stroke-width="1.5" stroke-linecap="round"/>
+  <circle cx="10" cy="25.5" r="2.2" fill="#ff9900"/>
+
+  <!-- Centre (lowest point of arch) -->
+  <line x1="16" y1="16" x2="16" y2="20.5"
+        stroke="#ff9900" stroke-width="1.5" stroke-linecap="round"/>
+  <circle cx="16" cy="22.5" r="2.2" fill="#ff9900"/>
+
+  <!-- Right -->
+  <line x1="22" y1="19" x2="22" y2="23.5"
+        stroke="#ff9900" stroke-width="1.5" stroke-linecap="round"/>
+  <circle cx="22" cy="25.5" r="2.2" fill="#ff9900"/>
+</svg>
