@@ -209,6 +209,104 @@ export async function setGroupState(
   return res.json();
 }
 
+// ── Floor plans ──────────────────────────────────────────────────────────────
+
+export type WallDir = "h" | "v";
+export type Mount = "c" | "n" | "s" | "e" | "w";
+
+export interface Wall {
+  x: number;
+  y: number;
+  dir: WallDir;
+}
+
+export interface Placement {
+  light_id: string;
+  x: number;
+  y: number;
+  mount: Mount;
+}
+
+export interface PlanSummary {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  lights: number;
+  created_at: string;
+}
+
+export interface PlanDetail {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  tiles: [number, number][];
+  walls: Wall[];
+  lights: Placement[];
+}
+
+export async function getPlans(): Promise<PlanSummary[]> {
+  const res = await fetch("/api/plans");
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function createPlan(name: string, width: number, height: number): Promise<{ id: string }> {
+  const res = await fetch("/api/plans", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name, width, height }),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function getPlan(id: string): Promise<PlanDetail> {
+  const res = await fetch(`/api/plans/${id}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function removePlan(id: string): Promise<void> {
+  await fetch(`/api/plans/${id}`, { method: "DELETE" });
+}
+
+export async function putPlanLayout(id: string, tiles: [number, number][], walls: Wall[]): Promise<void> {
+  const res = await fetch(`/api/plans/${id}/layout`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tiles, walls }),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+}
+
+export async function putPlanLights(id: string, placements: Placement[]): Promise<void> {
+  const res = await fetch(`/api/plans/${id}/lights`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ placements }),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+}
+
+/** Inverse of rgbToXy — CIE xy + Y brightness back to sRGB, for rendering. */
+export function xyToRgb(x: number, y: number, brightness: number): [number, number, number] {
+  if (y <= 0) return [0, 0, 0];
+  const Y = brightness;
+  const X = (Y / y) * x;
+  const Z = (Y / y) * (1 - x - y);
+  let r = X * 1.656492 - Y * 0.354851 - Z * 0.255038;
+  let g = -X * 0.707196 + Y * 1.655397 + Z * 0.036152;
+  let b = X * 0.051713 - Y * 0.121364 + Z * 1.01153;
+  const gam = (c: number) => (c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1 / 2.4) - 0.055);
+  r = gam(Math.max(0, r));
+  g = gam(Math.max(0, g));
+  b = gam(Math.max(0, b));
+  const m = Math.max(r, g, b, 1); // normalize overshoot instead of clipping hue
+  return [Math.round((r / m) * 255), Math.round((g / m) * 255), Math.round((b / m) * 255)];
+}
+
 export type HuePairResult =
   | { app_key: string }
   | { error: "link_button_not_pressed" | "bridge_unreachable"; message: string };

@@ -131,6 +131,66 @@ export async function setGroupState(id, state) {
         throw new Error(`HTTP ${res.status}`);
     return res.json();
 }
+export async function getPlans() {
+    const res = await fetch("/api/plans");
+    if (!res.ok)
+        return [];
+    return res.json();
+}
+export async function createPlan(name, width, height) {
+    const res = await fetch("/api/plans", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, width, height }),
+    });
+    if (!res.ok)
+        throw new Error((await res.text()) || `HTTP ${res.status}`);
+    return res.json();
+}
+export async function getPlan(id) {
+    const res = await fetch(`/api/plans/${id}`);
+    if (!res.ok)
+        throw new Error(`HTTP ${res.status}`);
+    return res.json();
+}
+export async function removePlan(id) {
+    await fetch(`/api/plans/${id}`, { method: "DELETE" });
+}
+export async function putPlanLayout(id, tiles, walls) {
+    const res = await fetch(`/api/plans/${id}/layout`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ tiles, walls }),
+    });
+    if (!res.ok)
+        throw new Error((await res.text()) || `HTTP ${res.status}`);
+}
+export async function putPlanLights(id, placements) {
+    const res = await fetch(`/api/plans/${id}/lights`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ placements }),
+    });
+    if (!res.ok)
+        throw new Error((await res.text()) || `HTTP ${res.status}`);
+}
+/** Inverse of rgbToXy — CIE xy + Y brightness back to sRGB, for rendering. */
+export function xyToRgb(x, y, brightness) {
+    if (y <= 0)
+        return [0, 0, 0];
+    const Y = brightness;
+    const X = (Y / y) * x;
+    const Z = (Y / y) * (1 - x - y);
+    let r = X * 1.656492 - Y * 0.354851 - Z * 0.255038;
+    let g = -X * 0.707196 + Y * 1.655397 + Z * 0.036152;
+    let b = X * 0.051713 - Y * 0.121364 + Z * 1.01153;
+    const gam = (c) => (c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1 / 2.4) - 0.055);
+    r = gam(Math.max(0, r));
+    g = gam(Math.max(0, g));
+    b = gam(Math.max(0, b));
+    const m = Math.max(r, g, b, 1); // normalize overshoot instead of clipping hue
+    return [Math.round((r / m) * 255), Math.round((g / m) * 255), Math.round((b / m) * 255)];
+}
 /** One Hue link-button pairing attempt. 409 means the button wasn't pressed yet. */
 export async function pairHueBridge(bridgeIp) {
     const res = await fetch("/api/providers/hue/pair", {

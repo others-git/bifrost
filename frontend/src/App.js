@@ -4,6 +4,7 @@ import { getLights, logout, getSetupStatus } from "./api";
 import { SetupPage } from "./pages/Setup";
 import { LoginPage } from "./pages/Login";
 import { DashboardPage } from "./pages/Dashboard";
+import { FloorPlanPage } from "./pages/FloorPlan";
 import { SettingsPage } from "./pages/Settings";
 import { S } from "./styles";
 export function App() {
@@ -40,14 +41,14 @@ export function App() {
     if (page === "login")
         return _jsx(LoginPage, { onSuccess: () => init() });
     return (_jsxs("div", { style: { minHeight: "100vh", background: "#111", color: "#f0f0f0" }, children: [_jsx(Nav, { page: page, onNavigate: (p) => {
-                    if (p === "dashboard")
-                        refreshLights().then(() => setPage("dashboard"));
+                    if (p === "dashboard" || p === "plan")
+                        refreshLights().then(() => setPage(p));
                     else
                         setPage(p);
                 }, onLogout: async () => {
                     await logout();
                     setPage("login");
-                } }), page === "dashboard" && (_jsx(DashboardPage, { lights: lights, onRefresh: refreshLights, onNavigate: (p) => setPage(p) })), page === "settings" && (_jsx(SettingsPage, { onNavigate: (p) => setPage(p) }))] }));
+                } }), page === "dashboard" && (_jsx(DashboardPage, { lights: lights, onRefresh: refreshLights, onNavigate: (p) => setPage(p) })), page === "plan" && _jsx(FloorPlanPage, { lights: lights }), page === "settings" && (_jsx(SettingsPage, { onNavigate: (p) => setPage(p) }))] }));
 }
 function Nav({ page, onNavigate, onLogout, }) {
     const activeStyle = { color: "#f90", fontWeight: 700 };
@@ -66,5 +67,5 @@ function Nav({ page, onNavigate, onLogout, }) {
             padding: "1rem 2rem",
             borderBottom: "1px solid #222",
             background: "#161616",
-        }, children: [_jsx("span", { style: { fontWeight: 800, fontSize: "1.1rem", color: "#f90", letterSpacing: "0.03em" }, children: "Bifrost" }), _jsxs("div", { style: { display: "flex", gap: "1.5rem", alignItems: "center" }, children: [_jsx("button", { onClick: () => onNavigate("dashboard"), style: { ...tabStyle, ...(page === "dashboard" ? activeStyle : {}) }, children: "Lights" }), _jsx("button", { onClick: () => onNavigate("settings"), style: { ...tabStyle, ...(page === "settings" ? activeStyle : {}) }, children: "Settings" }), _jsx("button", { onClick: onLogout, style: { ...tabStyle, color: "#666" }, children: "Sign out" })] })] }));
+        }, children: [_jsx("span", { style: { fontWeight: 800, fontSize: "1.1rem", color: "#f90", letterSpacing: "0.03em" }, children: "Bifrost" }), _jsxs("div", { style: { display: "flex", gap: "1.5rem", alignItems: "center" }, children: [_jsx("button", { onClick: () => onNavigate("dashboard"), style: { ...tabStyle, ...(page === "dashboard" ? activeStyle : {}) }, children: "Lights" }), _jsx("button", { onClick: () => onNavigate("plan"), style: { ...tabStyle, ...(page === "plan" ? activeStyle : {}) }, children: "Plan" }), _jsx("button", { onClick: () => onNavigate("settings"), style: { ...tabStyle, ...(page === "settings" ? activeStyle : {}) }, children: "Settings" }), _jsx("button", { onClick: onLogout, style: { ...tabStyle, color: "#666" }, children: "Sign out" })] })] }));
 }

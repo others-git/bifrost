@@ -3,10 +3,11 @@ import { getLights, logout, getSetupStatus, type Light } from "./api";
 import { SetupPage } from "./pages/Setup";
 import { LoginPage } from "./pages/Login";
 import { DashboardPage } from "./pages/Dashboard";
+import { FloorPlanPage } from "./pages/FloorPlan";
 import { SettingsPage } from "./pages/Settings";
 import { S } from "./styles";
 
-type Page = "loading" | "setup" | "login" | "dashboard" | "settings";
+type Page = "loading" | "setup" | "login" | "dashboard" | "plan" | "settings";
 
 export function App() {
   const [page, setPage] = useState<Page>("loading");
@@ -42,7 +43,7 @@ export function App() {
       <Nav
         page={page}
         onNavigate={(p) => {
-          if (p === "dashboard") refreshLights().then(() => setPage("dashboard"));
+          if (p === "dashboard" || p === "plan") refreshLights().then(() => setPage(p));
           else setPage(p);
         }}
         onLogout={async () => {
@@ -57,6 +58,7 @@ export function App() {
           onNavigate={(p) => setPage(p)}
         />
       )}
+      {page === "plan" && <FloorPlanPage lights={lights} />}
       {page === "settings" && (
         <SettingsPage onNavigate={(p) => setPage(p)} />
       )}
@@ -70,7 +72,7 @@ function Nav({
   onLogout,
 }: {
   page: Page;
-  onNavigate: (p: "dashboard" | "settings") => void;
+  onNavigate: (p: "dashboard" | "plan" | "settings") => void;
   onLogout: () => void;
 }) {
   const activeStyle: React.CSSProperties = { color: "#f90", fontWeight: 700 };
@@ -103,6 +105,12 @@ function Nav({
           style={{ ...tabStyle, ...(page === "dashboard" ? activeStyle : {}) }}
         >
           Lights
+        </button>
+        <button
+          onClick={() => onNavigate("plan")}
+          style={{ ...tabStyle, ...(page === "plan" ? activeStyle : {}) }}
+        >
+          Plan
         </button>
         <button
           onClick={() => onNavigate("settings")}

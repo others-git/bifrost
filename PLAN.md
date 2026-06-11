@@ -381,24 +381,30 @@ DELETE /api/plans/{id}
 Standard rules: session auth, 401 tests, happy-path tests against in-memory
 SQLite, out-of-bounds coordinates rejected with 422.
 
-### 7.3 Editor (frontend)
+### 7.3 Editor (frontend) ✅ DONE
 
-- Canvas-rendered grid (one `<canvas>`, not 4 096 divs), pan/zoom
-- Tools: paint floor (drag over tiles), draw wall (drag along tile
-  boundaries — pointer snaps to the nearest edge), erase
-- Light palette: unplaced lights listed at the side; drag onto a tile,
-  release near an edge to wall-mount or near the middle for `center`
-- Save = `PUT /layout` + `PUT /lights`
+`frontend/src/pages/FloorPlan.tsx`, "Plan" tab in the nav.
 
-### 7.4 Live view (the payoff)
+- [x] Canvas-rendered grid with drag-pan and wheel-zoom (cursor-anchored)
+- [x] Tools: View / Floor (drag-paint) / Wall (snaps to nearest tile edge) /
+  Erase (nearest wall within 0.2 tiles, else tile) / Lights
+- [x] Light palette: click to select, click a tile to place — near an edge
+  wall-mounts (n/s/e/w), middle = `center`; click a placed light to remove
+- [x] Plan switcher (one plan per floor), create via prompt, delete, dirty
+  tracking with explicit Save (`PUT /layout` + `PUT /lights`)
 
-- Placed lights render as glowing dots — color from `last_state.color`
-  (xy → RGB), radius/intensity from brightness, grey when off
-- Subscribes to the existing `GET /api/events` SSE stream — physical switch
-  flips show up on the plan in real time with zero new backend work
-- Click a light: toggle. Long-press / right-click: brightness + color popover
-  (reuse `LightCard` controls)
-- Stretch: marquee-select tiles → "create group from room"
+### 7.4 Live view (the payoff) ✅ DONE
+
+- [x] Placed lights render as glowing dots — color from live state via
+  `xyToRgb` (inverse Wide RGB D65, added to `api.ts`), glow intensity from
+  brightness, grey when off
+- [x] Subscribes to `GET /api/events` SSE — physical switch flips show on
+  the plan in real time, zero new backend work
+- [x] Click a light: toggle (optimistic). Clusters (several lights on one
+  mount) draw one dot with a ×N badge; click opens a popover with per-light
+  toggles
+- [ ] Stretch: marquee-select tiles → "create group from room"
+- [ ] Stretch: brightness/color popover on placed lights (reuse LightCard)
 
 ---
 
