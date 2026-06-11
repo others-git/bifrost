@@ -151,26 +151,12 @@ cd frontend && npm run build               # tsc + vite
 
 The test suite never touches the network — external HTTP is wiremock, the DB is in-memory SQLite. CI runs fmt, clippy, tests, and the frontend build on every push; tags matching `v*` publish a Docker image to GHCR and create a GitHub release.
 
-## Rooms architecture (proposal — under review)
+## Rooms architecture
 
-> Status: design for review, not yet implemented. The goal: **Bifrost Rooms
-> become an abstraction layer over imported provider groups**, instead of a
-> third competing copy of "which lights belong together".
+> Status: **implemented**. Bifrost Rooms are an abstraction layer over synced
+> provider-group mirrors — there is no separate "groups" concept.
 
-### The problem today
-
-Three things currently claim to define groupings, and they fight:
-
-1. **Manual groups** — created in Settings, membership hand-picked.
-2. **Imported provider groups** — "Import rooms" copies Hue rooms/zones into
-   local groups *once*; rename a room in the Hue app and Bifrost drifts.
-3. **Planner room auto-groups** — each painted room owns a group whose
-   membership is overwritten from tile placements on every save.
-
-A Hue room "Office" imported as a group and a planner room "Office" collide
-on name, and each save/import silently rewrites the other's membership.
-
-### Proposed model
+### The model
 
 ```
   PROVIDER LAYER (synced mirrors, read-only)
@@ -205,7 +191,11 @@ on name, and each save/import silently rewrites the other's membership.
   on/off fan-out, the dashboard chips, and the planner controller all hang
   off Rooms. Plain "groups" disappear from the UI.
 
-### Schema sketch
+Decisions (2026-06-11): sync stays manual for now; one plan region per room;
+planner placements **add on save** (never remove — noted next to the Save
+button); rename-follow is on while a room keeps its inherited name.
+
+### Schema
 
 ```sql
 provider_groups        id, provider_id, provider_group_id, name, kind (room|zone)
@@ -221,39 +211,32 @@ room_scenes            ...existing group_scenes, but → room_id
 
 `PUT /api/rooms/{id}/state` resolves effective members, then per provider:
 
-- If every member from provider P came via one linked provider group **and P
+- If every member from provider P comes via one linked provider group **and P
   supports native group control** (Hue `grouped_light`: one API call for the
   whole room), use it — faster and atomic, exactly how the Hue app behaves.
-- Otherwise fan out per light in parallel (current behaviour).
+- Otherwise fan out per light in parallel.
 
 ### Planner binding
 
-Painting a region binds the Room to floor space; it no longer *defines*
-membership. Placed lights inside a region that aren't already members
-(via links or direct) prompt: "Add to room?" — placement suggests, the Room
-decides. (Open question 3 offers a stricter alternative.)
+Painting a region binds it to a Room (new regions create one). Lights placed
+inside a region are **added** to its Room when the plan is saved — saving
+never removes members; manage membership in Settings. Renaming a region
+renames the Room and stops provider rename-follow (you took naming
+ownership).
 
-### Migration of existing data
+### Room scenes
 
-- Existing groups created by "Import rooms" → become `provider_groups`
-  mirrors + a Room linking each.
-- Existing planner-room groups → Rooms with their plan region; current
-  members become direct lights.
-- Remaining manual groups → Rooms with direct lights.
-- `group_scenes` rows move to `room_scenes`.
+Hue-like palette scenes hang off rooms: a name, an optional brightness, and
+a colour palette distributed round-robin across the room's lights (stable
+order). The plan-view room controller has chips to apply them, an inline
+editor, and presets (Relax, Energize, Read, Nightlight, Sunset, Aurora).
 
-### Open questions for review
+### Migration
 
-1. **Sync cadence** — manual "Sync" button only, or also automatic
-   (piggyback on the existing polling cycle)?
-2. **One room, many floors?** Can a Room have regions on multiple plans
-   (e.g. a stairwell)? Proposal: yes, region rows are per-plan.
-3. **Placement semantics** — prompt-to-add (proposed) vs. auto-add placed
-   lights as direct members (current behaviour, surprise-prone) vs. purely
-   visual (placement never affects membership).
-4. **Naming collisions** — when a sync renames hue/Office to "Studio", does
-   the Room auto-rename if it was created from that link? Proposal: only if
-   the Room still has the exact name it inherited.
+The `0007_rooms` migration converts all pre-existing groups into Rooms with
+direct lights (scenes and plan bindings follow). Which groups were provider
+imports wasn't recorded, so run **Sync rooms** once per provider — mirrors
+are created and linked to same-named Rooms automatically.
 
 ## License
 

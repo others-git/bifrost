@@ -13,13 +13,18 @@ use std::collections::HashMap;
 // ── Core provider trait ─────────────────────────────────────────────────────
 
 /// A light group defined inside the provider's own ecosystem (e.g. a Hue
-/// room or zone), importable as a local Bifrost group.
+/// room or zone), mirrored locally and linkable from Bifrost Rooms.
 #[derive(Debug, Clone)]
 pub struct ProviderGroup {
+    /// The group's id in the provider's namespace (e.g. Hue room UUID).
+    pub provider_group_id: String,
     pub name: String,
     /// Device IDs of member lights, in the provider's namespace
     /// (matches `Light::provider_id` / the `lights.device_id` column).
     pub member_device_ids: Vec<String>,
+    /// Native group-control handle (Hue grouped_light rid); None if the
+    /// provider has no single-call group control.
+    pub grouped_ref: Option<String>,
 }
 
 /// Runtime interface every provider must implement.
@@ -34,6 +39,13 @@ pub trait LightProvider: Send + Sync {
     /// Default: none — only providers with a native grouping concept override.
     async fn discover_groups(&self) -> Result<Vec<ProviderGroup>> {
         Ok(vec![])
+    }
+
+    /// Apply a state to a whole provider group in one native call, using the
+    /// `grouped_ref` from `discover_groups`. Returns Ok(false) when the
+    /// provider has no such mechanism (callers then fan out per light).
+    async fn set_group_state(&self, _grouped_ref: &str, _state: &LightState) -> Result<bool> {
+        Ok(false)
     }
 }
 

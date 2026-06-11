@@ -98,10 +98,10 @@ struct Placement {
 struct Room {
     id: String,
     name: String,
-    /// The auto-managed group mirroring lights placed inside the room.
-    /// Read-only for clients; assigned server-side.
+    /// The Bifrost Room this region is bound to. Read-only for clients;
+    /// assigned server-side (a new Room is created for new plan rooms).
     #[serde(default)]
-    group_id: Option<String>,
+    room_id: Option<String>,
     tiles: Vec<[i64; 2]>,
 }
 
@@ -280,7 +280,7 @@ async fn get_plan(
 }
 
 async fn load_rooms(state: &AppState, plan_id: &str) -> Vec<Room> {
-    let rows = sqlx::query("SELECT id, name, group_id FROM plan_rooms WHERE plan_id = ?")
+    let rows = sqlx::query("SELECT id, name, room_id FROM plan_rooms WHERE plan_id = ?")
         .bind(plan_id)
         .fetch_all(&state.db)
         .await
@@ -288,9 +288,9 @@ async fn load_rooms(state: &AppState, plan_id: &str) -> Vec<Room> {
 
     let mut rooms = Vec::with_capacity(rows.len());
     for r in rows {
-        let room_id: String = r.get("id");
+        let plan_room_id: String = r.get("id");
         let tiles = sqlx::query("SELECT x, y FROM plan_room_tiles WHERE room_id = ?")
-            .bind(&room_id)
+            .bind(&plan_room_id)
             .fetch_all(&state.db)
             .await
             .unwrap_or_default()
@@ -298,9 +298,9 @@ async fn load_rooms(state: &AppState, plan_id: &str) -> Vec<Room> {
             .map(|t| [t.get::<i64, _>("x"), t.get::<i64, _>("y")])
             .collect();
         rooms.push(Room {
-            id: room_id,
+            id: plan_room_id,
             name: r.get("name"),
-            group_id: r.get("group_id"),
+            room_id: r.get("room_id"),
             tiles,
         });
     }
@@ -476,8 +476,8 @@ async fn set_lights(
         .await;
     }
 
-    // Placements determine room-group membership.
-    sync_room_groups(&state, &id).await;
+    // Add-on-save: newly placed lights join their region's Room.
+    add_placed_lights_to_rooms(&state, &id).await;
 
     StatusCode::NO_CONTENT.into_response()
 }
@@ -487,9 +487,14 @@ struct SetRoomsRequest {
     rooms: Vec<Room>,
 }
 
-/// Replace the plan's rooms. Each room gets (or keeps) an auto-managed group
-/// whose membership mirrors the lights placed on the room's tiles. Removing a
-/// room deletes its group.
+/// Replace the plan's room regions. Regions bind to Bifrost Rooms:
+/// - a new region creates a Room (and binds it)
+/// - renaming a region renames its Room (and clears `inherited_name` — the
+///   user took naming ownership, so provider rename-follow stops)
+/// - removing a region does NOT delete the Room (rooms are first-class;
+///   delete them in Settings)
+///
+/// Lights placed inside a region are ADDED to its Room on save (never removed).
 async fn set_rooms(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -519,23 +524,12 @@ async fn set_rooms(
         }
     }
 
-    // Existing rooms: keep group linkage for ids that survive; delete the
-    // auto-managed groups of rooms that are being removed.
+    // Keep Room bindings for plan rooms that survive this save.
     let existing = load_rooms(&state, &id).await;
-    let incoming_ids: std::collections::HashSet<&str> =
-        req.rooms.iter().map(|r| r.id.as_str()).collect();
-    for old in &existing {
-        if !incoming_ids.contains(old.id.as_str())
-            && let Some(gid) = &old.group_id
-        {
-            let _ = sqlx::query("DELETE FROM groups WHERE id = ?")
-                .bind(gid)
-                .execute(&state.db)
-                .await;
-        }
-    }
-    let existing_groups: std::collections::HashMap<String, Option<String>> =
-        existing.into_iter().map(|r| (r.id, r.group_id)).collect();
+    let existing_bindings: std::collections::HashMap<String, (String, Option<String>)> = existing
+        .into_iter()
+        .map(|r| (r.id.clone(), (r.name, r.room_id)))
+        .collect();
 
     let _ = sqlx::query("DELETE FROM plan_rooms WHERE plan_id = ?")
         .bind(&id)
@@ -543,26 +537,51 @@ async fn set_rooms(
         .await;
 
     for room in &req.rooms {
-        let room_id = if room.id.is_empty() {
+        let plan_room_id = if room.id.is_empty() {
             Uuid::new_v4().to_string()
         } else {
             room.id.clone()
         };
-        let group_id = existing_groups.get(&room_id).cloned().flatten();
+
+        let room_id = match existing_bindings.get(&plan_room_id) {
+            Some((old_name, Some(rid))) => {
+                // Region renamed → rename the Room and stop rename-follow.
+                if old_name != room.name.trim() {
+                    let _ = sqlx::query(
+                        "UPDATE rooms SET name = ?, inherited_name = NULL WHERE id = ?",
+                    )
+                    .bind(room.name.trim())
+                    .bind(rid)
+                    .execute(&state.db)
+                    .await;
+                }
+                Some(rid.clone())
+            }
+            _ => {
+                // New region (or binding lost) → create a Room for it.
+                let rid = Uuid::new_v4().to_string();
+                let _ = sqlx::query("INSERT INTO rooms (id, name) VALUES (?, ?)")
+                    .bind(&rid)
+                    .bind(room.name.trim())
+                    .execute(&state.db)
+                    .await;
+                Some(rid)
+            }
+        };
 
         let _ =
-            sqlx::query("INSERT INTO plan_rooms (id, plan_id, name, group_id) VALUES (?, ?, ?, ?)")
-                .bind(&room_id)
+            sqlx::query("INSERT INTO plan_rooms (id, plan_id, name, room_id) VALUES (?, ?, ?, ?)")
+                .bind(&plan_room_id)
                 .bind(&id)
                 .bind(room.name.trim())
-                .bind(&group_id)
+                .bind(&room_id)
                 .execute(&state.db)
                 .await;
         for &[x, y] in &room.tiles {
             let _ = sqlx::query(
                 "INSERT OR IGNORE INTO plan_room_tiles (room_id, x, y) VALUES (?, ?, ?)",
             )
-            .bind(&room_id)
+            .bind(&plan_room_id)
             .bind(x)
             .bind(y)
             .execute(&state.db)
@@ -570,69 +589,58 @@ async fn set_rooms(
         }
     }
 
-    sync_room_groups(&state, &id).await;
+    add_placed_lights_to_rooms(&state, &id).await;
 
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// Recompute each room's group: ensure the group exists (named after the
-/// room) and its membership equals the lights placed on the room's tiles.
-pub(crate) async fn sync_room_groups(state: &AppState, plan_id: &str) {
+/// Add-on-save: every light placed inside a bound region becomes a DIRECT
+/// member of that region's Room, additively — saving never removes members
+/// (manage membership in Settings).
+pub(crate) async fn add_placed_lights_to_rooms(state: &AppState, plan_id: &str) {
     let rooms = load_rooms(state, plan_id).await;
+    let placements = sqlx::query("SELECT light_id, x, y FROM plan_lights WHERE plan_id = ?")
+        .bind(plan_id)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
 
     for room in rooms {
-        // Lights placed on this room's tiles.
+        let Some(room_id) = &room.room_id else {
+            continue;
+        };
         let tile_set: std::collections::HashSet<(i64, i64)> =
             room.tiles.iter().map(|t| (t[0], t[1])).collect();
-        let placements = sqlx::query("SELECT light_id, x, y FROM plan_lights WHERE plan_id = ?")
-            .bind(plan_id)
-            .fetch_all(&state.db)
-            .await
-            .unwrap_or_default();
-        let member_ids: Vec<String> = placements
-            .into_iter()
-            .filter(|p| tile_set.contains(&(p.get::<i64, _>("x"), p.get::<i64, _>("y"))))
-            .map(|p| p.get::<String, _>("light_id"))
-            .collect();
 
-        // Ensure the group exists and carries the room's name.
-        let group_id = match &room.group_id {
-            Some(gid) => {
-                let _ = sqlx::query("UPDATE groups SET name = ? WHERE id = ?")
-                    .bind(&room.name)
-                    .bind(gid)
-                    .execute(&state.db)
-                    .await;
-                gid.clone()
+        for p in &placements {
+            if !tile_set.contains(&(p.get::<i64, _>("x"), p.get::<i64, _>("y"))) {
+                continue;
             }
-            None => {
-                let gid = Uuid::new_v4().to_string();
-                let _ = sqlx::query("INSERT INTO groups (id, name) VALUES (?, ?)")
-                    .bind(&gid)
-                    .bind(&room.name)
-                    .execute(&state.db)
-                    .await;
-                let _ = sqlx::query("UPDATE plan_rooms SET group_id = ? WHERE id = ?")
-                    .bind(&gid)
-                    .bind(&room.id)
-                    .execute(&state.db)
-                    .await;
-                gid
-            }
-        };
+            let light_id: String = p.get("light_id");
 
-        let _ = sqlx::query("DELETE FROM group_lights WHERE group_id = ?")
-            .bind(&group_id)
-            .execute(&state.db)
-            .await;
-        for light_id in &member_ids {
-            let _ = sqlx::query(
-                "INSERT OR IGNORE INTO group_lights (group_id, light_id) VALUES (?, ?)",
+            // Skip lights already effective members via a provider-group link.
+            let via_link = sqlx::query(
+                "SELECT 1 FROM room_links rl
+                 JOIN provider_group_lights pgl ON pgl.provider_group_id = rl.provider_group_id
+                 WHERE rl.room_id = ? AND pgl.light_id = ?",
             )
-            .bind(&group_id)
-            .bind(light_id)
-            .execute(&state.db)
-            .await;
+            .bind(room_id)
+            .bind(&light_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+            if via_link {
+                continue;
+            }
+
+            let _ =
+                sqlx::query("INSERT OR IGNORE INTO room_lights (room_id, light_id) VALUES (?, ?)")
+                    .bind(room_id)
+                    .bind(&light_id)
+                    .execute(&state.db)
+                    .await;
         }
     }
 }

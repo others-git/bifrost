@@ -2,19 +2,19 @@ import { useEffect, useRef, useState } from "react";
 import {
   activateScene,
   createScene,
-  getGroups,
   getProviders,
+  getRooms,
   getScenes,
   mergePatch,
   removeScene,
   rgbToXy,
-  setGroupState,
   setLightState,
-  type Group,
+  setRoomState,
   type Light,
   type LightState,
   type LightStatePatch,
   type Provider,
+  type Room,
   type Scene,
 } from "../api";
 import { S } from "../styles";
@@ -65,7 +65,7 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
   return (
     <div style={{ padding: "2rem", maxWidth: 960, margin: "0 auto" }}>
       {localLights.length > 0 && <SceneBar onActivated={onRefresh} />}
-      {localLights.length > 0 && <GroupBar onChanged={onRefresh} />}
+      {localLights.length > 0 && <RoomBar onChanged={onRefresh} />}
       {localLights.length === 0 ? (
         <div style={{ textAlign: "center", padding: "4rem 0", color: "#666" }}>
           <p style={{ margin: "0 0 0.75rem" }}>No lights found.</p>
@@ -222,44 +222,44 @@ function SceneBar({ onActivated }: { onActivated: () => void }) {
   );
 }
 
-function GroupBar({ onChanged }: { onChanged: () => void }) {
-  const [groups, setGroups] = useState<Group[]>([]);
+function RoomBar({ onChanged }: { onChanged: () => void }) {
+  const [rooms, setRooms] = useState<Room[]>([]);
   const [busy, setBusy] = useState("");
 
   useEffect(() => {
-    getGroups().then(setGroups);
+    getRooms().then(setRooms);
   }, []);
 
   async function setAll(id: string, on: boolean) {
     setBusy(id);
     try {
-      await setGroupState(id, { on });
+      await setRoomState(id, { on });
       onChanged();
     } finally {
       setBusy("");
     }
   }
 
-  if (groups.length === 0) return null;
+  if (rooms.length === 0) return null;
 
   return (
     <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center", marginBottom: "1.25rem" }}>
-      {groups.map((g) => (
+      {rooms.map((r) => (
         <span
-          key={g.id}
+          key={r.id}
           style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem", border: "1px solid #333", borderRadius: 6, padding: "0.3rem 0.3rem 0.3rem 0.7rem" }}
         >
-          <span style={{ fontSize: "0.85rem", color: "#ccc" }}>{g.name}</span>
+          <span style={{ fontSize: "0.85rem", color: "#ccc" }}>{r.name}</span>
           <button
-            onClick={() => setAll(g.id, true)}
-            disabled={busy === g.id}
+            onClick={() => setAll(r.id, true)}
+            disabled={busy === r.id || r.light_ids.length === 0}
             style={{ ...S.buttonGhost, padding: "0.25rem 0.55rem", fontSize: "0.75rem" }}
           >
             On
           </button>
           <button
-            onClick={() => setAll(g.id, false)}
-            disabled={busy === g.id}
+            onClick={() => setAll(r.id, false)}
+            disabled={busy === r.id || r.light_ids.length === 0}
             style={{ ...S.buttonGhost, padding: "0.25rem 0.55rem", fontSize: "0.75rem" }}
           >
             Off

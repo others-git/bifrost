@@ -1,6 +1,6 @@
 import { jsx as _jsx, Fragment as _Fragment, jsxs as _jsxs } from "react/jsx-runtime";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { activateScene, createPlan, getGroups, getPlan, getPlans, getScenes, mergePatch, putPlanLayout, putPlanLights, putPlanRooms, removePlan, setGroupState, setLightState, xyToRgb, } from "../api";
+import { applyRoomScene, createPlan, createRoomScene, deleteRoomScene, getPlan, getPlans, getRoomScenes, getRooms, mergePatch, putPlanLayout, putPlanLights, putPlanRooms, removePlan, setLightState, setRoomState, xyToRgb, } from "../api";
 import { S } from "../styles";
 const TOOLS = [
     { id: "view", label: "View", hint: "Click a light to toggle it. Drag to pan, scroll to zoom." },
@@ -28,8 +28,7 @@ export function FloorPlanPage({ lights }) {
     const [selectedRoom, setSelectedRoom] = useState("");
     const [popover, setPopover] = useState(null);
     const [toast, setToast] = useState("");
-    const [groups, setGroups] = useState([]);
-    const [scenes, setScenes] = useState([]);
+    const [allRooms, setAllRooms] = useState([]);
     // Live light states: start from the lights prop, patched by SSE + optimistic toggles.
     const [statesById, setStatesById] = useState(new Map());
     useEffect(() => {
@@ -79,8 +78,7 @@ export function FloorPlanPage({ lights }) {
     }
     useEffect(() => { loadPlans(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
     useEffect(() => {
-        getGroups().then(setGroups);
-        getScenes().then(setScenes);
+        getRooms().then(setAllRooms);
     }, []);
     useEffect(() => {
         if (!planId) {
@@ -131,9 +129,9 @@ export function FloorPlanPage({ lights }) {
             await putPlanLayout(plan.id, tileArr, wallArr);
             await putPlanLights(plan.id, placements);
             await putPlanRooms(plan.id, roomArr);
-            // Reload to pick up server-assigned room group IDs.
+            // Reload to pick up server-assigned Room bindings and memberships.
             await loadPlan(plan.id);
-            setGroups(await getGroups());
+            setAllRooms(await getRooms());
             showToast("Saved.");
         }
         catch (e) {
@@ -146,30 +144,22 @@ export function FloorPlanPage({ lights }) {
         setStatesById((prev) => new Map(prev).set(lightId, next)); // optimistic
         await setLightState(lightId, next);
     }
-    /** "[Office] Right Lamp" — prefix a light's name with its first group. */
+    /** "[Office] Right Lamp" — prefix a light's name with its room. */
     function lightLabel(l) {
-        const g = groups.find((g) => g.light_ids.includes(l.id));
-        return g ? `[${g.name}] ${l.name}` : l.name;
+        const r = allRooms.find((r) => r.light_ids.includes(l.id));
+        return r ? `[${r.name}] ${l.name}` : l.name;
     }
     const placedIds = new Set(placements.map((p) => p.light_id));
-    return (_jsxs("div", { style: { padding: "1.5rem 2rem" }, children: [_jsxs("div", { style: { display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "0.9rem", flexWrap: "wrap" }, children: [plans.map((p) => (_jsx("button", { onClick: () => setPlanId(p.id), style: { ...S.buttonGhost, ...(p.id === planId ? { borderColor: "#f90", color: "#f90" } : {}) }, children: p.name }, p.id))), _jsx("button", { onClick: handleCreate, style: S.buttonGhost, children: "+ New plan" }), plan && (_jsxs(_Fragment, { children: [_jsx("span", { style: { flex: 1 } }), _jsx("button", { onClick: handleSave, disabled: !dirty, style: dirty ? S.button : S.buttonGhost, children: dirty ? "Save changes" : "Saved" }), _jsx("button", { onClick: handleDelete, style: S.buttonDanger, children: "Delete" })] }))] }), toast && (_jsx("div", { style: { background: "#1e3a1e", border: "1px solid #2a5a2a", borderRadius: 8, padding: "0.5rem 1rem", marginBottom: "0.75rem", color: "#8f8", fontSize: "0.875rem" }, children: toast })), !plan ? (_jsx("p", { style: { color: "#666" }, children: "No floor plans yet. Create one, paint your layout, then place your lights on it." })) : (_jsxs(_Fragment, { children: [_jsxs("div", { style: { display: "flex", gap: "0.4rem", marginBottom: "0.5rem", alignItems: "center", flexWrap: "wrap" }, children: [TOOLS.map((t) => (_jsx("button", { onClick: () => { setTool(t.id); setPopover(null); }, style: { ...S.buttonGhost, ...(tool === t.id ? { borderColor: "#f90", color: "#f90" } : {}) }, children: t.label }, t.id))), _jsx("span", { style: { color: "#666", fontSize: "0.78rem", marginLeft: "0.5rem" }, children: TOOLS.find((t) => t.id === tool)?.hint })] }), _jsxs("div", { style: { display: "flex", gap: "1rem", alignItems: "flex-start" }, children: [tool === "view" && plan.rooms.length > 0 && (_jsx(RoomController, { plan: plan, scenes: scenes, onSetRoom: async (room, on) => {
-                                    if (!room.group_id)
-                                        return;
-                                    const memberIds = roomMemberIds(room, placements);
+    return (_jsxs("div", { style: { padding: "1.5rem 2rem" }, children: [_jsxs("div", { style: { display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "0.9rem", flexWrap: "wrap" }, children: [plans.map((p) => (_jsx("button", { onClick: () => setPlanId(p.id), style: { ...S.buttonGhost, ...(p.id === planId ? { borderColor: "#f90", color: "#f90" } : {}) }, children: p.name }, p.id))), _jsx("button", { onClick: handleCreate, style: S.buttonGhost, children: "+ New plan" }), plan && (_jsxs(_Fragment, { children: [_jsx("span", { style: { flex: 1 } }), dirty && (_jsx("span", { style: { color: "#a86", fontSize: "0.72rem", maxWidth: 280, textAlign: "right" }, children: "Saving adds lights placed inside a room to that room (never removes)." })), _jsx("button", { onClick: handleSave, disabled: !dirty, style: dirty ? S.button : S.buttonGhost, children: dirty ? "Save changes" : "Saved" }), _jsx("button", { onClick: handleDelete, style: S.buttonDanger, children: "Delete" })] }))] }), toast && (_jsx("div", { style: { background: "#1e3a1e", border: "1px solid #2a5a2a", borderRadius: 8, padding: "0.5rem 1rem", marginBottom: "0.75rem", color: "#8f8", fontSize: "0.875rem" }, children: toast })), !plan ? (_jsx("p", { style: { color: "#666" }, children: "No floor plans yet. Create one, paint your layout, then place your lights on it." })) : (_jsxs(_Fragment, { children: [_jsxs("div", { style: { display: "flex", gap: "0.4rem", marginBottom: "0.5rem", alignItems: "center", flexWrap: "wrap" }, children: [TOOLS.map((t) => (_jsx("button", { onClick: () => { setTool(t.id); setPopover(null); }, style: { ...S.buttonGhost, ...(tool === t.id ? { borderColor: "#f90", color: "#f90" } : {}) }, children: t.label }, t.id))), _jsx("span", { style: { color: "#666", fontSize: "0.78rem", marginLeft: "0.5rem" }, children: TOOLS.find((t) => t.id === tool)?.hint })] }), _jsxs("div", { style: { display: "flex", gap: "1rem", alignItems: "flex-start" }, children: [tool === "view" && plan.rooms.length > 0 && (_jsx(RoomController, { plan: plan, rooms: allRooms, onSetRoom: async (room, on) => {
                                     setStatesById((prev) => {
                                         const next = new Map(prev);
-                                        for (const id of memberIds) {
+                                        for (const id of room.light_ids) {
                                             next.set(id, { ...(next.get(id) ?? { on: false }), on });
                                         }
                                         return next;
                                     });
-                                    await setGroupState(room.group_id, { on });
-                                }, onApplyScene: async (room, sceneId) => {
-                                    const memberIds = roomMemberIds(room, placements);
-                                    if (memberIds.length === 0)
-                                        return;
-                                    await activateScene(sceneId, memberIds);
-                                }, memberCount: (room) => roomMemberIds(room, placements).length })), _jsx(PlanCanvas, { plan: plan, tiles: tiles, walls: walls, placements: placements, rooms: rooms, selectedRoom: selectedRoom, statesById: statesById, tool: tool, selectedLight: selectedLight, onMutate: (fn) => { fn(); setDirty(true); setPopover(null); }, setTiles: setTiles, setWalls: setWalls, setPlacements: setPlacements, setRooms: setRooms, onLightClick: (pls, px, py) => {
+                                    await setRoomState(room.id, { on });
+                                } })), _jsx(PlanCanvas, { plan: plan, tiles: tiles, walls: walls, placements: placements, rooms: rooms, selectedRoom: selectedRoom, statesById: statesById, tool: tool, selectedLight: selectedLight, onMutate: (fn) => { fn(); setDirty(true); setPopover(null); }, setTiles: setTiles, setWalls: setWalls, setPlacements: setPlacements, setRooms: setRooms, onLightClick: (pls, px, py) => {
                                     if (pls.length === 1)
                                         toggleLight(pls[0].light_id);
                                     else
@@ -223,39 +213,106 @@ export function FloorPlanPage({ lights }) {
                                 return (_jsxs("button", { onClick: () => toggleLight(p.light_id), style: { ...S.buttonGhost, fontSize: "0.8rem", textAlign: "left", color: on ? "#f90" : "#888" }, children: [on ? "● " : "○ ", light ? lightLabel(light) : p.light_id] }, p.light_id));
                             }), _jsx("button", { onClick: () => setPopover(null), style: { ...S.buttonGhost, fontSize: "0.75rem", color: "#666" }, children: "Close" })] }))] }))] }));
 }
-/** Light IDs currently placed on a (saved) room's tiles. */
-function roomMemberIds(room, placements) {
-    const tileSet = new Set(room.tiles.map(([x, y]) => tileKey(x, y)));
-    return placements.filter((p) => tileSet.has(tileKey(p.x, p.y))).map((p) => p.light_id);
-}
 // ── Room controller (left of canvas, view mode) ─────────────────────────────
-function RoomController({ plan, scenes, onSetRoom, onApplyScene, memberCount, }) {
-    const [sceneId, setSceneId] = useState(scenes[0]?.id ?? "");
+const SCENE_PRESETS = [
+    { name: "Relax", brightness: 55, palette: ["#ffb46b"] },
+    { name: "Energize", brightness: 100, palette: ["#d6e8ff"] },
+    { name: "Read", brightness: 100, palette: ["#ffe4b3"] },
+    { name: "Nightlight", brightness: 5, palette: ["#ff9b3d"] },
+    { name: "Sunset", brightness: 75, palette: ["#ff7d33", "#ff5e9c", "#ffb04d"] },
+    { name: "Aurora", brightness: 65, palette: ["#22d3ee", "#4ade80", "#8b5cf6"] },
+];
+function RoomController({ plan, rooms, onSetRoom, }) {
     const [busy, setBusy] = useState("");
-    useEffect(() => {
-        if (scenes.length > 0 && !scenes.some((s) => s.id === sceneId))
-            setSceneId(scenes[0].id);
-    }, [scenes, sceneId]);
-    return (_jsxs("div", { style: { width: 230, flexShrink: 0, display: "flex", flexDirection: "column", gap: "0.6rem" }, children: [_jsx("h3", { style: { margin: 0, fontSize: "0.9rem", color: "#aaa" }, children: "Rooms" }), scenes.length > 0 && (_jsxs("label", { style: { display: "flex", flexDirection: "column", gap: "0.25rem", fontSize: "0.78rem", color: "#888" }, children: ["Scene", _jsx("select", { value: sceneId, onChange: (e) => setSceneId(e.target.value), style: { ...S.input, cursor: "pointer" }, children: scenes.map((s) => (_jsx("option", { value: s.id, children: s.name }, s.id))) })] })), plan.rooms.map((room, i) => {
-                const color = ROOM_COLORS[i % ROOM_COLORS.length];
-                const count = memberCount(room);
-                return (_jsxs("div", { style: { ...S.card, gap: "0.5rem", borderLeft: `3px solid ${color}` }, children: [_jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline" }, children: [_jsx("span", { style: { fontWeight: 600, fontSize: "0.9rem" }, children: room.name }), _jsxs("span", { style: { color: "#666", fontSize: "0.75rem" }, children: [count, " light", count !== 1 ? "s" : ""] })] }), _jsxs("div", { style: { display: "flex", gap: "0.4rem", flexWrap: "wrap" }, children: [_jsx("button", { onClick: async () => { setBusy(room.id); try {
+    // Plan regions bound to a Room, joined with the live Room data.
+    const bound = plan.rooms
+        .map((region, i) => ({
+        region,
+        room: rooms.find((r) => r.id === region.room_id),
+        color: ROOM_COLORS[i % ROOM_COLORS.length],
+    }))
+        .filter((b) => !!b.room);
+    if (bound.length === 0)
+        return null;
+    return (_jsxs("div", { style: { width: 250, flexShrink: 0, display: "flex", flexDirection: "column", gap: "0.6rem" }, children: [_jsx("h3", { style: { margin: 0, fontSize: "0.9rem", color: "#aaa" }, children: "Rooms" }), bound.map(({ room, color }) => {
+                const count = room.light_ids.length;
+                return (_jsxs("div", { style: { ...S.card, gap: "0.5rem", borderLeft: `3px solid ${color}` }, children: [_jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline" }, children: [_jsx("span", { style: { fontWeight: 600, fontSize: "0.9rem" }, children: room.name }), _jsxs("span", { style: { color: "#666", fontSize: "0.75rem" }, children: [count, " light", count !== 1 ? "s" : ""] })] }), _jsxs("div", { style: { display: "flex", gap: "0.4rem" }, children: [_jsx("button", { onClick: async () => { setBusy(room.id); try {
                                         await onSetRoom(room, true);
                                     }
                                     finally {
                                         setBusy("");
-                                    } }, disabled: busy === room.id || !room.group_id || count === 0, style: { ...S.buttonGhost, padding: "0.3rem 0.6rem", fontSize: "0.78rem" }, children: "On" }), _jsx("button", { onClick: async () => { setBusy(room.id); try {
+                                    } }, disabled: busy === room.id || count === 0, style: { ...S.buttonGhost, padding: "0.3rem 0.6rem", fontSize: "0.78rem" }, children: "On" }), _jsx("button", { onClick: async () => { setBusy(room.id); try {
                                         await onSetRoom(room, false);
                                     }
                                     finally {
                                         setBusy("");
-                                    } }, disabled: busy === room.id || !room.group_id || count === 0, style: { ...S.buttonGhost, padding: "0.3rem 0.6rem", fontSize: "0.78rem" }, children: "Off" }), scenes.length > 0 && (_jsx("button", { onClick: async () => { setBusy(room.id); try {
-                                        await onApplyScene(room, sceneId);
-                                    }
-                                    finally {
-                                        setBusy("");
-                                    } }, disabled: busy === room.id || !sceneId || count === 0, title: "Apply the selected scene to this room only", style: { ...S.buttonGhost, padding: "0.3rem 0.6rem", fontSize: "0.78rem" }, children: "Apply scene" }))] })] }, room.id));
-            }), _jsx("span", { style: { color: "#555", fontSize: "0.72rem" }, children: "Rooms are painted with the Rooms tool. Each room keeps a group in sync with the lights placed inside it." })] }));
+                                    } }, disabled: busy === room.id || count === 0, style: { ...S.buttonGhost, padding: "0.3rem 0.6rem", fontSize: "0.78rem" }, children: "Off" })] }), _jsx(RoomScenes, { roomId: room.id, disabled: count === 0 })] }, room.id));
+            })] }));
+}
+/** Palette scene chips + inline editor for one room. */
+function RoomScenes({ roomId, disabled }) {
+    const [scenes, setScenes] = useState([]);
+    const [editing, setEditing] = useState(false);
+    const [busy, setBusy] = useState("");
+    async function load() {
+        setScenes(await getRoomScenes(roomId));
+    }
+    useEffect(() => { load(); }, [roomId]); // eslint-disable-line react-hooks/exhaustive-deps
+    async function apply(sceneId) {
+        setBusy(sceneId);
+        try {
+            await applyRoomScene(roomId, sceneId);
+        }
+        finally {
+            setBusy("");
+        }
+    }
+    async function remove(scene) {
+        if (!window.confirm(`Delete scene "${scene.name}"?`))
+            return;
+        await deleteRoomScene(roomId, scene.id);
+        await load();
+    }
+    return (_jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "0.4rem" }, children: [_jsxs("div", { style: { display: "flex", flexWrap: "wrap", gap: "0.3rem" }, children: [scenes.map((s) => (_jsxs("span", { style: { display: "inline-flex" }, children: [_jsxs("button", { onClick: () => apply(s.id), disabled: disabled || busy === s.id, title: s.palette.length > 0 ? s.palette.join(" ") : "brightness only", style: {
+                                    ...S.buttonGhost,
+                                    padding: "0.25rem 0.5rem",
+                                    fontSize: "0.75rem",
+                                    borderRadius: "6px 0 0 6px",
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    gap: "0.3rem",
+                                }, children: [_jsx(PaletteDots, { palette: s.palette }), busy === s.id ? "…" : s.name] }), _jsx("button", { onClick: () => remove(s), title: "Delete scene", style: { ...S.buttonGhost, padding: "0.25rem 0.4rem", fontSize: "0.75rem", borderRadius: "0 6px 6px 0", borderLeft: "none", color: "#866" }, children: "\u00D7" })] }, s.id))), _jsx("button", { onClick: () => setEditing((v) => !v), style: { ...S.buttonGhost, padding: "0.25rem 0.5rem", fontSize: "0.75rem" }, children: editing ? "Close" : "+ Scene" })] }), editing && (_jsx(SceneEditor, { onSave: async (scene) => {
+                    await createRoomScene(roomId, scene);
+                    setEditing(false);
+                    await load();
+                } }))] }));
+}
+function PaletteDots({ palette }) {
+    if (palette.length === 0)
+        return null;
+    return (_jsx("span", { style: { display: "inline-flex", gap: 2 }, children: palette.slice(0, 4).map((c, i) => (_jsx("span", { style: { width: 8, height: 8, borderRadius: "50%", background: c, display: "inline-block" } }, i))) }));
+}
+/** Inline editor: name, brightness, palette swatches, Hue-like presets. */
+function SceneEditor({ onSave, }) {
+    const [name, setName] = useState("");
+    const [brightness, setBrightness] = useState(80);
+    const [palette, setPalette] = useState(["#ff9900"]);
+    const [saving, setSaving] = useState(false);
+    function setColor(i, value) {
+        setPalette((prev) => prev.map((c, j) => (j === i ? value : c)));
+    }
+    async function save() {
+        if (!name.trim())
+            return;
+        setSaving(true);
+        try {
+            await onSave({ name: name.trim(), brightness, palette });
+        }
+        finally {
+            setSaving(false);
+        }
+    }
+    return (_jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "0.45rem", borderTop: "1px solid #2a2a2a", paddingTop: "0.5rem" }, children: [_jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: "0.25rem" }, children: SCENE_PRESETS.map((p) => (_jsxs("button", { onClick: () => { setName(p.name); setBrightness(p.brightness); setPalette([...p.palette]); }, title: `Preset: ${p.palette.join(" ")} @ ${p.brightness}%`, style: { ...S.buttonGhost, padding: "0.2rem 0.45rem", fontSize: "0.72rem", display: "inline-flex", alignItems: "center", gap: "0.3rem" }, children: [_jsx(PaletteDots, { palette: p.palette }), p.name] }, p.name))) }), _jsx("input", { value: name, onChange: (e) => setName(e.target.value), placeholder: "Scene name", style: { ...S.input, fontSize: "0.8rem" } }), _jsxs("label", { style: { display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.75rem", color: "#888" }, children: ["Brightness", _jsx("input", { type: "range", min: 1, max: 100, value: brightness, onChange: (e) => setBrightness(Number(e.target.value)), style: { flex: 1, accentColor: "#f90" } }), _jsxs("span", { style: { width: 32, textAlign: "right" }, children: [brightness, "%"] })] }), _jsxs("div", { style: { display: "flex", alignItems: "center", gap: "0.3rem", flexWrap: "wrap" }, children: [_jsx("span", { style: { fontSize: "0.75rem", color: "#888" }, children: "Palette" }), palette.map((c, i) => (_jsxs("span", { style: { display: "inline-flex", alignItems: "center" }, children: [_jsx("input", { type: "color", value: c, onChange: (e) => setColor(i, e.target.value), style: { width: 26, height: 22, padding: 0, border: "1px solid #444", borderRadius: 4, background: "none", cursor: "pointer" } }), palette.length > 1 && (_jsx("button", { onClick: () => setPalette((prev) => prev.filter((_, j) => j !== i)), title: "Remove colour", style: { background: "none", border: "none", color: "#866", cursor: "pointer", fontSize: "0.7rem", padding: "0 0.15rem" }, children: "\u00D7" }))] }, i))), palette.length < 6 && (_jsx("button", { onClick: () => setPalette((prev) => [...prev, "#ffffff"]), style: { ...S.buttonGhost, padding: "0.15rem 0.45rem", fontSize: "0.75rem" }, children: "+" }))] }), _jsx("span", { style: { fontSize: "0.68rem", color: "#555" }, children: "Colours are spread across the room's lights in turn." }), _jsx("button", { onClick: save, disabled: saving || !name.trim(), style: { ...S.button, padding: "0.35rem 0.7rem", fontSize: "0.78rem" }, children: saving ? "Saving…" : "Save scene" })] }));
 }
 // ── Room editor panel (right of canvas, room tool) ──────────────────────────
 function RoomEditorPanel({ rooms, selectedRoom, onSelect, onCreate, onRename, onDelete, }) {

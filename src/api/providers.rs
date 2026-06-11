@@ -23,7 +23,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{id}/credentials", put(update_credentials))
         .route("/{id}/status", get(provider_status))
         .route("/{id}/discover", post(discover))
-        .route("/{id}/import-groups", post(import_groups))
+        .route("/{id}/sync-groups", post(sync_groups))
 }
 
 // ── List available provider types (for the setup UI) ───────────────────────
@@ -261,12 +261,16 @@ async fn provider_status(
     }
 }
 
-// ── Import provider groups (rooms/zones) ───────────────────────────────────
+// ── Sync provider groups (rooms/zones mirrors) ─────────────────────────────
 
-/// Import the provider's native rooms/zones as local Bifrost groups.
-/// Upserts by group name: an existing group with the same name gets its
-/// membership replaced. Members are matched via `lights.device_id`.
-async fn import_groups(
+/// Refresh this provider's group mirrors and keep Rooms in step:
+/// - upsert `provider_groups` (names, native handles) and their members
+/// - rename-follow: a room still carrying its inherited name renames with
+///   the provider group
+/// - mirrors with no linked room get one: an existing room with the same
+///   name is linked, otherwise a new room is created
+/// - mirrors that vanished from the provider are removed (links cascade)
+async fn sync_groups(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -310,10 +314,66 @@ async fn import_groups(
         }
     };
 
-    let mut imported = 0usize;
+    // Existing mirrors: provider_group_id → (mirror id, name)
+    let existing: std::collections::HashMap<String, (String, String)> = sqlx::query(
+        "SELECT id, provider_group_id, name FROM provider_groups WHERE provider_id = ?",
+    )
+    .bind(&id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| {
+        (
+            r.get::<String, _>("provider_group_id"),
+            (r.get::<String, _>("id"), r.get::<String, _>("name")),
+        )
+    })
+    .collect();
+
+    let mut synced = 0usize;
+    let mut rooms_created = 0usize;
+    let mut rooms_linked = 0usize;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     for pg in &provider_groups {
-        // Resolve member device IDs to local light IDs (this provider only).
-        let mut light_ids = Vec::new();
+        seen.insert(pg.provider_group_id.clone());
+
+        // Upsert the mirror.
+        let (mirror_id, old_name) = match existing.get(&pg.provider_group_id) {
+            Some((mid, old)) => {
+                let _ = sqlx::query(
+                    "UPDATE provider_groups SET name = ?, grouped_ref = ? WHERE id = ?",
+                )
+                .bind(&pg.name)
+                .bind(&pg.grouped_ref)
+                .bind(mid)
+                .execute(&state.db)
+                .await;
+                (mid.clone(), Some(old.clone()))
+            }
+            None => {
+                let mid = Uuid::new_v4().to_string();
+                let _ = sqlx::query(
+                    "INSERT INTO provider_groups (id, provider_id, provider_group_id, name, grouped_ref)
+                     VALUES (?, ?, ?, ?, ?)",
+                )
+                .bind(&mid)
+                .bind(&id)
+                .bind(&pg.provider_group_id)
+                .bind(&pg.name)
+                .bind(&pg.grouped_ref)
+                .execute(&state.db)
+                .await;
+                (mid, None)
+            }
+        };
+
+        // Refresh members (matched to discovered lights by device id).
+        let _ = sqlx::query("DELETE FROM provider_group_lights WHERE provider_group_id = ?")
+            .bind(&mirror_id)
+            .execute(&state.db)
+            .await;
         for device_id in &pg.member_device_ids {
             if let Ok(Some(r)) =
                 sqlx::query("SELECT id FROM lights WHERE provider_id = ? AND device_id = ?")
@@ -322,55 +382,100 @@ async fn import_groups(
                     .fetch_optional(&state.db)
                     .await
             {
-                light_ids.push(r.get::<String, _>("id"));
+                let _ = sqlx::query(
+                    "INSERT OR IGNORE INTO provider_group_lights (provider_group_id, light_id) VALUES (?, ?)",
+                )
+                .bind(&mirror_id)
+                .bind(r.get::<String, _>("id"))
+                .execute(&state.db)
+                .await;
             }
         }
-        if light_ids.is_empty() {
-            continue; // no discovered lights match — run discovery first
+
+        // Rename-follow: rooms still carrying the inherited name move with it.
+        if let Some(old) = &old_name
+            && old != &pg.name
+        {
+            let _ = sqlx::query(
+                "UPDATE rooms SET name = ?, inherited_name = ?
+                 WHERE inherited_name = ? AND name = ?
+                   AND id IN (SELECT room_id FROM room_links WHERE provider_group_id = ?)",
+            )
+            .bind(&pg.name)
+            .bind(&pg.name)
+            .bind(old)
+            .bind(old)
+            .bind(&mirror_id)
+            .execute(&state.db)
+            .await;
         }
 
-        // Upsert the group by name.
-        let group_id = match sqlx::query("SELECT id FROM groups WHERE name = ?")
-            .bind(&pg.name)
+        // Ensure a room links this mirror.
+        let linked = sqlx::query("SELECT 1 FROM room_links WHERE provider_group_id = ?")
+            .bind(&mirror_id)
             .fetch_optional(&state.db)
             .await
-        {
-            Ok(Some(r)) => r.get::<String, _>("id"),
-            Ok(None) => {
-                let gid = Uuid::new_v4().to_string();
-                if sqlx::query("INSERT INTO groups (id, name) VALUES (?, ?)")
-                    .bind(&gid)
+            .ok()
+            .flatten()
+            .is_some();
+        if !linked {
+            let room_id = match sqlx::query("SELECT id, inherited_name FROM rooms WHERE name = ?")
+                .bind(&pg.name)
+                .fetch_optional(&state.db)
+                .await
+            {
+                Ok(Some(r)) => {
+                    let rid: String = r.get("id");
+                    if r.get::<Option<String>, _>("inherited_name").is_none() {
+                        let _ = sqlx::query("UPDATE rooms SET inherited_name = ? WHERE id = ?")
+                            .bind(&pg.name)
+                            .bind(&rid)
+                            .execute(&state.db)
+                            .await;
+                    }
+                    rooms_linked += 1;
+                    rid
+                }
+                _ => {
+                    let rid = Uuid::new_v4().to_string();
+                    let _ = sqlx::query(
+                        "INSERT INTO rooms (id, name, inherited_name) VALUES (?, ?, ?)",
+                    )
+                    .bind(&rid)
+                    .bind(&pg.name)
                     .bind(&pg.name)
                     .execute(&state.db)
-                    .await
-                    .is_err()
-                {
-                    continue;
+                    .await;
+                    rooms_created += 1;
+                    rid
                 }
-                gid
-            }
-            Err(_) => continue,
-        };
-
-        let _ = sqlx::query("DELETE FROM group_lights WHERE group_id = ?")
-            .bind(&group_id)
-            .execute(&state.db)
-            .await;
-        for light_id in &light_ids {
+            };
             let _ = sqlx::query(
-                "INSERT OR IGNORE INTO group_lights (group_id, light_id) VALUES (?, ?)",
+                "INSERT OR IGNORE INTO room_links (room_id, provider_group_id) VALUES (?, ?)",
             )
-            .bind(&group_id)
-            .bind(light_id)
+            .bind(&room_id)
+            .bind(&mirror_id)
             .execute(&state.db)
             .await;
         }
-        imported += 1;
+
+        synced += 1;
+    }
+
+    // Mirrors that vanished from the provider.
+    for (pg_id, (mirror_id, _)) in &existing {
+        if !seen.contains(pg_id) {
+            let _ = sqlx::query("DELETE FROM provider_groups WHERE id = ?")
+                .bind(mirror_id)
+                .execute(&state.db)
+                .await;
+        }
     }
 
     Json(serde_json::json!({
-        "imported": imported,
-        "found": provider_groups.len(),
+        "synced": synced,
+        "rooms_created": rooms_created,
+        "rooms_linked": rooms_linked,
     }))
     .into_response()
 }

@@ -1,20 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  activateScene,
+  applyRoomScene,
   createPlan,
-  getGroups,
+  createRoomScene,
+  deleteRoomScene,
   getPlan,
   getPlans,
-  getScenes,
+  getRoomScenes,
+  getRooms,
   mergePatch,
   putPlanLayout,
   putPlanLights,
   putPlanRooms,
   removePlan,
-  setGroupState,
   setLightState,
+  setRoomState,
   xyToRgb,
-  type Group,
   type Light,
   type LightState,
   type LightStatePatch,
@@ -22,7 +23,8 @@ import {
   type Placement,
   type PlanDetail,
   type PlanSummary,
-  type Scene,
+  type Room,
+  type RoomScene,
 } from "../api";
 import { S } from "../styles";
 
@@ -72,8 +74,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
   const [popover, setPopover] = useState<Popover | null>(null);
   const [toast, setToast] = useState("");
 
-  const [groups, setGroups] = useState<Group[]>([]);
-  const [scenes, setScenes] = useState<Scene[]>([]);
+  const [allRooms, setAllRooms] = useState<Room[]>([]);
 
   // Live light states: start from the lights prop, patched by SSE + optimistic toggles.
   const [statesById, setStatesById] = useState<Map<string, LightState>>(new Map());
@@ -130,8 +131,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
 
   useEffect(() => { loadPlans(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
-    getGroups().then(setGroups);
-    getScenes().then(setScenes);
+    getRooms().then(setAllRooms);
   }, []);
 
   useEffect(() => {
@@ -179,9 +179,9 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
       await putPlanLayout(plan.id, tileArr, wallArr);
       await putPlanLights(plan.id, placements);
       await putPlanRooms(plan.id, roomArr);
-      // Reload to pick up server-assigned room group IDs.
+      // Reload to pick up server-assigned Room bindings and memberships.
       await loadPlan(plan.id);
-      setGroups(await getGroups());
+      setAllRooms(await getRooms());
       showToast("Saved.");
     } catch (e) {
       showToast(`Save failed: ${e instanceof Error ? e.message : e}`);
@@ -195,10 +195,10 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
     await setLightState(lightId, next);
   }
 
-  /** "[Office] Right Lamp" — prefix a light's name with its first group. */
+  /** "[Office] Right Lamp" — prefix a light's name with its room. */
   function lightLabel(l: Light): string {
-    const g = groups.find((g) => g.light_ids.includes(l.id));
-    return g ? `[${g.name}] ${l.name}` : l.name;
+    const r = allRooms.find((r) => r.light_ids.includes(l.id));
+    return r ? `[${r.name}] ${l.name}` : l.name;
   }
 
   const placedIds = new Set(placements.map((p) => p.light_id));
@@ -220,6 +220,11 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
         {plan && (
           <>
             <span style={{ flex: 1 }} />
+            {dirty && (
+              <span style={{ color: "#a86", fontSize: "0.72rem", maxWidth: 280, textAlign: "right" }}>
+                Saving adds lights placed inside a room to that room (never removes).
+              </span>
+            )}
             <button onClick={handleSave} disabled={!dirty} style={dirty ? S.button : S.buttonGhost}>
               {dirty ? "Save changes" : "Saved"}
             </button>
@@ -260,25 +265,17 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
             {tool === "view" && plan.rooms.length > 0 && (
               <RoomController
                 plan={plan}
-                scenes={scenes}
+                rooms={allRooms}
                 onSetRoom={async (room, on) => {
-                  if (!room.group_id) return;
-                  const memberIds = roomMemberIds(room, placements);
                   setStatesById((prev) => {
                     const next = new Map(prev);
-                    for (const id of memberIds) {
+                    for (const id of room.light_ids) {
                       next.set(id, { ...(next.get(id) ?? { on: false }), on });
                     }
                     return next;
                   });
-                  await setGroupState(room.group_id, { on });
+                  await setRoomState(room.id, { on });
                 }}
-                onApplyScene={async (room, sceneId) => {
-                  const memberIds = roomMemberIds(room, placements);
-                  if (memberIds.length === 0) return;
-                  await activateScene(sceneId, memberIds);
-                }}
-                memberCount={(room) => roomMemberIds(room, placements).length}
               />
             )}
 
@@ -402,52 +399,45 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
   );
 }
 
-/** Light IDs currently placed on a (saved) room's tiles. */
-function roomMemberIds(room: { tiles: [number, number][] }, placements: Placement[]): string[] {
-  const tileSet = new Set(room.tiles.map(([x, y]) => tileKey(x, y)));
-  return placements.filter((p) => tileSet.has(tileKey(p.x, p.y))).map((p) => p.light_id);
-}
-
 // ── Room controller (left of canvas, view mode) ─────────────────────────────
+
+const SCENE_PRESETS: { name: string; brightness: number; palette: string[] }[] = [
+  { name: "Relax", brightness: 55, palette: ["#ffb46b"] },
+  { name: "Energize", brightness: 100, palette: ["#d6e8ff"] },
+  { name: "Read", brightness: 100, palette: ["#ffe4b3"] },
+  { name: "Nightlight", brightness: 5, palette: ["#ff9b3d"] },
+  { name: "Sunset", brightness: 75, palette: ["#ff7d33", "#ff5e9c", "#ffb04d"] },
+  { name: "Aurora", brightness: 65, palette: ["#22d3ee", "#4ade80", "#8b5cf6"] },
+];
 
 function RoomController({
   plan,
-  scenes,
+  rooms,
   onSetRoom,
-  onApplyScene,
-  memberCount,
 }: {
   plan: PlanDetail;
-  scenes: Scene[];
-  onSetRoom: (room: PlanDetail["rooms"][number], on: boolean) => Promise<void>;
-  onApplyScene: (room: PlanDetail["rooms"][number], sceneId: string) => Promise<void>;
-  memberCount: (room: PlanDetail["rooms"][number]) => number;
+  rooms: Room[];
+  onSetRoom: (room: Room, on: boolean) => Promise<void>;
 }) {
-  const [sceneId, setSceneId] = useState(scenes[0]?.id ?? "");
   const [busy, setBusy] = useState("");
 
-  useEffect(() => {
-    if (scenes.length > 0 && !scenes.some((s) => s.id === sceneId)) setSceneId(scenes[0].id);
-  }, [scenes, sceneId]);
+  // Plan regions bound to a Room, joined with the live Room data.
+  const bound = plan.rooms
+    .map((region, i) => ({
+      region,
+      room: rooms.find((r) => r.id === region.room_id),
+      color: ROOM_COLORS[i % ROOM_COLORS.length],
+    }))
+    .filter((b): b is { region: typeof b.region; room: Room; color: string } => !!b.room);
+
+  if (bound.length === 0) return null;
 
   return (
-    <div style={{ width: 230, flexShrink: 0, display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+    <div style={{ width: 250, flexShrink: 0, display: "flex", flexDirection: "column", gap: "0.6rem" }}>
       <h3 style={{ margin: 0, fontSize: "0.9rem", color: "#aaa" }}>Rooms</h3>
 
-      {scenes.length > 0 && (
-        <label style={{ display: "flex", flexDirection: "column", gap: "0.25rem", fontSize: "0.78rem", color: "#888" }}>
-          Scene
-          <select value={sceneId} onChange={(e) => setSceneId(e.target.value)} style={{ ...S.input, cursor: "pointer" }}>
-            {scenes.map((s) => (
-              <option key={s.id} value={s.id}>{s.name}</option>
-            ))}
-          </select>
-        </label>
-      )}
-
-      {plan.rooms.map((room, i) => {
-        const color = ROOM_COLORS[i % ROOM_COLORS.length];
-        const count = memberCount(room);
+      {bound.map(({ room, color }) => {
+        const count = room.light_ids.length;
         return (
           <div key={room.id} style={{ ...S.card, gap: "0.5rem", borderLeft: `3px solid ${color}` }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
@@ -456,40 +446,216 @@ function RoomController({
                 {count} light{count !== 1 ? "s" : ""}
               </span>
             </div>
-            <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: "0.4rem" }}>
               <button
                 onClick={async () => { setBusy(room.id); try { await onSetRoom(room, true); } finally { setBusy(""); } }}
-                disabled={busy === room.id || !room.group_id || count === 0}
+                disabled={busy === room.id || count === 0}
                 style={{ ...S.buttonGhost, padding: "0.3rem 0.6rem", fontSize: "0.78rem" }}
               >
                 On
               </button>
               <button
                 onClick={async () => { setBusy(room.id); try { await onSetRoom(room, false); } finally { setBusy(""); } }}
-                disabled={busy === room.id || !room.group_id || count === 0}
+                disabled={busy === room.id || count === 0}
                 style={{ ...S.buttonGhost, padding: "0.3rem 0.6rem", fontSize: "0.78rem" }}
               >
                 Off
               </button>
-              {scenes.length > 0 && (
-                <button
-                  onClick={async () => { setBusy(room.id); try { await onApplyScene(room, sceneId); } finally { setBusy(""); } }}
-                  disabled={busy === room.id || !sceneId || count === 0}
-                  title="Apply the selected scene to this room only"
-                  style={{ ...S.buttonGhost, padding: "0.3rem 0.6rem", fontSize: "0.78rem" }}
-                >
-                  Apply scene
-                </button>
-              )}
             </div>
+            <RoomScenes roomId={room.id} disabled={count === 0} />
           </div>
         );
       })}
+    </div>
+  );
+}
 
-      <span style={{ color: "#555", fontSize: "0.72rem" }}>
-        Rooms are painted with the Rooms tool. Each room keeps a group in sync
-        with the lights placed inside it.
+/** Palette scene chips + inline editor for one room. */
+function RoomScenes({ roomId, disabled }: { roomId: string; disabled: boolean }) {
+  const [scenes, setScenes] = useState<RoomScene[]>([]);
+  const [editing, setEditing] = useState(false);
+  const [busy, setBusy] = useState("");
+
+  async function load() {
+    setScenes(await getRoomScenes(roomId));
+  }
+  useEffect(() => { load(); }, [roomId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function apply(sceneId: string) {
+    setBusy(sceneId);
+    try {
+      await applyRoomScene(roomId, sceneId);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function remove(scene: RoomScene) {
+    if (!window.confirm(`Delete scene "${scene.name}"?`)) return;
+    await deleteRoomScene(roomId, scene.id);
+    await load();
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.3rem" }}>
+        {scenes.map((s) => (
+          <span key={s.id} style={{ display: "inline-flex" }}>
+            <button
+              onClick={() => apply(s.id)}
+              disabled={disabled || busy === s.id}
+              title={s.palette.length > 0 ? s.palette.join(" ") : "brightness only"}
+              style={{
+                ...S.buttonGhost,
+                padding: "0.25rem 0.5rem",
+                fontSize: "0.75rem",
+                borderRadius: "6px 0 0 6px",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "0.3rem",
+              }}
+            >
+              <PaletteDots palette={s.palette} />
+              {busy === s.id ? "…" : s.name}
+            </button>
+            <button
+              onClick={() => remove(s)}
+              title="Delete scene"
+              style={{ ...S.buttonGhost, padding: "0.25rem 0.4rem", fontSize: "0.75rem", borderRadius: "0 6px 6px 0", borderLeft: "none", color: "#866" }}
+            >
+              ×
+            </button>
+          </span>
+        ))}
+        <button
+          onClick={() => setEditing((v) => !v)}
+          style={{ ...S.buttonGhost, padding: "0.25rem 0.5rem", fontSize: "0.75rem" }}
+        >
+          {editing ? "Close" : "+ Scene"}
+        </button>
+      </div>
+      {editing && (
+        <SceneEditor
+          onSave={async (scene) => {
+            await createRoomScene(roomId, scene);
+            setEditing(false);
+            await load();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function PaletteDots({ palette }: { palette: string[] }) {
+  if (palette.length === 0) return null;
+  return (
+    <span style={{ display: "inline-flex", gap: 2 }}>
+      {palette.slice(0, 4).map((c, i) => (
+        <span key={i} style={{ width: 8, height: 8, borderRadius: "50%", background: c, display: "inline-block" }} />
+      ))}
+    </span>
+  );
+}
+
+/** Inline editor: name, brightness, palette swatches, Hue-like presets. */
+function SceneEditor({
+  onSave,
+}: {
+  onSave: (scene: { name: string; brightness?: number; palette: string[] }) => Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  const [brightness, setBrightness] = useState(80);
+  const [palette, setPalette] = useState<string[]>(["#ff9900"]);
+  const [saving, setSaving] = useState(false);
+
+  function setColor(i: number, value: string) {
+    setPalette((prev) => prev.map((c, j) => (j === i ? value : c)));
+  }
+
+  async function save() {
+    if (!name.trim()) return;
+    setSaving(true);
+    try {
+      await onSave({ name: name.trim(), brightness, palette });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem", borderTop: "1px solid #2a2a2a", paddingTop: "0.5rem" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.25rem" }}>
+        {SCENE_PRESETS.map((p) => (
+          <button
+            key={p.name}
+            onClick={() => { setName(p.name); setBrightness(p.brightness); setPalette([...p.palette]); }}
+            title={`Preset: ${p.palette.join(" ")} @ ${p.brightness}%`}
+            style={{ ...S.buttonGhost, padding: "0.2rem 0.45rem", fontSize: "0.72rem", display: "inline-flex", alignItems: "center", gap: "0.3rem" }}
+          >
+            <PaletteDots palette={p.palette} />
+            {p.name}
+          </button>
+        ))}
+      </div>
+
+      <input
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder="Scene name"
+        style={{ ...S.input, fontSize: "0.8rem" }}
+      />
+
+      <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.75rem", color: "#888" }}>
+        Brightness
+        <input
+          type="range"
+          min={1}
+          max={100}
+          value={brightness}
+          onChange={(e) => setBrightness(Number(e.target.value))}
+          style={{ flex: 1, accentColor: "#f90" }}
+        />
+        <span style={{ width: 32, textAlign: "right" }}>{brightness}%</span>
+      </label>
+
+      <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", flexWrap: "wrap" }}>
+        <span style={{ fontSize: "0.75rem", color: "#888" }}>Palette</span>
+        {palette.map((c, i) => (
+          <span key={i} style={{ display: "inline-flex", alignItems: "center" }}>
+            <input
+              type="color"
+              value={c}
+              onChange={(e) => setColor(i, e.target.value)}
+              style={{ width: 26, height: 22, padding: 0, border: "1px solid #444", borderRadius: 4, background: "none", cursor: "pointer" }}
+            />
+            {palette.length > 1 && (
+              <button
+                onClick={() => setPalette((prev) => prev.filter((_, j) => j !== i))}
+                title="Remove colour"
+                style={{ background: "none", border: "none", color: "#866", cursor: "pointer", fontSize: "0.7rem", padding: "0 0.15rem" }}
+              >
+                ×
+              </button>
+            )}
+          </span>
+        ))}
+        {palette.length < 6 && (
+          <button
+            onClick={() => setPalette((prev) => [...prev, "#ffffff"])}
+            style={{ ...S.buttonGhost, padding: "0.15rem 0.45rem", fontSize: "0.75rem" }}
+          >
+            +
+          </button>
+        )}
+      </div>
+      <span style={{ fontSize: "0.68rem", color: "#555" }}>
+        Colours are spread across the room's lights in turn.
       </span>
+
+      <button onClick={save} disabled={saving || !name.trim()} style={{ ...S.button, padding: "0.35rem 0.7rem", fontSize: "0.78rem" }}>
+        {saving ? "Saving…" : "Save scene"}
+      </button>
     </div>
   );
 }

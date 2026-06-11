@@ -150,9 +150,22 @@ struct HueResourceRef {
 
 #[derive(Debug, Deserialize)]
 struct HueGroupResource {
+    id: String,
     metadata: HueMetadata,
     #[serde(default)]
     children: Vec<HueResourceRef>,
+    /// Rooms/zones carry a grouped_light service — the native control handle.
+    #[serde(default)]
+    services: Vec<HueResourceRef>,
+}
+
+impl HueGroupResource {
+    fn grouped_light_rid(&self) -> Option<String> {
+        self.services
+            .iter()
+            .find(|s| s.rtype == "grouped_light")
+            .map(|s| s.rid.clone())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -357,8 +370,10 @@ impl LightProvider for HueProvider {
                 .collect();
             if !members.is_empty() {
                 groups.push(ProviderGroup {
-                    name: room.metadata.name,
+                    provider_group_id: room.id.clone(),
+                    name: room.metadata.name.clone(),
                     member_device_ids: members,
+                    grouped_ref: room.grouped_light_rid(),
                 });
             }
         }
@@ -372,13 +387,45 @@ impl LightProvider for HueProvider {
                 .collect();
             if !members.is_empty() {
                 groups.push(ProviderGroup {
-                    name: zone.metadata.name,
+                    provider_group_id: zone.id.clone(),
+                    name: zone.metadata.name.clone(),
                     member_device_ids: members,
+                    grouped_ref: zone.grouped_light_rid(),
                 });
             }
         }
 
         Ok(groups)
+    }
+
+    /// Native group control: one PUT to the room/zone's grouped_light —
+    /// exactly how the Hue app switches a whole room.
+    async fn set_group_state(&self, grouped_ref: &str, state: &LightState) -> Result<bool> {
+        let url = format!(
+            "{}/clip/v2/resource/grouped_light/{grouped_ref}",
+            self.bridge_base
+        );
+        let body = HuePutLight {
+            on: Some(HueOn { on: state.on }),
+            dimming: state.brightness.map(|b| HueDimming { brightness: b }),
+            color: state.color.as_ref().map(|c| HueColor {
+                xy: HueXy { x: c.x, y: c.y },
+                gamut_type: None,
+            }),
+            color_temperature: state
+                .color_temp_mirek
+                .map(|m| HueColorTemperature { mirek: Some(m) }),
+        };
+
+        self.client
+            .put(&url)
+            .json(&body)
+            .send()
+            .await
+            .context("Hue grouped_light request failed")?
+            .error_for_status()?;
+
+        Ok(true)
     }
 }
 
@@ -633,7 +680,8 @@ mod tests {
                     "children": [
                         {"rid": "dev-1", "rtype": "device"},
                         {"rid": "dev-2", "rtype": "device"}
-                    ]
+                    ],
+                    "services": [{"rid": "gl-room-1", "rtype": "grouped_light"}]
                 }]
             })))
             .mount(server)
@@ -677,6 +725,36 @@ mod tests {
 
         let room = groups.iter().find(|g| g.name == "Living Room").unwrap();
         assert_eq!(room.member_device_ids, vec!["light-1", "light-2"]);
+        assert_eq!(room.provider_group_id, "room-1");
+        assert_eq!(room.grouped_ref.as_deref(), Some("gl-room-1"));
+    }
+
+    #[tokio::test]
+    async fn set_group_state_puts_grouped_light() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path("/clip/v2/resource/grouped_light/gl-room-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+            .mount(&server)
+            .await;
+
+        let state = LightState {
+            on: true,
+            brightness: Some(40.0),
+            ..Default::default()
+        };
+        let native = mock_provider(&server)
+            .await
+            .set_group_state("gl-room-1", &state)
+            .await
+            .unwrap();
+        assert!(native, "Hue must report native group control");
+
+        let received = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
+        assert_eq!(body["on"]["on"], true);
+        assert_eq!(body["dimming"]["brightness"], 40.0);
     }
 
     #[tokio::test]

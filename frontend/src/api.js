@@ -125,14 +125,20 @@ export async function activateScene(id, lightIds) {
 export async function removeScene(id) {
     await fetch(`/api/scenes/${id}`, { method: "DELETE" });
 }
-export async function getGroups() {
-    const res = await fetch("/api/groups");
+export async function getRooms() {
+    const res = await fetch("/api/rooms");
     if (!res.ok)
         return [];
     return res.json();
 }
-export async function createGroup(name, light_ids) {
-    const res = await fetch("/api/groups", {
+export async function getProviderGroups() {
+    const res = await fetch("/api/provider-groups");
+    if (!res.ok)
+        return [];
+    return res.json();
+}
+export async function createRoom(name, light_ids) {
+    const res = await fetch("/api/rooms", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name, light_ids }),
@@ -141,22 +147,55 @@ export async function createGroup(name, light_ids) {
         throw new Error(`HTTP ${res.status}`);
     return res.json();
 }
-export async function removeGroup(id) {
-    await fetch(`/api/groups/${id}`, { method: "DELETE" });
+export async function removeRoom(id) {
+    await fetch(`/api/rooms/${id}`, { method: "DELETE" });
 }
-export async function setGroupMembers(id, light_ids) {
-    await fetch(`/api/groups/${id}/lights`, {
+/** Replace the room's DIRECT lights (linked members are unaffected). */
+export async function setRoomDirectLights(id, light_ids) {
+    await fetch(`/api/rooms/${id}/lights`, {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ light_ids }),
     });
 }
-export async function setGroupState(id, state) {
-    const res = await fetch(`/api/groups/${id}/state`, {
+export async function setRoomLinks(id, provider_group_ids) {
+    await fetch(`/api/rooms/${id}/links`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider_group_ids }),
+    });
+}
+export async function setRoomState(id, state) {
+    const res = await fetch(`/api/rooms/${id}/state`, {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(state),
     });
+    if (!res.ok)
+        throw new Error(`HTTP ${res.status}`);
+    return res.json();
+}
+export async function getRoomScenes(roomId) {
+    const res = await fetch(`/api/rooms/${roomId}/scenes`);
+    if (!res.ok)
+        return [];
+    return res.json();
+}
+export async function createRoomScene(roomId, scene) {
+    const res = await fetch(`/api/rooms/${roomId}/scenes`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(scene),
+    });
+    if (!res.ok)
+        throw new Error((await res.text()) || `HTTP ${res.status}`);
+    return res.json();
+}
+export async function deleteRoomScene(roomId, sceneId) {
+    await fetch(`/api/rooms/${roomId}/scenes/${sceneId}`, { method: "DELETE" });
+}
+export async function applyRoomScene(roomId, sceneId) {
+    const res = await fetch(`/api/rooms/${roomId}/scenes/${sceneId}/apply`, { method: "POST" });
     if (!res.ok)
         throw new Error(`HTTP ${res.status}`);
     return res.json();
@@ -263,9 +302,9 @@ export async function discoverLights(id) {
         throw new Error(`HTTP ${res.status}`);
     return res.json();
 }
-/** Import the provider's native rooms/zones as local groups. */
-export async function importProviderGroups(id) {
-    const res = await fetch(`/api/providers/${id}/import-groups`, { method: "POST" });
+/** Sync the provider's rooms/zones into mirrors and keep Rooms in step. */
+export async function syncProviderGroups(id) {
+    const res = await fetch(`/api/providers/${id}/sync-groups`, { method: "POST" });
     if (!res.ok)
         throw new Error(`HTTP ${res.status}`);
     return res.json();

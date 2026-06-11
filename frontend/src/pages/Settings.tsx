@@ -1,22 +1,25 @@
 import { useEffect, useState } from "react";
 import {
   addProvider,
-  createGroup,
+  createRoom,
   discoverLights,
-  getGroups,
+  getProviderGroups,
   getLights,
   getProviderStatus,
   getProviderTypes,
   getProviders,
-  importProviderGroups,
+  syncProviderGroups,
   pairHueBridge,
-  removeGroup,
+  getRooms,
+  removeRoom,
   removeProvider,
-  setGroupMembers,
+  setRoomDirectLights,
+  setRoomLinks,
   updateProviderCredentials,
   type ConnectionStatus,
   type CredentialField,
-  type Group,
+  type ProviderGroupInfo,
+  type Room,
   type Light,
   type Provider,
   type ProviderType,
@@ -94,11 +97,11 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
             onRemove={() => handleRemove(p.id)}
             onDiscover={() => handleDiscover(p.id)}
             onImportGroups={async () => {
-              const r = await importProviderGroups(p.id);
+              const r = await syncProviderGroups(p.id);
               showToast(
-                r.found === 0
+                r.synced === 0
                   ? "No rooms or zones defined on this provider."
-                  : `Imported ${r.imported} of ${r.found} room${r.found !== 1 ? "s" : ""} as groups.`,
+                  : `Synced ${r.synced} room${r.synced !== 1 ? "s" : ""} (${r.rooms_created} created, ${r.rooms_linked} linked).`,
               );
             }}
           />
@@ -122,20 +125,22 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
         </button>
       )}
 
-      <GroupsSection />
+      <RoomsSection />
     </div>
   );
 }
 
-// ── Groups ───────────────────────────────────────────────────────────────────
+// ── Rooms ────────────────────────────────────────────────────────────────────
 
-function GroupsSection() {
-  const [groups, setGroups] = useState<Group[]>([]);
+function RoomsSection() {
+  const [rooms, setRooms] = useState<Room[]>([]);
+  const [providerGroups, setProviderGroups] = useState<ProviderGroupInfo[]>([]);
   const [lights, setLights] = useState<Light[]>([]);
   const [showAdd, setShowAdd] = useState(false);
 
   async function load() {
-    setGroups(await getGroups());
+    setRooms(await getRooms());
+    setProviderGroups(await getProviderGroups());
     const l = await getLights();
     if (l !== "unauthorized") setLights(l);
   }
@@ -143,41 +148,48 @@ function GroupsSection() {
   useEffect(() => { load(); }, []);
 
   async function handleRemove(id: string, name: string) {
-    if (!window.confirm(`Delete group "${name}"?`)) return;
-    await removeGroup(id);
+    if (!window.confirm(`Delete room "${name}"? Its scenes and plan bindings go with it.`)) return;
+    await removeRoom(id);
     await load();
   }
 
   return (
     <div style={{ marginTop: "2.5rem" }}>
-      <h2 style={{ margin: "0 0 1rem", fontSize: "1.2rem", color: "#ccc" }}>Groups</h2>
+      <h2 style={{ margin: "0 0 0.4rem", fontSize: "1.2rem", color: "#ccc" }}>Rooms</h2>
+      <p style={{ color: "#666", fontSize: "0.8rem", margin: "0 0 1rem" }}>
+        A room combines synced provider rooms/zones (links) with directly
+        assigned lights. Use “Sync rooms” on a provider to refresh links.
+      </p>
 
       <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-        {groups.length === 0 && !showAdd && (
+        {rooms.length === 0 && !showAdd && (
           <p style={{ color: "#666", margin: 0 }}>
-            No groups yet. Group lights to control a whole room at once.
+            No rooms yet. Sync a provider, paint one in the planner, or add one here.
           </p>
         )}
-        {groups.map((g) => (
-          <GroupCard
-            key={g.id}
-            group={g}
+        {rooms.map((room) => (
+          <RoomCard
+            key={room.id}
+            room={room}
             lights={lights}
+            providerGroups={providerGroups}
             onChanged={load}
-            onRemove={() => handleRemove(g.id, g.name)}
+            onRemove={() => handleRemove(room.id, room.name)}
           />
         ))}
       </div>
 
       {showAdd ? (
         <div style={{ marginTop: "1rem" }}>
-          <GroupForm
+          <RoomEditForm
             lights={lights}
+            providerGroups={providerGroups}
             initialName=""
-            initialMembers={[]}
+            initialDirect={[]}
+            initialLinks={[]}
             submitLabel="Create"
-            onSubmit={async (name, ids) => {
-              await createGroup(name, ids);
+            onSubmit={async (name, directIds, _linkIds) => {
+              await createRoom(name, directIds);
               setShowAdd(false);
               await load();
             }}
@@ -185,27 +197,24 @@ function GroupsSection() {
           />
         </div>
       ) : (
-        <button
-          onClick={() => setShowAdd(true)}
-          disabled={lights.length === 0}
-          title={lights.length === 0 ? "Discover some lights first" : undefined}
-          style={{ ...S.button, marginTop: "1rem" }}
-        >
-          + Add Group
+        <button onClick={() => setShowAdd(true)} style={{ ...S.button, marginTop: "1rem" }}>
+          + Add Room
         </button>
       )}
     </div>
   );
 }
 
-function GroupCard({
-  group,
+function RoomCard({
+  room,
   lights,
+  providerGroups,
   onChanged,
   onRemove,
 }: {
-  group: Group;
+  room: Room;
   lights: Light[];
+  providerGroups: ProviderGroupInfo[];
   onChanged: () => Promise<void>;
   onRemove: () => void;
 }) {
@@ -213,14 +222,17 @@ function GroupCard({
 
   if (editing) {
     return (
-      <GroupForm
+      <RoomEditForm
         lights={lights}
-        initialName={group.name}
-        initialMembers={group.light_ids}
+        providerGroups={providerGroups}
+        initialName={room.name}
+        initialDirect={room.direct_light_ids}
+        initialLinks={room.links.map((l) => l.provider_group_id)}
         submitLabel="Save"
         nameLocked
-        onSubmit={async (_name, ids) => {
-          await setGroupMembers(group.id, ids);
+        onSubmit={async (_name, directIds, linkIds) => {
+          await setRoomDirectLights(room.id, directIds);
+          await setRoomLinks(room.id, linkIds);
           setEditing(false);
           await onChanged();
         }}
@@ -231,10 +243,19 @@ function GroupCard({
 
   return (
     <div style={{ ...S.card, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: "1rem" }}>
-      <div>
-        <div style={{ fontWeight: 600 }}>{group.name}</div>
-        <div style={{ color: "#888", fontSize: "0.8rem", marginTop: "0.25rem" }}>
-          {group.light_ids.length} light{group.light_ids.length !== 1 ? "s" : ""}
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontWeight: 600 }}>{room.name}</div>
+        <div style={{ color: "#888", fontSize: "0.8rem", marginTop: "0.25rem", display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+          <span>{room.light_ids.length} light{room.light_ids.length !== 1 ? "s" : ""}</span>
+          {room.links.map((l) => (
+            <span
+              key={l.provider_group_id}
+              title="Synced provider room/zone"
+              style={{ border: "1px solid #333", borderRadius: 4, padding: "0 0.35rem", color: "#9a9", fontSize: "0.72rem" }}
+            >
+              ⇄ {l.name}
+            </span>
+          ))}
         </div>
       </div>
       <div style={{ display: "flex", gap: "0.5rem", flexShrink: 0 }}>
@@ -245,29 +266,34 @@ function GroupCard({
   );
 }
 
-function GroupForm({
+function RoomEditForm({
   lights,
+  providerGroups,
   initialName,
-  initialMembers,
+  initialDirect,
+  initialLinks,
   submitLabel,
   nameLocked,
   onSubmit,
   onCancel,
 }: {
   lights: Light[];
+  providerGroups: ProviderGroupInfo[];
   initialName: string;
-  initialMembers: string[];
+  initialDirect: string[];
+  initialLinks: string[];
   submitLabel: string;
   nameLocked?: boolean;
-  onSubmit: (name: string, lightIds: string[]) => Promise<void>;
+  onSubmit: (name: string, directIds: string[], linkIds: string[]) => Promise<void>;
   onCancel: () => void;
 }) {
   const [name, setName] = useState(initialName);
-  const [members, setMembers] = useState<Set<string>>(new Set(initialMembers));
+  const [direct, setDirect] = useState<Set<string>>(new Set(initialDirect));
+  const [links, setLinks] = useState<Set<string>>(new Set(initialLinks));
   const [saving, setSaving] = useState(false);
 
-  function toggle(id: string) {
-    setMembers((prev) => {
+  function toggleSet(setter: React.Dispatch<React.SetStateAction<Set<string>>>, id: string) {
+    setter((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
@@ -275,11 +301,16 @@ function GroupForm({
     });
   }
 
+  // Lights already covered by a selected link (shown, but as link members).
+  const linkedLightIds = new Set(
+    providerGroups.filter((pg) => links.has(pg.id)).flatMap((pg) => pg.light_ids),
+  );
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setSaving(true);
     try {
-      await onSubmit(name.trim(), [...members]);
+      await onSubmit(name.trim(), [...direct], [...links]);
     } finally {
       setSaving(false);
     }
@@ -302,26 +333,63 @@ function GroupForm({
       )}
       {nameLocked && <h3 style={{ margin: 0, fontSize: "1rem", color: "#ccc" }}>{name}</h3>}
 
+      {providerGroups.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
+          <span style={{ fontSize: "0.875rem", color: "#aaa" }}>
+            Linked provider rooms <span style={{ color: "#666" }}>(membership syncs automatically)</span>
+          </span>
+          {providerGroups.map((pg) => (
+            <label
+              key={pg.id}
+              style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.875rem", color: "#ccc", cursor: "pointer" }}
+            >
+              <input
+                type="checkbox"
+                checked={links.has(pg.id)}
+                onChange={() => toggleSet(setLinks, pg.id)}
+                style={{ accentColor: "#f90" }}
+              />
+              ⇄ {pg.name}
+              <span style={{ color: "#666", fontSize: "0.75rem" }}>
+                {pg.light_ids.length} light{pg.light_ids.length !== 1 ? "s" : ""}
+              </span>
+            </label>
+          ))}
+        </div>
+      )}
+
       <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
-        <span style={{ fontSize: "0.875rem", color: "#aaa" }}>Lights</span>
-        {lights.map((l) => (
-          <label
-            key={l.id}
-            style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.875rem", color: "#ccc", cursor: "pointer" }}
-          >
-            <input
-              type="checkbox"
-              checked={members.has(l.id)}
-              onChange={() => toggle(l.id)}
-              style={{ accentColor: "#f90" }}
-            />
-            {l.name}
-          </label>
-        ))}
+        <span style={{ fontSize: "0.875rem", color: "#aaa" }}>Direct lights</span>
+        {lights.map((l) => {
+          const viaLink = linkedLightIds.has(l.id);
+          return (
+            <label
+              key={l.id}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.5rem",
+                fontSize: "0.875rem",
+                color: viaLink ? "#666" : "#ccc",
+                cursor: viaLink ? "default" : "pointer",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={viaLink || direct.has(l.id)}
+                disabled={viaLink}
+                onChange={() => toggleSet(setDirect, l.id)}
+                style={{ accentColor: "#f90" }}
+              />
+              {l.name}
+              {viaLink && <span style={{ fontSize: "0.72rem" }}>(via link)</span>}
+            </label>
+          );
+        })}
       </div>
 
       <div style={{ display: "flex", gap: "0.5rem" }}>
-        <button type="submit" style={S.button} disabled={saving || members.size === 0}>
+        <button type="submit" style={S.button} disabled={saving}>
           {saving ? "…" : submitLabel}
         </button>
         <button type="button" onClick={onCancel} style={S.buttonGhost}>
@@ -390,10 +458,10 @@ function ProviderCard({
           <button
             onClick={handleImport}
             disabled={importing}
-            title="Import the provider's rooms/zones as Bifrost groups"
+            title="Sync the provider's rooms/zones into Bifrost Rooms"
             style={S.buttonGhost}
           >
-            {importing ? "…" : "Import rooms"}
+            {importing ? "…" : "Sync rooms"}
           </button>
           <button
             onClick={() => setEditingCreds((v) => !v)}

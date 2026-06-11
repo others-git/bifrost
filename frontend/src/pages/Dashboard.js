@@ -1,6 +1,6 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useEffect, useRef, useState } from "react";
-import { activateScene, createScene, getGroups, getProviders, getScenes, mergePatch, removeScene, rgbToXy, setGroupState, setLightState, } from "../api";
+import { activateScene, createScene, getProviders, getRooms, getScenes, mergePatch, removeScene, rgbToXy, setLightState, setRoomState, } from "../api";
 import { S } from "../styles";
 export function DashboardPage({ lights, onRefresh, onNavigate }) {
     // Local copy so SSE events can update individual lights without a full server round-trip.
@@ -23,7 +23,7 @@ export function DashboardPage({ lights, onRefresh, onNavigate }) {
     function handleLocalUpdate(id, state) {
         setLocalLights((prev) => prev.map((l) => (l.id === id ? { ...l, last_state: state } : l)));
     }
-    return (_jsxs("div", { style: { padding: "2rem", maxWidth: 960, margin: "0 auto" }, children: [localLights.length > 0 && _jsx(SceneBar, { onActivated: onRefresh }), localLights.length > 0 && _jsx(GroupBar, { onChanged: onRefresh }), localLights.length === 0 ? (_jsxs("div", { style: { textAlign: "center", padding: "4rem 0", color: "#666" }, children: [_jsx("p", { style: { margin: "0 0 0.75rem" }, children: "No lights found." }), _jsxs("p", { style: { margin: 0, fontSize: "0.875rem" }, children: ["Add a provider in", " ", _jsx("button", { onClick: () => onNavigate("settings"), style: {
+    return (_jsxs("div", { style: { padding: "2rem", maxWidth: 960, margin: "0 auto" }, children: [localLights.length > 0 && _jsx(SceneBar, { onActivated: onRefresh }), localLights.length > 0 && _jsx(RoomBar, { onChanged: onRefresh }), localLights.length === 0 ? (_jsxs("div", { style: { textAlign: "center", padding: "4rem 0", color: "#666" }, children: [_jsx("p", { style: { margin: "0 0 0.75rem" }, children: "No lights found." }), _jsxs("p", { style: { margin: 0, fontSize: "0.875rem" }, children: ["Add a provider in", " ", _jsx("button", { onClick: () => onNavigate("settings"), style: {
                                     background: "none",
                                     border: "none",
                                     color: "#f90",
@@ -85,25 +85,25 @@ function SceneBar({ onActivated }) {
     }
     return (_jsxs("div", { style: { display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center", marginBottom: "1.25rem" }, children: [scenes.map((s) => (_jsxs("span", { style: { display: "inline-flex" }, children: [_jsx("button", { onClick: () => handleActivate(s.id), disabled: busy === s.id, title: `Apply "${s.name}" (${s.lights} light${s.lights !== 1 ? "s" : ""})`, style: { ...S.buttonGhost, borderRadius: "6px 0 0 6px" }, children: busy === s.id ? "…" : s.name }), _jsx("button", { onClick: () => handleRemove(s.id, s.name), title: "Delete scene", style: { ...S.buttonGhost, borderRadius: "0 6px 6px 0", borderLeft: "none", padding: "0.45rem 0.55rem", color: "#866" }, children: "\u00D7" })] }, s.id))), _jsx("button", { onClick: handleSave, style: S.buttonGhost, title: "Save the current light states as a scene", children: "+ Save scene" })] }));
 }
-function GroupBar({ onChanged }) {
-    const [groups, setGroups] = useState([]);
+function RoomBar({ onChanged }) {
+    const [rooms, setRooms] = useState([]);
     const [busy, setBusy] = useState("");
     useEffect(() => {
-        getGroups().then(setGroups);
+        getRooms().then(setRooms);
     }, []);
     async function setAll(id, on) {
         setBusy(id);
         try {
-            await setGroupState(id, { on });
+            await setRoomState(id, { on });
             onChanged();
         }
         finally {
             setBusy("");
         }
     }
-    if (groups.length === 0)
+    if (rooms.length === 0)
         return null;
-    return (_jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center", marginBottom: "1.25rem" }, children: groups.map((g) => (_jsxs("span", { style: { display: "inline-flex", alignItems: "center", gap: "0.4rem", border: "1px solid #333", borderRadius: 6, padding: "0.3rem 0.3rem 0.3rem 0.7rem" }, children: [_jsx("span", { style: { fontSize: "0.85rem", color: "#ccc" }, children: g.name }), _jsx("button", { onClick: () => setAll(g.id, true), disabled: busy === g.id, style: { ...S.buttonGhost, padding: "0.25rem 0.55rem", fontSize: "0.75rem" }, children: "On" }), _jsx("button", { onClick: () => setAll(g.id, false), disabled: busy === g.id, style: { ...S.buttonGhost, padding: "0.25rem 0.55rem", fontSize: "0.75rem" }, children: "Off" })] }, g.id))) }));
+    return (_jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center", marginBottom: "1.25rem" }, children: rooms.map((r) => (_jsxs("span", { style: { display: "inline-flex", alignItems: "center", gap: "0.4rem", border: "1px solid #333", borderRadius: 6, padding: "0.3rem 0.3rem 0.3rem 0.7rem" }, children: [_jsx("span", { style: { fontSize: "0.85rem", color: "#ccc" }, children: r.name }), _jsx("button", { onClick: () => setAll(r.id, true), disabled: busy === r.id || r.light_ids.length === 0, style: { ...S.buttonGhost, padding: "0.25rem 0.55rem", fontSize: "0.75rem" }, children: "On" }), _jsx("button", { onClick: () => setAll(r.id, false), disabled: busy === r.id || r.light_ids.length === 0, style: { ...S.buttonGhost, padding: "0.25rem 0.55rem", fontSize: "0.75rem" }, children: "Off" })] }, r.id))) }));
 }
 function LightCard({ light, onLocalUpdate, onChanged, }) {
     const serverBrightness = light.last_state?.brightness ?? 100;
