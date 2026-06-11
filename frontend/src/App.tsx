@@ -44,8 +44,8 @@ export function App() {
   if (page === "login") return <LoginPage onSuccess={() => init()} />;
 
   return (
-    <div style={{ minHeight: "100vh", background: "#111", color: "#f0f0f0" }}>
-      <Nav
+    <div style={{ display: "flex", minHeight: "100vh", background: "#111", color: "#f0f0f0" }}>
+      <NavTray
         version={version}
         page={page}
         onNavigate={(p) => {
@@ -57,22 +57,26 @@ export function App() {
           setPage("login");
         }}
       />
-      {page === "dashboard" && (
-        <DashboardPage
-          lights={lights}
-          onRefresh={refreshLights}
-          onNavigate={(p) => setPage(p)}
-        />
-      )}
-      {page === "plan" && <FloorPlanPage lights={lights} />}
-      {page === "settings" && (
-        <SettingsPage onNavigate={(p) => setPage(p)} />
-      )}
+      <main style={{ flex: 1, minWidth: 0 }}>
+        {page === "dashboard" && (
+          <DashboardPage
+            lights={lights}
+            onRefresh={refreshLights}
+            onNavigate={(p) => setPage(p)}
+          />
+        )}
+        {page === "plan" && <FloorPlanPage lights={lights} />}
+        {page === "settings" && (
+          <SettingsPage onNavigate={(p) => setPage(p)} />
+        )}
+      </main>
     </div>
   );
 }
 
-function Nav({
+const NAV_COLLAPSED_KEY = "bifrost.nav.collapsed";
+
+function NavTray({
   version,
   page,
   onNavigate,
@@ -83,58 +87,135 @@ function Nav({
   onNavigate: (p: "dashboard" | "plan" | "settings") => void;
   onLogout: () => void;
 }) {
-  const activeStyle: React.CSSProperties = { color: "#f90", fontWeight: 700 };
-  const tabStyle: React.CSSProperties = {
-    background: "none",
-    border: "none",
-    color: "#999",
-    cursor: "pointer",
-    fontSize: "0.9rem",
-    padding: "0.25rem 0",
-  };
+  const [collapsed, setCollapsed] = useState(
+    () => localStorage.getItem(NAV_COLLAPSED_KEY) === "1",
+  );
+
+  function toggle() {
+    setCollapsed((c) => {
+      localStorage.setItem(NAV_COLLAPSED_KEY, c ? "0" : "1");
+      return !c;
+    });
+  }
+
+  const items: { id: "dashboard" | "plan" | "settings"; glyph: string; label: string }[] = [
+    { id: "dashboard", glyph: "◉", label: "Lights" },
+    { id: "plan", glyph: "▦", label: "Plan" },
+    { id: "settings", glyph: "⚙", label: "Settings" },
+  ];
 
   return (
     <nav
       style={{
+        width: collapsed ? 56 : 200,
+        flexShrink: 0,
         display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        padding: "1rem 2rem",
-        borderBottom: "1px solid #222",
+        flexDirection: "column",
+        borderRight: "1px solid #222",
         background: "#161616",
+        padding: "0.75rem 0.5rem",
+        gap: "0.25rem",
+        transition: "width 0.15s ease",
+        position: "sticky",
+        top: 0,
+        height: "100vh",
+        boxSizing: "border-box",
       }}
     >
-      <span style={{ display: "inline-flex", alignItems: "baseline", gap: "0.5rem" }}>
-        <span style={{ fontWeight: 800, fontSize: "1.1rem", color: "#f90", letterSpacing: "0.03em" }}>
-          Bifrost
+      {/* Brand */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "baseline",
+          gap: "0.5rem",
+          padding: "0.25rem 0.6rem 0.9rem",
+          overflow: "hidden",
+          whiteSpace: "nowrap",
+        }}
+      >
+        <span style={{ fontWeight: 800, fontSize: "1.05rem", color: "#f90", letterSpacing: "0.03em" }}>
+          {collapsed ? "B" : "Bifrost"}
         </span>
-        {version && (
+        {!collapsed && version && (
           <span style={{ fontSize: "0.7rem", color: "#666" }}>v{version}</span>
         )}
-      </span>
-      <div style={{ display: "flex", gap: "1.5rem", alignItems: "center" }}>
-        <button
-          onClick={() => onNavigate("dashboard")}
-          style={{ ...tabStyle, ...(page === "dashboard" ? activeStyle : {}) }}
-        >
-          Lights
-        </button>
-        <button
-          onClick={() => onNavigate("plan")}
-          style={{ ...tabStyle, ...(page === "plan" ? activeStyle : {}) }}
-        >
-          Plan
-        </button>
-        <button
-          onClick={() => onNavigate("settings")}
-          style={{ ...tabStyle, ...(page === "settings" ? activeStyle : {}) }}
-        >
-          Settings
-        </button>
-        <button onClick={onLogout} style={{ ...tabStyle, color: "#666" }}>
-          Sign out
-        </button>
       </div>
+
+      {items.map((item) => {
+        const active = page === item.id;
+        return (
+          <button
+            key={item.id}
+            onClick={() => onNavigate(item.id)}
+            title={collapsed ? item.label : undefined}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "0.65rem",
+              padding: collapsed ? "0.55rem 0" : "0.55rem 0.6rem",
+              justifyContent: collapsed ? "center" : "flex-start",
+              background: active ? "#222" : "none",
+              border: "none",
+              borderRadius: 8,
+              color: active ? "#f90" : "#999",
+              fontWeight: active ? 700 : 400,
+              fontSize: "0.9rem",
+              cursor: "pointer",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+            }}
+          >
+            <span style={{ fontSize: "1rem", width: 18, textAlign: "center", flexShrink: 0 }}>
+              {item.glyph}
+            </span>
+            {!collapsed && item.label}
+          </button>
+        );
+      })}
+
+      <span style={{ flex: 1 }} />
+
+      <button
+        onClick={onLogout}
+        title={collapsed ? "Sign out" : undefined}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "0.65rem",
+          padding: collapsed ? "0.55rem 0" : "0.55rem 0.6rem",
+          justifyContent: collapsed ? "center" : "flex-start",
+          background: "none",
+          border: "none",
+          borderRadius: 8,
+          color: "#666",
+          fontSize: "0.9rem",
+          cursor: "pointer",
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+        }}
+      >
+        <span style={{ fontSize: "1rem", width: 18, textAlign: "center", flexShrink: 0 }}>⏻</span>
+        {!collapsed && "Sign out"}
+      </button>
+
+      <button
+        onClick={toggle}
+        title={collapsed ? "Expand navigation" : "Collapse navigation"}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: "0.45rem 0",
+          background: "none",
+          border: "1px solid #2a2a2a",
+          borderRadius: 8,
+          color: "#777",
+          fontSize: "0.85rem",
+          cursor: "pointer",
+        }}
+      >
+        {collapsed ? "»" : "«"}
+      </button>
     </nav>
   );
 }

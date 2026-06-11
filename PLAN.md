@@ -403,7 +403,12 @@ SQLite, out-of-bounds coordinates rejected with 422.
 - [x] Click a light: toggle (optimistic). Clusters (several lights on one
   mount) draw one dot with a ×N badge; click opens a popover with per-light
   toggles
-- [ ] Stretch: marquee-select tiles → "create group from room"
+- [x] Stretch realized as **planner rooms**: paint named tile regions with the
+  Rooms tool (tinted overlays + labels); each room auto-maintains a group
+  whose membership mirrors the lights placed on its tiles (synced on room and
+  placement saves; group deleted with the room). Room controller panel left
+  of the canvas in view mode: per-room On/Off and scene apply scoped to the
+  room via `POST /api/scenes/{id}/activate {light_ids}`.
 - [ ] Stretch: brightness/color popover on placed lights (reuse LightCard)
 
 ---

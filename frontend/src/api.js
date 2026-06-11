@@ -112,8 +112,12 @@ export async function createScene(name) {
         throw new Error(`HTTP ${res.status}`);
     return res.json();
 }
-export async function activateScene(id) {
-    const res = await fetch(`/api/scenes/${id}/activate`, { method: "POST" });
+export async function activateScene(id, lightIds) {
+    const res = await fetch(`/api/scenes/${id}/activate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(lightIds ? { light_ids: lightIds } : {}),
+    });
     if (!res.ok)
         throw new Error(`HTTP ${res.status}`);
     return res.json();
@@ -196,6 +200,15 @@ export async function putPlanLights(id, placements) {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ placements }),
+    });
+    if (!res.ok)
+        throw new Error((await res.text()) || `HTTP ${res.status}`);
+}
+export async function putPlanRooms(id, rooms) {
+    const res = await fetch(`/api/plans/${id}/rooms`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ rooms }),
     });
     if (!res.ok)
         throw new Error((await res.text()) || `HTTP ${res.status}`);

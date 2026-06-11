@@ -1406,3 +1406,235 @@ async fn update_credentials_unknown_provider_returns_404() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+// ── Plan rooms ───────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn rooms_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/plans/some-id/rooms")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"rooms":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// Full room lifecycle: create a room over a placed light → auto-group with
+/// that light; move the room away → membership empties; remove the room →
+/// group disappears.
+#[tokio::test]
+async fn room_auto_group_follows_room_and_placements() {
+    let bridge = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Plan with a light placed at (2, 2).
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/plans",
+            &cookie,
+            r#"{"name":"P","width":10,"height":10}"#,
+        ))
+        .await
+        .unwrap();
+    let plan_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let body = format!(r#"{{"placements":[{{"light_id":"{light_id}","x":2,"y":2,"mount":"c"}}]}}"#);
+    let _ = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/plans/{plan_id}/lights"),
+            &cookie,
+            &body,
+        ))
+        .await
+        .unwrap();
+
+    // Room covering (2,2).
+    let rooms = r#"{"rooms":[{"id":"","name":"Office","tiles":[[2,2],[2,3],[3,2],[3,3]]}]}"#;
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/plans/{plan_id}/rooms"),
+            &cookie,
+            rooms,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // The auto-group exists with the placed light.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/groups", &cookie))
+        .await
+        .unwrap();
+    let groups = helpers::response_json(resp).await;
+    assert_eq!(groups[0]["name"], "Office");
+    assert_eq!(groups[0]["light_ids"][0], light_id);
+
+    // GET plan returns the room with its group linkage.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get(
+            &format!("/api/plans/{plan_id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    let plan = helpers::response_json(resp).await;
+    let room_id = plan["rooms"][0]["id"].as_str().unwrap().to_string();
+    let group_id = plan["rooms"][0]["group_id"].as_str().unwrap().to_string();
+    assert_eq!(plan["rooms"][0]["name"], "Office");
+
+    // Move the room away from the light → group membership empties,
+    // same group id (stable linkage).
+    let rooms = format!(r#"{{"rooms":[{{"id":"{room_id}","name":"Office","tiles":[[8,8]]}}]}}"#);
+    let _ = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/plans/{plan_id}/rooms"),
+            &cookie,
+            &rooms,
+        ))
+        .await
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/groups", &cookie))
+        .await
+        .unwrap();
+    let groups = helpers::response_json(resp).await;
+    assert_eq!(groups[0]["id"], group_id);
+    assert_eq!(groups[0]["light_ids"], serde_json::json!([]));
+
+    // Remove the room entirely → its group is deleted.
+    let _ = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/plans/{plan_id}/rooms"),
+            &cookie,
+            r#"{"rooms":[]}"#,
+        ))
+        .await
+        .unwrap();
+    let resp = app
+        .oneshot(helpers::authed_get("/api/groups", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(helpers::response_json(resp).await, serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn placing_a_light_updates_room_group_membership() {
+    let bridge = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/plans",
+            &cookie,
+            r#"{"name":"P","width":10,"height":10}"#,
+        ))
+        .await
+        .unwrap();
+    let plan_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Room first, no lights placed yet.
+    let _ = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/plans/{plan_id}/rooms"),
+            &cookie,
+            r#"{"rooms":[{"id":"","name":"Bedroom","tiles":[[5,5]]}]}"#,
+        ))
+        .await
+        .unwrap();
+
+    // Now place the light inside the room → membership updates via PUT lights.
+    let body = format!(r#"{{"placements":[{{"light_id":"{light_id}","x":5,"y":5,"mount":"c"}}]}}"#);
+    let _ = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/plans/{plan_id}/lights"),
+            &cookie,
+            &body,
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/groups", &cookie))
+        .await
+        .unwrap();
+    let groups = helpers::response_json(resp).await;
+    assert_eq!(groups[0]["light_ids"][0], light_id);
+}
+
+#[tokio::test]
+async fn scene_activation_scoped_to_light_ids() {
+    let bridge = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/scenes",
+            &cookie,
+            r#"{"name":"S"}"#,
+        ))
+        .await
+        .unwrap();
+    let scene_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Scoped to a different light: nothing applies.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/scenes/{scene_id}/activate"),
+            &cookie,
+            r#"{"light_ids":["someone-else"]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["applied"], 0);
+
+    // Scoped to our light: applies.
+    let resp = app
+        .oneshot(helpers::authed_post(
+            &format!("/api/scenes/{scene_id}/activate"),
+            &cookie,
+            &format!(r#"{{"light_ids":["{light_id}"]}}"#),
+        ))
+        .await
+        .unwrap();
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["applied"], 1);
+}

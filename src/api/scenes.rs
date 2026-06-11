@@ -142,15 +142,27 @@ async fn remove_scene(
     StatusCode::NO_CONTENT.into_response()
 }
 
+#[derive(Deserialize, Default)]
+struct ActivateRequest {
+    /// When present, only entries for these lights are applied — used by the
+    /// floor-plan room controller to scope a scene to one room.
+    #[serde(default)]
+    light_ids: Option<Vec<String>>,
+}
+
 /// Apply every entry in the scene, in parallel, via each light's provider.
+/// An optional body `{light_ids: [...]}` restricts which entries apply.
 async fn activate_scene(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    body: Option<Json<ActivateRequest>>,
 ) -> impl IntoResponse {
     if require_session(&state, &headers).await.is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+
+    let filter = body.and_then(|Json(b)| b.light_ids);
 
     let entries = match sqlx::query(
         "SELECT e.light_id, e.state, l.device_id, p.provider_type, p.credentials
@@ -170,9 +182,19 @@ async fn activate_scene(
         }
     };
 
+    // 404 only when the scene itself has nothing; an exhaustive filter just
+    // applies zero entries.
     if entries.is_empty() {
         return StatusCode::NOT_FOUND.into_response();
     }
+
+    let entries: Vec<_> = match &filter {
+        Some(ids) => entries
+            .into_iter()
+            .filter(|r| ids.contains(&r.get::<String, _>("light_id")))
+            .collect(),
+        None => entries,
+    };
 
     let mut jobs = Vec::new();
     for row in entries {

@@ -190,8 +190,15 @@ export async function createScene(name: string): Promise<{ id: string; lights: n
   return res.json();
 }
 
-export async function activateScene(id: string): Promise<{ applied: number; failed: number }> {
-  const res = await fetch(`/api/scenes/${id}/activate`, { method: "POST" });
+export async function activateScene(
+  id: string,
+  lightIds?: string[],
+): Promise<{ applied: number; failed: number }> {
+  const res = await fetch(`/api/scenes/${id}/activate`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(lightIds ? { light_ids: lightIds } : {}),
+  });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -274,6 +281,14 @@ export interface PlanSummary {
   created_at: string;
 }
 
+export interface PlanRoom {
+  id: string;
+  name: string;
+  /** Auto-managed group mirroring the lights placed in this room (server-assigned). */
+  group_id?: string;
+  tiles: [number, number][];
+}
+
 export interface PlanDetail {
   id: string;
   name: string;
@@ -282,6 +297,7 @@ export interface PlanDetail {
   tiles: [number, number][];
   walls: Wall[];
   lights: Placement[];
+  rooms: PlanRoom[];
 }
 
 export async function getPlans(): Promise<PlanSummary[]> {
@@ -324,6 +340,18 @@ export async function putPlanLights(id: string, placements: Placement[]): Promis
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ placements }),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+}
+
+export async function putPlanRooms(
+  id: string,
+  rooms: { id: string; name: string; tiles: [number, number][] }[],
+): Promise<void> {
+  const res = await fetch(`/api/plans/${id}/rooms`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ rooms }),
   });
   if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
 }

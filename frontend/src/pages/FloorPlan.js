@@ -1,14 +1,16 @@
 import { jsx as _jsx, Fragment as _Fragment, jsxs as _jsxs } from "react/jsx-runtime";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createPlan, getPlan, getPlans, mergePatch, putPlanLayout, putPlanLights, removePlan, setLightState, xyToRgb, } from "../api";
+import { activateScene, createPlan, getGroups, getPlan, getPlans, getScenes, mergePatch, putPlanLayout, putPlanLights, putPlanRooms, removePlan, setGroupState, setLightState, xyToRgb, } from "../api";
 import { S } from "../styles";
 const TOOLS = [
     { id: "view", label: "View", hint: "Click a light to toggle it. Drag to pan, scroll to zoom." },
     { id: "floor", label: "Floor", hint: "Click-drag to paint floor tiles." },
     { id: "wall", label: "Wall", hint: "Click-drag along tile boundaries to draw walls. Leave gaps for doors." },
-    { id: "erase", label: "Erase", hint: "Click-drag to remove tiles and walls." },
+    { id: "erase", label: "Erase", hint: "Click-drag to remove tiles, walls, and room assignments." },
     { id: "place", label: "Lights", hint: "Pick a light from the palette, then click a tile — near an edge wall-mounts it, the middle ceiling-mounts it. Click a placed light to remove it." },
+    { id: "room", label: "Rooms", hint: "Pick or create a room on the right, then click-drag tiles to paint it. A tile belongs to one room." },
 ];
+const ROOM_COLORS = ["#8b5cf6", "#3b82f6", "#22d3ee", "#4ade80", "#facc15", "#fb923c", "#f43f5e"];
 const tileKey = (x, y) => `${x},${y}`;
 const wallKey = (x, y, dir) => `${x},${y},${dir}`;
 export function FloorPlanPage({ lights }) {
@@ -19,11 +21,15 @@ export function FloorPlanPage({ lights }) {
     const [tiles, setTiles] = useState(new Set());
     const [walls, setWalls] = useState(new Set());
     const [placements, setPlacements] = useState([]);
+    const [rooms, setRooms] = useState([]);
     const [dirty, setDirty] = useState(false);
     const [tool, setTool] = useState("view");
     const [selectedLight, setSelectedLight] = useState("");
+    const [selectedRoom, setSelectedRoom] = useState("");
     const [popover, setPopover] = useState(null);
     const [toast, setToast] = useState("");
+    const [groups, setGroups] = useState([]);
+    const [scenes, setScenes] = useState([]);
     // Live light states: start from the lights prop, patched by SSE + optimistic toggles.
     const [statesById, setStatesById] = useState(new Map());
     useEffect(() => {
@@ -57,21 +63,32 @@ export function FloorPlanPage({ lights }) {
         if (list.length > 0 && !list.some((p) => p.id === planId))
             setPlanId(list[0].id);
     }
+    async function loadPlan(id) {
+        const p = await getPlan(id);
+        setPlan(p);
+        setTiles(new Set(p.tiles.map(([x, y]) => tileKey(x, y))));
+        setWalls(new Set(p.walls.map((w) => wallKey(w.x, w.y, w.dir))));
+        setPlacements(p.lights);
+        setRooms(p.rooms.map((r) => ({
+            id: r.id,
+            name: r.name,
+            tiles: new Set(r.tiles.map(([x, y]) => tileKey(x, y))),
+        })));
+        setDirty(false);
+        setPopover(null);
+    }
     useEffect(() => { loadPlans(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    useEffect(() => {
+        getGroups().then(setGroups);
+        getScenes().then(setScenes);
+    }, []);
     useEffect(() => {
         if (!planId) {
             setPlan(null);
             return;
         }
-        getPlan(planId).then((p) => {
-            setPlan(p);
-            setTiles(new Set(p.tiles.map(([x, y]) => tileKey(x, y))));
-            setWalls(new Set(p.walls.map((w) => wallKey(w.x, w.y, w.dir))));
-            setPlacements(p.lights);
-            setDirty(false);
-            setPopover(null);
-        });
-    }, [planId]);
+        loadPlan(planId);
+    }, [planId]); // eslint-disable-line react-hooks/exhaustive-deps
     function showToast(msg) {
         setToast(msg);
         setTimeout(() => setToast(""), 3000);
@@ -105,10 +122,18 @@ export function FloorPlanPage({ lights }) {
             const [x, y, dir] = k.split(",");
             return { x: Number(x), y: Number(y), dir: dir };
         });
+        const roomArr = rooms.map((r) => ({
+            id: r.id,
+            name: r.name,
+            tiles: [...r.tiles].map((k) => k.split(",").map(Number)),
+        }));
         try {
             await putPlanLayout(plan.id, tileArr, wallArr);
             await putPlanLights(plan.id, placements);
-            setDirty(false);
+            await putPlanRooms(plan.id, roomArr);
+            // Reload to pick up server-assigned room group IDs.
+            await loadPlan(plan.id);
+            setGroups(await getGroups());
             showToast("Saved.");
         }
         catch (e) {
@@ -121,19 +146,65 @@ export function FloorPlanPage({ lights }) {
         setStatesById((prev) => new Map(prev).set(lightId, next)); // optimistic
         await setLightState(lightId, next);
     }
+    /** "[Office] Right Lamp" — prefix a light's name with its first group. */
+    function lightLabel(l) {
+        const g = groups.find((g) => g.light_ids.includes(l.id));
+        return g ? `[${g.name}] ${l.name}` : l.name;
+    }
     const placedIds = new Set(placements.map((p) => p.light_id));
-    return (_jsxs("div", { style: { padding: "1.5rem 2rem" }, children: [_jsxs("div", { style: { display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "0.9rem", flexWrap: "wrap" }, children: [plans.map((p) => (_jsx("button", { onClick: () => setPlanId(p.id), style: { ...S.buttonGhost, ...(p.id === planId ? { borderColor: "#f90", color: "#f90" } : {}) }, children: p.name }, p.id))), _jsx("button", { onClick: handleCreate, style: S.buttonGhost, children: "+ New plan" }), plan && (_jsxs(_Fragment, { children: [_jsx("span", { style: { flex: 1 } }), _jsx("button", { onClick: handleSave, disabled: !dirty, style: dirty ? S.button : S.buttonGhost, children: dirty ? "Save changes" : "Saved" }), _jsx("button", { onClick: handleDelete, style: S.buttonDanger, children: "Delete" })] }))] }), toast && (_jsx("div", { style: { background: "#1e3a1e", border: "1px solid #2a5a2a", borderRadius: 8, padding: "0.5rem 1rem", marginBottom: "0.75rem", color: "#8f8", fontSize: "0.875rem" }, children: toast })), !plan ? (_jsx("p", { style: { color: "#666" }, children: "No floor plans yet. Create one, paint your layout, then place your lights on it." })) : (_jsxs(_Fragment, { children: [_jsxs("div", { style: { display: "flex", gap: "0.4rem", marginBottom: "0.5rem", alignItems: "center", flexWrap: "wrap" }, children: [TOOLS.map((t) => (_jsx("button", { onClick: () => { setTool(t.id); setPopover(null); }, style: { ...S.buttonGhost, ...(tool === t.id ? { borderColor: "#f90", color: "#f90" } : {}) }, children: t.label }, t.id))), _jsx("span", { style: { color: "#666", fontSize: "0.78rem", marginLeft: "0.5rem" }, children: TOOLS.find((t) => t.id === tool)?.hint })] }), _jsxs("div", { style: { display: "flex", gap: "1rem", alignItems: "flex-start" }, children: [_jsx(PlanCanvas, { plan: plan, tiles: tiles, walls: walls, placements: placements, statesById: statesById, tool: tool, selectedLight: selectedLight, onMutate: (fn) => { fn(); setDirty(true); setPopover(null); }, setTiles: setTiles, setWalls: setWalls, setPlacements: setPlacements, onLightClick: (pls, px, py) => {
+    return (_jsxs("div", { style: { padding: "1.5rem 2rem" }, children: [_jsxs("div", { style: { display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "0.9rem", flexWrap: "wrap" }, children: [plans.map((p) => (_jsx("button", { onClick: () => setPlanId(p.id), style: { ...S.buttonGhost, ...(p.id === planId ? { borderColor: "#f90", color: "#f90" } : {}) }, children: p.name }, p.id))), _jsx("button", { onClick: handleCreate, style: S.buttonGhost, children: "+ New plan" }), plan && (_jsxs(_Fragment, { children: [_jsx("span", { style: { flex: 1 } }), _jsx("button", { onClick: handleSave, disabled: !dirty, style: dirty ? S.button : S.buttonGhost, children: dirty ? "Save changes" : "Saved" }), _jsx("button", { onClick: handleDelete, style: S.buttonDanger, children: "Delete" })] }))] }), toast && (_jsx("div", { style: { background: "#1e3a1e", border: "1px solid #2a5a2a", borderRadius: 8, padding: "0.5rem 1rem", marginBottom: "0.75rem", color: "#8f8", fontSize: "0.875rem" }, children: toast })), !plan ? (_jsx("p", { style: { color: "#666" }, children: "No floor plans yet. Create one, paint your layout, then place your lights on it." })) : (_jsxs(_Fragment, { children: [_jsxs("div", { style: { display: "flex", gap: "0.4rem", marginBottom: "0.5rem", alignItems: "center", flexWrap: "wrap" }, children: [TOOLS.map((t) => (_jsx("button", { onClick: () => { setTool(t.id); setPopover(null); }, style: { ...S.buttonGhost, ...(tool === t.id ? { borderColor: "#f90", color: "#f90" } : {}) }, children: t.label }, t.id))), _jsx("span", { style: { color: "#666", fontSize: "0.78rem", marginLeft: "0.5rem" }, children: TOOLS.find((t) => t.id === tool)?.hint })] }), _jsxs("div", { style: { display: "flex", gap: "1rem", alignItems: "flex-start" }, children: [tool === "view" && plan.rooms.length > 0 && (_jsx(RoomController, { plan: plan, scenes: scenes, onSetRoom: async (room, on) => {
+                                    if (!room.group_id)
+                                        return;
+                                    const memberIds = roomMemberIds(room, placements);
+                                    setStatesById((prev) => {
+                                        const next = new Map(prev);
+                                        for (const id of memberIds) {
+                                            next.set(id, { ...(next.get(id) ?? { on: false }), on });
+                                        }
+                                        return next;
+                                    });
+                                    await setGroupState(room.group_id, { on });
+                                }, onApplyScene: async (room, sceneId) => {
+                                    const memberIds = roomMemberIds(room, placements);
+                                    if (memberIds.length === 0)
+                                        return;
+                                    await activateScene(sceneId, memberIds);
+                                }, memberCount: (room) => roomMemberIds(room, placements).length })), _jsx(PlanCanvas, { plan: plan, tiles: tiles, walls: walls, placements: placements, rooms: rooms, selectedRoom: selectedRoom, statesById: statesById, tool: tool, selectedLight: selectedLight, onMutate: (fn) => { fn(); setDirty(true); setPopover(null); }, setTiles: setTiles, setWalls: setWalls, setPlacements: setPlacements, setRooms: setRooms, onLightClick: (pls, px, py) => {
                                     if (pls.length === 1)
                                         toggleLight(pls[0].light_id);
                                     else
                                         setPopover({ px, py, placements: pls });
-                                } }), tool === "place" && (_jsxs("div", { style: { width: 200, flexShrink: 0 }, children: [_jsx("h3", { style: { margin: "0 0 0.5rem", fontSize: "0.9rem", color: "#aaa" }, children: "Lights" }), _jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "0.3rem" }, children: [lights.map((l) => (_jsxs("button", { onClick: () => setSelectedLight(l.id === selectedLight ? "" : l.id), style: {
+                                } }), tool === "place" && (_jsxs("div", { style: { width: 220, flexShrink: 0 }, children: [_jsx("h3", { style: { margin: "0 0 0.5rem", fontSize: "0.9rem", color: "#aaa" }, children: "Lights" }), _jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "0.3rem" }, children: [lights.map((l) => (_jsxs("button", { onClick: () => setSelectedLight(l.id === selectedLight ? "" : l.id), style: {
                                                     ...S.buttonGhost,
                                                     textAlign: "left",
                                                     fontSize: "0.8rem",
                                                     ...(l.id === selectedLight ? { borderColor: "#f90", color: "#f90" } : {}),
                                                     ...(placedIds.has(l.id) ? { opacity: 0.55 } : {}),
-                                                }, children: [placedIds.has(l.id) ? "✓ " : "", l.name] }, l.id))), lights.length === 0 && (_jsx("span", { style: { color: "#666", fontSize: "0.8rem" }, children: "No lights discovered yet." }))] })] }))] }), popover && (_jsxs("div", { style: {
+                                                }, children: [placedIds.has(l.id) ? "✓ " : "", lightLabel(l)] }, l.id))), lights.length === 0 && (_jsx("span", { style: { color: "#666", fontSize: "0.8rem" }, children: "No lights discovered yet." }))] })] })), tool === "room" && (_jsx(RoomEditorPanel, { rooms: rooms, selectedRoom: selectedRoom, onSelect: setSelectedRoom, onCreate: () => {
+                                    const name = window.prompt("Room name:");
+                                    if (!name?.trim())
+                                        return;
+                                    const room = { id: "", name: name.trim(), tiles: new Set() };
+                                    // Local placeholder id so selection works before save.
+                                    room.id = `new-${Date.now()}`;
+                                    setRooms((prev) => [...prev, room]);
+                                    setSelectedRoom(room.id);
+                                    setDirty(true);
+                                }, onRename: (id) => {
+                                    const room = rooms.find((r) => r.id === id);
+                                    const name = window.prompt("Room name:", room?.name ?? "");
+                                    if (!name?.trim())
+                                        return;
+                                    setRooms((prev) => prev.map((r) => (r.id === id ? { ...r, name: name.trim() } : r)));
+                                    setDirty(true);
+                                }, onDelete: (id) => {
+                                    if (!window.confirm("Remove this room? Its auto-group is deleted on save."))
+                                        return;
+                                    setRooms((prev) => prev.filter((r) => r.id !== id));
+                                    if (selectedRoom === id)
+                                        setSelectedRoom("");
+                                    setDirty(true);
+                                } }))] }), popover && (_jsxs("div", { style: {
                             position: "fixed",
                             left: popover.px,
                             top: popover.py,
@@ -149,11 +220,56 @@ export function FloorPlanPage({ lights }) {
                         }, children: [popover.placements.map((p) => {
                                 const light = lights.find((l) => l.id === p.light_id);
                                 const on = statesById.get(p.light_id)?.on ?? false;
-                                return (_jsxs("button", { onClick: () => toggleLight(p.light_id), style: { ...S.buttonGhost, fontSize: "0.8rem", textAlign: "left", color: on ? "#f90" : "#888" }, children: [on ? "● " : "○ ", light?.name ?? p.light_id] }, p.light_id));
+                                return (_jsxs("button", { onClick: () => toggleLight(p.light_id), style: { ...S.buttonGhost, fontSize: "0.8rem", textAlign: "left", color: on ? "#f90" : "#888" }, children: [on ? "● " : "○ ", light ? lightLabel(light) : p.light_id] }, p.light_id));
                             }), _jsx("button", { onClick: () => setPopover(null), style: { ...S.buttonGhost, fontSize: "0.75rem", color: "#666" }, children: "Close" })] }))] }))] }));
 }
+/** Light IDs currently placed on a (saved) room's tiles. */
+function roomMemberIds(room, placements) {
+    const tileSet = new Set(room.tiles.map(([x, y]) => tileKey(x, y)));
+    return placements.filter((p) => tileSet.has(tileKey(p.x, p.y))).map((p) => p.light_id);
+}
+// ── Room controller (left of canvas, view mode) ─────────────────────────────
+function RoomController({ plan, scenes, onSetRoom, onApplyScene, memberCount, }) {
+    const [sceneId, setSceneId] = useState(scenes[0]?.id ?? "");
+    const [busy, setBusy] = useState("");
+    useEffect(() => {
+        if (scenes.length > 0 && !scenes.some((s) => s.id === sceneId))
+            setSceneId(scenes[0].id);
+    }, [scenes, sceneId]);
+    return (_jsxs("div", { style: { width: 230, flexShrink: 0, display: "flex", flexDirection: "column", gap: "0.6rem" }, children: [_jsx("h3", { style: { margin: 0, fontSize: "0.9rem", color: "#aaa" }, children: "Rooms" }), scenes.length > 0 && (_jsxs("label", { style: { display: "flex", flexDirection: "column", gap: "0.25rem", fontSize: "0.78rem", color: "#888" }, children: ["Scene", _jsx("select", { value: sceneId, onChange: (e) => setSceneId(e.target.value), style: { ...S.input, cursor: "pointer" }, children: scenes.map((s) => (_jsx("option", { value: s.id, children: s.name }, s.id))) })] })), plan.rooms.map((room, i) => {
+                const color = ROOM_COLORS[i % ROOM_COLORS.length];
+                const count = memberCount(room);
+                return (_jsxs("div", { style: { ...S.card, gap: "0.5rem", borderLeft: `3px solid ${color}` }, children: [_jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline" }, children: [_jsx("span", { style: { fontWeight: 600, fontSize: "0.9rem" }, children: room.name }), _jsxs("span", { style: { color: "#666", fontSize: "0.75rem" }, children: [count, " light", count !== 1 ? "s" : ""] })] }), _jsxs("div", { style: { display: "flex", gap: "0.4rem", flexWrap: "wrap" }, children: [_jsx("button", { onClick: async () => { setBusy(room.id); try {
+                                        await onSetRoom(room, true);
+                                    }
+                                    finally {
+                                        setBusy("");
+                                    } }, disabled: busy === room.id || !room.group_id || count === 0, style: { ...S.buttonGhost, padding: "0.3rem 0.6rem", fontSize: "0.78rem" }, children: "On" }), _jsx("button", { onClick: async () => { setBusy(room.id); try {
+                                        await onSetRoom(room, false);
+                                    }
+                                    finally {
+                                        setBusy("");
+                                    } }, disabled: busy === room.id || !room.group_id || count === 0, style: { ...S.buttonGhost, padding: "0.3rem 0.6rem", fontSize: "0.78rem" }, children: "Off" }), scenes.length > 0 && (_jsx("button", { onClick: async () => { setBusy(room.id); try {
+                                        await onApplyScene(room, sceneId);
+                                    }
+                                    finally {
+                                        setBusy("");
+                                    } }, disabled: busy === room.id || !sceneId || count === 0, title: "Apply the selected scene to this room only", style: { ...S.buttonGhost, padding: "0.3rem 0.6rem", fontSize: "0.78rem" }, children: "Apply scene" }))] })] }, room.id));
+            }), _jsx("span", { style: { color: "#555", fontSize: "0.72rem" }, children: "Rooms are painted with the Rooms tool. Each room keeps a group in sync with the lights placed inside it." })] }));
+}
+// ── Room editor panel (right of canvas, room tool) ──────────────────────────
+function RoomEditorPanel({ rooms, selectedRoom, onSelect, onCreate, onRename, onDelete, }) {
+    return (_jsxs("div", { style: { width: 220, flexShrink: 0, display: "flex", flexDirection: "column", gap: "0.4rem" }, children: [_jsx("h3", { style: { margin: "0 0 0.2rem", fontSize: "0.9rem", color: "#aaa" }, children: "Rooms" }), rooms.map((r, i) => (_jsxs("div", { style: { display: "flex", gap: "0.3rem", alignItems: "center" }, children: [_jsxs("button", { onClick: () => onSelect(r.id === selectedRoom ? "" : r.id), style: {
+                            ...S.buttonGhost,
+                            flex: 1,
+                            textAlign: "left",
+                            fontSize: "0.8rem",
+                            borderLeft: `3px solid ${ROOM_COLORS[i % ROOM_COLORS.length]}`,
+                            ...(r.id === selectedRoom ? { borderColor: "#f90", color: "#f90" } : {}),
+                        }, children: [r.name, _jsx("span", { style: { color: "#666", marginLeft: "0.4rem" }, children: r.tiles.size })] }), _jsx("button", { onClick: () => onRename(r.id), title: "Rename", style: { ...S.buttonGhost, padding: "0.3rem 0.5rem" }, children: "\u270E" }), _jsx("button", { onClick: () => onDelete(r.id), title: "Delete", style: { ...S.buttonGhost, padding: "0.3rem 0.5rem", color: "#866" }, children: "\u00D7" })] }, r.id))), _jsx("button", { onClick: onCreate, style: S.buttonGhost, children: "+ New room" }), rooms.length > 0 && !selectedRoom && (_jsx("span", { style: { color: "#666", fontSize: "0.75rem" }, children: "Select a room, then paint its tiles." }))] }));
+}
 // ── Canvas ───────────────────────────────────────────────────────────────────
-function PlanCanvas({ plan, tiles, walls, placements, statesById, tool, selectedLight, onMutate, setTiles, setWalls, setPlacements, onLightClick, }) {
+function PlanCanvas({ plan, tiles, walls, placements, rooms, selectedRoom, statesById, tool, selectedLight, onMutate, setTiles, setWalls, setPlacements, setRooms, onLightClick, }) {
     const canvasRef = useRef(null);
     const [view, setView] = useState({ cell: 0, ox: 0, oy: 0 }); // cell=0 → fit on first draw
     const drag = useRef(null);
@@ -194,6 +310,18 @@ function PlanCanvas({ plan, tiles, walls, placements, statesById, tool, selected
             const [x, y] = k.split(",").map(Number);
             ctx.fillRect(ox + x * cell, oy + y * cell, cell, cell);
         }
+        // Room tints
+        rooms.forEach((room, i) => {
+            const color = ROOM_COLORS[i % ROOM_COLORS.length];
+            const emphasized = tool === "room" && room.id === selectedRoom;
+            ctx.fillStyle = color;
+            ctx.globalAlpha = emphasized ? 0.32 : 0.15;
+            for (const k of room.tiles) {
+                const [x, y] = k.split(",").map(Number);
+                ctx.fillRect(ox + x * cell, oy + y * cell, cell, cell);
+            }
+            ctx.globalAlpha = 1;
+        });
         // Grid
         ctx.strokeStyle = "rgba(255,255,255,0.05)";
         ctx.lineWidth = 1;
@@ -227,6 +355,26 @@ function PlanCanvas({ plan, tiles, walls, placements, statesById, tool, selected
             }
             ctx.stroke();
         }
+        // Room labels (above tints and walls, below lights)
+        if (cell >= 9) {
+            rooms.forEach((room) => {
+                if (room.tiles.size === 0)
+                    return;
+                let sx = 0, sy = 0;
+                for (const k of room.tiles) {
+                    const [x, y] = k.split(",").map(Number);
+                    sx += x + 0.5;
+                    sy += y + 0.5;
+                }
+                const cx = ox + (sx / room.tiles.size) * cell;
+                const cy = oy + (sy / room.tiles.size) * cell;
+                ctx.font = `600 ${Math.max(10, cell * 0.45)}px system-ui`;
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                ctx.fillStyle = "rgba(255,255,255,0.55)";
+                ctx.fillText(room.name, cx, cy);
+            });
+        }
         // Lights, clustered by (x, y, mount)
         const clusters = new Map();
         for (const p of placements) {
@@ -239,7 +387,6 @@ function PlanCanvas({ plan, tiles, walls, placements, statesById, tool, selected
             const cx = ox + (p.x + mx) * cell;
             const cy = oy + (p.y + my) * cell;
             const r = Math.max(3.5, cell * 0.18);
-            // Aggregate: lit if any member is on; color from the first lit member.
             const states = group.map((g) => statesById.get(g.light_id));
             const lit = states.find((s) => s?.on);
             let fill = "#3a3d45";
@@ -276,7 +423,7 @@ function PlanCanvas({ plan, tiles, walls, placements, statesById, tool, selected
                 ctx.fillText(`×${group.length}`, cx + r + 2, cy);
             }
         }
-    }, [view, plan, tiles, walls, placements, statesById]);
+    }, [view, plan, tiles, walls, placements, rooms, selectedRoom, tool, statesById]);
     useEffect(() => { draw(); }, [draw]);
     useEffect(() => {
         // Redraw whenever the canvas box changes (window resize, palette
@@ -326,14 +473,36 @@ function PlanCanvas({ plan, tiles, walls, placements, statesById, tool, selected
             if (edge)
                 onMutate(() => setWalls((prev) => new Set(prev).add(wallKey(edge.x, edge.y, edge.dir))));
         }
+        else if (tool === "room" && inBounds && selectedRoom) {
+            const k = tileKey(tx, ty);
+            onMutate(() => setRooms((prev) => prev.map((r) => {
+                const tiles = new Set(r.tiles);
+                // A tile belongs to exactly one room.
+                if (r.id === selectedRoom)
+                    tiles.add(k);
+                else
+                    tiles.delete(k);
+                return { ...r, tiles };
+            })));
+        }
         else if (tool === "erase") {
             const edge = nearestEdge(gx, gy);
             const nearWall = edge && Math.min(gx - Math.floor(gx), 1 - (gx - Math.floor(gx)), gy - Math.floor(gy), 1 - (gy - Math.floor(gy))) < 0.2;
+            const k = tileKey(tx, ty);
             onMutate(() => {
-                if (nearWall && edge)
+                if (nearWall && edge) {
                     setWalls((prev) => { const n = new Set(prev); n.delete(wallKey(edge.x, edge.y, edge.dir)); return n; });
-                else if (inBounds)
-                    setTiles((prev) => { const n = new Set(prev); n.delete(tileKey(tx, ty)); return n; });
+                }
+                else if (inBounds) {
+                    setTiles((prev) => { const n = new Set(prev); n.delete(k); return n; });
+                    setRooms((prev) => prev.map((r) => {
+                        if (!r.tiles.has(k))
+                            return r;
+                        const tiles = new Set(r.tiles);
+                        tiles.delete(k);
+                        return { ...r, tiles };
+                    }));
+                }
             });
         }
         else if (tool === "place" && e.type === "pointerdown" && inBounds) {
@@ -387,7 +556,7 @@ function PlanCanvas({ plan, tiles, walls, placements, statesById, tool, selected
             drag.current.px = e.clientX;
             drag.current.py = e.clientY;
         }
-        else if (!drag.current.panning && (tool === "floor" || tool === "wall" || tool === "erase")) {
+        else if (!drag.current.panning && (tool === "floor" || tool === "wall" || tool === "erase" || tool === "room")) {
             const { gx, gy } = toGrid(e);
             applyTool(gx, gy, e);
         }
