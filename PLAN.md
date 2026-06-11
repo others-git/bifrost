@@ -250,33 +250,23 @@ The registry pattern makes this mechanical. Each new provider is:
 - [x] `PUT /api/groups/{id}/lights` — replace membership
 - [x] `PUT /api/groups/{id}/state` — broadcast a state to all members in parallel; `{applied, failed}`
 - [x] Tests: 401, create+list, empty-name 422, group state via wiremock device, 404, membership replace, delete
-- [ ] Groups UI (assign lights to rooms in Settings, group cards on Dashboard)
+- [x] Groups UI — Settings: create groups with light checkboxes, edit membership, delete; Dashboard: per-group On/Off chips
 
 ### 5.3 Schedules / automations
 
 Stretch goal. Cron-style triggers stored in SQLite, executed by a tokio interval task.
 
-### 5.4 Docker Compose reference
+### 5.4 Docker Compose reference ✅ DONE
 
-```yaml
-services:
-  bifrost:
-    image: bifrost:latest
-    restart: unless-stopped
-    ports: ["3000:3000"]
-    volumes:
-      - ./data:/data
-    environment:
-      DATABASE_URL: sqlite:///data/bifrost.db
-      BIFROST_SECRET: <32+ char random secret>
-      BIND_ADDR: 0.0.0.0:3000
-```
+`docker-compose.yml` at the repo root (BIFROST_SECRET required via `.env`), plus
+`README.md` with quickstarts (Docker + bare binary), an env-var table, provider
+setup notes, API overview, and `LICENSE` (MIT).
 
-### 5.5 Observability
+### 5.5 Observability ✅ PARTIAL
 
-- Structured JSON logging via `tracing` (already wired, needs `RUST_LOG` docs)
-- `GET /api/health` response extended with uptime and per-provider SSE stats
-- Optional: Prometheus metrics endpoint (`/metrics`) — reconnect counts, event rates
+- [x] `RUST_LOG` documented in README and set in compose (`bifrost=info`)
+- [x] `GET /api/health` now reports `version` + `uptime_secs` alongside per-provider connection state
+- [ ] Optional: Prometheus metrics endpoint (`/metrics`) — reconnect counts, event rates
 
 ---
 

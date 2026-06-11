@@ -21,6 +21,7 @@ pub struct AppState {
     pub db: SqlitePool,
     pub registry: ProviderRegistry,
     pub connections: Mutex<ConnectionRegistry>,
+    pub started_at: std::time::Instant,
     cipher: Aes256Gcm,
 }
 
@@ -31,6 +32,7 @@ impl AppState {
             cipher: crypto::cipher_from_secret(secret),
             registry,
             connections: Mutex::new(ConnectionRegistry::new()),
+            started_at: std::time::Instant::now(),
         }
     }
 

@@ -27,6 +27,8 @@ pub fn router() -> Router<Arc<AppState>> {
 #[derive(Serialize)]
 struct HealthResponse {
     ok: bool,
+    version: &'static str,
+    uptime_secs: u64,
     providers: Vec<ProviderHealth>,
 }
 
@@ -68,6 +70,8 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
     Json(HealthResponse {
         ok: true,
+        version: env!("CARGO_PKG_VERSION"),
+        uptime_secs: state.started_at.elapsed().as_secs(),
         providers,
     })
 }

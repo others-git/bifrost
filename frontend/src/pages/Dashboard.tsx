@@ -2,10 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import {
   activateScene,
   createScene,
+  getGroups,
   getScenes,
   removeScene,
   rgbToXy,
+  setGroupState,
   setLightState,
+  type Group,
   type Light,
   type LightState,
   type Scene,
@@ -54,6 +57,7 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
   return (
     <div style={{ padding: "2rem", maxWidth: 960, margin: "0 auto" }}>
       {localLights.length > 0 && <SceneBar onActivated={onRefresh} />}
+      {localLights.length > 0 && <GroupBar onChanged={onRefresh} />}
       {localLights.length === 0 ? (
         <div style={{ textAlign: "center", padding: "4rem 0", color: "#666" }}>
           <p style={{ margin: "0 0 0.75rem" }}>No lights found.</p>
@@ -154,6 +158,54 @@ function SceneBar({ onActivated }: { onActivated: () => void }) {
       <button onClick={handleSave} style={S.buttonGhost} title="Save the current light states as a scene">
         + Save scene
       </button>
+    </div>
+  );
+}
+
+function GroupBar({ onChanged }: { onChanged: () => void }) {
+  const [groups, setGroups] = useState<Group[]>([]);
+  const [busy, setBusy] = useState("");
+
+  useEffect(() => {
+    getGroups().then(setGroups);
+  }, []);
+
+  async function setAll(id: string, on: boolean) {
+    setBusy(id);
+    try {
+      await setGroupState(id, { on });
+      onChanged();
+    } finally {
+      setBusy("");
+    }
+  }
+
+  if (groups.length === 0) return null;
+
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center", marginBottom: "1.25rem" }}>
+      {groups.map((g) => (
+        <span
+          key={g.id}
+          style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem", border: "1px solid #333", borderRadius: 6, padding: "0.3rem 0.3rem 0.3rem 0.7rem" }}
+        >
+          <span style={{ fontSize: "0.85rem", color: "#ccc" }}>{g.name}</span>
+          <button
+            onClick={() => setAll(g.id, true)}
+            disabled={busy === g.id}
+            style={{ ...S.buttonGhost, padding: "0.25rem 0.55rem", fontSize: "0.75rem" }}
+          >
+            On
+          </button>
+          <button
+            onClick={() => setAll(g.id, false)}
+            disabled={busy === g.id}
+            style={{ ...S.buttonGhost, padding: "0.25rem 0.55rem", fontSize: "0.75rem" }}
+          >
+            Off
+          </button>
+        </span>
+      ))}
     </div>
   );
 }

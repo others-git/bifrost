@@ -1,6 +1,6 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useEffect, useState } from "react";
-import { addProvider, discoverLights, getProviderStatus, getProviderTypes, getProviders, pairHueBridge, removeProvider, } from "../api";
+import { addProvider, createGroup, discoverLights, getGroups, getLights, getProviderStatus, getProviderTypes, getProviders, pairHueBridge, removeGroup, removeProvider, setGroupMembers, } from "../api";
 import { S } from "../styles";
 export function SettingsPage({ onNavigate: _onNavigate }) {
     const [providers, setProviders] = useState([]);
@@ -41,7 +41,68 @@ export function SettingsPage({ onNavigate: _onNavigate }) {
             showToast("Provider added. Discovery failed — check the connection and try Discover.");
         }
     }
-    return (_jsxs("div", { style: { padding: "2rem", maxWidth: 720, margin: "0 auto" }, children: [_jsx("h2", { style: { margin: "0 0 1.5rem", fontSize: "1.2rem", color: "#ccc" }, children: "Providers" }), toast && (_jsx("div", { style: { background: "#1e3a1e", border: "1px solid #2a5a2a", borderRadius: 8, padding: "0.6rem 1rem", marginBottom: "1rem", color: "#8f8", fontSize: "0.875rem" }, children: toast })), _jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "0.75rem" }, children: [providers.length === 0 && !showAdd && (_jsx("p", { style: { color: "#666", margin: 0 }, children: "No providers configured." })), providers.map((p) => (_jsx(ProviderCard, { provider: p, onRemove: () => handleRemove(p.id), onDiscover: () => handleDiscover(p.id) }, p.id)))] }), showAdd ? (_jsx("div", { style: { marginTop: "1.5rem" }, children: _jsx(AddProviderForm, { types: types, onAdded: handleAdded, onCancel: () => setShowAdd(false) }) })) : (_jsx("button", { onClick: () => setShowAdd(true), style: { ...S.button, marginTop: "1.5rem" }, children: "+ Add Provider" }))] }));
+    return (_jsxs("div", { style: { padding: "2rem", maxWidth: 720, margin: "0 auto" }, children: [_jsx("h2", { style: { margin: "0 0 1.5rem", fontSize: "1.2rem", color: "#ccc" }, children: "Providers" }), toast && (_jsx("div", { style: { background: "#1e3a1e", border: "1px solid #2a5a2a", borderRadius: 8, padding: "0.6rem 1rem", marginBottom: "1rem", color: "#8f8", fontSize: "0.875rem" }, children: toast })), _jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "0.75rem" }, children: [providers.length === 0 && !showAdd && (_jsx("p", { style: { color: "#666", margin: 0 }, children: "No providers configured." })), providers.map((p) => (_jsx(ProviderCard, { provider: p, onRemove: () => handleRemove(p.id), onDiscover: () => handleDiscover(p.id) }, p.id)))] }), showAdd ? (_jsx("div", { style: { marginTop: "1.5rem" }, children: _jsx(AddProviderForm, { types: types, onAdded: handleAdded, onCancel: () => setShowAdd(false) }) })) : (_jsx("button", { onClick: () => setShowAdd(true), style: { ...S.button, marginTop: "1.5rem" }, children: "+ Add Provider" })), _jsx(GroupsSection, {})] }));
+}
+// ── Groups ───────────────────────────────────────────────────────────────────
+function GroupsSection() {
+    const [groups, setGroups] = useState([]);
+    const [lights, setLights] = useState([]);
+    const [showAdd, setShowAdd] = useState(false);
+    async function load() {
+        setGroups(await getGroups());
+        const l = await getLights();
+        if (l !== "unauthorized")
+            setLights(l);
+    }
+    useEffect(() => { load(); }, []);
+    async function handleRemove(id, name) {
+        if (!window.confirm(`Delete group "${name}"?`))
+            return;
+        await removeGroup(id);
+        await load();
+    }
+    return (_jsxs("div", { style: { marginTop: "2.5rem" }, children: [_jsx("h2", { style: { margin: "0 0 1rem", fontSize: "1.2rem", color: "#ccc" }, children: "Groups" }), _jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "0.75rem" }, children: [groups.length === 0 && !showAdd && (_jsx("p", { style: { color: "#666", margin: 0 }, children: "No groups yet. Group lights to control a whole room at once." })), groups.map((g) => (_jsx(GroupCard, { group: g, lights: lights, onChanged: load, onRemove: () => handleRemove(g.id, g.name) }, g.id)))] }), showAdd ? (_jsx("div", { style: { marginTop: "1rem" }, children: _jsx(GroupForm, { lights: lights, initialName: "", initialMembers: [], submitLabel: "Create", onSubmit: async (name, ids) => {
+                        await createGroup(name, ids);
+                        setShowAdd(false);
+                        await load();
+                    }, onCancel: () => setShowAdd(false) }) })) : (_jsx("button", { onClick: () => setShowAdd(true), disabled: lights.length === 0, title: lights.length === 0 ? "Discover some lights first" : undefined, style: { ...S.button, marginTop: "1rem" }, children: "+ Add Group" }))] }));
+}
+function GroupCard({ group, lights, onChanged, onRemove, }) {
+    const [editing, setEditing] = useState(false);
+    if (editing) {
+        return (_jsx(GroupForm, { lights: lights, initialName: group.name, initialMembers: group.light_ids, submitLabel: "Save", nameLocked: true, onSubmit: async (_name, ids) => {
+                await setGroupMembers(group.id, ids);
+                setEditing(false);
+                await onChanged();
+            }, onCancel: () => setEditing(false) }));
+    }
+    return (_jsxs("div", { style: { ...S.card, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: "1rem" }, children: [_jsxs("div", { children: [_jsx("div", { style: { fontWeight: 600 }, children: group.name }), _jsxs("div", { style: { color: "#888", fontSize: "0.8rem", marginTop: "0.25rem" }, children: [group.light_ids.length, " light", group.light_ids.length !== 1 ? "s" : ""] })] }), _jsxs("div", { style: { display: "flex", gap: "0.5rem", flexShrink: 0 }, children: [_jsx("button", { onClick: () => setEditing(true), style: S.buttonGhost, children: "Edit" }), _jsx("button", { onClick: onRemove, style: S.buttonDanger, children: "Remove" })] })] }));
+}
+function GroupForm({ lights, initialName, initialMembers, submitLabel, nameLocked, onSubmit, onCancel, }) {
+    const [name, setName] = useState(initialName);
+    const [members, setMembers] = useState(new Set(initialMembers));
+    const [saving, setSaving] = useState(false);
+    function toggle(id) {
+        setMembers((prev) => {
+            const next = new Set(prev);
+            if (next.has(id))
+                next.delete(id);
+            else
+                next.add(id);
+            return next;
+        });
+    }
+    async function submit(e) {
+        e.preventDefault();
+        setSaving(true);
+        try {
+            await onSubmit(name.trim(), [...members]);
+        }
+        finally {
+            setSaving(false);
+        }
+    }
+    return (_jsxs("form", { onSubmit: submit, style: { ...S.card, border: "1px solid #333" }, children: [!nameLocked && (_jsxs("label", { style: labelStyle, children: [_jsx("span", { children: "Name" }), _jsx("input", { value: name, onChange: (e) => setName(e.target.value), placeholder: "e.g. Living Room", style: S.input, required: true, autoFocus: true })] })), nameLocked && _jsx("h3", { style: { margin: 0, fontSize: "1rem", color: "#ccc" }, children: name }), _jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "0.35rem" }, children: [_jsx("span", { style: { fontSize: "0.875rem", color: "#aaa" }, children: "Lights" }), lights.map((l) => (_jsxs("label", { style: { display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.875rem", color: "#ccc", cursor: "pointer" }, children: [_jsx("input", { type: "checkbox", checked: members.has(l.id), onChange: () => toggle(l.id), style: { accentColor: "#f90" } }), l.name] }, l.id)))] }), _jsxs("div", { style: { display: "flex", gap: "0.5rem" }, children: [_jsx("button", { type: "submit", style: S.button, disabled: saving || members.size === 0, children: saving ? "…" : submitLabel }), _jsx("button", { type: "button", onClick: onCancel, style: S.buttonGhost, children: "Cancel" })] })] }));
 }
 function ProviderCard({ provider, onRemove, onDiscover, }) {
     const [status, setStatus] = useState(null);

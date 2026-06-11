@@ -161,6 +161,24 @@ async fn health_endpoint_returns_ok() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+#[tokio::test]
+async fn health_reports_version_and_uptime() {
+    let app = helpers::test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+    assert!(body["uptime_secs"].is_u64());
+}
+
 // ── Auth ────────────────────────────────────────────────────────────────────
 
 #[tokio::test]

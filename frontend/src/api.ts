@@ -162,6 +162,53 @@ export async function removeScene(id: string): Promise<void> {
   await fetch(`/api/scenes/${id}`, { method: "DELETE" });
 }
 
+export interface Group {
+  id: string;
+  name: string;
+  light_ids: string[];
+}
+
+export async function getGroups(): Promise<Group[]> {
+  const res = await fetch("/api/groups");
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function createGroup(name: string, light_ids: string[]): Promise<{ id: string }> {
+  const res = await fetch("/api/groups", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name, light_ids }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function removeGroup(id: string): Promise<void> {
+  await fetch(`/api/groups/${id}`, { method: "DELETE" });
+}
+
+export async function setGroupMembers(id: string, light_ids: string[]): Promise<void> {
+  await fetch(`/api/groups/${id}/lights`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ light_ids }),
+  });
+}
+
+export async function setGroupState(
+  id: string,
+  state: LightState,
+): Promise<{ applied: number; failed: number }> {
+  const res = await fetch(`/api/groups/${id}/state`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(state),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
 export type HuePairResult =
   | { app_key: string }
   | { error: "link_button_not_pressed" | "bridge_unreachable"; message: string };

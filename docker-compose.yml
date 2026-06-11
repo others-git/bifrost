@@ -1,0 +1,17 @@
+services:
+  bifrost:
+    build: .
+    # Or, once images are published:
+    # image: ghcr.io/others-git/bifrost:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/data
+    environment:
+      DATABASE_URL: sqlite:///data/bifrost.db
+      BIND_ADDR: 0.0.0.0:3000
+      # Required: encrypts provider credentials at rest (AES-256-GCM).
+      # Generate one: openssl rand -hex 32
+      BIFROST_SECRET: ${BIFROST_SECRET:?set BIFROST_SECRET in .env}
+      RUST_LOG: bifrost=info
