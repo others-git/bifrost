@@ -290,7 +290,97 @@ setup notes, API overview, and `LICENSE` (MIT).
 
 ------
 
-new feature:
+## Milestone 6 — LIFX Provider
 
-a a "DIY" grid feature where a house can be represented by building a floor plan using 1x1 "sqquare foot" files (think Sims 4 houses but 2d) and lights can be placed. The "light"s should correspond to the actual lights. 
+LIFX is the one major light ecosystem still missing. Two transports, two phases:
+
+### 6.1 Phase 1: Cloud API (HTTPS REST)
+
+Matches the existing provider pattern exactly — testable with wiremock, no new
+infrastructure.
+
+- Base URL `https://api.lifx.com/v1`, auth via `Authorization: Bearer <token>`
+  (token from cloud.lifx.com → Personal Access Tokens)
+- `GET /lights/all` — discovery + state (power, brightness 0–1, color as HSBK)
+- `PUT /lights/id:<id>/state` — `{ power, brightness, color: "hue:120 saturation:1.0" }`
+- HSBK ↔ internal model: hue 0–360 + sat → RGB → CIE xy via existing `Color`;
+  kelvin → mirek (1_000_000 / K)
+- `ConnectionMode::Poll` (default 120 s)
+- Credentials schema: `[{ name: "token", kind: Password, required: true }]`
+- Standard wiremock suite: discover, get_state, set_state, error propagation,
+  factory build/missing-token
+
+### 6.2 Phase 2: LAN protocol (UDP) — the reason LIFX was deferred
+
+Binary UDP on port 56700; no cloud dependency, much lower latency.
+
+- Discovery: broadcast `GetService` (pkt 2) → `StateService` (pkt 3) replies
+- State: `LightGet` (101) → `LightState` (107) — HSBK + power + label
+- Control: `LightSetColor` (102), `SetLightPower` (117)
+- Needs: packet codec (header Frame / FrameAddress / ProtocolHeader — pure
+  functions, unit-testable byte-for-byte), `tokio::net::UdpSocket` transport
+- Tests: codec round-trips against known byte fixtures; transport against a
+  scripted fake bulb (local UDP socket in the test) — consistent with the
+  "real behaviour over mocks" rule
+- Caveat to document: UDP broadcast requires host-network mode in Docker;
+  cloud (6.1) remains the fallback for bridged containers
+- Same `LightProvider` impl surface; the registry entry stays one line
+
+---
+
+## Milestone 7 — Floor Plan ("DIY" grid)
+
+> Feature request: a "DIY" grid feature where a house can be represented by
+> building a floor plan using 1×1 "square foot" tiles (think Sims 4 houses,
+> but 2D) and lights can be placed. The placed lights correspond to the
+> actual lights.
+
+A tile-based floor-plan editor that doubles as a live spatial dashboard:
+paint your house layout, drop your real lights onto it, then watch them glow
+with their actual state and click them to control.
+
+### 7.1 Data model
+
+```sql
+-- migrations/0004_floor_plans.sql
+-- floor_plans: id, name, width, height (tiles), created_at
+-- plan_tiles:  plan_id, x, y, kind ('floor' | 'wall')   -- sparse; absent = empty
+-- plan_lights: plan_id, light_id, x, y                  -- one placement per light per plan
+```
+
+Grid size soft-capped (e.g. 64×64) to keep payloads and rendering sane.
+
+### 7.2 API
+
+```
+GET    /api/plans                     list (id, name, dimensions, counts)
+POST   /api/plans                     { name, width, height }
+GET    /api/plans/{id}                full plan: tiles + light placements
+PUT    /api/plans/{id}/tiles          replace tile set (bulk save from editor)
+PUT    /api/plans/{id}/lights         replace light placements
+DELETE /api/plans/{id}
+```
+
+Standard rules: session auth, 401 tests, happy-path tests against in-memory
+SQLite. Placements referencing deleted lights vanish via FK CASCADE (enabled
+in 5.1).
+
+### 7.3 Editor (frontend)
+
+- Canvas-rendered grid (one `<canvas>`, not 4 096 divs), pan/zoom
+- Tools: paint floor, paint wall, erase — click-drag like the Sims build mode
+- Light palette: unplaced lights listed at the side; drag onto a tile to place
+- Save = bulk `PUT` of tiles + placements
+
+### 7.4 Live view (the payoff)
+
+- Placed lights render as glowing dots — color from `last_state.color`
+  (xy → RGB), radius/intensity from brightness, grey when off
+- Subscribes to the existing `GET /api/events` SSE stream — physical switch
+  flips show up on the plan in real time with zero new backend work
+- Click a light: toggle. Long-press / right-click: brightness + color popover
+  (reuse `LightCard` controls)
+- Stretch: marquee-select tiles → "create group from room"
+
+---
 
