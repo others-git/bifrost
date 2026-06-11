@@ -12,6 +12,16 @@ use std::collections::HashMap;
 
 // ── Core provider trait ─────────────────────────────────────────────────────
 
+/// A light group defined inside the provider's own ecosystem (e.g. a Hue
+/// room or zone), importable as a local Bifrost group.
+#[derive(Debug, Clone)]
+pub struct ProviderGroup {
+    pub name: String,
+    /// Device IDs of member lights, in the provider's namespace
+    /// (matches `Light::provider_id` / the `lights.device_id` column).
+    pub member_device_ids: Vec<String>,
+}
+
 /// Runtime interface every provider must implement.
 #[async_trait]
 pub trait LightProvider: Send + Sync {
@@ -19,6 +29,12 @@ pub trait LightProvider: Send + Sync {
     async fn discover(&self) -> Result<Vec<Light>>;
     async fn set_state(&self, device_id: &str, state: &LightState) -> Result<()>;
     async fn get_state(&self, device_id: &str) -> Result<LightState>;
+
+    /// Groups (rooms/zones) defined in the provider's own ecosystem.
+    /// Default: none — only providers with a native grouping concept override.
+    async fn discover_groups(&self) -> Result<Vec<ProviderGroup>> {
+        Ok(vec![])
+    }
 }
 
 // ── Credential schema (for the setup UI) ───────────────────────────────────

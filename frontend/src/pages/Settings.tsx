@@ -8,6 +8,7 @@ import {
   getProviderStatus,
   getProviderTypes,
   getProviders,
+  importProviderGroups,
   pairHueBridge,
   removeGroup,
   removeProvider,
@@ -89,6 +90,14 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
             provider={p}
             onRemove={() => handleRemove(p.id)}
             onDiscover={() => handleDiscover(p.id)}
+            onImportGroups={async () => {
+              const r = await importProviderGroups(p.id);
+              showToast(
+                r.found === 0
+                  ? "No rooms or zones defined on this provider."
+                  : `Imported ${r.imported} of ${r.found} room${r.found !== 1 ? "s" : ""} as groups.`,
+              );
+            }}
           />
         ))}
       </div>
@@ -324,13 +333,16 @@ function ProviderCard({
   provider,
   onRemove,
   onDiscover,
+  onImportGroups,
 }: {
   provider: Provider;
   onRemove: () => void;
   onDiscover: () => Promise<void>;
+  onImportGroups: () => Promise<void>;
 }) {
   const [status, setStatus] = useState<ConnectionStatus | null>(null);
   const [discovering, setDiscovering] = useState(false);
+  const [importing, setImporting] = useState(false);
 
   useEffect(() => {
     getProviderStatus(provider.id).then(setStatus);
@@ -342,6 +354,15 @@ function ProviderCard({
     setDiscovering(true);
     await onDiscover();
     setDiscovering(false);
+  }
+
+  async function handleImport() {
+    setImporting(true);
+    try {
+      await onImportGroups();
+    } finally {
+      setImporting(false);
+    }
   }
 
   return (
@@ -356,6 +377,14 @@ function ProviderCard({
       <div style={{ display: "flex", gap: "0.5rem", flexShrink: 0 }}>
         <button onClick={handleDiscover} disabled={discovering} style={S.buttonGhost}>
           {discovering ? "…" : "Discover"}
+        </button>
+        <button
+          onClick={handleImport}
+          disabled={importing}
+          title="Import the provider's rooms/zones as Bifrost groups"
+          style={S.buttonGhost}
+        >
+          {importing ? "…" : "Import rooms"}
         </button>
         <button onClick={onRemove} style={S.buttonDanger}>Remove</button>
       </div>

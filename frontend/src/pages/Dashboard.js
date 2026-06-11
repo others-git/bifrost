@@ -1,12 +1,14 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useEffect, useRef, useState } from "react";
-import { activateScene, createScene, getGroups, getScenes, removeScene, rgbToXy, setGroupState, setLightState, } from "../api";
+import { activateScene, createScene, getGroups, getProviders, getScenes, removeScene, rgbToXy, setGroupState, setLightState, } from "../api";
 import { S } from "../styles";
 export function DashboardPage({ lights, onRefresh, onNavigate }) {
     // Local copy so SSE events can update individual lights without a full server round-trip.
     const [localLights, setLocalLights] = useState(lights);
+    const [providers, setProviders] = useState([]);
     // Keep in sync when the parent does a full refresh (authoritative server state wins).
     useEffect(() => { setLocalLights(lights); }, [lights]);
+    useEffect(() => { getProviders().then(setProviders); }, []);
     // Real-time light state from Hue SSE → our SSE → browser.
     useEffect(() => {
         const es = new EventSource("/api/events");
@@ -28,11 +30,28 @@ export function DashboardPage({ lights, onRefresh, onNavigate }) {
                                     cursor: "pointer",
                                     fontSize: "0.875rem",
                                     padding: 0,
-                                }, children: "Settings" }), " ", "and run discovery."] })] })) : (_jsx("div", { style: {
-                    display: "grid",
-                    gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
-                    gap: "1rem",
-                }, children: localLights.map((light) => (_jsx(LightCard, { light: light, onLocalUpdate: handleLocalUpdate, onChanged: onRefresh }, light.id))) }))] }));
+                                }, children: "Settings" }), " ", "and run discovery."] })] })) : (_jsx(ProviderSections, { lights: localLights, providers: providers, onLocalUpdate: handleLocalUpdate, onChanged: onRefresh }))] }));
+}
+/** Lights grouped under one section per provider. */
+function ProviderSections({ lights, providers, onLocalUpdate, onChanged, }) {
+    const providerName = new Map(providers.map((p) => [p.id, p.name]));
+    const sections = new Map();
+    for (const l of lights) {
+        sections.set(l.provider_id, [...(sections.get(l.provider_id) ?? []), l]);
+    }
+    const ordered = [...sections.entries()].sort((a, b) => (providerName.get(a[0]) ?? "").localeCompare(providerName.get(b[0]) ?? ""));
+    return (_jsx("div", { style: { display: "flex", flexDirection: "column", gap: "1.5rem" }, children: ordered.map(([providerId, sectionLights]) => (_jsxs("section", { children: [_jsxs("h2", { style: {
+                        margin: "0 0 0.6rem",
+                        fontSize: "0.8rem",
+                        fontWeight: 600,
+                        color: "#777",
+                        textTransform: "uppercase",
+                        letterSpacing: "0.08em",
+                    }, children: [providerName.get(providerId) ?? "Other", _jsxs("span", { style: { color: "#555", marginLeft: "0.5rem", textTransform: "none", letterSpacing: 0 }, children: [sectionLights.length, " light", sectionLights.length !== 1 ? "s" : ""] })] }), _jsx("div", { style: {
+                        display: "grid",
+                        gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
+                        gap: "1rem",
+                    }, children: sectionLights.map((light) => (_jsx(LightCard, { light: light, onLocalUpdate: onLocalUpdate, onChanged: onChanged }, light.id))) })] }, providerId))) }));
 }
 function SceneBar({ onActivated }) {
     const [scenes, setScenes] = useState([]);

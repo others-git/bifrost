@@ -27,7 +27,13 @@ pub struct HueProvider {
 
 impl HueProvider {
     pub fn new(bridge_ip: impl Into<String>, app_key: impl Into<String>) -> Result<Self> {
-        let bridge_base = format!("https://{}", bridge_ip.into());
+        let ip = bridge_ip.into();
+        // Accept a full base URL too (used by tests and unusual setups).
+        let bridge_base = if ip.starts_with("http://") || ip.starts_with("https://") {
+            ip
+        } else {
+            format!("https://{ip}")
+        };
         Self::new_with_base(bridge_base, app_key.into(), true)
     }
 
@@ -131,6 +137,26 @@ struct HueColorTemperature {
     /// Mirek (153–500). None if light is in RGB mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     mirek: Option<u16>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HueResourceRef {
+    rid: String,
+    rtype: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct HueGroupResource {
+    metadata: HueMetadata,
+    #[serde(default)]
+    children: Vec<HueResourceRef>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HueDeviceResource {
+    id: String,
+    #[serde(default)]
+    services: Vec<HueResourceRef>,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -252,6 +278,94 @@ impl LightProvider for HueProvider {
 
         let resource = resp.data.into_iter().next().context("light not found")?;
         Ok(hue_resource_to_light(resource).state)
+    }
+
+    /// Hue rooms + zones. Room children are *devices* — their light service
+    /// IDs come from `/resource/device`. Zone children are lights directly.
+    async fn discover_groups(&self) -> Result<Vec<crate::providers::ProviderGroup>> {
+        use crate::providers::ProviderGroup;
+        use std::collections::HashMap;
+
+        let rooms: HueListResponse<HueGroupResource> = self
+            .client
+            .get(self.resource_url("/room"))
+            .send()
+            .await
+            .context("Hue room request failed")?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        let devices: HueListResponse<HueDeviceResource> = self
+            .client
+            .get(self.resource_url("/device"))
+            .send()
+            .await
+            .context("Hue device request failed")?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        let zones: HueListResponse<HueGroupResource> = self
+            .client
+            .get(self.resource_url("/zone"))
+            .send()
+            .await
+            .context("Hue zone request failed")?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        // device id → light resource ids
+        let device_lights: HashMap<String, Vec<String>> = devices
+            .data
+            .into_iter()
+            .map(|d| {
+                let lights = d
+                    .services
+                    .into_iter()
+                    .filter(|s| s.rtype == "light")
+                    .map(|s| s.rid)
+                    .collect();
+                (d.id, lights)
+            })
+            .collect();
+
+        let mut groups = Vec::new();
+
+        for room in rooms.data {
+            let members: Vec<String> = room
+                .children
+                .iter()
+                .filter(|c| c.rtype == "device")
+                .filter_map(|c| device_lights.get(&c.rid))
+                .flatten()
+                .cloned()
+                .collect();
+            if !members.is_empty() {
+                groups.push(ProviderGroup {
+                    name: room.metadata.name,
+                    member_device_ids: members,
+                });
+            }
+        }
+
+        for zone in zones.data {
+            let members: Vec<String> = zone
+                .children
+                .iter()
+                .filter(|c| c.rtype == "light")
+                .map(|c| c.rid.clone())
+                .collect();
+            if !members.is_empty() {
+                groups.push(ProviderGroup {
+                    name: zone.metadata.name,
+                    member_device_ids: members,
+                });
+            }
+        }
+
+        Ok(groups)
     }
 }
 
@@ -494,6 +608,106 @@ mod tests {
             .await;
 
         assert!(mock_provider(&server).await.discover().await.is_err());
+    }
+
+    async fn mount_group_mocks(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/clip/v2/resource/room"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "id": "room-1",
+                    "metadata": {"name": "Living Room"},
+                    "children": [
+                        {"rid": "dev-1", "rtype": "device"},
+                        {"rid": "dev-2", "rtype": "device"}
+                    ]
+                }]
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/clip/v2/resource/device"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {"id": "dev-1", "services": [
+                        {"rid": "light-1", "rtype": "light"},
+                        {"rid": "zb-1", "rtype": "zigbee_connectivity"}
+                    ]},
+                    {"id": "dev-2", "services": [{"rid": "light-2", "rtype": "light"}]}
+                ]
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/clip/v2/resource/zone"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "id": "zone-1",
+                    "metadata": {"name": "Downstairs"},
+                    "children": [{"rid": "light-1", "rtype": "light"}]
+                }]
+            })))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn discover_groups_maps_room_devices_to_lights() {
+        let server = MockServer::start().await;
+        mount_group_mocks(&server).await;
+
+        let groups = mock_provider(&server)
+            .await
+            .discover_groups()
+            .await
+            .unwrap();
+
+        let room = groups.iter().find(|g| g.name == "Living Room").unwrap();
+        assert_eq!(room.member_device_ids, vec!["light-1", "light-2"]);
+    }
+
+    #[tokio::test]
+    async fn discover_groups_includes_zones_with_direct_light_children() {
+        let server = MockServer::start().await;
+        mount_group_mocks(&server).await;
+
+        let groups = mock_provider(&server)
+            .await
+            .discover_groups()
+            .await
+            .unwrap();
+
+        let zone = groups.iter().find(|g| g.name == "Downstairs").unwrap();
+        assert_eq!(zone.member_device_ids, vec!["light-1"]);
+    }
+
+    #[tokio::test]
+    async fn discover_groups_skips_empty_rooms() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/clip/v2/resource/room"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "r", "metadata": {"name": "Empty"}, "children": []}]
+            })))
+            .mount(&server)
+            .await;
+        for p in ["/clip/v2/resource/device", "/clip/v2/resource/zone"] {
+            Mock::given(method("GET"))
+                .and(path(p))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})),
+                )
+                .mount(&server)
+                .await;
+        }
+
+        let groups = mock_provider(&server)
+            .await
+            .discover_groups()
+            .await
+            .unwrap();
+        assert!(groups.is_empty());
     }
 
     #[test]

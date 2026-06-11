@@ -344,3 +344,10 @@ export async function discoverLights(id: string): Promise<{ discovered: number }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
+
+/** Import the provider's native rooms/zones as local groups. */
+export async function importProviderGroups(id: string): Promise<{ imported: number; found: number }> {
+  const res = await fetch(`/api/providers/${id}/import-groups`, { method: "POST" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}

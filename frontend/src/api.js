@@ -224,3 +224,10 @@ export async function discoverLights(id) {
         throw new Error(`HTTP ${res.status}`);
     return res.json();
 }
+/** Import the provider's native rooms/zones as local groups. */
+export async function importProviderGroups(id) {
+    const res = await fetch(`/api/providers/${id}/import-groups`, { method: "POST" });
+    if (!res.ok)
+        throw new Error(`HTTP ${res.status}`);
+    return res.json();
+}

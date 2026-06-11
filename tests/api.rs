@@ -1144,3 +1144,152 @@ async fn delete_plan_cascades_children() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+// ── Import provider groups ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn import_groups_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers/some-id/import-groups")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn import_groups_creates_local_groups_from_hue_rooms() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let bridge = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/clip/v2/resource/room"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{
+                "id": "room-1",
+                "metadata": {"name": "Living Room"},
+                "children": [{"rid": "dev-1", "rtype": "device"}]
+            }]
+        })))
+        .mount(&bridge)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/clip/v2/resource/device"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "dev-1", "services": [{"rid": "light-1", "rtype": "light"}]}]
+        })))
+        .mount(&bridge)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/clip/v2/resource/zone"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+        .mount(&bridge)
+        .await;
+
+    let (app, light_id) = helpers::test_app_with_hue_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/providers/prov-hue-1/import-groups",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["imported"], 1);
+    assert_eq!(body["found"], 1);
+
+    // The local group exists with the matched light as its member.
+    let resp = app
+        .oneshot(helpers::authed_get("/api/groups", &cookie))
+        .await
+        .unwrap();
+    let groups = helpers::response_json(resp).await;
+    assert_eq!(groups[0]["name"], "Living Room");
+    assert_eq!(groups[0]["light_ids"][0], light_id);
+}
+
+#[tokio::test]
+async fn import_groups_reimport_updates_membership_without_duplicates() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let bridge = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/clip/v2/resource/room"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{
+                "id": "room-1",
+                "metadata": {"name": "Living Room"},
+                "children": [{"rid": "dev-1", "rtype": "device"}]
+            }]
+        })))
+        .mount(&bridge)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/clip/v2/resource/device"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "dev-1", "services": [{"rid": "light-1", "rtype": "light"}]}]
+        })))
+        .mount(&bridge)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/clip/v2/resource/zone"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+        .mount(&bridge)
+        .await;
+
+    let (app, _light_id) = helpers::test_app_with_hue_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    for _ in 0..2 {
+        let resp = app
+            .clone()
+            .oneshot(helpers::authed_post(
+                "/api/providers/prov-hue-1/import-groups",
+                &cookie,
+                "{}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/groups", &cookie))
+        .await
+        .unwrap();
+    let groups = helpers::response_json(resp).await;
+    assert_eq!(
+        groups.as_array().unwrap().len(),
+        1,
+        "re-import duplicated the group"
+    );
+    assert_eq!(groups[0]["light_ids"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn import_groups_unknown_provider_returns_404() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .oneshot(helpers::authed_post(
+            "/api/providers/nope/import-groups",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}

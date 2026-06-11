@@ -3,6 +3,7 @@ import {
   activateScene,
   createScene,
   getGroups,
+  getProviders,
   getScenes,
   removeScene,
   rgbToXy,
@@ -11,6 +12,7 @@ import {
   type Group,
   type Light,
   type LightState,
+  type Provider,
   type Scene,
 } from "../api";
 import { S } from "../styles";
@@ -24,9 +26,11 @@ interface Props {
 export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
   // Local copy so SSE events can update individual lights without a full server round-trip.
   const [localLights, setLocalLights] = useState<Light[]>(lights);
+  const [providers, setProviders] = useState<Provider[]>([]);
 
   // Keep in sync when the parent does a full refresh (authoritative server state wins).
   useEffect(() => { setLocalLights(lights); }, [lights]);
+  useEffect(() => { getProviders().then(setProviders); }, []);
 
   // Real-time light state from Hue SSE → our SSE → browser.
   useEffect(() => {
@@ -80,23 +84,75 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
           </p>
         </div>
       ) : (
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
-            gap: "1rem",
-          }}
-        >
-          {localLights.map((light) => (
-            <LightCard
-              key={light.id}
-              light={light}
-              onLocalUpdate={handleLocalUpdate}
-              onChanged={onRefresh}
-            />
-          ))}
-        </div>
+        <ProviderSections
+          lights={localLights}
+          providers={providers}
+          onLocalUpdate={handleLocalUpdate}
+          onChanged={onRefresh}
+        />
       )}
+    </div>
+  );
+}
+
+/** Lights grouped under one section per provider. */
+function ProviderSections({
+  lights,
+  providers,
+  onLocalUpdate,
+  onChanged,
+}: {
+  lights: Light[];
+  providers: Provider[];
+  onLocalUpdate: (id: string, state: LightState) => void;
+  onChanged: () => void;
+}) {
+  const providerName = new Map(providers.map((p) => [p.id, p.name]));
+  const sections = new Map<string, Light[]>();
+  for (const l of lights) {
+    sections.set(l.provider_id, [...(sections.get(l.provider_id) ?? []), l]);
+  }
+  const ordered = [...sections.entries()].sort((a, b) =>
+    (providerName.get(a[0]) ?? "").localeCompare(providerName.get(b[0]) ?? ""),
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+      {ordered.map(([providerId, sectionLights]) => (
+        <section key={providerId}>
+          <h2
+            style={{
+              margin: "0 0 0.6rem",
+              fontSize: "0.8rem",
+              fontWeight: 600,
+              color: "#777",
+              textTransform: "uppercase",
+              letterSpacing: "0.08em",
+            }}
+          >
+            {providerName.get(providerId) ?? "Other"}
+            <span style={{ color: "#555", marginLeft: "0.5rem", textTransform: "none", letterSpacing: 0 }}>
+              {sectionLights.length} light{sectionLights.length !== 1 ? "s" : ""}
+            </span>
+          </h2>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
+              gap: "1rem",
+            }}
+          >
+            {sectionLights.map((light) => (
+              <LightCard
+                key={light.id}
+                light={light}
+                onLocalUpdate={onLocalUpdate}
+                onChanged={onChanged}
+              />
+            ))}
+          </div>
+        </section>
+      ))}
     </div>
   );
 }

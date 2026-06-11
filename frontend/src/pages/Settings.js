@@ -1,6 +1,6 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useEffect, useState } from "react";
-import { addProvider, createGroup, discoverLights, getGroups, getLights, getProviderStatus, getProviderTypes, getProviders, pairHueBridge, removeGroup, removeProvider, setGroupMembers, } from "../api";
+import { addProvider, createGroup, discoverLights, getGroups, getLights, getProviderStatus, getProviderTypes, getProviders, importProviderGroups, pairHueBridge, removeGroup, removeProvider, setGroupMembers, } from "../api";
 import { S } from "../styles";
 export function SettingsPage({ onNavigate: _onNavigate }) {
     const [providers, setProviders] = useState([]);
@@ -41,7 +41,12 @@ export function SettingsPage({ onNavigate: _onNavigate }) {
             showToast("Provider added. Discovery failed — check the connection and try Discover.");
         }
     }
-    return (_jsxs("div", { style: { padding: "2rem", maxWidth: 720, margin: "0 auto" }, children: [_jsx("h2", { style: { margin: "0 0 1.5rem", fontSize: "1.2rem", color: "#ccc" }, children: "Providers" }), toast && (_jsx("div", { style: { background: "#1e3a1e", border: "1px solid #2a5a2a", borderRadius: 8, padding: "0.6rem 1rem", marginBottom: "1rem", color: "#8f8", fontSize: "0.875rem" }, children: toast })), _jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "0.75rem" }, children: [providers.length === 0 && !showAdd && (_jsx("p", { style: { color: "#666", margin: 0 }, children: "No providers configured." })), providers.map((p) => (_jsx(ProviderCard, { provider: p, onRemove: () => handleRemove(p.id), onDiscover: () => handleDiscover(p.id) }, p.id)))] }), showAdd ? (_jsx("div", { style: { marginTop: "1.5rem" }, children: _jsx(AddProviderForm, { types: types, onAdded: handleAdded, onCancel: () => setShowAdd(false) }) })) : (_jsx("button", { onClick: () => setShowAdd(true), style: { ...S.button, marginTop: "1.5rem" }, children: "+ Add Provider" })), _jsx(GroupsSection, {})] }));
+    return (_jsxs("div", { style: { padding: "2rem", maxWidth: 720, margin: "0 auto" }, children: [_jsx("h2", { style: { margin: "0 0 1.5rem", fontSize: "1.2rem", color: "#ccc" }, children: "Providers" }), toast && (_jsx("div", { style: { background: "#1e3a1e", border: "1px solid #2a5a2a", borderRadius: 8, padding: "0.6rem 1rem", marginBottom: "1rem", color: "#8f8", fontSize: "0.875rem" }, children: toast })), _jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "0.75rem" }, children: [providers.length === 0 && !showAdd && (_jsx("p", { style: { color: "#666", margin: 0 }, children: "No providers configured." })), providers.map((p) => (_jsx(ProviderCard, { provider: p, onRemove: () => handleRemove(p.id), onDiscover: () => handleDiscover(p.id), onImportGroups: async () => {
+                            const r = await importProviderGroups(p.id);
+                            showToast(r.found === 0
+                                ? "No rooms or zones defined on this provider."
+                                : `Imported ${r.imported} of ${r.found} room${r.found !== 1 ? "s" : ""} as groups.`);
+                        } }, p.id)))] }), showAdd ? (_jsx("div", { style: { marginTop: "1.5rem" }, children: _jsx(AddProviderForm, { types: types, onAdded: handleAdded, onCancel: () => setShowAdd(false) }) })) : (_jsx("button", { onClick: () => setShowAdd(true), style: { ...S.button, marginTop: "1.5rem" }, children: "+ Add Provider" })), _jsx(GroupsSection, {})] }));
 }
 // ── Groups ───────────────────────────────────────────────────────────────────
 function GroupsSection() {
@@ -104,9 +109,10 @@ function GroupForm({ lights, initialName, initialMembers, submitLabel, nameLocke
     }
     return (_jsxs("form", { onSubmit: submit, style: { ...S.card, border: "1px solid #333" }, children: [!nameLocked && (_jsxs("label", { style: labelStyle, children: [_jsx("span", { children: "Name" }), _jsx("input", { value: name, onChange: (e) => setName(e.target.value), placeholder: "e.g. Living Room", style: S.input, required: true, autoFocus: true })] })), nameLocked && _jsx("h3", { style: { margin: 0, fontSize: "1rem", color: "#ccc" }, children: name }), _jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "0.35rem" }, children: [_jsx("span", { style: { fontSize: "0.875rem", color: "#aaa" }, children: "Lights" }), lights.map((l) => (_jsxs("label", { style: { display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.875rem", color: "#ccc", cursor: "pointer" }, children: [_jsx("input", { type: "checkbox", checked: members.has(l.id), onChange: () => toggle(l.id), style: { accentColor: "#f90" } }), l.name] }, l.id)))] }), _jsxs("div", { style: { display: "flex", gap: "0.5rem" }, children: [_jsx("button", { type: "submit", style: S.button, disabled: saving || members.size === 0, children: saving ? "…" : submitLabel }), _jsx("button", { type: "button", onClick: onCancel, style: S.buttonGhost, children: "Cancel" })] })] }));
 }
-function ProviderCard({ provider, onRemove, onDiscover, }) {
+function ProviderCard({ provider, onRemove, onDiscover, onImportGroups, }) {
     const [status, setStatus] = useState(null);
     const [discovering, setDiscovering] = useState(false);
+    const [importing, setImporting] = useState(false);
     useEffect(() => {
         getProviderStatus(provider.id).then(setStatus);
         const id = setInterval(() => getProviderStatus(provider.id).then(setStatus), 5000);
@@ -117,7 +123,16 @@ function ProviderCard({ provider, onRemove, onDiscover, }) {
         await onDiscover();
         setDiscovering(false);
     }
-    return (_jsxs("div", { style: { ...S.card, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: "1rem" }, children: [_jsxs("div", { style: { minWidth: 0 }, children: [_jsx("div", { style: { fontWeight: 600 }, children: provider.name }), _jsxs("div", { style: { display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.25rem" }, children: [_jsx("span", { style: { color: "#888", fontSize: "0.8rem" }, children: provider.provider_type }), status && _jsx(StatusBadge, { state: status.state })] })] }), _jsxs("div", { style: { display: "flex", gap: "0.5rem", flexShrink: 0 }, children: [_jsx("button", { onClick: handleDiscover, disabled: discovering, style: S.buttonGhost, children: discovering ? "…" : "Discover" }), _jsx("button", { onClick: onRemove, style: S.buttonDanger, children: "Remove" })] })] }));
+    async function handleImport() {
+        setImporting(true);
+        try {
+            await onImportGroups();
+        }
+        finally {
+            setImporting(false);
+        }
+    }
+    return (_jsxs("div", { style: { ...S.card, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: "1rem" }, children: [_jsxs("div", { style: { minWidth: 0 }, children: [_jsx("div", { style: { fontWeight: 600 }, children: provider.name }), _jsxs("div", { style: { display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.25rem" }, children: [_jsx("span", { style: { color: "#888", fontSize: "0.8rem" }, children: provider.provider_type }), status && _jsx(StatusBadge, { state: status.state })] })] }), _jsxs("div", { style: { display: "flex", gap: "0.5rem", flexShrink: 0 }, children: [_jsx("button", { onClick: handleDiscover, disabled: discovering, style: S.buttonGhost, children: discovering ? "…" : "Discover" }), _jsx("button", { onClick: handleImport, disabled: importing, title: "Import the provider's rooms/zones as Bifrost groups", style: S.buttonGhost, children: importing ? "…" : "Import rooms" }), _jsx("button", { onClick: onRemove, style: S.buttonDanger, children: "Remove" })] })] }));
 }
 function StatusBadge({ state }) {
     const color = state === "connected" || state === "ok" ? "#4d4"

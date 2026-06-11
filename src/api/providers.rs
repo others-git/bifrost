@@ -22,6 +22,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{id}", delete(remove_provider))
         .route("/{id}/status", get(provider_status))
         .route("/{id}/discover", post(discover))
+        .route("/{id}/import-groups", post(import_groups))
 }
 
 // ── List available provider types (for the setup UI) ───────────────────────
@@ -189,6 +190,120 @@ async fn provider_status(
             Json(ConnectionStatus::from_state(&cs)).into_response()
         }
     }
+}
+
+// ── Import provider groups (rooms/zones) ───────────────────────────────────
+
+/// Import the provider's native rooms/zones as local Bifrost groups.
+/// Upserts by group name: an existing group with the same name gets its
+/// membership replaced. Members are matched via `lights.device_id`.
+async fn import_groups(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let row = sqlx::query(
+        "SELECT provider_type, credentials FROM providers WHERE id = ? AND enabled = 1",
+    )
+    .bind(&id)
+    .fetch_optional(&state.db)
+    .await;
+
+    let row = match row {
+        Ok(Some(r)) => r,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("db error: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let provider_type: String = row.get("provider_type");
+    let credentials_enc: String = row.get("credentials");
+
+    let provider = match build_provider(&state, &provider_type, &credentials_enc) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("failed to build provider: {e:#}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let provider_groups = match provider.discover_groups().await {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::error!("group discovery error: {e:#}");
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+    };
+
+    let mut imported = 0usize;
+    for pg in &provider_groups {
+        // Resolve member device IDs to local light IDs (this provider only).
+        let mut light_ids = Vec::new();
+        for device_id in &pg.member_device_ids {
+            if let Ok(Some(r)) =
+                sqlx::query("SELECT id FROM lights WHERE provider_id = ? AND device_id = ?")
+                    .bind(&id)
+                    .bind(device_id)
+                    .fetch_optional(&state.db)
+                    .await
+            {
+                light_ids.push(r.get::<String, _>("id"));
+            }
+        }
+        if light_ids.is_empty() {
+            continue; // no discovered lights match — run discovery first
+        }
+
+        // Upsert the group by name.
+        let group_id = match sqlx::query("SELECT id FROM groups WHERE name = ?")
+            .bind(&pg.name)
+            .fetch_optional(&state.db)
+            .await
+        {
+            Ok(Some(r)) => r.get::<String, _>("id"),
+            Ok(None) => {
+                let gid = Uuid::new_v4().to_string();
+                if sqlx::query("INSERT INTO groups (id, name) VALUES (?, ?)")
+                    .bind(&gid)
+                    .bind(&pg.name)
+                    .execute(&state.db)
+                    .await
+                    .is_err()
+                {
+                    continue;
+                }
+                gid
+            }
+            Err(_) => continue,
+        };
+
+        let _ = sqlx::query("DELETE FROM group_lights WHERE group_id = ?")
+            .bind(&group_id)
+            .execute(&state.db)
+            .await;
+        for light_id in &light_ids {
+            let _ = sqlx::query(
+                "INSERT OR IGNORE INTO group_lights (group_id, light_id) VALUES (?, ?)",
+            )
+            .bind(&group_id)
+            .bind(light_id)
+            .execute(&state.db)
+            .await;
+        }
+        imported += 1;
+    }
+
+    Json(serde_json::json!({
+        "imported": imported,
+        "found": provider_groups.len(),
+    }))
+    .into_response()
 }
 
 // ── Hue link-button pairing ─────────────────────────────────────────────────

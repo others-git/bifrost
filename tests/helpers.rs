@@ -159,6 +159,45 @@ pub async fn test_app_with_light(base_url: &str) -> (Router, String) {
     (build_app(state), light_id)
 }
 
+/// Test app with a configured password plus one Hue provider whose bridge
+/// URL points at `base_url` (a wiremock server), and one discovered light
+/// with device_id "light-1". Returns the app and the seeded light's ID.
+#[allow(dead_code)]
+pub async fn test_app_with_hue_light(base_url: &str) -> (Router, String) {
+    let db = test_db().await;
+    let hash = hash_password(TEST_PASSWORD);
+    sqlx::query("INSERT INTO config (id, password_hash, setup_complete) VALUES (1, ?, 1)")
+        .bind(&hash)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let registry = providers::default_registry();
+    let state = Arc::new(AppState::new(db.clone(), TEST_SECRET, registry));
+
+    let creds = format!(r#"{{"bridge_ip":"{base_url}","app_key":"test-key"}}"#);
+    let enc = state.encrypt_credentials(&creds).unwrap();
+    sqlx::query("INSERT INTO providers (id, provider_type, name, credentials) VALUES (?, 'hue', 'Test Hue', ?)")
+        .bind("prov-hue-1")
+        .bind(&enc)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let light_id = "light-hue-1".to_string();
+    sqlx::query(
+        "INSERT INTO lights (id, provider_id, device_id, name, capabilities, last_state, last_seen)
+         VALUES (?, 'prov-hue-1', 'light-1', 'Hue Bulb', '{}', ?, datetime('now'))",
+    )
+    .bind(&light_id)
+    .bind(r#"{"on":true,"brightness":100.0,"color":null,"color_temp_mirek":null}"#)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    (build_app(state), light_id)
+}
+
 pub async fn response_json(resp: Response<Body>) -> serde_json::Value {
     let bytes = http_body_util::BodyExt::collect(resp.into_body())
         .await
