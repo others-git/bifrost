@@ -21,6 +21,9 @@ pub struct GoveeProvider {
     client: Client,
     /// Base URL for the API; overridden in tests to point at a wiremock server.
     base_url: String,
+    /// device id → SKU, fetched lazily. Control and state requests REQUIRE
+    /// the device's SKU in the payload; without it the API answers 400.
+    sku_cache: tokio::sync::OnceCell<std::collections::HashMap<String, String>>,
 }
 
 impl GoveeProvider {
@@ -38,7 +41,49 @@ impl GoveeProvider {
         Ok(Self {
             client,
             base_url: base_url.into(),
+            sku_cache: tokio::sync::OnceCell::new(),
         })
+    }
+
+    /// Fetch the account's device list (shared by discovery and SKU lookup).
+    async fn fetch_devices(&self) -> Result<Vec<GoveeDevice>> {
+        let resp: GoveeResponse<GoveeDeviceList> = self
+            .client
+            .get(format!("{}/user/devices", self.base_url))
+            .send()
+            .await
+            .context("Govee devices request failed")?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        if resp.code != 200 {
+            bail!("Govee API error {}: {}", resp.code, resp.message);
+        }
+        Ok(resp
+            .body()
+            .map(GoveeDeviceList::into_vec)
+            .unwrap_or_default())
+    }
+
+    /// The SKU for a device — required by control/state payloads.
+    /// Cached per provider instance (one devices call, then free).
+    async fn sku_for(&self, device_id: &str) -> Result<String> {
+        let map = self
+            .sku_cache
+            .get_or_try_init(|| async {
+                let devices = self.fetch_devices().await?;
+                Ok::<_, anyhow::Error>(
+                    devices
+                        .into_iter()
+                        .map(|d| (d.device, d.sku))
+                        .collect::<std::collections::HashMap<_, _>>(),
+                )
+            })
+            .await?;
+        map.get(device_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown Govee device '{device_id}'"))
     }
 
     /// Test constructor: points at a local HTTP mock server instead of the Govee cloud.
@@ -89,9 +134,12 @@ impl GoveeDeviceList {
 
 #[derive(Debug, Deserialize)]
 struct GoveeDevice {
+    /// Model SKU — REQUIRED by control/state request payloads.
+    sku: String,
     device: String, // MAC-style device id
     #[serde(rename = "deviceName")]
     device_name: String,
+    #[serde(default)]
     capabilities: Vec<GoveeCapability>,
 }
 
@@ -186,24 +234,9 @@ impl LightProvider for GoveeProvider {
     }
 
     async fn discover(&self) -> Result<Vec<Light>> {
-        let resp: GoveeResponse<GoveeDeviceList> = self
-            .client
-            .get(format!("{}/user/devices", self.base_url))
-            .send()
-            .await
-            .context("Govee discover request failed")?
-            .error_for_status()?
-            .json()
-            .await?;
-
-        if resp.code != 200 {
-            bail!("Govee API error {}: {}", resp.code, resp.message);
-        }
-
-        Ok(resp
-            .body()
-            .map(GoveeDeviceList::into_vec)
-            .unwrap_or_default()
+        Ok(self
+            .fetch_devices()
+            .await?
             .into_iter()
             .map(|d| govee_device_to_light(d, None))
             .collect())
@@ -244,10 +277,13 @@ impl LightProvider for GoveeProvider {
             }));
         }
 
+        let sku = self.sku_for(provider_id).await?;
+
         for cmd in commands {
             let body = json!({
                 "requestId": Uuid::new_v4().to_string(),
                 "payload": {
+                    "sku": sku,
                     "device": provider_id,
                     "capability": cmd
                 }
@@ -272,9 +308,10 @@ impl LightProvider for GoveeProvider {
     }
 
     async fn get_state(&self, provider_id: &str) -> Result<LightState> {
+        let sku = self.sku_for(provider_id).await?;
         let body = json!({
             "requestId": Uuid::new_v4().to_string(),
-            "payload": { "device": provider_id }
+            "payload": { "sku": sku, "device": provider_id }
         });
 
         let resp: GoveeResponse<GoveeStateData> = self
@@ -396,17 +433,38 @@ mod tests {
         assert!(lights.is_empty());
     }
 
-    #[tokio::test]
-    async fn set_state_on_off_sends_power_switch_command() {
-        let server = MockServer::start().await;
-
+    /// Mount the devices endpoint (needed by SKU resolution) + control endpoint.
+    async fn mount_control_mocks(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/user/devices"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(device_list_response()))
+            .mount(server)
+            .await;
         Mock::given(method("POST"))
             .and(path("/device/control"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "code": 200, "message": "success", "data": {}
             })))
-            .mount(&server)
+            .mount(server)
             .await;
+    }
+
+    /// Bodies of the POSTs to /device/control (skipping the SKU-lookup GET).
+    async fn control_bodies(server: &MockServer) -> Vec<serde_json::Value> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path() == "/device/control")
+            .map(|r| serde_json::from_slice(&r.body).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn set_state_on_off_sends_power_switch_command() {
+        let server = MockServer::start().await;
+        mount_control_mocks(&server).await;
 
         let state = LightState {
             on: true,
@@ -418,10 +476,12 @@ mod tests {
             .await
             .unwrap();
 
-        let received = server.received_requests().await.unwrap();
+        let bodies = control_bodies(&server).await;
         // One request for power switch.
-        assert_eq!(received.len(), 1);
-        let body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
+        assert_eq!(bodies.len(), 1);
+        let body = &bodies[0];
+        // The live API rejects control requests without the device SKU (400).
+        assert_eq!(body["payload"]["sku"], "H6159");
         assert_eq!(body["payload"]["capability"]["instance"], "powerSwitch");
         assert_eq!(body["payload"]["capability"]["value"], 1);
     }
@@ -429,14 +489,7 @@ mod tests {
     #[tokio::test]
     async fn set_state_with_brightness_sends_two_commands() {
         let server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/device/control"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "code": 200, "message": "success", "data": {}
-            })))
-            .mount(&server)
-            .await;
+        mount_control_mocks(&server).await;
 
         let state = LightState {
             on: true,
@@ -449,9 +502,9 @@ mod tests {
             .await
             .unwrap();
 
-        let received = server.received_requests().await.unwrap();
-        // Two requests: power + brightness.
-        assert_eq!(received.len(), 2);
+        // Two control requests: power + brightness.
+        let bodies = control_bodies(&server).await;
+        assert_eq!(bodies.len(), 2);
     }
 
     #[tokio::test]
@@ -492,6 +545,18 @@ mod tests {
     async fn get_state_parses_live_api_payload_and_value_wrappers() {
         // The live API: state under "payload", each value wrapped as {"value": x}.
         let server = MockServer::start().await;
+
+        // SKU resolution fetches the device list first.
+        Mock::given(method("GET"))
+            .and(path("/user/devices"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "requestId": "uuid-0",
+                "msg": "success",
+                "code": 200,
+                "data": [{"sku": "H6601", "device": "11:22:33:44:55:66", "deviceName": "Desk Strip"}]
+            })))
+            .mount(&server)
+            .await;
 
         Mock::given(method("POST"))
             .and(path("/device/state"))

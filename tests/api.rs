@@ -1638,3 +1638,243 @@ async fn scene_activation_scoped_to_light_ids() {
     let body = helpers::response_json(resp).await;
     assert_eq!(body["applied"], 1);
 }
+
+// ── Group scenes (palette scenes) ────────────────────────────────────────────
+
+#[tokio::test]
+async fn group_scenes_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/groups/g1/scenes")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn create_and_list_group_scene() {
+    let bridge = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let body = format!(r#"{{"name":"G","light_ids":["{light_id}"]}}"#);
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post("/api/groups", &cookie, &body))
+        .await
+        .unwrap();
+    let group_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/groups/{group_id}/scenes"),
+            &cookie,
+            r##"{"name":"Sunset","brightness":60,"palette":["#ff7d33","#ffb04d"]}"##,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let resp = app
+        .oneshot(helpers::authed_get(
+            &format!("/api/groups/{group_id}/scenes"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    let scenes = helpers::response_json(resp).await;
+    assert_eq!(scenes[0]["name"], "Sunset");
+    assert_eq!(scenes[0]["brightness"], 60.0);
+    assert_eq!(scenes[0]["palette"][0], "#ff7d33");
+}
+
+#[tokio::test]
+async fn create_group_scene_rejects_bad_palette() {
+    let bridge = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let body = format!(r#"{{"name":"G","light_ids":["{light_id}"]}}"#);
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post("/api/groups", &cookie, &body))
+        .await
+        .unwrap();
+    let group_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    for bad in [
+        r#"{"name":"X","palette":["red"]}"#,
+        r#"{"name":"X","brightness":150,"palette":[]}"#,
+        r#"{"name":"  ","palette":[]}"#,
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(helpers::authed_post(
+                &format!("/api/groups/{group_id}/scenes"),
+                &cookie,
+                bad,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "body: {bad}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn apply_group_scene_distributes_palette_across_lights() {
+    let device = wled_mock().await;
+    let (app, light_a, light_b) = helpers::test_app_with_two_lights(&device.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let body = format!(r#"{{"name":"Room","light_ids":["{light_a}","{light_b}"]}}"#);
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post("/api/groups", &cookie, &body))
+        .await
+        .unwrap();
+    let group_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/groups/{group_id}/scenes"),
+            &cookie,
+            r##"{"name":"Duo","brightness":50,"palette":["#ff0000","#0000ff"]}"##,
+        ))
+        .await
+        .unwrap();
+    let scene_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .oneshot(helpers::authed_post(
+            &format!("/api/groups/{group_id}/scenes/{scene_id}/apply"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let result = helpers::response_json(resp).await;
+    assert_eq!(result["applied"], 2);
+    assert_eq!(result["failed"], 0);
+
+    // Two set_state calls, each with a *different* colour from the palette.
+    let requests = device.received_requests().await.unwrap();
+    let bodies: Vec<serde_json::Value> = requests
+        .iter()
+        .filter(|r| r.url.path() == "/json/state" && r.method.as_str() == "POST")
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect();
+    assert_eq!(bodies.len(), 2);
+    let col0 = bodies[0]["seg"][0]["col"][0].clone();
+    let col1 = bodies[1]["seg"][0]["col"][0].clone();
+    assert!(
+        col0.is_array() && col1.is_array(),
+        "colours missing in device writes"
+    );
+    assert_ne!(
+        col0, col1,
+        "palette was not distributed — both lights got the same colour"
+    );
+}
+
+#[tokio::test]
+async fn apply_unknown_group_scene_returns_404() {
+    let bridge = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let body = format!(r#"{{"name":"G","light_ids":["{light_id}"]}}"#);
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post("/api/groups", &cookie, &body))
+        .await
+        .unwrap();
+    let group_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .oneshot(helpers::authed_post(
+            &format!("/api/groups/{group_id}/scenes/nope/apply"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn delete_group_scene_removes_it() {
+    let bridge = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let body = format!(r#"{{"name":"G","light_ids":["{light_id}"]}}"#);
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post("/api/groups", &cookie, &body))
+        .await
+        .unwrap();
+    let group_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/groups/{group_id}/scenes"),
+            &cookie,
+            r#"{"name":"Tmp","palette":[]}"#,
+        ))
+        .await
+        .unwrap();
+    let scene_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_delete(
+            &format!("/api/groups/{group_id}/scenes/{scene_id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(helpers::authed_get(
+            &format!("/api/groups/{group_id}/scenes"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(helpers::response_json(resp).await, serde_json::json!([]));
+}

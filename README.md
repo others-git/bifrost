@@ -151,6 +151,110 @@ cd frontend && npm run build               # tsc + vite
 
 The test suite never touches the network — external HTTP is wiremock, the DB is in-memory SQLite. CI runs fmt, clippy, tests, and the frontend build on every push; tags matching `v*` publish a Docker image to GHCR and create a GitHub release.
 
+## Rooms architecture (proposal — under review)
+
+> Status: design for review, not yet implemented. The goal: **Bifrost Rooms
+> become an abstraction layer over imported provider groups**, instead of a
+> third competing copy of "which lights belong together".
+
+### The problem today
+
+Three things currently claim to define groupings, and they fight:
+
+1. **Manual groups** — created in Settings, membership hand-picked.
+2. **Imported provider groups** — "Import rooms" copies Hue rooms/zones into
+   local groups *once*; rename a room in the Hue app and Bifrost drifts.
+3. **Planner room auto-groups** — each painted room owns a group whose
+   membership is overwritten from tile placements on every save.
+
+A Hue room "Office" imported as a group and a planner room "Office" collide
+on name, and each save/import silently rewrites the other's membership.
+
+### Proposed model
+
+```
+  PROVIDER LAYER (synced mirrors, read-only)
+  ┌──────────────────────────┐   ┌──────────────────────────┐
+  │ hue • room "Office"      │   │ hue • zone "Downstairs"  │
+  │   lights: L1, L2         │   │   lights: L1, L4         │
+  └────────────┬─────────────┘   └────────────┬─────────────┘
+               │ link                          │ link
+               ▼                               ▼
+  ROOM LAYER (Bifrost abstraction, user-owned)
+  ┌─────────────────────────────────────────────────────────┐
+  │ Room "Office"                                           │
+  │  ├─ linked provider groups: hue/Office                  │
+  │  ├─ direct lights: G1 (Govee desk strip — no native     │
+  │  │                     grouping concept on that provider)│
+  │  ├─ plan region: tiles on "Ground Floor"                │
+  │  └─ scenes: "Relax", "Energize", custom palettes        │
+  │                                                         │
+  │  effective members = union(linked groups) ∪ direct      │
+  └─────────────────────────────────────────────────────────┘
+```
+
+- **Provider groups are mirrors.** A sync (manual button now, periodic later)
+  refreshes their names and members from the provider. They are never edited
+  in Bifrost.
+- **A Room references mirrors instead of copying them.** When the Hue app
+  moves a bulb between rooms, the next sync updates the mirror and every
+  Room linking it follows automatically — nothing to re-import.
+- **Direct lights cover the gaps.** Providers without native grouping
+  (Govee, WLED, single Tasmota/Shelly devices) attach to a Room directly.
+- **Rooms are the only user-facing grouping.** Scenes (snapshot + palette),
+  on/off fan-out, the dashboard chips, and the planner controller all hang
+  off Rooms. Plain "groups" disappear from the UI.
+
+### Schema sketch
+
+```sql
+provider_groups        id, provider_id, provider_group_id, name, kind (room|zone)
+provider_group_lights  provider_group_id, light_id          -- refreshed on sync
+rooms                  id, name
+room_links             room_id, provider_group_id           -- the abstraction
+room_lights            room_id, light_id                    -- direct additions
+plan_rooms             ...existing, but → room_id (region binds to a Room)
+room_scenes            ...existing group_scenes, but → room_id
+```
+
+### Control path
+
+`PUT /api/rooms/{id}/state` resolves effective members, then per provider:
+
+- If every member from provider P came via one linked provider group **and P
+  supports native group control** (Hue `grouped_light`: one API call for the
+  whole room), use it — faster and atomic, exactly how the Hue app behaves.
+- Otherwise fan out per light in parallel (current behaviour).
+
+### Planner binding
+
+Painting a region binds the Room to floor space; it no longer *defines*
+membership. Placed lights inside a region that aren't already members
+(via links or direct) prompt: "Add to room?" — placement suggests, the Room
+decides. (Open question 3 offers a stricter alternative.)
+
+### Migration of existing data
+
+- Existing groups created by "Import rooms" → become `provider_groups`
+  mirrors + a Room linking each.
+- Existing planner-room groups → Rooms with their plan region; current
+  members become direct lights.
+- Remaining manual groups → Rooms with direct lights.
+- `group_scenes` rows move to `room_scenes`.
+
+### Open questions for review
+
+1. **Sync cadence** — manual "Sync" button only, or also automatic
+   (piggyback on the existing polling cycle)?
+2. **One room, many floors?** Can a Room have regions on multiple plans
+   (e.g. a stairwell)? Proposal: yes, region rows are per-plan.
+3. **Placement semantics** — prompt-to-add (proposed) vs. auto-add placed
+   lights as direct members (current behaviour, surprise-prone) vs. purely
+   visual (placement never affects membership).
+4. **Naming collisions** — when a sync renames hue/Office to "Studio", does
+   the Room auto-rename if it was created from that link? Proposal: only if
+   the Room still has the exact name it inherited.
+
 ## License
 
 MIT
