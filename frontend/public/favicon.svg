@@ -1,49 +1,49 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
   <defs>
-    <!-- Deep night sky -->
     <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0%" stop-color="#141831"/>
       <stop offset="100%" stop-color="#07070d"/>
     </linearGradient>
-
-    <!-- Full spectrum across the curtains: violet to ember -->
-    <linearGradient id="spectrum" gradientUnits="userSpaceOnUse" x1="7" y1="0" x2="26" y2="0">
-      <stop offset="0%"   stop-color="#a855f7"/>
-      <stop offset="25%"  stop-color="#3b82f6"/>
-      <stop offset="45%"  stop-color="#22d3ee"/>
-      <stop offset="62%"  stop-color="#4ade80"/>
-      <stop offset="82%"  stop-color="#facc15"/>
-      <stop offset="100%" stop-color="#f43f5e"/>
-    </linearGradient>
-
     <filter id="soften" x="-40%" y="-40%" width="180%" height="180%">
-      <feGaussianBlur stdDeviation="1.3"/>
+      <feGaussianBlur stdDeviation="1.2"/>
     </filter>
   </defs>
 
   <rect width="32" height="32" rx="7" fill="url(#sky)"/>
 
-  <!-- Faint stars -->
-  <circle cx="5" cy="8" r="0.45" fill="#e8ecff" opacity="0.5"/>
-  <circle cx="27.5" cy="25" r="0.5" fill="#e8ecff" opacity="0.45"/>
-  <circle cx="6" cy="26" r="0.4" fill="#e8ecff" opacity="0.4"/>
+  <circle cx="27" cy="5" r="0.5" fill="#e8ecff" opacity="0.5"/>
+  <circle cx="5" cy="27" r="0.45" fill="#e8ecff" opacity="0.45"/>
 
-  <!-- Valhalla: small four-point star, upper right -->
-  <path d="M27.4 3.4 L27.95 5.15 L29.7 5.7 L27.95 6.25 L27.4 8 L26.85 6.25 L25.1 5.7 L26.85 5.15 Z"
-        fill="#f4f7ff" opacity="0.9"/>
+  <!-- Nine-ish realms: the hub at the centre of the worlds -->
+  <!-- Spokes -->
+  <g stroke-width="1.3" opacity="0.7" stroke-linecap="round">
+    <line x1="16" y1="16.5" x2="16"   y2="6.9"  stroke="#a855f7"/>
+    <line x1="16" y1="16.5" x2="7.7"  y2="11.7" stroke="#3b82f6"/>
+    <line x1="16" y1="16.5" x2="7.7"  y2="21.3" stroke="#22d3ee"/>
+    <line x1="16" y1="16.5" x2="16"   y2="26.1" stroke="#4ade80"/>
+    <line x1="16" y1="16.5" x2="24.3" y2="21.3" stroke="#facc15"/>
+    <line x1="16" y1="16.5" x2="24.3" y2="11.7" stroke="#f43f5e"/>
+  </g>
 
-  <!-- Bifrost as aurora: three curtains of full-spectrum light -->
-  <!-- Glow underlay -->
-  <g stroke="url(#spectrum)" fill="none" stroke-linecap="round"
-     opacity="0.22" filter="url(#soften)">
-    <path d="M11.5 6.5 C8 11 13.5 15 8.5 22" stroke-width="5.8"/>
-    <path d="M18.5 4.5 C14.5 10 20.5 15.5 15 25.5" stroke-width="6.4"/>
-    <path d="M25 7.5 C21.5 12 26.5 15 21.5 21.5" stroke-width="5.8"/>
+  <!-- Realm nodes, full spectrum -->
+  <g filter="url(#soften)" opacity="0.45">
+    <circle cx="16"   cy="6.9"  r="2.4" fill="#a855f7"/>
+    <circle cx="7.7"  cy="11.7" r="2.4" fill="#3b82f6"/>
+    <circle cx="7.7"  cy="21.3" r="2.4" fill="#22d3ee"/>
+    <circle cx="16"   cy="26.1" r="2.4" fill="#4ade80"/>
+    <circle cx="24.3" cy="21.3" r="2.4" fill="#facc15"/>
+    <circle cx="24.3" cy="11.7" r="2.4" fill="#f43f5e"/>
   </g>
-  <!-- Curtains -->
-  <g stroke="url(#spectrum)" fill="none" stroke-linecap="round">
-    <path d="M11.5 6.5 C8 11 13.5 15 8.5 22" stroke-width="3.6"/>
-    <path d="M18.5 4.5 C14.5 10 20.5 15.5 15 25.5" stroke-width="4.2"/>
-    <path d="M25 7.5 C21.5 12 26.5 15 21.5 21.5" stroke-width="3.6"/>
+  <g>
+    <circle cx="16"   cy="6.9"  r="1.8" fill="#a855f7"/>
+    <circle cx="7.7"  cy="11.7" r="1.8" fill="#3b82f6"/>
+    <circle cx="7.7"  cy="21.3" r="1.8" fill="#22d3ee"/>
+    <circle cx="16"   cy="26.1" r="1.8" fill="#4ade80"/>
+    <circle cx="24.3" cy="21.3" r="1.8" fill="#facc15"/>
+    <circle cx="24.3" cy="11.7" r="1.8" fill="#f43f5e"/>
   </g>
+
+  <!-- The bridge-keeper at the centre -->
+  <circle cx="16" cy="16.5" r="3.4" fill="#f4f7ff" opacity="0.35" filter="url(#soften)"/>
+  <circle cx="16" cy="16.5" r="2.5" fill="#f4f7ff"/>
 </svg>
