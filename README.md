@@ -20,17 +20,29 @@ Home Assistant is a great platform, but its Hue integration is known to silently
 - Providers without a push channel (Govee, WLED, Tasmota, Shelly) are kept fresh by a polling manager that feeds the same event pipeline — the UI updates live either way.
 - Connection state per provider is always one API call away (`GET /api/providers/{id}/status`) and shown as a badge in the UI.
 
-## Quickstart (Docker)
+## Install
+
+### Docker (recommended)
 
 ```sh
-git clone https://github.com/others-git/bifrost && cd bifrost
+mkdir bifrost && cd bifrost
+curl -fsSLO https://raw.githubusercontent.com/others-git/bifrost/main/docker-compose.yml
 echo "BIFROST_SECRET=$(openssl rand -hex 32)" > .env
 docker compose up -d
 ```
 
-Open `http://localhost:3000`, set a password, add a provider, discover lights.
+Then open `http://<host>:3000`.
 
-## Quickstart (bare binary)
+### Unraid
+
+A Community Applications template lives at
+[`environment/unraid/bifrost.xml`](environment/unraid/bifrost.xml).
+Until it's published in CA: **Docker → Add Container → Template** and paste the
+raw URL of that file, or drop it into
+`/boot/config/plugins/dockerMan/templates-user/`. Fill in the Secret Key
+(`openssl rand -hex 32`) — everything else has sane defaults.
+
+### Bare binary
 
 Requires Rust (stable) and Node 20+.
 
@@ -38,6 +50,31 @@ Requires Rust (stable) and Node 20+.
 cd frontend && npm ci && npm run build && cd ..
 BIFROST_SECRET=$(openssl rand -hex 32) cargo run --release
 ```
+
+## First-run setup
+
+1. **Set a password** — the first visit shows the setup page. One password
+   protects the whole hub (designed for LAN/VPN; put it behind Tailscale or a
+   reverse proxy for remote access).
+2. **Add a provider** — Settings → Add Provider:
+   - **Hue**: enter the bridge IP (Hue app → Settings → My Hue system →
+     Bridge), press the round link button on the bridge, click **Pair**. The
+     app key is fetched and filled in automatically.
+   - **Govee**: API key from the Govee Home app (Profile → About Us → Apply
+     for API Key).
+   - **WLED / Tasmota / Shelly**: just the device IP.
+3. **Discover** — runs automatically after adding; lights appear on the
+   dashboard with live on/off, brightness, and full-RGB color controls.
+4. **Scenes** — set your lights how you like them, then *+ Save scene* on the
+   dashboard. Activating a scene re-applies every captured state in parallel.
+5. **Groups** — Settings → Groups: pick lights into a room; the dashboard
+   gets per-group On/Off chips.
+6. **Floor plan** — the *Plan* tab. Paint your house layout (floor tiles +
+   thin walls, Sims-style), then place your real lights on it — wall-mounted
+   on edges or ceiling-mounted in tile centres. The plan doubles as a live
+   dashboard: lights glow with their actual color and brightness, update in
+   real time, and toggle on click. Multiple lights on one spot (a multi-bulb
+   fixture) cluster into a single dot with a ×N badge.
 
 ## Configuration
 
@@ -54,21 +91,13 @@ Everything is configured via environment variables (a `.env` file works too):
 
 | Provider | Transport | Live updates | Setup |
 |---|---|---|---|
-| Philips Hue | LAN (CLIP v2) | SSE push | Enter the bridge IP, press the link button, click **Pair** — Bifrost fetches the app key for you |
-| Govee | Cloud API v2 | Polling | API key from the Govee Home app (Profile → About Us → Apply for API Key) |
+| Philips Hue | LAN (CLIP v2) | SSE push | Bridge IP + link-button pairing in the UI |
+| Govee | Cloud API v2 | Polling | API key from the Govee Home app |
 | WLED | LAN REST | Polling | Device IP |
 | Tasmota | LAN REST | Polling | Device IP |
 | Shelly (Gen1) | LAN REST | Polling | Device IP |
 
 Adding a provider type is intentionally mechanical: implement two traits, register one factory line, write wiremock tests. See `src/providers/wled/mod.rs` for the template and `CLAUDE.md` for the rules.
-
-## Features
-
-- **Single-password auth** — HttpOnly, SameSite=Strict session cookie. Designed for LAN/VPN use; put it behind Tailscale or a reverse proxy for remote access.
-- **Live dashboard** — on/off, brightness, full-RGB color; state changes from physical switches or other apps stream in over `GET /api/events` (SSE).
-- **Scenes** — snapshot every light's current state, re-apply in parallel with one click.
-- **Groups** — control a room at once (`PUT /api/groups/{id}/state`).
-- **Encrypted credentials** — provider secrets are AES-256-GCM encrypted before they touch the database.
 
 ## API
 
@@ -93,17 +122,21 @@ GET/POST /api/scenes                 list / snapshot current states
 POST /api/scenes/{id}/activate       apply in parallel
 GET/POST /api/groups                 list / create
 PUT  /api/groups/{id}/state          broadcast one state to all members
+
+GET/POST /api/plans                  floor plans
+PUT  /api/plans/{id}/layout          tiles + walls (bulk editor save)
+PUT  /api/plans/{id}/lights          light placements (tile + mount point)
 ```
 
 ## Development
 
 ```sh
-cargo test                                 # 100+ tests: unit + wiremock + API integration
+cargo test                                 # 116 tests: unit + wiremock + API integration
 cargo clippy --all-targets -- -D warnings  # CI-enforced
 cd frontend && npm run build               # tsc + vite
 ```
 
-The test suite never touches the network — external HTTP is wiremock, the DB is in-memory SQLite. CI runs fmt, clippy, tests, and the frontend build on every push.
+The test suite never touches the network — external HTTP is wiremock, the DB is in-memory SQLite. CI runs fmt, clippy, tests, and the frontend build on every push; tags matching `v*` publish a Docker image to GHCR and create a GitHub release.
 
 ## License
 

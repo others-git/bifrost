@@ -1,8 +1,8 @@
 services:
   bifrost:
-    build: .
-    # Or, once images are published:
-    # image: ghcr.io/others-git/bifrost:latest
+    image: ghcr.io/others-git/bifrost:latest
+    # Building from a source checkout instead:
+    # build: .
     restart: unless-stopped
     ports:
       - "3000:3000"
