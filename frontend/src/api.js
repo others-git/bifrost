@@ -70,6 +70,33 @@ export async function addProvider(name, provider_type, credentials) {
 export async function removeProvider(id) {
     await fetch(`/api/providers/${id}`, { method: "DELETE" });
 }
+/** One Hue link-button pairing attempt. 409 means the button wasn't pressed yet. */
+export async function pairHueBridge(bridgeIp) {
+    const res = await fetch("/api/providers/hue/pair", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ bridge_ip: bridgeIp }),
+    });
+    return res.json();
+}
+/**
+ * Convert sRGB to CIE xy + Y brightness using the Hue Wide RGB D65 matrix —
+ * the same math as the server's `Color::from_rgb`.
+ */
+export function rgbToXy(r, g, b) {
+    const lin = (c) => {
+        const v = c / 255;
+        return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+    };
+    const rl = lin(r), gl = lin(g), bl = lin(b);
+    const X = rl * 0.664511 + gl * 0.154324 + bl * 0.162028;
+    const Y = rl * 0.283881 + gl * 0.668433 + bl * 0.047685;
+    const Z = rl * 0.000088 + gl * 0.07231 + bl * 0.986039;
+    const sum = X + Y + Z;
+    if (sum === 0)
+        return { x: 0, y: 0, brightness: 0 };
+    return { x: X / sum, y: Y / sum, brightness: Y };
+}
 export async function discoverLights(id) {
     const res = await fetch(`/api/providers/${id}/discover`, { method: "POST" });
     if (!res.ok)

@@ -7,6 +7,8 @@
 //! Base URL: `https://<bridge-ip>/clip/v2/resource`
 //! The bridge uses a self-signed TLS cert; accept it or pin the bridge cert.
 
+pub mod pairing;
+
 use crate::models::{Color, HueGamut, Light, LightCapabilities, LightState, Provider};
 use crate::providers::LightProvider;
 use anyhow::{Context, Result};
@@ -308,6 +310,10 @@ impl ProviderFactory for HueProviderFactory {
             .ok_or_else(|| anyhow::anyhow!("hue credentials missing app_key"))?
             .to_string();
         Ok(Box::new(HueProvider::new(bridge_ip, app_key)?))
+    }
+
+    fn connection_mode(&self) -> crate::providers::ConnectionMode {
+        crate::providers::ConnectionMode::Sse
     }
 
     fn credentials_schema(&self) -> &'static [CredentialField] {

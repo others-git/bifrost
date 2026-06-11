@@ -1,6 +1,6 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useEffect, useRef, useState } from "react";
-import { setLightState } from "../api";
+import { rgbToXy, setLightState } from "../api";
 import { S } from "../styles";
 export function DashboardPage({ lights, onRefresh, onNavigate }) {
     // Local copy so SSE events can update individual lights without a full server round-trip.
@@ -37,10 +37,23 @@ export function DashboardPage({ lights, onRefresh, onNavigate }) {
 function LightCard({ light, onLocalUpdate, onChanged, }) {
     const serverBrightness = light.last_state?.brightness ?? 100;
     const [localBrightness, setLocalBrightness] = useState(serverBrightness);
+    const [localHex, setLocalHex] = useState("#ffb84d");
     const commitTimer = useRef(undefined);
+    const colorTimer = useRef(undefined);
     const isOn = light.last_state?.on ?? false;
     // Sync slider when a server update (refresh or SSE) changes brightness.
     useEffect(() => { setLocalBrightness(serverBrightness); }, [serverBrightness]);
+    function handleColorChange(hex) {
+        setLocalHex(hex);
+        const r = parseInt(hex.slice(1, 3), 16);
+        const g = parseInt(hex.slice(3, 5), 16);
+        const b = parseInt(hex.slice(5, 7), 16);
+        const color = rgbToXy(r, g, b);
+        const next = { ...(light.last_state ?? { on: true }), on: true, color };
+        onLocalUpdate(light.id, next);
+        clearTimeout(colorTimer.current);
+        colorTimer.current = setTimeout(() => { setLightState(light.id, next); }, 200);
+    }
     async function toggle() {
         const next = { ...(light.last_state ?? { on: false }), on: !isOn };
         onLocalUpdate(light.id, next); // optimistic update
@@ -70,7 +83,15 @@ function LightCard({ light, onLocalUpdate, onChanged, }) {
                     marginTop: "0.25rem",
                     accentColor: "#f90",
                     cursor: isOn ? "pointer" : "default",
-                } }))] }));
+                } })), light.capabilities.color_rgb && (_jsxs("div", { style: { display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.4rem" }, children: [_jsx("input", { type: "color", value: localHex, disabled: !isOn, onChange: (e) => handleColorChange(e.target.value), style: {
+                            width: 36,
+                            height: 24,
+                            padding: 0,
+                            border: "1px solid #444",
+                            borderRadius: 4,
+                            background: "none",
+                            cursor: isOn ? "pointer" : "default",
+                        } }), _jsx("span", { style: { fontSize: "0.75rem", color: "#888" }, children: "Color" })] }))] }));
 }
 function Toggle({ on, onToggle }) {
     return (_jsx("button", { onClick: onToggle, style: {

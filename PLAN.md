@@ -214,6 +214,19 @@ The registry pattern makes this mechanical. Each new provider is:
 
 ---
 
+## Milestone 4.5 — Functional Hue + Govee ✅ DONE
+
+93 tests green. Closes the gaps between "compiles and passes tests" and "usable":
+
+- [x] **Hue link-button pairing** — `src/providers/hue/pairing.rs` + `POST /api/providers/hue/pair`. User enters the bridge IP, presses the link button, clicks Pair; the server POSTs `{"devicetype":"bifrost#server","generateclientkey":true}` and returns the app key (409 if the button wasn't pressed, 502 if unreachable). No more manual curl. 5 wiremock + 4 API tests.
+- [x] **`ConnectionMode` on `ProviderFactory`** — `Sse` (Hue) or `Poll{interval_secs}` (default 120s, everything else). Startup and `POST /api/providers` dispatch via `start_manager_for()`; the `provider_type == "hue"` string match in the API layer is gone.
+- [x] **`PollingManager`** — keeps Govee/WLED/Tasmota/Shelly state fresh without a push channel: discover → per-device `get_state` → broadcast on the same `LightEvent` pipeline as Hue SSE, so `/api/events` and the DB writer work identically. Connected/Reconnecting state machine with the shared backoff. 4 unit tests with a scripted provider.
+- [x] **Frontend: Hue pair flow** — Add-provider form grows a Pair button on the app-key field (hue only), with link-button guidance and auto-fill on success.
+- [x] **Frontend: auto-discovery** — adding a provider immediately runs discovery; lights appear without a second click.
+- [x] **Frontend: color picker** — `LightCard` shows a color input for `color_rgb` lights; hex → CIE xy via the same Wide RGB D65 matrix as the server (`rgbToXy` in `api.ts`), 200ms debounce.
+
+---
+
 ## Milestone 5 — Production Readiness
 
 ### 5.1 Scenes
@@ -280,3 +293,10 @@ services:
 - Credentials encrypted with AES-256-GCM. Never stored in plaintext.
 - `HueConnectionManager` is the only code that opens the bridge SSE stream.
 - `ProviderRegistry` is the only place provider types are registered.
+
+------
+
+new feature:
+
+a a "DIY" grid feature where a house can be represented by building a floor plan using 1x1 "sqquare foot" files (think Sims 4 houses but 2d) and lights can be placed. The "light"s should correspond to the actual lights. 
+

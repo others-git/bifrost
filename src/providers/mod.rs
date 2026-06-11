@@ -42,6 +42,21 @@ pub enum FieldKind {
     Url,
 }
 
+// ── Connection mode ─────────────────────────────────────────────────────────
+
+/// How the runtime keeps a provider's light states fresh.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ConnectionMode {
+    /// Push events via the Hue CLIP v2 SSE stream, managed by `HueConnectionManager`.
+    Sse,
+    /// Periodic state polling via `PollingManager`.
+    Poll { interval_secs: u64 },
+}
+
+/// Default polling cadence. Conservative enough for cloud APIs with daily
+/// rate limits (Govee: 10 000 req/day).
+pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 120;
+
 // ── Factory trait ───────────────────────────────────────────────────────────
 
 /// A factory knows how to construct one type of provider from its credentials.
@@ -55,6 +70,14 @@ pub trait ProviderFactory: Send + Sync {
 
     /// Describe the credential fields the UI must collect before calling `add_provider`.
     fn credentials_schema(&self) -> &'static [CredentialField];
+
+    /// How the runtime should keep this provider's state fresh. Defaults to polling;
+    /// only providers with a push channel need to override.
+    fn connection_mode(&self) -> ConnectionMode {
+        ConnectionMode::Poll {
+            interval_secs: DEFAULT_POLL_INTERVAL_SECS,
+        }
+    }
 }
 
 // ── Registry ────────────────────────────────────────────────────────────────
@@ -91,6 +114,13 @@ impl ProviderRegistry {
     /// Returns true if `provider_type` is registered.
     pub fn is_known(&self, provider_type: &str) -> bool {
         self.factories.contains_key(provider_type)
+    }
+
+    /// How the runtime should keep this provider type's state fresh.
+    pub fn connection_mode(&self, provider_type: &str) -> Option<ConnectionMode> {
+        self.factories
+            .get(provider_type)
+            .map(|f| f.connection_mode())
     }
 
     /// All registered provider types with their UI schemas, sorted by type name.
@@ -237,6 +267,26 @@ pub(crate) mod tests {
         let reg = default_registry();
         assert!(reg.is_known("tasmota"));
         assert!(reg.is_known("shelly"));
+    }
+
+    #[test]
+    fn hue_uses_sse_mode_all_others_poll() {
+        let reg = default_registry();
+        assert_eq!(reg.connection_mode("hue"), Some(ConnectionMode::Sse));
+        for t in ["govee", "wled", "tasmota", "shelly"] {
+            match reg.connection_mode(t) {
+                Some(ConnectionMode::Poll { interval_secs }) => {
+                    assert!(interval_secs > 0, "{t}: zero poll interval")
+                }
+                other => panic!("{t}: expected Poll mode, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn connection_mode_for_unknown_type_is_none() {
+        let reg = ProviderRegistry::new();
+        assert!(reg.connection_mode("nonexistent").is_none());
     }
 
     #[test]

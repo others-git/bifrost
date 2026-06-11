@@ -68,7 +68,7 @@ pub async fn run() -> Result<()> {
     let registry = providers::default_registry();
     let state = Arc::new(AppState::new(db, &cfg.secret, registry));
 
-    start_hue_managers(&state).await;
+    start_managers(&state).await;
 
     let app = build_app(Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
@@ -78,37 +78,81 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
-/// Query all enabled Hue providers from the DB and start a connection manager for each.
-async fn start_hue_managers(state: &Arc<AppState>) {
+/// Start a connection manager (SSE or polling, per the factory's `ConnectionMode`)
+/// for every enabled provider in the DB.
+async fn start_managers(state: &Arc<AppState>) {
     use sqlx::Row;
 
-    let rows = match sqlx::query(
-        "SELECT id, credentials FROM providers WHERE provider_type = 'hue' AND enabled = 1",
-    )
-    .fetch_all(&state.db)
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("could not load Hue providers at startup: {e}");
-            return;
-        }
-    };
+    let rows =
+        match sqlx::query("SELECT id, provider_type, credentials FROM providers WHERE enabled = 1")
+            .fetch_all(&state.db)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("could not load providers at startup: {e}");
+                return;
+            }
+        };
 
     let mut connections = state.connections.lock().await;
     for row in rows {
         let id: String = row.get("id");
+        let provider_type: String = row.get("provider_type");
         let creds_enc: String = row.get("credentials");
-        match state
-            .decrypt_credentials(&creds_enc)
-            .and_then(|j| providers::hue::HueProvider::from_credentials(&j))
-        {
-            Ok(provider) => {
-                tracing::info!("starting Hue connection manager for provider {id}");
-                connections.start(id, provider, state.db.clone());
+
+        let creds_json = match state.decrypt_credentials(&creds_enc) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::error!("failed to decrypt credentials for provider {id}: {e:#}");
+                continue;
             }
-            Err(e) => tracing::error!("failed to build Hue provider {id}: {e:#}"),
+        };
+
+        start_manager_for(&mut connections, state, &id, &provider_type, &creds_json);
+    }
+}
+
+/// Dispatch one provider to the right manager based on its registry connection mode.
+/// Used at startup and when a provider is added at runtime.
+pub fn start_manager_for(
+    connections: &mut ConnectionRegistry,
+    state: &AppState,
+    provider_id: &str,
+    provider_type: &str,
+    creds_json: &str,
+) {
+    use providers::ConnectionMode;
+
+    match state.registry.connection_mode(provider_type) {
+        Some(ConnectionMode::Sse) => {
+            // The SSE stream is Hue-specific; the HueConnectionManager is the
+            // single owner of bridge stream reconnection.
+            match providers::hue::HueProvider::from_credentials(creds_json) {
+                Ok(provider) => {
+                    tracing::info!("starting SSE connection manager for provider {provider_id}");
+                    connections.start_sse(provider_id.to_string(), provider, state.db.clone());
+                }
+                Err(e) => tracing::error!("failed to build provider {provider_id}: {e:#}"),
+            }
         }
+        Some(ConnectionMode::Poll { interval_secs }) => {
+            match state.registry.build(provider_type, creds_json) {
+                Ok(provider) => {
+                    tracing::info!(
+                        "starting polling manager for provider {provider_id} (every {interval_secs}s)"
+                    );
+                    connections.start_polling(
+                        provider_id.to_string(),
+                        provider,
+                        std::time::Duration::from_secs(interval_secs),
+                        state.db.clone(),
+                    );
+                }
+                Err(e) => tracing::error!("failed to build provider {provider_id}: {e:#}"),
+            }
+        }
+        None => tracing::warn!("provider {provider_id} has unknown type '{provider_type}'"),
     }
 }
 

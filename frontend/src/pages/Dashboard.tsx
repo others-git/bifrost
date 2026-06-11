@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { setLightState, type Light, type LightState } from "../api";
+import { rgbToXy, setLightState, type Light, type LightState } from "../api";
 import { S } from "../styles";
 
 interface Props {
@@ -97,11 +97,25 @@ function LightCard({
 }) {
   const serverBrightness = light.last_state?.brightness ?? 100;
   const [localBrightness, setLocalBrightness] = useState(serverBrightness);
+  const [localHex, setLocalHex] = useState("#ffb84d");
   const commitTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const colorTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const isOn = light.last_state?.on ?? false;
 
   // Sync slider when a server update (refresh or SSE) changes brightness.
   useEffect(() => { setLocalBrightness(serverBrightness); }, [serverBrightness]);
+
+  function handleColorChange(hex: string) {
+    setLocalHex(hex);
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    const color = rgbToXy(r, g, b);
+    const next: LightState = { ...(light.last_state ?? { on: true }), on: true, color };
+    onLocalUpdate(light.id, next);
+    clearTimeout(colorTimer.current);
+    colorTimer.current = setTimeout(() => { setLightState(light.id, next); }, 200);
+  }
 
   async function toggle() {
     const next: LightState = { ...(light.last_state ?? { on: false }), on: !isOn };
@@ -154,6 +168,26 @@ function LightCard({
             cursor: isOn ? "pointer" : "default",
           }}
         />
+      )}
+      {light.capabilities.color_rgb && (
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.4rem" }}>
+          <input
+            type="color"
+            value={localHex}
+            disabled={!isOn}
+            onChange={(e) => handleColorChange(e.target.value)}
+            style={{
+              width: 36,
+              height: 24,
+              padding: 0,
+              border: "1px solid #444",
+              borderRadius: 4,
+              background: "none",
+              cursor: isOn ? "pointer" : "default",
+            }}
+          />
+          <span style={{ fontSize: "0.75rem", color: "#888" }}>Color</span>
+        </div>
       )}
     </div>
   );

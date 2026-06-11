@@ -5,6 +5,7 @@ import {
   getProviderStatus,
   getProviderTypes,
   getProviders,
+  pairHueBridge,
   removeProvider,
   type ConnectionStatus,
   type CredentialField,
@@ -49,10 +50,16 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
     showToast(`Discovered ${result.discovered} light${result.discovered !== 1 ? "s" : ""}.`);
   }
 
-  async function handleAdded() {
+  async function handleAdded(id: string) {
     setShowAdd(false);
     await loadProviders();
-    showToast("Provider added.");
+    // Run discovery right away so lights appear without an extra click.
+    try {
+      const result = await discoverLights(id);
+      showToast(`Provider added — found ${result.discovered} light${result.discovered !== 1 ? "s" : ""}.`);
+    } catch {
+      showToast("Provider added. Discovery failed — check the connection and try Discover.");
+    }
   }
 
   return (
@@ -162,7 +169,7 @@ function AddProviderForm({
   onCancel,
 }: {
   types: ProviderType[];
-  onAdded: () => void;
+  onAdded: (id: string) => void;
   onCancel: () => void;
 }) {
   const [selectedType, setSelectedType] = useState(types[0]?.provider_type ?? "");
@@ -170,11 +177,13 @@ function AddProviderForm({
   const [credentials, setCredentials] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [pairing, setPairing] = useState(false);
+  const [pairMsg, setPairMsg] = useState("");
 
   const schema: CredentialField[] = types.find((t) => t.provider_type === selectedType)?.schema ?? [];
 
   // Clear credentials when the provider type changes.
-  useEffect(() => { setCredentials({}); }, [selectedType]);
+  useEffect(() => { setCredentials({}); setPairMsg(""); }, [selectedType]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -183,11 +192,28 @@ function AddProviderForm({
     const result = await addProvider(name, selectedType, credentials);
     setLoading(false);
     if ("error" in result) setError(result.error);
-    else onAdded();
+    else onAdded(result.id);
   }
 
   function setField(fieldName: string, value: string) {
     setCredentials((prev) => ({ ...prev, [fieldName]: value }));
+  }
+
+  // Hue link-button pairing: fetch the app key from the bridge so the user
+  // never has to curl it manually.
+  async function handlePair() {
+    setPairing(true);
+    setPairMsg("");
+    const result = await pairHueBridge(credentials.bridge_ip ?? "");
+    setPairing(false);
+    if ("app_key" in result) {
+      setField("app_key", result.app_key);
+      setPairMsg("✓ Paired with bridge.");
+    } else if (result.error === "link_button_not_pressed") {
+      setPairMsg("Press the round link button on the bridge, then click Pair again.");
+    } else {
+      setPairMsg(`Could not reach the bridge: ${result.message}`);
+    }
   }
 
   return (
@@ -221,23 +247,56 @@ function AddProviderForm({
         </select>
       </label>
 
-      {schema.map((field) => (
-        <label key={field.name} style={labelStyle}>
-          <span>
-            {field.label}
-            {field.required && <span style={{ color: "#f90" }}> *</span>}
-          </span>
-          {field.hint && <span style={{ color: "#666", fontSize: "0.78rem" }}>{field.hint}</span>}
-          <input
-            type={field.kind === "password" ? "password" : "text"}
-            value={credentials[field.name] ?? ""}
-            onChange={(e) => setField(field.name, e.target.value)}
-            style={S.input}
-            required={field.required}
-            autoComplete={field.kind === "password" ? "new-password" : "off"}
-          />
-        </label>
-      ))}
+      {schema.map((field) => {
+        // Hue's app key comes from link-button pairing, not manual entry.
+        const isHueAppKey = selectedType === "hue" && field.name === "app_key";
+        return (
+          <label key={field.name} style={labelStyle}>
+            <span>
+              {field.label}
+              {field.required && <span style={{ color: "#f90" }}> *</span>}
+            </span>
+            {!isHueAppKey && field.hint && (
+              <span style={{ color: "#666", fontSize: "0.78rem" }}>{field.hint}</span>
+            )}
+            {isHueAppKey && (
+              <span style={{ color: "#666", fontSize: "0.78rem" }}>
+                Press the link button on the bridge, then click Pair — or paste a key manually.
+              </span>
+            )}
+            <div style={{ display: "flex", gap: "0.5rem" }}>
+              <input
+                type={field.kind === "password" ? "password" : "text"}
+                value={credentials[field.name] ?? ""}
+                onChange={(e) => setField(field.name, e.target.value)}
+                style={{ ...S.input, flex: 1 }}
+                required={field.required}
+                autoComplete={field.kind === "password" ? "new-password" : "off"}
+              />
+              {isHueAppKey && (
+                <button
+                  type="button"
+                  onClick={handlePair}
+                  disabled={pairing || !(credentials.bridge_ip ?? "").trim()}
+                  style={S.buttonGhost}
+                >
+                  {pairing ? "Pairing…" : "Pair"}
+                </button>
+              )}
+            </div>
+            {isHueAppKey && pairMsg && (
+              <span
+                style={{
+                  fontSize: "0.78rem",
+                  color: pairMsg.startsWith("✓") ? "#4d4" : "#fa0",
+                }}
+              >
+                {pairMsg}
+              </span>
+            )}
+          </label>
+        );
+      })}
 
       {error && <p style={{ color: "#f66", margin: 0, fontSize: "0.875rem" }}>{error}</p>}
 

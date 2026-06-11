@@ -380,3 +380,104 @@ async fn logout_clears_session() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
+
+// ── Hue pairing ──────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn hue_pair_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers/hue/pair")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"bridge_ip":"192.168.1.10"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn hue_pair_returns_app_key_when_bridge_accepts() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let bridge = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            { "success": { "username": "paired-key-123", "clientkey": "deadbeef" } }
+        ])))
+        .mount(&bridge)
+        .await;
+
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let body = format!(r#"{{"bridge_ip":"{}"}}"#, bridge.uri());
+    let resp = app
+        .oneshot(helpers::authed_post(
+            "/api/providers/hue/pair",
+            &cookie,
+            &body,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["app_key"], "paired-key-123");
+}
+
+#[tokio::test]
+async fn hue_pair_returns_409_when_link_button_not_pressed() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let bridge = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            { "error": { "type": 101, "address": "", "description": "link button not pressed" } }
+        ])))
+        .mount(&bridge)
+        .await;
+
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let body = format!(r#"{{"bridge_ip":"{}"}}"#, bridge.uri());
+    let resp = app
+        .oneshot(helpers::authed_post(
+            "/api/providers/hue/pair",
+            &cookie,
+            &body,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["error"], "link_button_not_pressed");
+}
+
+#[tokio::test]
+async fn hue_pair_returns_502_when_bridge_unreachable() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Nothing listens on port 9.
+    let resp = app
+        .oneshot(helpers::authed_post(
+            "/api/providers/hue/pair",
+            &cookie,
+            r#"{"bridge_ip":"127.0.0.1:9"}"#,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+}

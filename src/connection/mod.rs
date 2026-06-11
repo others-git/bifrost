@@ -268,20 +268,114 @@ impl ConnectionStatus {
     }
 }
 
+// ── Polling manager ─────────────────────────────────────────────────────────
+
+/// Keeps state fresh for providers without a push channel (Govee, WLED, …) by
+/// polling on an interval. Broadcasts `LightEvent`s on the same pipeline as
+/// the Hue SSE manager, so the frontend event stream works identically.
+pub struct PollingManager {
+    provider: Box<dyn LightProvider>,
+    pub state: Arc<RwLock<ConnectionState>>,
+    pub events: broadcast::Sender<LightEvent>,
+    interval: Duration,
+}
+
+impl PollingManager {
+    pub fn new(
+        provider: Box<dyn LightProvider>,
+        interval: Duration,
+    ) -> (Self, broadcast::Receiver<LightEvent>) {
+        let (tx, rx) = broadcast::channel(256);
+        let mgr = Self {
+            provider,
+            state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
+            events: tx,
+            interval,
+        };
+        (mgr, rx)
+    }
+
+    /// Poll forever. Successful polls mark the provider Connected; failures
+    /// transition to Reconnecting with exponential backoff.
+    pub async fn run(self: Arc<Self>) {
+        info!("polling manager starting ({})", self.provider.name());
+        let mut attempt: u32 = 0;
+        let mut connected_since: Option<Instant> = None;
+
+        loop {
+            match self.poll_once().await {
+                Ok(n) => {
+                    attempt = 0;
+                    let since = *connected_since.get_or_insert_with(Instant::now);
+                    *self.state.write().await = ConnectionState::Connected {
+                        since,
+                        last_event: Instant::now(),
+                    };
+                    debug!("{}: polled {n} lights", self.provider.name());
+                    tokio::time::sleep(self.interval).await;
+                }
+                Err(e) => {
+                    warn!("{}: poll failed: {e:#}", self.provider.name());
+                    connected_since = None;
+                    let delay = backoff_delay(attempt);
+                    attempt += 1;
+                    *self.state.write().await = ConnectionState::Reconnecting {
+                        attempt,
+                        retry_at: Instant::now() + delay,
+                    };
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+
+    /// One polling pass: enumerate devices, fetch each device's live state,
+    /// broadcast the result. Falls back to the discovery snapshot when a
+    /// per-device state fetch fails (e.g. transient cloud error).
+    async fn poll_once(&self) -> Result<usize> {
+        let lights = self.provider.discover().await?;
+        let mut count = 0;
+        for light in lights {
+            let state = match self.provider.get_state(&light.provider_id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    debug!(
+                        "{}: get_state({}) failed, using discovery snapshot: {e:#}",
+                        self.provider.name(),
+                        light.provider_id
+                    );
+                    light.state
+                }
+            };
+            let _ = self.events.send(LightEvent {
+                device_id: light.provider_id,
+                state,
+            });
+            count += 1;
+        }
+        Ok(count)
+    }
+}
+
+// ── Connection registry ─────────────────────────────────────────────────────
+
+/// One managed connection (SSE or polling): its observable state, its event
+/// channel, and the background tasks that keep it alive.
 struct ConnectionEntry {
-    manager: Arc<HueConnectionManager>,
-    _sse_task: JoinHandle<()>,
-    _db_task: JoinHandle<()>,
+    state: Arc<RwLock<ConnectionState>>,
+    events: broadcast::Sender<LightEvent>,
+    tasks: Vec<JoinHandle<()>>,
 }
 
 impl Drop for ConnectionEntry {
     fn drop(&mut self) {
-        self._sse_task.abort();
-        self._db_task.abort();
+        for t in &self.tasks {
+            t.abort();
+        }
     }
 }
 
-/// Owns one `HueConnectionManager` per provider. Thread-safe via `Mutex<ConnectionRegistry>`.
+/// Owns one connection manager per provider. Thread-safe via `Mutex<ConnectionRegistry>`.
 pub struct ConnectionRegistry {
     entries: HashMap<String, ConnectionEntry>,
 }
@@ -293,40 +387,64 @@ impl ConnectionRegistry {
         }
     }
 
-    /// Spawn the SSE loop and a DB writer task for the given Hue provider.
-    pub fn start(&mut self, provider_id: String, provider: HueProvider, db: SqlitePool) {
+    /// Spawn the Hue SSE loop and a DB writer task for the given provider.
+    pub fn start_sse(&mut self, provider_id: String, provider: HueProvider, db: SqlitePool) {
         let (mgr, rx) = HueConnectionManager::new(provider);
         let mgr = Arc::new(mgr);
+        let state = Arc::clone(&mgr.state);
+        let events = mgr.events.clone();
         let sse_task = tokio::spawn(Arc::clone(&mgr).run());
         let db_task = tokio::spawn(db_writer_task(rx, db));
         self.entries.insert(
             provider_id,
             ConnectionEntry {
-                manager: mgr,
-                _sse_task: sse_task,
-                _db_task: db_task,
+                state,
+                events,
+                tasks: vec![sse_task, db_task],
+            },
+        );
+    }
+
+    /// Spawn a polling loop and a DB writer task for any provider.
+    pub fn start_polling(
+        &mut self,
+        provider_id: String,
+        provider: Box<dyn LightProvider>,
+        interval: Duration,
+        db: SqlitePool,
+    ) {
+        let (mgr, rx) = PollingManager::new(provider, interval);
+        let mgr = Arc::new(mgr);
+        let state = Arc::clone(&mgr.state);
+        let events = mgr.events.clone();
+        let poll_task = tokio::spawn(Arc::clone(&mgr).run());
+        let db_task = tokio::spawn(db_writer_task(rx, db));
+        self.entries.insert(
+            provider_id,
+            ConnectionEntry {
+                state,
+                events,
+                tasks: vec![poll_task, db_task],
             },
         );
     }
 
     /// Abort tasks for the given provider. No-op if not managed.
     pub fn stop(&mut self, provider_id: &str) {
-        self.entries.remove(provider_id); // Drop aborts both tasks.
+        self.entries.remove(provider_id); // Drop aborts the tasks.
     }
 
     /// Return a shared handle to the manager's state lock (for the status endpoint).
     pub fn get_state_lock(&self, provider_id: &str) -> Option<Arc<RwLock<ConnectionState>>> {
-        self.entries
-            .get(provider_id)
-            .map(|e| Arc::clone(&e.manager.state))
+        self.entries.get(provider_id).map(|e| Arc::clone(&e.state))
     }
 
-    /// Subscribe to all managed Hue managers. Each returned receiver gets every
+    /// Subscribe to every managed connection. Each returned receiver gets every
     /// `LightEvent` broadcast by its manager. Used by the SSE endpoint.
     pub fn subscribe_all(&self) -> Vec<broadcast::Receiver<LightEvent>> {
         self.entries
             .values()
-            .map(|e| e.manager.events.subscribe())
+            .map(|e| e.events.subscribe())
             .collect()
     }
 }
@@ -373,6 +491,156 @@ fn backoff_delay(attempt: u32) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{Light, LightCapabilities};
+    use chrono::Utc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use uuid::Uuid;
+
+    // ── Polling manager ──────────────────────────────────────────────────────
+
+    /// Scripted provider: serves `lights`, per-device state via `get_state`,
+    /// and fails discovery after `fail_after` calls (u32::MAX = never).
+    struct ScriptedProvider {
+        lights: Vec<(String, LightState)>,
+        discover_calls: AtomicU32,
+        fail_discover_after: u32,
+        fail_get_state: bool,
+    }
+
+    impl ScriptedProvider {
+        fn new(lights: Vec<(String, LightState)>) -> Self {
+            Self {
+                lights,
+                discover_calls: AtomicU32::new(0),
+                fail_discover_after: u32::MAX,
+                fail_get_state: false,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LightProvider for ScriptedProvider {
+        fn name(&self) -> &str {
+            "scripted"
+        }
+
+        async fn discover(&self) -> Result<Vec<Light>> {
+            let n = self.discover_calls.fetch_add(1, Ordering::SeqCst);
+            if n >= self.fail_discover_after {
+                anyhow::bail!("scripted discover failure");
+            }
+            Ok(self
+                .lights
+                .iter()
+                .map(|(id, _)| Light {
+                    id: Uuid::new_v4(),
+                    provider_id: id.clone(),
+                    provider: crate::models::Provider::Govee,
+                    name: format!("Light {id}"),
+                    // Discovery snapshot is default (Govee's device list has no state).
+                    state: LightState::default(),
+                    capabilities: LightCapabilities::default(),
+                    last_seen: Utc::now(),
+                })
+                .collect())
+        }
+
+        async fn set_state(&self, _id: &str, _s: &LightState) -> Result<()> {
+            Ok(())
+        }
+
+        async fn get_state(&self, id: &str) -> Result<LightState> {
+            if self.fail_get_state {
+                anyhow::bail!("scripted get_state failure");
+            }
+            self.lights
+                .iter()
+                .find(|(lid, _)| lid == id)
+                .map(|(_, s)| s.clone())
+                .ok_or_else(|| anyhow::anyhow!("unknown device"))
+        }
+    }
+
+    fn on_at(brightness: f32) -> LightState {
+        LightState {
+            on: true,
+            brightness: Some(brightness),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_broadcasts_live_state_for_each_device() {
+        let provider = ScriptedProvider::new(vec![
+            ("dev-1".into(), on_at(75.0)),
+            ("dev-2".into(), on_at(30.0)),
+        ]);
+        let (mgr, mut rx) = PollingManager::new(Box::new(provider), Duration::from_secs(60));
+
+        let n = mgr.poll_once().await.unwrap();
+        assert_eq!(n, 2);
+
+        let e1 = rx.recv().await.unwrap();
+        let e2 = rx.recv().await.unwrap();
+        let mut got: Vec<_> = vec![
+            (e1.device_id, e1.state.brightness),
+            (e2.device_id, e2.state.brightness),
+        ];
+        got.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            got,
+            vec![
+                ("dev-1".to_string(), Some(75.0)),
+                ("dev-2".to_string(), Some(30.0))
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_falls_back_to_discovery_snapshot_when_get_state_fails() {
+        let mut provider = ScriptedProvider::new(vec![("dev-1".into(), on_at(75.0))]);
+        provider.fail_get_state = true;
+        let (mgr, mut rx) = PollingManager::new(Box::new(provider), Duration::from_secs(60));
+
+        mgr.poll_once().await.unwrap();
+
+        // get_state failed → falls back to the (default) discovery snapshot.
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event.device_id, "dev-1");
+        assert!(!event.state.on);
+        assert_eq!(event.state.brightness, None);
+    }
+
+    #[tokio::test]
+    async fn poll_run_marks_connected_then_reconnecting_on_failure() {
+        let mut provider = ScriptedProvider::new(vec![("dev-1".into(), on_at(50.0))]);
+        provider.fail_discover_after = 1; // first poll succeeds, second fails
+        let (mgr, _rx) = PollingManager::new(Box::new(provider), Duration::from_millis(10));
+        let mgr = Arc::new(mgr);
+        let state = Arc::clone(&mgr.state);
+
+        let task = tokio::spawn(Arc::clone(&mgr).run());
+
+        // After the first successful poll: Connected.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert_eq!(state.read().await.label(), "connected");
+
+        // After the second (failing) poll: Reconnecting with backoff.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(state.read().await.label(), "reconnecting");
+
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn poll_discover_failure_propagates_as_err() {
+        let mut provider = ScriptedProvider::new(vec![]);
+        provider.fail_discover_after = 0;
+        let (mgr, _rx) = PollingManager::new(Box::new(provider), Duration::from_secs(60));
+        assert!(mgr.poll_once().await.is_err());
+    }
+
+    // ── Backoff ──────────────────────────────────────────────────────────────
 
     #[test]
     fn delay_is_always_positive() {

@@ -85,6 +85,18 @@ pub fn authed_get(uri: &str, cookie: &str) -> Request<Body> {
         .unwrap()
 }
 
+/// Build an authenticated POST request with a JSON body and the given session cookie.
+#[allow(dead_code)] // used by some, not all, test binaries
+pub fn authed_post(uri: &str, cookie: &str, json_body: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::COOKIE, cookie.split(';').next().unwrap())
+        .body(Body::from(json_body.to_string()))
+        .unwrap()
+}
+
 pub async fn response_json(resp: Response<Body>) -> serde_json::Value {
     let bytes = http_body_util::BodyExt::collect(resp.into_body())
         .await

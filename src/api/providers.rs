@@ -18,6 +18,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(list_providers).post(add_provider))
         .route("/types", get(list_types))
+        .route("/hue/pair", post(hue_pair))
         .route("/{id}", delete(remove_provider))
         .route("/{id}/status", get(provider_status))
         .route("/{id}/discover", post(discover))
@@ -131,16 +132,16 @@ async fn add_provider(
     .await
     {
         Ok(_) => {
-            // For Hue providers, start a connection manager immediately.
-            if req.provider_type == "hue"
-                && let Ok(provider) =
-                    crate::providers::hue::HueProvider::from_credentials(&creds_json)
+            // Start the right manager (SSE or polling) for the new provider immediately.
             {
-                state
-                    .connections
-                    .lock()
-                    .await
-                    .start(id.clone(), provider, state.db.clone());
+                let mut connections = state.connections.lock().await;
+                crate::start_manager_for(
+                    &mut connections,
+                    &state,
+                    &id,
+                    &req.provider_type,
+                    &creds_json,
+                );
             }
             (StatusCode::CREATED, Json(serde_json::json!({ "id": id }))).into_response()
         }
@@ -187,6 +188,51 @@ async fn provider_status(
             let cs = lock.read().await;
             Json(ConnectionStatus::from_state(&cs)).into_response()
         }
+    }
+}
+
+// ── Hue link-button pairing ─────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct HuePairRequest {
+    /// Bridge IP or full base URL (the latter is used by tests).
+    bridge_ip: String,
+}
+
+async fn hue_pair(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<HuePairRequest>,
+) -> impl IntoResponse {
+    use crate::providers::hue::pairing::{self, PairOutcome};
+
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let base = if req.bridge_ip.starts_with("http://") || req.bridge_ip.starts_with("https://") {
+        req.bridge_ip.clone()
+    } else {
+        format!("http://{}", req.bridge_ip)
+    };
+
+    match pairing::pair(&base).await {
+        Ok(PairOutcome::Paired { app_key }) => {
+            Json(serde_json::json!({ "app_key": app_key })).into_response()
+        }
+        Ok(PairOutcome::LinkButtonNotPressed) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "link_button_not_pressed",
+                "message": "Press the round link button on the Hue bridge, then try again within 30 seconds."
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": "bridge_unreachable", "message": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
