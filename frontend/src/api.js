@@ -8,6 +8,12 @@ export function mergePatch(base, patch) {
         color_temp_mirek: patch.color_temp_mirek ?? base?.color_temp_mirek,
     };
 }
+export async function getHealth() {
+    const res = await fetch("/api/health");
+    if (!res.ok)
+        return { ok: false, version: "", uptime_secs: 0 };
+    return res.json();
+}
 export async function getSetupStatus() {
     const res = await fetch("/api/setup/status");
     return res.json();
@@ -78,6 +84,17 @@ export async function addProvider(name, provider_type, credentials) {
 }
 export async function removeProvider(id) {
     await fetch(`/api/providers/${id}`, { method: "DELETE" });
+}
+/** Replace an existing provider's credentials (recovery after key rotation). */
+export async function updateProviderCredentials(id, credentials) {
+    const res = await fetch(`/api/providers/${id}/credentials`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ credentials }),
+    });
+    if (res.ok)
+        return { ok: true };
+    return { error: (await res.text()) || `HTTP ${res.status}` };
 }
 export async function getScenes() {
     const res = await fetch("/api/scenes");

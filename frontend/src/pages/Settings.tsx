@@ -13,6 +13,7 @@ import {
   removeGroup,
   removeProvider,
   setGroupMembers,
+  updateProviderCredentials,
   type ConnectionStatus,
   type CredentialField,
   type Group,
@@ -88,6 +89,8 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
           <ProviderCard
             key={p.id}
             provider={p}
+            types={types}
+            onCredentialsSaved={() => showToast("Credentials updated — reconnecting.")}
             onRemove={() => handleRemove(p.id)}
             onDiscover={() => handleDiscover(p.id)}
             onImportGroups={async () => {
@@ -331,11 +334,15 @@ function GroupForm({
 
 function ProviderCard({
   provider,
+  types,
+  onCredentialsSaved,
   onRemove,
   onDiscover,
   onImportGroups,
 }: {
   provider: Provider;
+  types: ProviderType[];
+  onCredentialsSaved: () => void;
   onRemove: () => void;
   onDiscover: () => Promise<void>;
   onImportGroups: () => Promise<void>;
@@ -343,6 +350,7 @@ function ProviderCard({
   const [status, setStatus] = useState<ConnectionStatus | null>(null);
   const [discovering, setDiscovering] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [editingCreds, setEditingCreds] = useState(false);
 
   useEffect(() => {
     getProviderStatus(provider.id).then(setStatus);
@@ -366,29 +374,146 @@ function ProviderCard({
   }
 
   return (
-    <div style={{ ...S.card, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: "1rem" }}>
-      <div style={{ minWidth: 0 }}>
-        <div style={{ fontWeight: 600 }}>{provider.name}</div>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.25rem" }}>
-          <span style={{ color: "#888", fontSize: "0.8rem" }}>{provider.provider_type}</span>
-          {status && <StatusBadge state={status.state} />}
+    <div style={{ ...S.card, gap: "0.75rem" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1rem" }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontWeight: 600 }}>{provider.name}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.25rem" }}>
+            <span style={{ color: "#888", fontSize: "0.8rem" }}>{provider.provider_type}</span>
+            {status && <StatusBadge state={status.state} />}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: "0.5rem", flexShrink: 0 }}>
+          <button onClick={handleDiscover} disabled={discovering} style={S.buttonGhost}>
+            {discovering ? "…" : "Discover"}
+          </button>
+          <button
+            onClick={handleImport}
+            disabled={importing}
+            title="Import the provider's rooms/zones as Bifrost groups"
+            style={S.buttonGhost}
+          >
+            {importing ? "…" : "Import rooms"}
+          </button>
+          <button
+            onClick={() => setEditingCreds((v) => !v)}
+            title="Re-enter credentials (e.g. after a BIFROST_SECRET change)"
+            style={S.buttonGhost}
+          >
+            {editingCreds ? "Close" : "Edit credentials"}
+          </button>
+          <button onClick={onRemove} style={S.buttonDanger}>Remove</button>
         </div>
       </div>
-      <div style={{ display: "flex", gap: "0.5rem", flexShrink: 0 }}>
-        <button onClick={handleDiscover} disabled={discovering} style={S.buttonGhost}>
-          {discovering ? "…" : "Discover"}
-        </button>
-        <button
-          onClick={handleImport}
-          disabled={importing}
-          title="Import the provider's rooms/zones as Bifrost groups"
-          style={S.buttonGhost}
-        >
-          {importing ? "…" : "Import rooms"}
-        </button>
-        <button onClick={onRemove} style={S.buttonDanger}>Remove</button>
-      </div>
+      {editingCreds && (
+        <EditCredentialsForm
+          provider={provider}
+          schema={types.find((t) => t.provider_type === provider.provider_type)?.schema ?? []}
+          onSaved={() => {
+            setEditingCreds(false);
+            onCredentialsSaved();
+          }}
+          onCancel={() => setEditingCreds(false)}
+        />
+      )}
     </div>
+  );
+}
+
+/// Re-enter credentials for an existing provider. The provider row (and all
+/// lights, scenes, groups, plans referencing it) stays intact.
+function EditCredentialsForm({
+  provider,
+  schema,
+  onSaved,
+  onCancel,
+}: {
+  provider: Provider;
+  schema: CredentialField[];
+  onSaved: () => void;
+  onCancel: () => void;
+}) {
+  const [credentials, setCredentials] = useState<Record<string, string>>({});
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [pairing, setPairing] = useState(false);
+  const [pairMsg, setPairMsg] = useState("");
+
+  function setField(name: string, value: string) {
+    setCredentials((prev) => ({ ...prev, [name]: value }));
+  }
+
+  async function handlePair() {
+    setPairing(true);
+    setPairMsg("");
+    const result = await pairHueBridge(credentials.bridge_ip ?? "");
+    setPairing(false);
+    if ("app_key" in result) {
+      setField("app_key", result.app_key);
+      setPairMsg("✓ Paired with bridge.");
+    } else if (result.error === "link_button_not_pressed") {
+      setPairMsg("Press the round link button on the bridge, then click Pair again.");
+    } else {
+      setPairMsg(`Could not reach the bridge: ${result.message}`);
+    }
+  }
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setError("");
+    setSaving(true);
+    const result = await updateProviderCredentials(provider.id, credentials);
+    setSaving(false);
+    if ("error" in result) setError(result.error);
+    else onSaved();
+  }
+
+  return (
+    <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: "0.6rem", borderTop: "1px solid #2a2a2a", paddingTop: "0.75rem" }}>
+      {schema.map((field) => {
+        const isHueAppKey = provider.provider_type === "hue" && field.name === "app_key";
+        return (
+          <label key={field.name} style={labelStyle}>
+            <span>
+              {field.label}
+              {field.required && <span style={{ color: "#f90" }}> *</span>}
+            </span>
+            <div style={{ display: "flex", gap: "0.5rem" }}>
+              <input
+                type={field.kind === "password" ? "password" : "text"}
+                value={credentials[field.name] ?? ""}
+                onChange={(e) => setField(field.name, e.target.value)}
+                style={{ ...S.input, flex: 1 }}
+                required={field.required}
+                autoComplete={field.kind === "password" ? "new-password" : "off"}
+              />
+              {isHueAppKey && (
+                <button
+                  type="button"
+                  onClick={handlePair}
+                  disabled={pairing || !(credentials.bridge_ip ?? "").trim()}
+                  style={S.buttonGhost}
+                >
+                  {pairing ? "Pairing…" : "Pair"}
+                </button>
+              )}
+            </div>
+            {isHueAppKey && pairMsg && (
+              <span style={{ fontSize: "0.78rem", color: pairMsg.startsWith("✓") ? "#4d4" : "#fa0" }}>
+                {pairMsg}
+              </span>
+            )}
+          </label>
+        );
+      })}
+      {error && <p style={{ color: "#f66", margin: 0, fontSize: "0.875rem" }}>{error}</p>}
+      <div style={{ display: "flex", gap: "0.5rem" }}>
+        <button type="submit" style={S.button} disabled={saving}>
+          {saving ? "Saving…" : "Save credentials"}
+        </button>
+        <button type="button" onClick={onCancel} style={S.buttonGhost}>Cancel</button>
+      </div>
+    </form>
   );
 }
 

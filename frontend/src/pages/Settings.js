@@ -1,6 +1,6 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useEffect, useState } from "react";
-import { addProvider, createGroup, discoverLights, getGroups, getLights, getProviderStatus, getProviderTypes, getProviders, importProviderGroups, pairHueBridge, removeGroup, removeProvider, setGroupMembers, } from "../api";
+import { addProvider, createGroup, discoverLights, getGroups, getLights, getProviderStatus, getProviderTypes, getProviders, importProviderGroups, pairHueBridge, removeGroup, removeProvider, setGroupMembers, updateProviderCredentials, } from "../api";
 import { S } from "../styles";
 export function SettingsPage({ onNavigate: _onNavigate }) {
     const [providers, setProviders] = useState([]);
@@ -41,7 +41,7 @@ export function SettingsPage({ onNavigate: _onNavigate }) {
             showToast("Provider added. Discovery failed — check the connection and try Discover.");
         }
     }
-    return (_jsxs("div", { style: { padding: "2rem", maxWidth: 720, margin: "0 auto" }, children: [_jsx("h2", { style: { margin: "0 0 1.5rem", fontSize: "1.2rem", color: "#ccc" }, children: "Providers" }), toast && (_jsx("div", { style: { background: "#1e3a1e", border: "1px solid #2a5a2a", borderRadius: 8, padding: "0.6rem 1rem", marginBottom: "1rem", color: "#8f8", fontSize: "0.875rem" }, children: toast })), _jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "0.75rem" }, children: [providers.length === 0 && !showAdd && (_jsx("p", { style: { color: "#666", margin: 0 }, children: "No providers configured." })), providers.map((p) => (_jsx(ProviderCard, { provider: p, onRemove: () => handleRemove(p.id), onDiscover: () => handleDiscover(p.id), onImportGroups: async () => {
+    return (_jsxs("div", { style: { padding: "2rem", maxWidth: 720, margin: "0 auto" }, children: [_jsx("h2", { style: { margin: "0 0 1.5rem", fontSize: "1.2rem", color: "#ccc" }, children: "Providers" }), toast && (_jsx("div", { style: { background: "#1e3a1e", border: "1px solid #2a5a2a", borderRadius: 8, padding: "0.6rem 1rem", marginBottom: "1rem", color: "#8f8", fontSize: "0.875rem" }, children: toast })), _jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "0.75rem" }, children: [providers.length === 0 && !showAdd && (_jsx("p", { style: { color: "#666", margin: 0 }, children: "No providers configured." })), providers.map((p) => (_jsx(ProviderCard, { provider: p, types: types, onCredentialsSaved: () => showToast("Credentials updated — reconnecting."), onRemove: () => handleRemove(p.id), onDiscover: () => handleDiscover(p.id), onImportGroups: async () => {
                             const r = await importProviderGroups(p.id);
                             showToast(r.found === 0
                                 ? "No rooms or zones defined on this provider."
@@ -109,10 +109,11 @@ function GroupForm({ lights, initialName, initialMembers, submitLabel, nameLocke
     }
     return (_jsxs("form", { onSubmit: submit, style: { ...S.card, border: "1px solid #333" }, children: [!nameLocked && (_jsxs("label", { style: labelStyle, children: [_jsx("span", { children: "Name" }), _jsx("input", { value: name, onChange: (e) => setName(e.target.value), placeholder: "e.g. Living Room", style: S.input, required: true, autoFocus: true })] })), nameLocked && _jsx("h3", { style: { margin: 0, fontSize: "1rem", color: "#ccc" }, children: name }), _jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "0.35rem" }, children: [_jsx("span", { style: { fontSize: "0.875rem", color: "#aaa" }, children: "Lights" }), lights.map((l) => (_jsxs("label", { style: { display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.875rem", color: "#ccc", cursor: "pointer" }, children: [_jsx("input", { type: "checkbox", checked: members.has(l.id), onChange: () => toggle(l.id), style: { accentColor: "#f90" } }), l.name] }, l.id)))] }), _jsxs("div", { style: { display: "flex", gap: "0.5rem" }, children: [_jsx("button", { type: "submit", style: S.button, disabled: saving || members.size === 0, children: saving ? "…" : submitLabel }), _jsx("button", { type: "button", onClick: onCancel, style: S.buttonGhost, children: "Cancel" })] })] }));
 }
-function ProviderCard({ provider, onRemove, onDiscover, onImportGroups, }) {
+function ProviderCard({ provider, types, onCredentialsSaved, onRemove, onDiscover, onImportGroups, }) {
     const [status, setStatus] = useState(null);
     const [discovering, setDiscovering] = useState(false);
     const [importing, setImporting] = useState(false);
+    const [editingCreds, setEditingCreds] = useState(false);
     useEffect(() => {
         getProviderStatus(provider.id).then(setStatus);
         const id = setInterval(() => getProviderStatus(provider.id).then(setStatus), 5000);
@@ -132,7 +133,53 @@ function ProviderCard({ provider, onRemove, onDiscover, onImportGroups, }) {
             setImporting(false);
         }
     }
-    return (_jsxs("div", { style: { ...S.card, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: "1rem" }, children: [_jsxs("div", { style: { minWidth: 0 }, children: [_jsx("div", { style: { fontWeight: 600 }, children: provider.name }), _jsxs("div", { style: { display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.25rem" }, children: [_jsx("span", { style: { color: "#888", fontSize: "0.8rem" }, children: provider.provider_type }), status && _jsx(StatusBadge, { state: status.state })] })] }), _jsxs("div", { style: { display: "flex", gap: "0.5rem", flexShrink: 0 }, children: [_jsx("button", { onClick: handleDiscover, disabled: discovering, style: S.buttonGhost, children: discovering ? "…" : "Discover" }), _jsx("button", { onClick: handleImport, disabled: importing, title: "Import the provider's rooms/zones as Bifrost groups", style: S.buttonGhost, children: importing ? "…" : "Import rooms" }), _jsx("button", { onClick: onRemove, style: S.buttonDanger, children: "Remove" })] })] }));
+    return (_jsxs("div", { style: { ...S.card, gap: "0.75rem" }, children: [_jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1rem" }, children: [_jsxs("div", { style: { minWidth: 0 }, children: [_jsx("div", { style: { fontWeight: 600 }, children: provider.name }), _jsxs("div", { style: { display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.25rem" }, children: [_jsx("span", { style: { color: "#888", fontSize: "0.8rem" }, children: provider.provider_type }), status && _jsx(StatusBadge, { state: status.state })] })] }), _jsxs("div", { style: { display: "flex", gap: "0.5rem", flexShrink: 0 }, children: [_jsx("button", { onClick: handleDiscover, disabled: discovering, style: S.buttonGhost, children: discovering ? "…" : "Discover" }), _jsx("button", { onClick: handleImport, disabled: importing, title: "Import the provider's rooms/zones as Bifrost groups", style: S.buttonGhost, children: importing ? "…" : "Import rooms" }), _jsx("button", { onClick: () => setEditingCreds((v) => !v), title: "Re-enter credentials (e.g. after a BIFROST_SECRET change)", style: S.buttonGhost, children: editingCreds ? "Close" : "Edit credentials" }), _jsx("button", { onClick: onRemove, style: S.buttonDanger, children: "Remove" })] })] }), editingCreds && (_jsx(EditCredentialsForm, { provider: provider, schema: types.find((t) => t.provider_type === provider.provider_type)?.schema ?? [], onSaved: () => {
+                    setEditingCreds(false);
+                    onCredentialsSaved();
+                }, onCancel: () => setEditingCreds(false) }))] }));
+}
+/// Re-enter credentials for an existing provider. The provider row (and all
+/// lights, scenes, groups, plans referencing it) stays intact.
+function EditCredentialsForm({ provider, schema, onSaved, onCancel, }) {
+    const [credentials, setCredentials] = useState({});
+    const [error, setError] = useState("");
+    const [saving, setSaving] = useState(false);
+    const [pairing, setPairing] = useState(false);
+    const [pairMsg, setPairMsg] = useState("");
+    function setField(name, value) {
+        setCredentials((prev) => ({ ...prev, [name]: value }));
+    }
+    async function handlePair() {
+        setPairing(true);
+        setPairMsg("");
+        const result = await pairHueBridge(credentials.bridge_ip ?? "");
+        setPairing(false);
+        if ("app_key" in result) {
+            setField("app_key", result.app_key);
+            setPairMsg("✓ Paired with bridge.");
+        }
+        else if (result.error === "link_button_not_pressed") {
+            setPairMsg("Press the round link button on the bridge, then click Pair again.");
+        }
+        else {
+            setPairMsg(`Could not reach the bridge: ${result.message}`);
+        }
+    }
+    async function submit(e) {
+        e.preventDefault();
+        setError("");
+        setSaving(true);
+        const result = await updateProviderCredentials(provider.id, credentials);
+        setSaving(false);
+        if ("error" in result)
+            setError(result.error);
+        else
+            onSaved();
+    }
+    return (_jsxs("form", { onSubmit: submit, style: { display: "flex", flexDirection: "column", gap: "0.6rem", borderTop: "1px solid #2a2a2a", paddingTop: "0.75rem" }, children: [schema.map((field) => {
+                const isHueAppKey = provider.provider_type === "hue" && field.name === "app_key";
+                return (_jsxs("label", { style: labelStyle, children: [_jsxs("span", { children: [field.label, field.required && _jsx("span", { style: { color: "#f90" }, children: " *" })] }), _jsxs("div", { style: { display: "flex", gap: "0.5rem" }, children: [_jsx("input", { type: field.kind === "password" ? "password" : "text", value: credentials[field.name] ?? "", onChange: (e) => setField(field.name, e.target.value), style: { ...S.input, flex: 1 }, required: field.required, autoComplete: field.kind === "password" ? "new-password" : "off" }), isHueAppKey && (_jsx("button", { type: "button", onClick: handlePair, disabled: pairing || !(credentials.bridge_ip ?? "").trim(), style: S.buttonGhost, children: pairing ? "Pairing…" : "Pair" }))] }), isHueAppKey && pairMsg && (_jsx("span", { style: { fontSize: "0.78rem", color: pairMsg.startsWith("✓") ? "#4d4" : "#fa0" }, children: pairMsg }))] }, field.name));
+            }), error && _jsx("p", { style: { color: "#f66", margin: 0, fontSize: "0.875rem" }, children: error }), _jsxs("div", { style: { display: "flex", gap: "0.5rem" }, children: [_jsx("button", { type: "submit", style: S.button, disabled: saving, children: saving ? "Saving…" : "Save credentials" }), _jsx("button", { type: "button", onClick: onCancel, style: S.buttonGhost, children: "Cancel" })] })] }));
 }
 function StatusBadge({ state }) {
     const color = state === "connected" || state === "ok" ? "#4d4"

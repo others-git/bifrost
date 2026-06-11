@@ -7,7 +7,7 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -20,6 +20,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/types", get(list_types))
         .route("/hue/pair", post(hue_pair))
         .route("/{id}", delete(remove_provider))
+        .route("/{id}/credentials", put(update_credentials))
         .route("/{id}/status", get(provider_status))
         .route("/{id}/discover", post(discover))
         .route("/{id}/import-groups", post(import_groups))
@@ -151,6 +152,74 @@ async fn add_provider(
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
+}
+
+#[derive(Deserialize)]
+struct UpdateCredentialsRequest {
+    credentials: serde_json::Value,
+}
+
+/// Replace an existing provider's credentials in place — the recovery path
+/// when BIFROST_SECRET changed or a key was rotated. Keeps the provider row
+/// (and therefore all lights, scenes, groups, and plan placements) intact.
+async fn update_credentials(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateCredentialsRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let row = sqlx::query("SELECT provider_type FROM providers WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await;
+    let provider_type: String = match row {
+        Ok(Some(r)) => r.get("provider_type"),
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("db error: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let creds_json = req.credentials.to_string();
+
+    // Smoke-test before persisting, like add_provider does.
+    if let Err(e) = state.registry.build(&provider_type, &creds_json) {
+        return (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response();
+    }
+
+    let encrypted = match state.encrypt_credentials(&creds_json) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::error!("encryption error: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    if let Err(e) = sqlx::query(
+        "UPDATE providers SET credentials = ?, updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(&encrypted)
+    .bind(&id)
+    .execute(&state.db)
+    .await
+    {
+        tracing::error!("db error: {e}");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    // Restart the connection manager with the fresh credentials.
+    {
+        let mut connections = state.connections.lock().await;
+        connections.stop(&id);
+        crate::start_manager_for(&mut connections, &state, &id, &provider_type, &creds_json);
+    }
+
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn remove_provider(

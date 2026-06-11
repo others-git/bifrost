@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getLights, logout, getSetupStatus, type Light } from "./api";
+import { getHealth, getLights, logout, getSetupStatus, type Light } from "./api";
 import { SetupPage } from "./pages/Setup";
 import { LoginPage } from "./pages/Login";
 import { DashboardPage } from "./pages/Dashboard";
@@ -12,6 +12,11 @@ type Page = "loading" | "setup" | "login" | "dashboard" | "plan" | "settings";
 export function App() {
   const [page, setPage] = useState<Page>("loading");
   const [lights, setLights] = useState<Light[]>([]);
+  const [version, setVersion] = useState("");
+
+  useEffect(() => {
+    getHealth().then((h) => setVersion(h.version));
+  }, []);
 
   async function init() {
     const status = await getSetupStatus();
@@ -41,6 +46,7 @@ export function App() {
   return (
     <div style={{ minHeight: "100vh", background: "#111", color: "#f0f0f0" }}>
       <Nav
+        version={version}
         page={page}
         onNavigate={(p) => {
           if (p === "dashboard" || p === "plan") refreshLights().then(() => setPage(p));
@@ -67,10 +73,12 @@ export function App() {
 }
 
 function Nav({
+  version,
   page,
   onNavigate,
   onLogout,
 }: {
+  version: string;
   page: Page;
   onNavigate: (p: "dashboard" | "plan" | "settings") => void;
   onLogout: () => void;
@@ -96,8 +104,13 @@ function Nav({
         background: "#161616",
       }}
     >
-      <span style={{ fontWeight: 800, fontSize: "1.1rem", color: "#f90", letterSpacing: "0.03em" }}>
-        Bifrost
+      <span style={{ display: "inline-flex", alignItems: "baseline", gap: "0.5rem" }}>
+        <span style={{ fontWeight: 800, fontSize: "1.1rem", color: "#f90", letterSpacing: "0.03em" }}>
+          Bifrost
+        </span>
+        {version && (
+          <span style={{ fontSize: "0.7rem", color: "#666" }}>v{version}</span>
+        )}
       </span>
       <div style={{ display: "flex", gap: "1.5rem", alignItems: "center" }}>
         <button

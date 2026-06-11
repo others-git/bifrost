@@ -1293,3 +1293,116 @@ async fn import_groups_unknown_provider_returns_404() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+// ── Update provider credentials ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn update_credentials_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/providers/some-id/credentials")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"credentials":{}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn update_credentials_takes_effect_for_subsequent_requests() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // Provider initially points at old_device; credentials are then updated
+    // to point at new_device. Discovery must hit the NEW device.
+    let old_device = wled_mock().await;
+    let new_device = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/json/info"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": "Replacement Strip"
+        })))
+        .mount(&new_device)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/json/state"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "on": true, "bri": 128
+        })))
+        .mount(&new_device)
+        .await;
+
+    let (app, _light_id) = helpers::test_app_with_light(&old_device.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let body = format!(
+        r#"{{"credentials":{{"device_ip":"{}"}}}}"#,
+        new_device.uri()
+    );
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/providers/prov-test-1/credentials",
+            &cookie,
+            &body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(helpers::authed_post(
+            "/api/providers/prov-test-1/discover",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let requests = new_device.received_requests().await.unwrap();
+    assert!(
+        requests.iter().any(|r| r.url.path() == "/json/info"),
+        "discovery did not use the updated credentials"
+    );
+}
+
+#[tokio::test]
+async fn update_credentials_rejects_invalid_shape() {
+    let bridge = wled_mock().await;
+    let (app, _light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Missing device_ip — the smoke build must reject it.
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/providers/prov-test-1/credentials",
+            &cookie,
+            r#"{"credentials":{}}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn update_credentials_unknown_provider_returns_404() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/providers/nope/credentials",
+            &cookie,
+            r#"{"credentials":{"device_ip":"10.0.0.1"}}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}

@@ -27,11 +27,24 @@ Smart lighting lives and dies by connection reliability: event streams drop sile
 ```sh
 mkdir bifrost && cd bifrost
 curl -fsSLO https://raw.githubusercontent.com/others-git/bifrost/main/docker-compose.yml
-echo "BIFROST_SECRET=$(openssl rand -hex 32)" > .env
+test -f .env || echo "BIFROST_SECRET=$(openssl rand -hex 32)" > .env
 docker compose up -d
 ```
 
 Then open `http://<host>:3000`.
+
+### Upgrading
+
+```sh
+docker compose pull && docker compose up -d
+```
+
+**Keep `BIFROST_SECRET` identical across upgrades** — it is the key that
+encrypts your provider credentials. If it changes, the app starts fine but
+logs `failed to decrypt credentials` and providers show as disconnected.
+Recovery: restore the original secret, or re-enter each provider's
+credentials via Settings → **Edit credentials** (lights, scenes, groups, and
+floor plans are not affected either way).
 
 ### Unraid
 

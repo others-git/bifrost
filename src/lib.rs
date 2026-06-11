@@ -106,7 +106,13 @@ async fn start_managers(state: &Arc<AppState>) {
         let creds_json = match state.decrypt_credentials(&creds_enc) {
             Ok(j) => j,
             Err(e) => {
-                tracing::error!("failed to decrypt credentials for provider {id}: {e:#}");
+                tracing::error!(
+                    "failed to decrypt credentials for provider {id}: {e:#}. \
+                     This almost always means BIFROST_SECRET changed since the provider \
+                     was added. Restore the original secret, or re-enter this provider's \
+                     credentials in Settings (Edit credentials) — lights, scenes, groups \
+                     and plans are unaffected."
+                );
                 continue;
             }
         };

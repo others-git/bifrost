@@ -68,6 +68,12 @@ export interface ConnectionStatus {
   reason?: string;
 }
 
+export async function getHealth(): Promise<{ ok: boolean; version: string; uptime_secs: number }> {
+  const res = await fetch("/api/health");
+  if (!res.ok) return { ok: false, version: "", uptime_secs: 0 };
+  return res.json();
+}
+
 export async function getSetupStatus(): Promise<{ setup_complete: boolean }> {
   const res = await fetch("/api/setup/status");
   return res.json();
@@ -145,6 +151,20 @@ export async function addProvider(
 
 export async function removeProvider(id: string): Promise<void> {
   await fetch(`/api/providers/${id}`, { method: "DELETE" });
+}
+
+/** Replace an existing provider's credentials (recovery after key rotation). */
+export async function updateProviderCredentials(
+  id: string,
+  credentials: Record<string, string>,
+): Promise<{ ok: true } | { error: string }> {
+  const res = await fetch(`/api/providers/${id}/credentials`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ credentials }),
+  });
+  if (res.ok) return { ok: true };
+  return { error: (await res.text()) || `HTTP ${res.status}` };
 }
 
 export interface Scene {
