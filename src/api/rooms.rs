@@ -30,6 +30,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/", get(list_rooms).post(create_room))
         .route("/{id}", delete(remove_room))
         .route("/{id}/merge", post(merge_rooms))
+        .route("/{id}/audio", put(set_room_audio))
         .route("/{id}/lights", put(set_direct_lights))
         .route("/{id}/links", put(set_links))
         .route("/{id}/state", put(set_room_state))
@@ -58,6 +59,8 @@ struct RoomInfo {
     light_ids: Vec<String>,
     direct_light_ids: Vec<String>,
     links: Vec<LinkInfo>,
+    /// Linked audio device (volume/mute on the room's controls), if any.
+    audio_device_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -166,16 +169,78 @@ async fn list_rooms(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
         })
         .collect();
 
+        let audio_device_id: Option<String> =
+            sqlx::query("SELECT audio_device_id FROM room_audio WHERE room_id = ?")
+                .bind(&id)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten()
+                .map(|r| r.get("audio_device_id"));
+
         out.push(RoomInfo {
             light_ids: effective_member_ids(&state, &id).await,
             direct_light_ids: direct,
             links,
+            audio_device_id,
             id,
             name: room.get("name"),
         });
     }
 
     Json(out).into_response()
+}
+
+#[derive(Deserialize)]
+struct SetRoomAudioRequest {
+    /// `null` clears the link.
+    audio_device_id: Option<String>,
+}
+
+/// Link (or unlink) an audio device to a room so the room's controls carry
+/// volume/mute. One device per room; several rooms may share one device.
+async fn set_room_audio(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<SetRoomAudioRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !room_exists(&state, &id).await {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    match req.audio_device_id {
+        Some(device_id) => {
+            let known = sqlx::query("SELECT 1 FROM audio_devices WHERE id = ?")
+                .bind(&device_id)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+            if !known {
+                return (StatusCode::UNPROCESSABLE_ENTITY, "unknown audio device").into_response();
+            }
+            let _ = sqlx::query(
+                "INSERT INTO room_audio (room_id, audio_device_id) VALUES (?, ?)
+                 ON CONFLICT (room_id) DO UPDATE SET audio_device_id = excluded.audio_device_id",
+            )
+            .bind(&id)
+            .bind(&device_id)
+            .execute(&state.db)
+            .await;
+        }
+        None => {
+            let _ = sqlx::query("DELETE FROM room_audio WHERE room_id = ?")
+                .bind(&id)
+                .execute(&state.db)
+                .await;
+        }
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn list_provider_groups(

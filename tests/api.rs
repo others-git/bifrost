@@ -3033,3 +3033,124 @@ async fn v1_audio_requires_key_and_mirrors_session_routes() {
         recorded.lock().await
     );
 }
+
+// ── Room ↔ audio device link ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn room_audio_link_requires_session() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/rooms/some-id/audio")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"audio_device_id":"x"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn room_audio_link_set_list_and_clear() {
+    let (port, _) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let device_id = setup_onkyo(&app, &cookie, port).await;
+
+    // A room to link.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/rooms",
+            &cookie,
+            r#"{"name":"Den","light_ids":[]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let room_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Unknown device → 422; unknown room → 404.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/audio"),
+            &cookie,
+            r#"{"audio_device_id":"nope"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/rooms/nope/audio",
+            &cookie,
+            &format!(r#"{{"audio_device_id":"{device_id}"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Link, and see it in both the session and v1 room listings.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/audio"),
+            &cookie,
+            &format!(r#"{{"audio_device_id":"{device_id}"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/rooms", &cookie))
+        .await
+        .unwrap();
+    let rooms = helpers::response_json(resp).await;
+    assert_eq!(rooms[0]["audio_device_id"], device_id);
+
+    let key = create_api_key(&app, &cookie, "mcp").await;
+    let resp = app
+        .clone()
+        .oneshot(bearer_get("/api/v1/rooms", &key))
+        .await
+        .unwrap();
+    assert_eq!(
+        helpers::response_json(resp).await[0]["audio_device_id"],
+        device_id
+    );
+
+    // Clear with null.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/audio"),
+            &cookie,
+            r#"{"audio_device_id":null}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/rooms", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(
+        helpers::response_json(resp).await[0]["audio_device_id"],
+        serde_json::Value::Null
+    );
+}

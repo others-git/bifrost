@@ -105,7 +105,7 @@ provider group plus any directly assigned.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/v1/rooms` | All rooms: `[{ id, name, light_ids }]` |
+| `GET` | `/api/v1/rooms` | All rooms: `[{ id, name, light_ids, audio_device_id }]` — `audio_device_id` is the room's linked audio device (or null); control it via the audio endpoints |
 | `PUT` | `/api/v1/rooms/{id}/state` | Apply a `LightState` to every member |
 | `POST` | `/api/v1/rooms/{id}/scenes/{scene_id}/apply` | Apply a scene to the room |
 

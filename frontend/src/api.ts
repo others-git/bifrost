@@ -297,6 +297,17 @@ export interface Room {
   light_ids: string[];
   direct_light_ids: string[];
   links: RoomLink[];
+  /** Linked audio device (volume/mute on the room's controls), if any. */
+  audio_device_id?: string | null;
+}
+
+/** Link (or, with null, unlink) an audio device to a room. */
+export async function setRoomAudio(roomId: string, audioDeviceId: string | null): Promise<void> {
+  await fetch(`/api/rooms/${roomId}/audio`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ audio_device_id: audioDeviceId }),
+  });
 }
 
 export interface ProviderGroupInfo {

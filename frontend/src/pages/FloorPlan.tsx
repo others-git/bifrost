@@ -3,6 +3,7 @@ import {
   applySceneToRoom,
   createPaletteScene,
   createPlan,
+  getAudioDevices,
   getPaletteScenes,
   getPlan,
   getPlans,
@@ -15,9 +16,12 @@ import {
   removePlan,
   rgbToHex,
   rgbToXy,
+  setAudioState,
   setLightState,
+  setRoomAudio,
   setRoomState,
   xyToRgb,
+  type AudioDevice,
   type Light,
   type LightState,
   type LightStatePatch,
@@ -510,6 +514,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                 statesById={statesById}
                 onSetRoom={setRoom}
                 onEditRoom={(room, anchor) => setEditor({ kind: "room", roomId: room.id, anchor })}
+                onRoomsChanged={() => getRooms().then(setAllRooms)}
               />
             )}
 
@@ -800,14 +805,29 @@ function RoomController({
   statesById,
   onSetRoom,
   onEditRoom,
+  onRoomsChanged,
 }: {
   plan: PlanDetail;
   rooms: Room[];
   statesById: Map<string, LightState>;
   onSetRoom: (room: Room, on: boolean) => Promise<void>;
   onEditRoom: (room: Room, anchor: HTMLElement) => void;
+  onRoomsChanged: () => void;
 }) {
   const [busy, setBusy] = useState("");
+  const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
+  /** Room id whose audio-link picker is open. */
+  const [linking, setLinking] = useState("");
+
+  useEffect(() => {
+    getAudioDevices().then(setAudioDevices);
+  }, []);
+
+  async function link(roomId: string, deviceId: string | null) {
+    await setRoomAudio(roomId, deviceId);
+    setLinking("");
+    onRoomsChanged();
+  }
 
   // Plan regions bound to a Room, joined with the live Room data.
   const bound = plan.rooms
@@ -883,9 +903,141 @@ function RoomController({
                 }}
               />
             </div>
+
+            {audioDevices.length > 0 && (
+              <RoomAudioRow
+                room={room}
+                devices={audioDevices}
+                picking={linking === room.id}
+                onPick={(deviceId) => link(room.id, deviceId)}
+                onTogglePicker={() => setLinking(linking === room.id ? "" : room.id)}
+              />
+            )}
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/**
+ * The audio strip under a room card: a volume slider + mute for the linked
+ * device, or a subtle "link audio" affordance. The ♪ button toggles a compact
+ * picker listing every audio device (and None to unlink).
+ */
+function RoomAudioRow({
+  room,
+  devices,
+  picking,
+  onPick,
+  onTogglePicker,
+}: {
+  room: Room;
+  devices: AudioDevice[];
+  picking: boolean;
+  onPick: (deviceId: string | null) => void;
+  onTogglePicker: () => void;
+}) {
+  const linked = devices.find((d) => d.id === room.audio_device_id);
+  // Local volume/mute so the slider is responsive; server state seeds it.
+  const [volume, setVolume] = useState(linked?.state.volume ?? 0);
+  const [mute, setMute] = useState(linked?.state.mute ?? false);
+  const volumeTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => {
+    if (linked) {
+      setVolume(linked.state.volume);
+      setMute(linked.state.mute);
+    }
+  }, [linked?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function commitVolume(v: number) {
+    setVolume(v);
+    if (!linked) return;
+    clearTimeout(volumeTimer.current);
+    volumeTimer.current = setTimeout(() => setAudioState(linked.id, { volume: v }), 250);
+  }
+
+  function toggleMute() {
+    if (!linked) return;
+    setMute(!mute);
+    setAudioState(linked.id, { mute: !mute });
+  }
+
+  return (
+    <div style={{ borderTop: "1px solid #26241f", padding: "0.4rem 0.7rem 0.5rem" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "0.45rem" }}>
+        <button
+          onClick={onTogglePicker}
+          title={linked ? `Linked to ${linked.name} — click to change` : "Link an audio device to this room"}
+          style={{
+            background: "none",
+            border: "none",
+            cursor: "pointer",
+            padding: 0,
+            fontSize: "0.85rem",
+            color: linked ? "#a78bfa" : "#555",
+          }}
+        >
+          ♪
+        </button>
+        {linked ? (
+          <>
+            <button
+              onClick={toggleMute}
+              title={mute ? "Unmute" : "Mute"}
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                padding: 0,
+                fontSize: "0.8rem",
+                opacity: mute ? 1 : 0.5,
+              }}
+            >
+              {mute ? "🔇" : "🔊"}
+            </button>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={volume}
+              onChange={(e) => commitVolume(Number(e.target.value))}
+              style={{ flex: 1, accentColor: "#a78bfa" }}
+            />
+            <span style={{ fontSize: "0.68rem", color: "#777", width: 22, textAlign: "right" }}>
+              {volume}
+            </span>
+          </>
+        ) : (
+          <span style={{ fontSize: "0.7rem", color: "#555" }}>no audio linked</span>
+        )}
+      </div>
+
+      {picking && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 2, marginTop: "0.35rem" }}>
+          <button
+            onClick={() => onPick(null)}
+            style={{ ...S.buttonGhost, fontSize: "0.72rem", padding: "0.2rem 0.45rem", textAlign: "left" }}
+          >
+            None
+          </button>
+          {devices.map((d) => (
+            <button
+              key={d.id}
+              onClick={() => onPick(d.id)}
+              style={{
+                ...S.buttonGhost,
+                fontSize: "0.72rem",
+                padding: "0.2rem 0.45rem",
+                textAlign: "left",
+                ...(d.id === room.audio_device_id ? { borderColor: "#a78bfa", color: "#a78bfa" } : {}),
+              }}
+            >
+              {d.name}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

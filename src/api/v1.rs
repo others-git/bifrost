@@ -103,6 +103,8 @@ struct V1Room {
     name: String,
     /// Effective members (linked provider-group lights ∪ direct lights).
     light_ids: Vec<String>,
+    /// Linked audio device, if any — control it via /audio/devices/{id}/state.
+    audio_device_id: Option<String>,
 }
 
 async fn list_rooms(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
@@ -119,9 +121,18 @@ async fn list_rooms(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
     for row in rows {
         let id: String = row.get("id");
         let light_ids = effective_member_ids(&state, &id).await;
+        let audio_device_id: Option<String> =
+            sqlx::query("SELECT audio_device_id FROM room_audio WHERE room_id = ?")
+                .bind(&id)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten()
+                .map(|r| r.get("audio_device_id"));
         out.push(V1Room {
             name: row.get("name"),
             light_ids,
+            audio_device_id,
             id,
         });
     }
