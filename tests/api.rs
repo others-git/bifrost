@@ -3154,3 +3154,74 @@ async fn room_audio_link_set_list_and_clear() {
         serde_json::Value::Null
     );
 }
+
+// ── Provider network auto-detect (POST /api/providers/scan/{type}) ────────────
+
+#[tokio::test]
+async fn provider_scan_requires_session() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers/scan/onkyo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn provider_scan_unsupported_type_returns_404() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Hue has no auto-detect object (yet) → 404.
+    let resp = app
+        .oneshot(helpers::authed_post("/api/providers/scan/hue", &cookie, ""))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn provider_scan_supported_type_returns_device_array() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Onkyo supports discovery; nothing answers the broadcast in the test
+    // environment, so the result is a (possibly empty) JSON array, never an error.
+    let resp = app
+        .oneshot(helpers::authed_post("/api/providers/scan/onkyo", &cookie, ""))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(helpers::response_json(resp).await.is_array());
+}
+
+#[tokio::test]
+async fn provider_types_flag_discovery_support() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/providers/types", &cookie))
+        .await
+        .unwrap();
+    let types = helpers::response_json(resp).await;
+    let flag = |t: &str| {
+        types
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["provider_type"] == t)
+            .unwrap()["supports_discovery"]
+            .as_bool()
+            .unwrap()
+    };
+    assert!(flag("onkyo"), "onkyo advertises auto-detect");
+    assert!(flag("sonos"), "sonos advertises auto-detect");
+    assert!(!flag("hue"), "hue has no auto-detect yet");
+}

@@ -10,6 +10,8 @@ import {
   getProviders,
   syncProviderGroups,
   pairHueBridge,
+  scanForDevices,
+  type DiscoveredDevice,
   getRooms,
   mergeRooms,
   removeRoom,
@@ -828,11 +830,39 @@ function AddProviderForm({
   const [loading, setLoading] = useState(false);
   const [pairing, setPairing] = useState(false);
   const [pairMsg, setPairMsg] = useState("");
+  const [scanning, setScanning] = useState(false);
+  const [scanned, setScanned] = useState(false);
+  const [found, setFound] = useState<DiscoveredDevice[]>([]);
 
-  const schema: CredentialField[] = types.find((t) => t.provider_type === selectedType)?.schema ?? [];
+  const selected = types.find((t) => t.provider_type === selectedType);
+  const schema: CredentialField[] = selected?.schema ?? [];
 
-  // Clear credentials when the provider type changes.
-  useEffect(() => { setCredentials({}); setPairMsg(""); }, [selectedType]);
+  // Clear per-type state when the provider type changes.
+  useEffect(() => {
+    setCredentials({});
+    setPairMsg("");
+    setScanned(false);
+    setFound([]);
+  }, [selectedType]);
+
+  // Scan the LAN and let the user pick a found device to fill the form.
+  async function handleScan() {
+    setScanning(true);
+    setScanned(false);
+    const devices = await scanForDevices(selectedType);
+    setFound(devices);
+    setScanned(true);
+    setScanning(false);
+  }
+
+  function applyFound(d: DiscoveredDevice) {
+    // Credential values arrive as JSON; the form holds strings.
+    const creds = Object.fromEntries(
+      Object.entries(d.credentials).map(([k, v]) => [k, String(v)]),
+    );
+    setCredentials((prev) => ({ ...prev, ...creds }));
+    if (!name.trim()) setName(d.label ?? d.host);
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -896,6 +926,41 @@ function AddProviderForm({
           ))}
         </select>
       </label>
+
+      {selected?.supports_discovery && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+          <button
+            type="button"
+            onClick={handleScan}
+            disabled={scanning}
+            style={S.buttonGhost}
+          >
+            {scanning ? "Scanning network…" : "Scan network for devices"}
+          </button>
+          {found.map((d) => (
+            <button
+              key={d.host}
+              type="button"
+              onClick={() => applyFound(d)}
+              title={`Use ${d.host}`}
+              style={{
+                ...S.buttonGhost,
+                textAlign: "left",
+                fontSize: "0.82rem",
+                borderColor: ACCENT,
+              }}
+            >
+              {d.label ? `${d.label} · ${d.host}` : d.host}
+            </button>
+          ))}
+          {scanned && found.length === 0 && (
+            <span style={{ color: "#888", fontSize: "0.78rem" }}>
+              No devices found. Make sure they're powered on and on the same network
+              (auto-detect needs host networking in Docker).
+            </span>
+          )}
+        </div>
+      )}
 
       {schema.map((field) => {
         // Hue's app key comes from link-button pairing, not manual entry.

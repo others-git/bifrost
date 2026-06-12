@@ -19,10 +19,12 @@ use crate::models::audio::{
     AudioCapabilities, AudioCommand, AudioDevice, AudioDeviceKind, AudioState, NowPlaying,
     PlayState, TransportCmd,
 };
+use crate::providers::discovery::{DeviceDiscovery, DiscoveredDevice, udp_probe};
 use crate::providers::{AudioProvider, AudioProviderFactory, CredentialField, FieldKind};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -34,9 +36,15 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_millis(2500);
 // ── eISCP packet codec (pure functions) ─────────────────────────────────────
 
 /// Wrap an ISCP message (e.g. `PWRQSTN`) in an eISCP packet: 16-byte header +
-/// `!1<msg>\r`.
+/// `!1<msg>\r`. The `1` is the unit-type destination (the receiver).
 pub fn encode_packet(msg: &str) -> Vec<u8> {
-    let payload = format!("!1{msg}\r");
+    encode_packet_unit('1', msg)
+}
+
+/// Like [`encode_packet`] but with an explicit unit-type char. Discovery uses
+/// `x` ("any device") to broadcast `!xECNQSTN`.
+fn encode_packet_unit(unit: char, msg: &str) -> Vec<u8> {
+    let payload = format!("!{unit}{msg}\r");
     let mut out = Vec::with_capacity(16 + payload.len());
     out.extend_from_slice(b"ISCP");
     out.extend_from_slice(&16u32.to_be_bytes());
@@ -588,6 +596,63 @@ impl AudioProvider for OnkyoProvider {
     }
 }
 
+// ── Network discovery ─────────────────────────────────────────────────────────
+
+/// eISCP auto-detect: broadcast `!xECNQSTN` to UDP 60128; receivers answer with
+/// an `ECN<model>/<port>/<area>/<mac>` packet from their own address.
+pub struct OnkyoDiscovery {
+    /// Probe target — the global broadcast address in production, a loopback
+    /// mock in tests.
+    target: SocketAddr,
+}
+
+impl OnkyoDiscovery {
+    pub fn broadcast() -> Self {
+        Self {
+            target: SocketAddr::new(IpAddr::V4(Ipv4Addr::BROADCAST), DEFAULT_PORT),
+        }
+    }
+
+    #[cfg(test)]
+    fn to(target: SocketAddr) -> Self {
+        Self { target }
+    }
+}
+
+#[async_trait]
+impl DeviceDiscovery for OnkyoDiscovery {
+    async fn scan(&self, timeout: Duration) -> Result<Vec<DiscoveredDevice>> {
+        let probe = encode_packet_unit('x', "ECNQSTN");
+        let replies = udp_probe(self.target, &probe, timeout).await?;
+
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for (from, bytes) in replies {
+            let Some((msg, _)) = decode_packet(&bytes) else {
+                continue;
+            };
+            let Some(rest) = msg.strip_prefix("ECN") else {
+                continue;
+            };
+            let host = from.ip().to_string();
+            if !seen.insert(host.clone()) {
+                continue;
+            }
+            let model = rest
+                .split('/')
+                .next()
+                .filter(|m| !m.is_empty())
+                .map(|m| m.to_string());
+            out.push(DiscoveredDevice {
+                label: model.map(|m| format!("Onkyo {m}")),
+                credentials: serde_json::json!({ "host": host }),
+                host,
+            });
+        }
+        Ok(out)
+    }
+}
+
 // ── Factory ─────────────────────────────────────────────────────────────────
 
 pub struct OnkyoProviderFactory;
@@ -625,6 +690,10 @@ impl AudioProviderFactory for OnkyoProviderFactory {
     fn connection_mode(&self) -> crate::providers::AudioConnectionMode {
         // The receiver echoes every state change unsolicited on the open socket.
         crate::providers::AudioConnectionMode::Push
+    }
+
+    fn discoverer(&self) -> Option<Box<dyn DeviceDiscovery>> {
+        Some(Box::new(OnkyoDiscovery::broadcast()))
     }
 }
 
@@ -1092,7 +1161,53 @@ mod tests {
         assert!(p.event_stream().await.is_err());
     }
 
+    // ── Network discovery ────────────────────────────────────────────────────
+
+    /// A loopback "receiver" that answers one discovery probe with an ECN packet.
+    async fn spawn_discovery_responder(ecn: &'static str) -> SocketAddr {
+        let sock = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = sock.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            if let Ok((_, from)) = sock.recv_from(&mut buf).await {
+                let _ = sock.send_to(&encode_packet(ecn), from).await;
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn discovery_parses_ecn_reply_into_host_and_model() {
+        let addr = spawn_discovery_responder("ECNTX-NR686/60128/DX/001122334455").await;
+        let found = OnkyoDiscovery::to(addr)
+            .scan(Duration::from_millis(300))
+            .await
+            .unwrap();
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].host, "127.0.0.1");
+        assert_eq!(found[0].label.as_deref(), Some("Onkyo TX-NR686"));
+        assert_eq!(found[0].credentials, serde_json::json!({ "host": "127.0.0.1" }));
+    }
+
+    #[tokio::test]
+    async fn discovery_returns_empty_when_no_receiver_answers() {
+        let found = OnkyoDiscovery::to(SocketAddr::from((Ipv4Addr::LOCALHOST, 1)))
+            .scan(Duration::from_millis(150))
+            .await
+            .unwrap();
+        assert!(found.is_empty());
+    }
+
     // ── Factory ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn factory_exposes_a_discoverer() {
+        use crate::providers::AudioProviderFactory as _;
+        assert!(OnkyoProviderFactory.discoverer().is_some());
+    }
 
     #[test]
     fn factory_advertises_push_mode() {

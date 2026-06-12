@@ -1,3 +1,4 @@
+pub mod discovery;
 pub mod govee;
 pub mod govee_lan;
 pub mod hue;
@@ -6,6 +7,8 @@ pub mod shelly;
 pub mod sonos;
 pub mod tasmota;
 pub mod wled;
+
+use discovery::DeviceDiscovery;
 
 use crate::models::audio::{AudioCommand, AudioDevice, AudioEvent, AudioState};
 use crate::models::{Light, LightState};
@@ -99,6 +102,12 @@ pub trait AudioProviderFactory: Send + Sync {
     fn connection_mode(&self) -> AudioConnectionMode {
         AudioConnectionMode::OnDemand
     }
+
+    /// Network auto-detect for this provider type. Default: none — providers
+    /// with a LAN discovery protocol (Sonos SSDP, Onkyo eISCP, …) override.
+    fn discoverer(&self) -> Option<Box<dyn DeviceDiscovery>> {
+        None
+    }
 }
 
 // ── Credential schema (for the setup UI) ───────────────────────────────────
@@ -158,6 +167,12 @@ pub trait ProviderFactory: Send + Sync {
             interval_secs: DEFAULT_POLL_INTERVAL_SECS,
         }
     }
+
+    /// Network auto-detect for this provider type. Default: none — providers
+    /// with a LAN discovery protocol override.
+    fn discoverer(&self) -> Option<Box<dyn DeviceDiscovery>> {
+        None
+    }
 }
 
 // ── Registry ────────────────────────────────────────────────────────────────
@@ -205,6 +220,17 @@ impl ProviderRegistry {
         self.audio_factories.contains_key(provider_type)
     }
 
+    /// The network auto-detect object for a provider type, if it has one.
+    /// Looks in both the light and audio factory maps.
+    pub fn discoverer(&self, provider_type: &str) -> Option<Box<dyn DeviceDiscovery>> {
+        if let Some(f) = self.factories.get(provider_type) {
+            return f.discoverer();
+        }
+        self.audio_factories
+            .get(provider_type)
+            .and_then(|f| f.discoverer())
+    }
+
     /// How the runtime should keep this audio provider type's state fresh.
     pub fn audio_connection_mode(&self, provider_type: &str) -> Option<AudioConnectionMode> {
         self.audio_factories
@@ -245,11 +271,13 @@ impl ProviderRegistry {
             .map(|f| ProviderTypeInfo {
                 provider_type: f.provider_type(),
                 kind: ProviderDomain::Light,
+                supports_discovery: f.discoverer().is_some(),
                 schema: f.credentials_schema().to_vec(),
             })
             .chain(self.audio_factories.values().map(|f| ProviderTypeInfo {
                 provider_type: f.provider_type(),
                 kind: ProviderDomain::Audio,
+                supports_discovery: f.discoverer().is_some(),
                 schema: f.credentials_schema().to_vec(),
             }))
             .collect();
@@ -276,6 +304,8 @@ impl Default for ProviderRegistry {
 pub struct ProviderTypeInfo {
     pub provider_type: &'static str,
     pub kind: ProviderDomain,
+    /// Whether the UI should offer a "scan network" button for this type.
+    pub supports_discovery: bool,
     pub schema: Vec<CredentialField>,
 }
 

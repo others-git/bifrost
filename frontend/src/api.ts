@@ -63,7 +63,24 @@ export interface CredentialField {
 export interface ProviderType {
   provider_type: string;
   kind: "light" | "audio";
+  /** Whether the UI should offer a "Scan network" button for this type. */
+  supports_discovery: boolean;
   schema: CredentialField[];
+}
+
+/** A device found by a provider's network scan. */
+export interface DiscoveredDevice {
+  host: string;
+  label?: string | null;
+  /** Credential fields pre-shaped for the add-provider form. */
+  credentials: Record<string, unknown>;
+}
+
+/** Scan the LAN for devices of a provider type that supports auto-detect. */
+export async function scanForDevices(providerType: string): Promise<DiscoveredDevice[]> {
+  const res = await fetch(`/api/providers/scan/${providerType}`, { method: "POST" });
+  if (!res.ok) return [];
+  return res.json();
 }
 
 export interface ConnectionStatus {

@@ -18,12 +18,49 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(list_providers).post(add_provider))
         .route("/types", get(list_types))
+        .route("/scan/{provider_type}", post(scan_network))
         .route("/hue/pair", post(hue_pair))
         .route("/{id}", delete(remove_provider))
         .route("/{id}/credentials", put(update_credentials))
         .route("/{id}/status", get(provider_status))
         .route("/{id}/discover", post(discover))
         .route("/{id}/sync-groups", post(sync_groups))
+}
+
+// ── Network auto-detect ─────────────────────────────────────────────────────
+
+/// Scan the LAN for devices of a provider type that supports auto-detect, so
+/// the add-provider form can pre-fill the host. Returns the discovered devices
+/// (empty if none answered). A scan that couldn't even probe the network
+/// (e.g. no host networking) degrades to an empty list rather than an error —
+/// "found nothing" is the honest UX. 404 only when the type has no discoverer.
+async fn scan_network(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(provider_type): Path<String>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let Some(discoverer) = state.registry.discoverer(&provider_type) else {
+        return (
+            StatusCode::NOT_FOUND,
+            "auto-detect is not supported for this provider type",
+        )
+            .into_response();
+    };
+
+    match discoverer
+        .scan(std::time::Duration::from_secs(2))
+        .await
+    {
+        Ok(devices) => Json(devices).into_response(),
+        Err(e) => {
+            tracing::warn!("network scan for '{provider_type}' could not probe: {e:#}");
+            Json(Vec::<crate::providers::discovery::DiscoveredDevice>::new()).into_response()
+        }
+    }
 }
 
 // ── List available provider types (for the setup UI) ───────────────────────

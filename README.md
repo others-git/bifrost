@@ -135,7 +135,9 @@ Volume-knob turns and track changes on an Onkyo push to the UI instantly.
 Rooms can link an audio device (♪ on the Floor Plan room card) for in-room
 volume/mute.
 
-Adding a provider type is intentionally mechanical: implement two traits, register one factory line, write wiremock tests. See `src/providers/wled/mod.rs` for the template (lights), `src/providers/sonos/mod.rs` (audio), and `CLAUDE.md` for the rules.
+Providers with a LAN discovery protocol support **auto-detect**: a "Scan network for devices" button in the add-provider form finds them and fills in the IP (Onkyo via eISCP broadcast, Sonos via SSDP today). A provider opts in by returning a `DeviceDiscovery` object from its factory; the shared `udp_probe` engine owns the socket work.
+
+Adding a provider type is intentionally mechanical: implement two traits, register one factory line, write wiremock tests. See `src/providers/wled/mod.rs` for the template (lights), `src/providers/sonos/mod.rs` (audio), `src/providers/discovery.rs` for auto-detect, and `CLAUDE.md` for the rules.
 
 ## API
 
