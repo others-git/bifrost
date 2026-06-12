@@ -109,19 +109,42 @@ Everything is configured via environment variables (a `.env` file works too):
 
 ## Providers
 
+### Lights
+
 | Provider | Transport | Live updates | Setup |
 |---|---|---|---|
 | Philips Hue | LAN (CLIP v2) | SSE push | Bridge IP + link-button pairing in the UI |
 | Govee | Cloud API v2 | Polling | API key from the Govee Home app |
+| Govee LAN | LAN (UDP) | Polling | LAN control enabled in the Govee Home app |
 | WLED | LAN REST | Polling | Device IP |
 | Tasmota | LAN REST | Polling | Device IP |
 | Shelly (Gen1) | LAN REST | Polling | Device IP |
 
-Adding a provider type is intentionally mechanical: implement two traits, register one factory line, write wiremock tests. See `src/providers/wled/mod.rs` for the template and `CLAUDE.md` for the rules.
+### Audio
+
+| Provider | Transport | Live updates | Setup |
+|---|---|---|---|
+| Onkyo / Integra | LAN (eISCP, TCP 60128) | Push (persistent socket) | Receiver IP; enable Network Standby for remote power-on |
+| Sonos | LAN (UPnP SOAP, port 1400) | Polling | Any one player's IP — the rest of the household is discovered from it |
+
+Receivers expose power, volume, mute, input selection (including one-call
+streaming-service switching: `spotify`, `tunein`, `deezer`, `tidal`, `airplay`),
+playback transport, and now-playing metadata. Onkyo zone 2 appears as its own
+device; Sonos playback groups appear as zone devices with group volume.
+Volume-knob turns and track changes on an Onkyo push to the UI instantly.
+Rooms can link an audio device (♪ on the Floor Plan room card) for in-room
+volume/mute.
+
+Adding a provider type is intentionally mechanical: implement two traits, register one factory line, write wiremock tests. See `src/providers/wled/mod.rs` for the template (lights), `src/providers/sonos/mod.rs` (audio), and `CLAUDE.md` for the rules.
 
 ## API
 
-All endpoints are under `/api` and (except setup/login/health) require the session cookie.
+**Public API for external apps:** `/api/v1` is key-authenticated (mint keys in
+Settings → API keys) and documented in [API.md](API.md) — lights, rooms, scenes,
+and audio devices. The companion **[bifrost-mcp](../bifrost-mcp)** project wraps
+it as Model Context Protocol tools so an AI assistant can drive the whole home.
+
+All endpoints below are under `/api` and (except setup/login/health) require the session cookie.
 
 ```
 POST /api/setup                      first-run password
@@ -130,7 +153,12 @@ GET  /api/health                     { ok, version, uptime_secs, providers[] }
 
 GET  /api/lights                     cached lights
 PUT  /api/lights/{id}                set state { on, brightness, color, color_temp_mirek }
-GET  /api/events                     SSE stream of live light-state events
+GET  /api/events                     SSE stream of live light_state + audio_state events
+
+GET  /api/audio/devices              audio devices (receivers, speakers, zones)
+GET  /api/audio/devices/{id}         live state read (refreshes the cache)
+PUT  /api/audio/devices/{id}/state   { power?, volume?, mute?, source?, transport? }
+PUT  /api/rooms/{id}/audio           link/unlink an audio device to a room
 
 GET  /api/providers                  configured providers
 POST /api/providers                  add { name, provider_type, credentials }
