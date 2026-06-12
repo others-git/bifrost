@@ -1,11 +1,19 @@
 services:
   bifrost:
-    image: ghcr.io/others-git/bifrost:latest
+    #image: ghcr.io/others-git/bifrost:latest
     # Building from a source checkout instead:
-    # build: .
+    build: .
     restart: unless-stopped
-    ports:
-      - "3000:3000"
+    # Host networking lets device auto-detect reach the LAN: discovery uses
+    # SSDP/eISCP broadcast, multicast, and a local-subnet sweep, which don't
+    # cross a bridged container's NAT. Govee LAN control also needs it.
+    # With host mode the app binds the host's port directly (BIND_ADDR), so no
+    # `ports:` mapping is used. To run bridged instead, delete network_mode and
+    # uncomment the ports block — runtime control still works, but the "Scan
+    # network" button and Govee LAN won't find devices.
+    network_mode: host
+    # ports:
+    #   - "3000:3000"
     volumes:
       - ./data:/data
     environment:

@@ -3,15 +3,15 @@
   <Name>bifrost</Name>
   <Repository>ghcr.io/others-git/bifrost:latest</Repository>
   <Registry>https://ghcr.io</Registry>
-  <Network>bridge</Network>
+  <Network>host</Network>
   <MyIP/>
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
   <Support>https://github.com/others-git/bifrost/issues</Support>
   <Project>https://github.com/others-git/bifrost</Project>
-  <Overview>Self-hosted smart home hub for lights. Bridges Philips Hue, Govee, WLED, Tasmota, and Shelly behind one fast web UI and REST API, with a focus on connection reliability: explicit reconnect state machines, polling fallback, and live push to the browser. Single binary, single SQLite file. Hue pairing happens in the UI via the bridge link button.</Overview>
+  <Overview>Self-hosted smart home hub. Bridges lights (Philips Hue, Govee, WLED, Tasmota, Shelly) and audio (Sonos, Onkyo) behind one fast web UI and REST API, with a focus on connection reliability: explicit reconnect state machines, polling fallback, and live push to the browser. Single binary, single SQLite file. Hue pairing happens in the UI via the bridge link button.&#13;&#13;Runs on the host network so device auto-detect works: discovery uses SSDP/eISCP broadcast, multicast, and a local-subnet sweep, none of which cross a bridged container's NAT. The web UI is on port 3000 (set by Bind Address below); change that variable to use a different port.</Overview>
   <Category>HomeAutomation:</Category>
-  <WebUI>http://[IP]:[PORT:3000]/</WebUI>
+  <WebUI>http://[IP]:3000/</WebUI>
   <TemplateURL/>
   <Icon>https://raw.githubusercontent.com/others-git/bifrost/main/assets/icon.png</Icon>
   <ExtraParams/>
@@ -22,17 +22,10 @@
   <DonateLink/>
   <Requires/>
 
-  <!-- Port: host port → container port. The app listens on 3000 by default
-       (BIND_ADDR below). -->
-  <Config Name="WebUI Port"
-          Target="3000"
-          Default="3000"
-          Mode="tcp"
-          Description="Host port for the web interface."
-          Type="Port"
-          Display="always"
-          Required="true"
-          Mask="false">3000</Config>
+  <!-- Host networking: no port mapping. The app binds the host's port 3000
+       directly (see Bind Address below); change that to move the port. Host
+       mode is required so device auto-detect (SSDP/eISCP broadcast, multicast,
+       subnet sweep) reaches the LAN. -->
 
   <!-- Volumes -->
   <Config Name="Data Directory"
@@ -70,9 +63,9 @@
           Target="BIND_ADDR"
           Default="0.0.0.0:3000"
           Mode=""
-          Description="Address and port the app listens on inside the container. Change the WebUI Port mapping above to match if you alter the port."
+          Description="Address and port the app listens on. With host networking this is the actual host port — open http://[server-ip]:3000 after install. If you change the port here (e.g. 0.0.0.0:8080), browse to that port instead; the WebUI shortcut is fixed at 3000."
           Type="Variable"
-          Display="advanced"
+          Display="always"
           Required="false"
           Mask="false">0.0.0.0:3000</Config>
 
