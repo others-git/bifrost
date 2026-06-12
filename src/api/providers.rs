@@ -51,7 +51,20 @@ async fn scan_network(
             .into_response();
     };
 
-    match discoverer.scan(std::time::Duration::from_secs(2)).await {
+    // Expanded-LAN: any configured private subnets widen the HTTP sweep. With
+    // extras present a full sweep takes longer, so allow a larger budget.
+    let extra_subnets = crate::api::settings::expanded_subnets(&state).await;
+    let budget = if extra_subnets.is_empty() {
+        std::time::Duration::from_secs(2)
+    } else {
+        std::time::Duration::from_secs(8)
+    };
+    let opts = crate::providers::discovery::ScanOptions {
+        timeout: budget,
+        extra_subnets,
+    };
+
+    match discoverer.scan(&opts).await {
         Ok(devices) => Json(devices).into_response(),
         Err(e) => {
             tracing::warn!("network scan for '{provider_type}' could not probe: {e:#}");

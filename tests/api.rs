@@ -3239,3 +3239,84 @@ async fn provider_types_flag_discovery_support() {
     // Cloud providers (token, no LAN IP) do not.
     assert!(!flag("govee"), "govee is cloud — no auto-detect");
 }
+
+// ── Settings: Expanded-LAN scan subnets ───────────────────────────────────────
+
+#[tokio::test]
+async fn settings_require_session() {
+    let app = helpers::test_app_with_password().await;
+    for (method, body) in [("GET", None), ("PUT", Some(r#"{"expanded_lan_scan":[]}"#))] {
+        let mut builder = Request::builder().method(method).uri("/api/settings");
+        if body.is_some() {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+        }
+        let resp = app
+            .clone()
+            .oneshot(builder.body(Body::from(body.unwrap_or(""))).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{method}");
+    }
+}
+
+#[tokio::test]
+async fn settings_roundtrip_normalises_private_subnets() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Defaults to empty.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/settings", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        helpers::response_json(resp).await["expanded_lan_scan"],
+        serde_json::json!([])
+    );
+
+    // A host address is normalised to its /24 base.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/settings",
+            &cookie,
+            r#"{"expanded_lan_scan":["192.168.1.50","10.0.0.0/24"]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        helpers::response_json(resp).await["expanded_lan_scan"],
+        serde_json::json!(["192.168.1.0/24", "10.0.0.0/24"])
+    );
+
+    // Persisted across reads.
+    let resp = app
+        .oneshot(helpers::authed_get("/api/settings", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(
+        helpers::response_json(resp).await["expanded_lan_scan"],
+        serde_json::json!(["192.168.1.0/24", "10.0.0.0/24"])
+    );
+}
+
+#[tokio::test]
+async fn settings_reject_public_subnet() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/settings",
+            &cookie,
+            r#"{"expanded_lan_scan":["8.8.8.0/24"]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}

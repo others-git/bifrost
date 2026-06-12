@@ -22,6 +22,8 @@ import {
   getApiKeys,
   createApiKey,
   revokeApiKey,
+  getSettings,
+  updateSettings,
   type ApiKey,
   type ConnectionStatus,
   type CredentialField,
@@ -141,8 +143,108 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
       )}
 
       <RoomsSection />
+      <ExpandedLanSection />
       <ApiKeysSection dialogs={dialogs} />
       {dialogs.element}
+    </div>
+  );
+}
+
+// ── Expanded-LAN scan ──────────────────────────────────────────────────────────
+
+/**
+ * Extra private subnets the "Scan network" button should sweep, beyond the
+ * container's own subnet. Lets auto-detect reach devices on a different LAN
+ * without host networking (unicast routes across subnets; broadcast doesn't).
+ */
+function ExpandedLanSection() {
+  const [subnets, setSubnets] = useState<string[]>([]);
+  const [text, setText] = useState("");
+  const [msg, setMsg] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    getSettings().then((s) => {
+      setSubnets(s.expanded_lan_scan);
+      setText(s.expanded_lan_scan.join(", "));
+    });
+  }, []);
+
+  async function save() {
+    setSaving(true);
+    setMsg("");
+    const list = text
+      .split(/[,\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const result = await updateSettings({ expanded_lan_scan: list });
+    setSaving(false);
+    if ("error" in result) {
+      setMsg(result.error);
+    } else {
+      setSubnets(result.expanded_lan_scan);
+      setText(result.expanded_lan_scan.join(", "));
+      setMsg(
+        result.expanded_lan_scan.length
+          ? "✓ Saved."
+          : "✓ Saved — scanning the local subnet only.",
+      );
+    }
+  }
+
+  return (
+    <div style={{ marginTop: "2rem" }}>
+      <h2 style={{ margin: "0 0 0.4rem", fontSize: "1.2rem", color: "#ccc" }}>Expanded-LAN scan</h2>
+      <p style={{ color: "#888", fontSize: "0.85rem", margin: "0 0 0.75rem", maxWidth: 560 }}>
+        By default, <strong>Scan network</strong> only searches Bifrost's own subnet. If Bifrost
+        runs in a container on a different network than your devices (e.g. bridged Docker), list the
+        device LAN(s) here as <code>/24</code> networks and the scan will reach across to them. Only
+        private networks (10/8, 172.16/12, 192.168/16) are allowed; up to 8. This widens the
+        HTTP-based light scans (WLED/Tasmota/Shelly) — Hue/Sonos/Onkyo use broadcast discovery that
+        can't cross a subnet either way.
+      </p>
+      <div style={{ display: "flex", gap: "0.5rem", alignItems: "flex-start", maxWidth: 560 }}>
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="192.168.1.0/24, 10.0.0.0/24"
+          style={{ ...S.input, flex: 1 }}
+          spellCheck={false}
+        />
+        <button onClick={save} disabled={saving} style={S.button}>
+          {saving ? "Saving…" : "Save"}
+        </button>
+      </div>
+      {msg && (
+        <span
+          style={{
+            display: "block",
+            marginTop: "0.5rem",
+            fontSize: "0.8rem",
+            color: msg.startsWith("✓") ? "#4d4" : "#fa0",
+          }}
+        >
+          {msg}
+        </span>
+      )}
+      {subnets.length > 0 && (
+        <div style={{ marginTop: "0.6rem", display: "flex", flexWrap: "wrap", gap: "0.4rem" }}>
+          {subnets.map((s) => (
+            <span
+              key={s}
+              style={{
+                fontSize: "0.78rem",
+                color: ACCENT,
+                border: `1px solid ${ACCENT}`,
+                borderRadius: 6,
+                padding: "0.1rem 0.45rem",
+              }}
+            >
+              {s}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

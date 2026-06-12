@@ -83,6 +83,32 @@ export async function scanForDevices(providerType: string): Promise<DiscoveredDe
   return res.json();
 }
 
+// ── App settings ──────────────────────────────────────────────────────────────
+
+export interface AppSettings {
+  /** Extra private /24 subnets auto-detect should also sweep (Expanded-LAN). */
+  expanded_lan_scan: string[];
+}
+
+export async function getSettings(): Promise<AppSettings> {
+  const res = await fetch("/api/settings");
+  if (!res.ok) return { expanded_lan_scan: [] };
+  return res.json();
+}
+
+/** Save settings. Returns the normalised settings, or an error message. */
+export async function updateSettings(
+  settings: AppSettings,
+): Promise<AppSettings | { error: string }> {
+  const res = await fetch("/api/settings", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(settings),
+  });
+  if (res.ok) return res.json();
+  return { error: (await res.text()) || `HTTP ${res.status}` };
+}
+
 export interface ConnectionStatus {
   state: string;
   since_secs?: number;

@@ -33,11 +33,30 @@ pub struct DiscoveredDevice {
     pub credentials: serde_json::Value,
 }
 
+/// Options passed to a scan. `timeout` bounds the whole probe; `extra_subnets`
+/// are additional private /24 bases for the HTTP sweep (Expanded-LAN). Broadcast
+/// discoverers (SSDP, eISCP) use only `timeout` — they can't cross a subnet.
+#[derive(Debug, Clone)]
+pub struct ScanOptions {
+    pub timeout: Duration,
+    pub extra_subnets: Vec<Ipv4Addr>,
+}
+
+impl ScanOptions {
+    /// A scan of just the local subnet (no Expanded-LAN).
+    pub fn new(timeout: Duration) -> Self {
+        Self {
+            timeout,
+            extra_subnets: Vec::new(),
+        }
+    }
+}
+
 /// A provider's network auto-detect. One method: probe the LAN, return what
 /// answered. Implementations stay thin — the I/O lives in [`udp_probe`].
 #[async_trait]
 pub trait DeviceDiscovery: Send + Sync {
-    async fn scan(&self, timeout: Duration) -> Result<Vec<DiscoveredDevice>>;
+    async fn scan(&self, opts: &ScanOptions) -> Result<Vec<DiscoveredDevice>>;
 }
 
 /// Send `payload` once to `target` (a broadcast or multicast address), then
@@ -160,11 +179,11 @@ impl SsdpDiscovery {
 
 #[async_trait]
 impl DeviceDiscovery for SsdpDiscovery {
-    async fn scan(&self, timeout: Duration) -> Result<Vec<DiscoveredDevice>> {
+    async fn scan(&self, opts: &ScanOptions) -> Result<Vec<DiscoveredDevice>> {
         let replies = udp_probe(
             self.target,
             &msearch(self.st),
-            timeout.min(MULTICAST_WINDOW),
+            opts.timeout.min(MULTICAST_WINDOW),
         )
         .await?;
         let mut seen = HashSet::new();
@@ -209,6 +228,14 @@ fn subnet_bases(ip: Ipv4Addr) -> Vec<String> {
     let o = ip.octets();
     (1u8..=254)
         .filter(|&h| h != o[3])
+        .map(|h| format!("http://{}.{}.{}.{}", o[0], o[1], o[2], h))
+        .collect()
+}
+
+/// Every `http://host` in the /24 with the given base address (`.1`–`.254`).
+fn extra_subnet_bases(base: Ipv4Addr) -> Vec<String> {
+    let o = base.octets();
+    (1u8..=254)
         .map(|h| format!("http://{}.{}.{}.{}", o[0], o[1], o[2], h))
         .collect()
 }
@@ -278,17 +305,25 @@ impl HttpSweepDiscovery {
 
 #[async_trait]
 impl DeviceDiscovery for HttpSweepDiscovery {
-    async fn scan(&self, timeout: Duration) -> Result<Vec<DiscoveredDevice>> {
-        let bases = match &self.bases {
+    async fn scan(&self, opts: &ScanOptions) -> Result<Vec<DiscoveredDevice>> {
+        let mut bases = match &self.bases {
             Some(b) => b.clone(),
-            None => match local_ipv4() {
-                Some(ip) => subnet_bases(ip),
-                None => return Ok(Vec::new()),
-            },
+            None => local_ipv4().map(subnet_bases).unwrap_or_default(),
         };
+        // Expanded-LAN: also sweep each configured private /24 (deduped).
+        for subnet in &opts.extra_subnets {
+            for base in extra_subnet_bases(*subnet) {
+                if !bases.contains(&base) {
+                    bases.push(base);
+                }
+            }
+        }
+        if bases.is_empty() {
+            return Ok(Vec::new());
+        }
         // Cap per-host wait so a full sweep fits the budget (unused IPs hang to
         // this limit; live ones answer in milliseconds).
-        let per_host = timeout.min(Duration::from_millis(600));
+        let per_host = opts.timeout.min(Duration::from_millis(600));
         let hosts = http_probe(bases, self.path, per_host, self.signature).await;
         Ok(hosts
             .into_iter()
@@ -363,7 +398,7 @@ mod tests {
 
         let found = SsdpDiscovery::new("upnp:rootdevice", "ipbridge", "Hue bridge", "bridge_ip")
             .to(addr)
-            .scan(Duration::from_millis(300))
+            .scan(&ScanOptions::new(Duration::from_millis(300)))
             .await
             .unwrap();
         assert_eq!(found.len(), 1);
@@ -390,7 +425,7 @@ mod tests {
 
         let found = SsdpDiscovery::new("upnp:rootdevice", "ipbridge", "Hue bridge", "bridge_ip")
             .to(addr)
-            .scan(Duration::from_millis(300))
+            .scan(&ScanOptions::new(Duration::from_millis(300)))
             .await
             .unwrap();
         assert!(found.is_empty());
@@ -418,7 +453,7 @@ mod tests {
         let found =
             HttpSweepDiscovery::new("/json/info", "WLED", "device_ip", |b| b.contains("WLED"))
                 .with_bases(vec![wled.uri(), other.uri()])
-                .scan(Duration::from_secs(1))
+                .scan(&ScanOptions::new(Duration::from_secs(1)))
                 .await
                 .unwrap();
 
@@ -435,9 +470,45 @@ mod tests {
         let found =
             HttpSweepDiscovery::new("/json/info", "WLED", "device_ip", |b| b.contains("WLED"))
                 .with_bases(vec![])
-                .scan(Duration::from_millis(200))
+                .scan(&ScanOptions::new(Duration::from_millis(200)))
                 .await
                 .unwrap();
         assert!(found.is_empty());
+    }
+
+    #[test]
+    fn expanded_lan_generates_full_24_for_a_private_base() {
+        // The Expanded-LAN address set for one configured /24.
+        let bases = extra_subnet_bases(Ipv4Addr::new(192, 168, 7, 0));
+        assert_eq!(bases.len(), 254);
+        assert_eq!(bases[0], "http://192.168.7.1");
+        assert_eq!(bases[253], "http://192.168.7.254");
+    }
+
+    #[tokio::test]
+    async fn http_sweep_finds_a_device_via_an_extra_subnet_base() {
+        // Prove the merge path: with no local subnet, an injected base plus the
+        // signature match still surfaces the device. (Real extra /24s expand to
+        // port-80 hosts; here we exercise the matching + mapping end to end.)
+        let wled = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/json/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"brand":"WLED"}"#))
+            .mount(&wled)
+            .await;
+
+        let found =
+            HttpSweepDiscovery::new("/json/info", "WLED", "device_ip", |b| b.contains("WLED"))
+                .with_bases(vec![wled.uri()])
+                .scan(&ScanOptions {
+                    timeout: Duration::from_millis(400),
+                    extra_subnets: vec![Ipv4Addr::new(10, 0, 0, 0)],
+                })
+                .await
+                .unwrap();
+
+        // The injected WLED base matches; the 10.0.0.x hosts don't answer.
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].label.as_deref(), Some("WLED"));
     }
 }

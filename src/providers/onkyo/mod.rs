@@ -19,7 +19,7 @@ use crate::models::audio::{
     AudioCapabilities, AudioCommand, AudioDevice, AudioDeviceKind, AudioState, NowPlaying,
     PlayState, TransportCmd,
 };
-use crate::providers::discovery::{DeviceDiscovery, DiscoveredDevice, udp_probe};
+use crate::providers::discovery::{DeviceDiscovery, DiscoveredDevice, ScanOptions, udp_probe};
 use crate::providers::{AudioProvider, AudioProviderFactory, CredentialField, FieldKind};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -622,9 +622,10 @@ impl OnkyoDiscovery {
 
 #[async_trait]
 impl DeviceDiscovery for OnkyoDiscovery {
-    async fn scan(&self, timeout: Duration) -> Result<Vec<DiscoveredDevice>> {
+    async fn scan(&self, opts: &ScanOptions) -> Result<Vec<DiscoveredDevice>> {
+        // eISCP discovery is a broadcast; Expanded-LAN subnets don't apply.
         let probe = encode_packet_unit('x', "ECNQSTN");
-        let replies = udp_probe(self.target, &probe, timeout).await?;
+        let replies = udp_probe(self.target, &probe, opts.timeout).await?;
 
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
@@ -1182,7 +1183,7 @@ mod tests {
     async fn discovery_parses_ecn_reply_into_host_and_model() {
         let addr = spawn_discovery_responder("ECNTX-NR686/60128/DX/001122334455").await;
         let found = OnkyoDiscovery::to(addr)
-            .scan(Duration::from_millis(300))
+            .scan(&ScanOptions::new(Duration::from_millis(300)))
             .await
             .unwrap();
 
@@ -1198,7 +1199,7 @@ mod tests {
     #[tokio::test]
     async fn discovery_returns_empty_when_no_receiver_answers() {
         let found = OnkyoDiscovery::to(SocketAddr::from((Ipv4Addr::LOCALHOST, 1)))
-            .scan(Duration::from_millis(150))
+            .scan(&ScanOptions::new(Duration::from_millis(150)))
             .await
             .unwrap();
         assert!(found.is_empty());

@@ -8,6 +8,7 @@ pub mod plans;
 pub mod providers;
 pub mod rooms;
 pub mod scenes;
+pub mod settings;
 pub mod setup;
 pub mod v1;
 
@@ -30,6 +31,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .nest("/providers", providers::router())
         .nest("/rooms", rooms::router())
         .nest("/scenes", scenes::router())
+        .nest("/settings", settings::router())
         .nest("/setup", setup::router())
         .nest("/v1", v1::router())
         .route("/health", get(health))
