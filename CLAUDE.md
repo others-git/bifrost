@@ -19,7 +19,13 @@ There are no exceptions. This is not negotiable.
 - **New provider?** The `LightProvider` impl AND the `ProviderFactory::build` path must both be covered by wiremock tests before the code is considered done.
 - **New API route?** At minimum: happy path + unauthenticated request returns 401.
 - **New crypto helper?** Roundtrip test + at least one failure-mode test (wrong key, tampered data).
-- **`cargo test` must be green** before any change is considered complete. Run it.
+- **The full CI gate must pass locally** before any change is considered complete — CI runs all three and fails on any:
+  ```
+  cargo fmt --check
+  cargo clippy --all-targets -- -D warnings
+  cargo test
+  ```
+  Running only `cargo test` is not enough; fmt and clippy (with `-D warnings`) are equally blocking.
 - Do not silence warnings with `#[allow(dead_code)]` to make tests pass. Fix the code.
 
 ### Test style

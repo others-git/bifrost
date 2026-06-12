@@ -10,9 +10,7 @@
 
 use crate::AppState;
 use crate::api::apikeys::require_api_key;
-use crate::api::audio::{
-    apply_audio_command, get_device_live, list_all_devices, set_audio_status,
-};
+use crate::api::audio::{apply_audio_command, get_device_live, list_all_devices, set_audio_status};
 use crate::api::lights::{apply_light_state, get_light_by_id, list_all_lights, set_light_status};
 use crate::api::palette_scenes::{
     NewScene, SceneError, apply_scene_to_room, create_scene as create_palette_scene,

@@ -51,10 +51,7 @@ async fn scan_network(
             .into_response();
     };
 
-    match discoverer
-        .scan(std::time::Duration::from_secs(2))
-        .await
-    {
+    match discoverer.scan(std::time::Duration::from_secs(2)).await {
         Ok(devices) => Json(devices).into_response(),
         Err(e) => {
             tracing::warn!("network scan for '{provider_type}' could not probe: {e:#}");
@@ -243,7 +240,10 @@ async fn update_credentials(
             .build_audio(&provider_type, &creds_json)
             .map(|_| ())
     } else {
-        state.registry.build(&provider_type, &creds_json).map(|_| ())
+        state
+            .registry
+            .build(&provider_type, &creds_json)
+            .map(|_| ())
     };
     if let Err(e) = build_check {
         return (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response();

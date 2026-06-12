@@ -50,7 +50,11 @@ pub async fn udp_probe(
     payload: &[u8],
     timeout: Duration,
 ) -> Result<Vec<(SocketAddr, Vec<u8>)>> {
-    let bind = if target.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+    let bind = if target.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
     let socket = UdpSocket::bind(bind)
         .await
         .context("binding discovery socket")?;
@@ -81,7 +85,10 @@ pub async fn udp_probe(
 /// Credentials object pre-shaped for one host field, e.g. `{"device_ip": ip}`.
 fn host_credentials(field: &str, host: &str) -> serde_json::Value {
     let mut m = serde_json::Map::new();
-    m.insert(field.to_string(), serde_json::Value::String(host.to_string()));
+    m.insert(
+        field.to_string(),
+        serde_json::Value::String(host.to_string()),
+    );
     serde_json::Value::Object(m)
 }
 
@@ -154,7 +161,12 @@ impl SsdpDiscovery {
 #[async_trait]
 impl DeviceDiscovery for SsdpDiscovery {
     async fn scan(&self, timeout: Duration) -> Result<Vec<DiscoveredDevice>> {
-        let replies = udp_probe(self.target, &msearch(self.st), timeout.min(MULTICAST_WINDOW)).await?;
+        let replies = udp_probe(
+            self.target,
+            &msearch(self.st),
+            timeout.min(MULTICAST_WINDOW),
+        )
+        .await?;
         let mut seen = HashSet::new();
         let mut out = Vec::new();
         for (_, bytes) in replies {
@@ -390,7 +402,10 @@ mod tests {
         let wled = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/json/info"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"ver":"0.14","brand":"WLED","leds":{}}"#))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"ver":"0.14","brand":"WLED","leds":{}}"#),
+            )
             .mount(&wled)
             .await;
         let other = MockServer::start().await;
@@ -400,11 +415,12 @@ mod tests {
             .mount(&other)
             .await;
 
-        let found = HttpSweepDiscovery::new("/json/info", "WLED", "device_ip", |b| b.contains("WLED"))
-            .with_bases(vec![wled.uri(), other.uri()])
-            .scan(Duration::from_secs(1))
-            .await
-            .unwrap();
+        let found =
+            HttpSweepDiscovery::new("/json/info", "WLED", "device_ip", |b| b.contains("WLED"))
+                .with_bases(vec![wled.uri(), other.uri()])
+                .scan(Duration::from_secs(1))
+                .await
+                .unwrap();
 
         assert_eq!(found.len(), 1);
         // wiremock.uri() is http://127.0.0.1:PORT → host keeps the port here.
@@ -416,11 +432,12 @@ mod tests {
     #[tokio::test]
     async fn http_sweep_with_no_local_network_returns_empty() {
         // No injected bases and (in CI) no routable IPv4 → empty, never an error.
-        let found = HttpSweepDiscovery::new("/json/info", "WLED", "device_ip", |b| b.contains("WLED"))
-            .with_bases(vec![])
-            .scan(Duration::from_millis(200))
-            .await
-            .unwrap();
+        let found =
+            HttpSweepDiscovery::new("/json/info", "WLED", "device_ip", |b| b.contains("WLED"))
+                .with_bases(vec![])
+                .scan(Duration::from_millis(200))
+                .await
+                .unwrap();
         assert!(found.is_empty());
     }
 }

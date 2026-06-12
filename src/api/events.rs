@@ -31,7 +31,10 @@ async fn sse_events(
 
     let (receivers, audio_receivers) = {
         let connections = state.connections.lock().await;
-        (connections.subscribe_all(), connections.subscribe_all_audio())
+        (
+            connections.subscribe_all(),
+            connections.subscribe_all_audio(),
+        )
     };
 
     let mut streams: Vec<SseStream> = receivers

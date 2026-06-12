@@ -171,7 +171,9 @@ pub fn start_manager_for(
                             state.db.clone(),
                         );
                     }
-                    Err(e) => tracing::error!("failed to build audio provider {provider_id}: {e:#}"),
+                    Err(e) => {
+                        tracing::error!("failed to build audio provider {provider_id}: {e:#}")
+                    }
                 }
             }
             Some(providers::AudioConnectionMode::OnDemand) => {

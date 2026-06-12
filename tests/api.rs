@@ -3008,7 +3008,10 @@ async fn v1_audio_requires_key_and_mirrors_session_routes() {
 
     let resp = app
         .clone()
-        .oneshot(bearer_get(&format!("/api/v1/audio/devices/{device_id}"), &key))
+        .oneshot(bearer_get(
+            &format!("/api/v1/audio/devices/{device_id}"),
+            &key,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -3180,7 +3183,11 @@ async fn provider_scan_unsupported_type_returns_404() {
 
     // Govee is cloud (API key, no LAN IP) → no discoverer → 404.
     let resp = app
-        .oneshot(helpers::authed_post("/api/providers/scan/govee", &cookie, ""))
+        .oneshot(helpers::authed_post(
+            "/api/providers/scan/govee",
+            &cookie,
+            "",
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -3194,7 +3201,11 @@ async fn provider_scan_supported_type_returns_device_array() {
     // Onkyo supports discovery; nothing answers the broadcast in the test
     // environment, so the result is a (possibly empty) JSON array, never an error.
     let resp = app
-        .oneshot(helpers::authed_post("/api/providers/scan/onkyo", &cookie, ""))
+        .oneshot(helpers::authed_post(
+            "/api/providers/scan/onkyo",
+            &cookie,
+            "",
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);

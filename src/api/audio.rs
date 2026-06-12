@@ -49,8 +49,7 @@ fn row_to_device(r: sqlx::sqlite::SqliteRow) -> AudioDeviceRow {
         device_id: r.get("device_id"),
         name: r.get("name"),
         kind: r.get("kind"),
-        capabilities: serde_json::from_str(&r.get::<String, _>("capabilities"))
-            .unwrap_or_default(),
+        capabilities: serde_json::from_str(&r.get::<String, _>("capabilities")).unwrap_or_default(),
         state: r
             .get::<Option<String>, _>("last_state")
             .and_then(|s| serde_json::from_str(&s).ok())

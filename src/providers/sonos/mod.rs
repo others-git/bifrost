@@ -420,10 +420,13 @@ impl AudioProvider for SonosProvider {
                 .filter_map(|u| by_uuid.get(u.as_str()).map(|p| p.name.as_str()))
                 .collect::<Vec<_>>()
                 .join(" + ");
-            let state = self.read_state(coordinator, true).await.unwrap_or(AudioState {
-                reachable: Some(false),
-                ..Default::default()
-            });
+            let state = self
+                .read_state(coordinator, true)
+                .await
+                .unwrap_or(AudioState {
+                    reachable: Some(false),
+                    ..Default::default()
+                });
             devices.push(AudioDevice {
                 id: Uuid::new_v4(),
                 provider_id: format!("{GROUP_PREFIX}{}", g.coordinator_uuid),
@@ -477,8 +480,16 @@ impl AudioProvider for SonosProvider {
                     ),
                 )
             };
-            self.soap(&player.base_url, SoapCall { path, service, action, args })
-                .await?;
+            self.soap(
+                &player.base_url,
+                SoapCall {
+                    path,
+                    service,
+                    action,
+                    args,
+                },
+            )
+            .await?;
         }
 
         if let Some(mute) = cmd.mute {
@@ -503,8 +514,16 @@ impl AudioProvider for SonosProvider {
                     ),
                 )
             };
-            self.soap(&player.base_url, SoapCall { path, service, action, args })
-                .await?;
+            self.soap(
+                &player.base_url,
+                SoapCall {
+                    path,
+                    service,
+                    action,
+                    args,
+                },
+            )
+            .await?;
         }
 
         // power maps to play/pause; an explicit transport command wins.
@@ -757,7 +776,9 @@ mod tests {
         );
         assert_eq!(devices[0].provider_id, "RINCON_LIVING");
         assert!(
-            devices[..3].iter().all(|d| d.kind == AudioDeviceKind::Speaker),
+            devices[..3]
+                .iter()
+                .all(|d| d.kind == AudioDeviceKind::Speaker),
             "players are speakers"
         );
     }

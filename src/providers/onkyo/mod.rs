@@ -63,7 +63,8 @@ pub fn decode_packet(buf: &[u8]) -> Option<(String, usize)> {
     if buf.len() < 16 || &buf[0..4] != b"ISCP" {
         // Resync: skip garbage until a plausible magic. (Receivers are well
         // behaved; this guards against a mid-stream connect.)
-        if !buf.is_empty() && &buf[0..buf.len().min(4)] != &b"ISCP"[..buf.len().min(4)] {
+        let n = buf.len().min(4);
+        if !buf.is_empty() && buf[0..n] != b"ISCP"[..n] {
             return Some((String::new(), 1));
         }
         return None;
@@ -351,8 +352,8 @@ impl OnkyoProvider {
         if wanted.is_empty() {
             // Fire-and-forget writes still deserve a moment on the wire before
             // the socket closes — receivers drop unread input on RST.
-            let _ = tokio::time::timeout(Duration::from_millis(50), stream.read(&mut [0u8; 256]))
-                .await;
+            let _ =
+                tokio::time::timeout(Duration::from_millis(50), stream.read(&mut [0u8; 256])).await;
             return Ok(collected);
         }
 
@@ -434,8 +435,8 @@ impl AudioProvider for OnkyoProvider {
     }
 
     async fn get_state(&self, device_id: &str) -> Result<AudioState> {
-        let zone = zone_codes(device_id)
-            .ok_or_else(|| anyhow!("unknown Onkyo zone '{device_id}'"))?;
+        let zone =
+            zone_codes(device_id).ok_or_else(|| anyhow!("unknown Onkyo zone '{device_id}'"))?;
 
         let base = self
             .exchange(
@@ -496,8 +497,8 @@ impl AudioProvider for OnkyoProvider {
     }
 
     async fn set_state(&self, device_id: &str, cmd: &AudioCommand) -> Result<()> {
-        let zone = zone_codes(device_id)
-            .ok_or_else(|| anyhow!("unknown Onkyo zone '{device_id}'"))?;
+        let zone =
+            zone_codes(device_id).ok_or_else(|| anyhow!("unknown Onkyo zone '{device_id}'"))?;
         if cmd.is_empty() {
             return Ok(());
         }
@@ -536,8 +537,8 @@ impl AudioProvider for OnkyoProvider {
 
         let mut stream = self.connect().await?;
         for q in [
-            "PWRQSTN", "MVLQSTN", "AMTQSTN", "SLIQSTN", "NSTQSTN", "NTIQSTN", "NATQSTN",
-            "NALQSTN", "ZPWQSTN", "ZVLQSTN", "ZMTQSTN", "SLZQSTN",
+            "PWRQSTN", "MVLQSTN", "AMTQSTN", "SLIQSTN", "NSTQSTN", "NTIQSTN", "NATQSTN", "NALQSTN",
+            "ZPWQSTN", "ZVLQSTN", "ZMTQSTN", "SLZQSTN",
         ] {
             stream.write_all(&encode_packet(q)).await?;
         }
@@ -830,7 +831,7 @@ mod tests {
         // Switching away from NET clears the metadata; power-off too.
         assert!(apply_message(&mut s, "SLI", "12"));
         assert!(s.now_playing.is_none());
-        assert!(apply_message(&mut s, "MVL", "ZZ") == false, "bad hex ignored");
+        assert!(!apply_message(&mut s, "MVL", "ZZ"), "bad hex ignored");
         assert!(apply_message(&mut s, "PWR", "00"));
         assert!(!s.power);
     }
@@ -1051,7 +1052,10 @@ mod tests {
         let z2 = &devices[1];
         assert_eq!(z2.provider_id, "zone2");
         assert_eq!(z2.kind, AudioDeviceKind::Zone);
-        assert!(!z2.capabilities.now_playing, "NET metadata is main-zone only");
+        assert!(
+            !z2.capabilities.now_playing,
+            "NET metadata is main-zone only"
+        );
         assert!(z2.state.power);
         assert_eq!(z2.state.volume, 20);
         assert!(z2.state.mute);
@@ -1092,9 +1096,7 @@ mod tests {
 
         let mut rx = p.event_stream().await.unwrap();
         let mut last_zone2 = None;
-        while let Ok(Some(ev)) =
-            tokio::time::timeout(Duration::from_millis(300), rx.recv()).await
-        {
+        while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await {
             if ev.device_id == "zone2" {
                 last_zone2 = Some(ev);
             }
@@ -1134,9 +1136,7 @@ mod tests {
         // The initial QSTN battery folds in reply by reply — drain until the
         // channel goes quiet and inspect the final accumulated snapshot.
         let mut latest = None;
-        while let Ok(Some(ev)) =
-            tokio::time::timeout(Duration::from_millis(300), rx.recv()).await
-        {
+        while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await {
             latest = Some(ev);
         }
         let ev = latest.expect("initial events");
@@ -1189,7 +1189,10 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].host, "127.0.0.1");
         assert_eq!(found[0].label.as_deref(), Some("Onkyo TX-NR686"));
-        assert_eq!(found[0].credentials, serde_json::json!({ "host": "127.0.0.1" }));
+        assert_eq!(
+            found[0].credentials,
+            serde_json::json!({ "host": "127.0.0.1" })
+        );
     }
 
     #[tokio::test]
