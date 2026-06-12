@@ -66,6 +66,7 @@ struct SoapCall<'a> {
 }
 
 const RENDERING: &str = "urn:schemas-upnp-org:service:RenderingControl:1";
+const GROUP_RENDERING: &str = "urn:schemas-upnp-org:service:GroupRenderingControl:1";
 const AV_TRANSPORT: &str = "urn:schemas-upnp-org:service:AVTransport:1";
 const TOPOLOGY: &str = "urn:schemas-upnp-org:service:ZoneGroupTopology:1";
 
@@ -83,6 +84,62 @@ struct Player {
     name: String,
     /// `http://<ip>:1400` — derived from the topology Location URL.
     base_url: String,
+}
+
+/// A Sonos playback group: members play in sync, controlled through the
+/// coordinator. Only groups with 2+ visible members surface as zone devices.
+#[derive(Debug, Clone)]
+struct Group {
+    coordinator_uuid: String,
+    member_uuids: Vec<String>,
+}
+
+/// Device-id prefix for group zone devices (`group:RINCON_…` = coordinator).
+const GROUP_PREFIX: &str = "group:";
+
+/// Parse the (unescaped) ZoneGroupState XML into players and groups.
+fn parse_topology(state_xml: &str) -> (Vec<Player>, Vec<Group>) {
+    let mut players = Vec::new();
+    let mut groups = Vec::new();
+
+    for group_chunk in state_xml.split("<ZoneGroup ").skip(1) {
+        let group_el = group_chunk.split('>').next().unwrap_or("");
+        let coordinator = xml_attr(group_el, "Coordinator").unwrap_or_default();
+        let mut member_uuids = Vec::new();
+
+        for chunk in group_chunk.split("<ZoneGroupMember").skip(1) {
+            let element = chunk.split('>').next().unwrap_or("");
+            if xml_attr(element, "Invisible").as_deref() == Some("1") {
+                continue;
+            }
+            let (Some(uuid), Some(name), Some(location)) = (
+                xml_attr(element, "UUID"),
+                xml_attr(element, "ZoneName"),
+                xml_attr(element, "Location"),
+            ) else {
+                continue;
+            };
+            // Location is e.g. http://192.168.1.50:1400/xml/device_description.xml
+            let base_url = location
+                .find("/xml/")
+                .map(|i| location[..i].to_string())
+                .unwrap_or(location);
+            member_uuids.push(uuid.clone());
+            players.push(Player {
+                uuid,
+                name,
+                base_url,
+            });
+        }
+
+        if member_uuids.len() >= 2 && !coordinator.is_empty() {
+            groups.push(Group {
+                coordinator_uuid: coordinator,
+                member_uuids,
+            });
+        }
+    }
+    (players, groups)
 }
 
 // ── Provider ────────────────────────────────────────────────────────────────
@@ -152,7 +209,7 @@ impl SonosProvider {
 
     /// Fetch the household topology from the seed player. Invisible members
     /// (bridges, bonded surrounds) are skipped.
-    async fn topology(&self) -> Result<Vec<Player>> {
+    async fn topology(&self) -> Result<(Vec<Player>, Vec<Group>)> {
         let body = self
             .soap(
                 &self.seed_url,
@@ -165,58 +222,65 @@ impl SonosProvider {
             )
             .await?;
         let state_xml = xml_unescape(&xml_tag(&body, "ZoneGroupState").unwrap_or_default());
-
-        let mut players = Vec::new();
-        for chunk in state_xml.split("<ZoneGroupMember").skip(1) {
-            let element = chunk.split('>').next().unwrap_or("");
-            if xml_attr(element, "Invisible").as_deref() == Some("1") {
-                continue;
-            }
-            let (Some(uuid), Some(name), Some(location)) = (
-                xml_attr(element, "UUID"),
-                xml_attr(element, "ZoneName"),
-                xml_attr(element, "Location"),
-            ) else {
-                continue;
-            };
-            // Location is e.g. http://192.168.1.50:1400/xml/device_description.xml
-            let base_url = location
-                .find("/xml/")
-                .map(|i| location[..i].to_string())
-                .unwrap_or(location);
-            players.push(Player {
-                uuid,
-                name,
-                base_url,
-            });
-        }
+        let (players, groups) = parse_topology(&state_xml);
         if players.is_empty() {
             return Err(anyhow!("Sonos topology returned no visible players"));
         }
-        Ok(players)
+        Ok((players, groups))
     }
 
-    async fn find_player(&self, device_id: &str) -> Result<Player> {
-        self.topology()
-            .await?
+    /// Resolve a device id to the player to control: a plain player id maps to
+    /// itself; a `group:` id maps to the group's coordinator (which drives the
+    /// whole group for transport, and carries GroupRenderingControl).
+    async fn find_target(&self, device_id: &str) -> Result<Player> {
+        let (players, _) = self.topology().await?;
+        let uuid = device_id.strip_prefix(GROUP_PREFIX).unwrap_or(device_id);
+        players
             .into_iter()
-            .find(|p| p.uuid == device_id)
+            .find(|p| p.uuid == uuid)
             .ok_or_else(|| anyhow!("unknown Sonos player '{device_id}'"))
     }
 
-    async fn read_state(&self, player: &Player) -> Result<AudioState> {
+    /// Read volume + mute, per player (RenderingControl) or for a whole group
+    /// (GroupRenderingControl on the coordinator).
+    async fn read_volume_mute(&self, player: &Player, group: bool) -> Result<(u8, bool)> {
+        let (path, service, get_vol, get_mute, vol_tag, mute_tag) = if group {
+            (
+                "/MediaRenderer/GroupRenderingControl/Control",
+                GROUP_RENDERING,
+                "GetGroupVolume",
+                "GetGroupMute",
+                "CurrentVolume",
+                "CurrentMute",
+            )
+        } else {
+            (
+                "/MediaRenderer/RenderingControl/Control",
+                RENDERING,
+                "GetVolume",
+                "GetMute",
+                "CurrentVolume",
+                "CurrentMute",
+            )
+        };
+        let args = if group {
+            "<InstanceID>0</InstanceID>".to_string()
+        } else {
+            "<InstanceID>0</InstanceID><Channel>Master</Channel>".to_string()
+        };
+
         let vol_body = self
             .soap(
                 &player.base_url,
                 SoapCall {
-                    path: "/MediaRenderer/RenderingControl/Control",
-                    service: RENDERING,
-                    action: "GetVolume",
-                    args: "<InstanceID>0</InstanceID><Channel>Master</Channel>".into(),
+                    path,
+                    service,
+                    action: get_vol,
+                    args: args.clone(),
                 },
             )
             .await?;
-        let volume: u8 = xml_tag(&vol_body, "CurrentVolume")
+        let volume: u8 = xml_tag(&vol_body, vol_tag)
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
 
@@ -224,14 +288,19 @@ impl SonosProvider {
             .soap(
                 &player.base_url,
                 SoapCall {
-                    path: "/MediaRenderer/RenderingControl/Control",
-                    service: RENDERING,
-                    action: "GetMute",
-                    args: "<InstanceID>0</InstanceID><Channel>Master</Channel>".into(),
+                    path,
+                    service,
+                    action: get_mute,
+                    args,
                 },
             )
             .await?;
-        let mute = xml_tag(&mute_body, "CurrentMute").as_deref() == Some("1");
+        let mute = xml_tag(&mute_body, mute_tag).as_deref() == Some("1");
+        Ok((volume, mute))
+    }
+
+    async fn read_state(&self, player: &Player, group: bool) -> Result<AudioState> {
+        let (volume, mute) = self.read_volume_mute(player, group).await?;
 
         let transport_body = self
             .soap(
@@ -312,12 +381,15 @@ impl AudioProvider for SonosProvider {
     }
 
     async fn discover(&self) -> Result<Vec<AudioDevice>> {
-        let players = self.topology().await?;
-        let mut devices = Vec::with_capacity(players.len());
-        for p in players {
+        let (players, groups) = self.topology().await?;
+        let by_uuid: std::collections::HashMap<&str, &Player> =
+            players.iter().map(|p| (p.uuid.as_str(), p)).collect();
+        let mut devices = Vec::with_capacity(players.len() + groups.len());
+
+        for p in &players {
             // A player that drops mid-discovery still gets listed (unreachable),
             // matching how light discovery tolerates flaky devices.
-            let state = self.read_state(&p).await.unwrap_or(AudioState {
+            let state = self.read_state(p, false).await.unwrap_or(AudioState {
                 reachable: Some(false),
                 ..Default::default()
             });
@@ -334,12 +406,43 @@ impl AudioProvider for SonosProvider {
                 state,
             });
         }
+
+        // Multi-player groups surface as zone devices: group volume/mute via
+        // the coordinator, transport drives the whole group in sync.
+        for g in &groups {
+            let Some(coordinator) = by_uuid.get(g.coordinator_uuid.as_str()) else {
+                continue;
+            };
+            let name = g
+                .member_uuids
+                .iter()
+                .filter_map(|u| by_uuid.get(u.as_str()).map(|p| p.name.as_str()))
+                .collect::<Vec<_>>()
+                .join(" + ");
+            let state = self.read_state(coordinator, true).await.unwrap_or(AudioState {
+                reachable: Some(false),
+                ..Default::default()
+            });
+            devices.push(AudioDevice {
+                id: Uuid::new_v4(),
+                provider_id: format!("{GROUP_PREFIX}{}", g.coordinator_uuid),
+                name,
+                kind: AudioDeviceKind::Zone,
+                capabilities: AudioCapabilities {
+                    sources: false,
+                    transport: true,
+                    now_playing: true,
+                },
+                state,
+            });
+        }
         Ok(devices)
     }
 
     async fn get_state(&self, device_id: &str) -> Result<AudioState> {
-        let player = self.find_player(device_id).await?;
-        self.read_state(&player).await
+        let target = self.find_target(device_id).await?;
+        self.read_state(&target, device_id.starts_with(GROUP_PREFIX))
+            .await
     }
 
     async fn set_state(&self, device_id: &str, cmd: &AudioCommand) -> Result<()> {
@@ -348,38 +451,59 @@ impl AudioProvider for SonosProvider {
                 "Sonos source selection is not supported; control playback from a Sonos app, then use transport commands"
             ));
         }
-        let player = self.find_player(device_id).await?;
+        let group = device_id.starts_with(GROUP_PREFIX);
+        let player = self.find_target(device_id).await?;
 
         if let Some(volume) = cmd.volume {
-            self.soap(
-                &player.base_url,
-                SoapCall {
-                    path: "/MediaRenderer/RenderingControl/Control",
-                    service: RENDERING,
-                    action: "SetVolume",
-                    args: format!(
+            let (path, service, action, args) = if group {
+                (
+                    "/MediaRenderer/GroupRenderingControl/Control",
+                    GROUP_RENDERING,
+                    "SetGroupVolume",
+                    format!(
+                        "<InstanceID>0</InstanceID><DesiredVolume>{}</DesiredVolume>",
+                        volume.min(100)
+                    ),
+                )
+            } else {
+                (
+                    "/MediaRenderer/RenderingControl/Control",
+                    RENDERING,
+                    "SetVolume",
+                    format!(
                         "<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredVolume>{}</DesiredVolume>",
                         volume.min(100)
                     ),
-                },
-            )
-            .await?;
+                )
+            };
+            self.soap(&player.base_url, SoapCall { path, service, action, args })
+                .await?;
         }
 
         if let Some(mute) = cmd.mute {
-            self.soap(
-                &player.base_url,
-                SoapCall {
-                    path: "/MediaRenderer/RenderingControl/Control",
-                    service: RENDERING,
-                    action: "SetMute",
-                    args: format!(
+            let (path, service, action, args) = if group {
+                (
+                    "/MediaRenderer/GroupRenderingControl/Control",
+                    GROUP_RENDERING,
+                    "SetGroupMute",
+                    format!(
+                        "<InstanceID>0</InstanceID><DesiredMute>{}</DesiredMute>",
+                        if mute { 1 } else { 0 }
+                    ),
+                )
+            } else {
+                (
+                    "/MediaRenderer/RenderingControl/Control",
+                    RENDERING,
+                    "SetMute",
+                    format!(
                         "<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredMute>{}</DesiredMute>",
                         if mute { 1 } else { 0 }
                     ),
-                },
-            )
-            .await?;
+                )
+            };
+            self.soap(&player.base_url, SoapCall { path, service, action, args })
+                .await?;
         }
 
         // power maps to play/pause; an explicit transport command wins.
@@ -392,7 +516,7 @@ impl AudioProvider for SonosProvider {
                 TransportCmd::Previous => "Previous",
                 // Sonos has no toggle action; resolve from current state.
                 TransportCmd::Toggle => {
-                    if self.read_state(&player).await?.power {
+                    if self.read_state(&player, group).await?.power {
                         "Pause"
                     } else {
                         "Play"
@@ -475,11 +599,12 @@ mod tests {
         )
     }
 
-    /// Topology XML (escaped, as Sonos returns it) listing players that point
-    /// back at the mock server.
+    /// Topology XML (escaped, as Sonos returns it): Living Room + Kitchen play
+    /// as one group (coordinator: Living Room); Den stands alone; a bridge is
+    /// invisible. Every Location points back at the mock server.
     fn topology_response(base: &str) -> String {
         let raw = format!(
-            r#"<ZoneGroups><ZoneGroup Coordinator="RINCON_LIVING"><ZoneGroupMember UUID="RINCON_LIVING" Location="{base}/xml/device_description.xml" ZoneName="Living Room"/><ZoneGroupMember UUID="RINCON_KITCHEN" Location="{base}/xml/device_description.xml" ZoneName="Kitchen"/><ZoneGroupMember UUID="RINCON_BRIDGE" Location="{base}/xml/device_description.xml" ZoneName="BRIDGE" Invisible="1"/></ZoneGroup></ZoneGroups>"#
+            r#"<ZoneGroups><ZoneGroup Coordinator="RINCON_LIVING" ID="RINCON_LIVING:1"><ZoneGroupMember UUID="RINCON_LIVING" Location="{base}/xml/device_description.xml" ZoneName="Living Room"/><ZoneGroupMember UUID="RINCON_KITCHEN" Location="{base}/xml/device_description.xml" ZoneName="Kitchen"/><ZoneGroupMember UUID="RINCON_BRIDGE" Location="{base}/xml/device_description.xml" ZoneName="BRIDGE" Invisible="1"/></ZoneGroup><ZoneGroup Coordinator="RINCON_DEN" ID="RINCON_DEN:1"><ZoneGroupMember UUID="RINCON_DEN" Location="{base}/xml/device_description.xml" ZoneName="Den"/></ZoneGroup></ZoneGroups>"#
         );
         let escaped = raw
             .replace('&', "&amp;")
@@ -491,6 +616,35 @@ mod tests {
             "ZoneGroupTopology",
             &format!("<ZoneGroupState>{escaped}</ZoneGroupState>"),
         )
+    }
+
+    async fn mount_group_state(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/MediaRenderer/GroupRenderingControl/Control"))
+            .and(header(
+                "SOAPACTION",
+                format!("\"{GROUP_RENDERING}#GetGroupVolume\"").as_str(),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string(soap_ok(
+                "GetGroupVolume",
+                "GroupRenderingControl",
+                "<CurrentVolume>22</CurrentVolume>",
+            )))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/MediaRenderer/GroupRenderingControl/Control"))
+            .and(header(
+                "SOAPACTION",
+                format!("\"{GROUP_RENDERING}#GetGroupMute\"").as_str(),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string(soap_ok(
+                "GetGroupMute",
+                "GroupRenderingControl",
+                "<CurrentMute>0</CurrentMute>",
+            )))
+            .mount(server)
+            .await;
     }
 
     async fn mount_topology(server: &MockServer) {
@@ -563,19 +717,88 @@ mod tests {
 
     // ── Behaviour ────────────────────────────────────────────────────────────
 
+    #[test]
+    fn parse_topology_finds_players_and_multi_member_groups() {
+        let xml = r#"<ZoneGroups><ZoneGroup Coordinator="A" ID="A:1"><ZoneGroupMember UUID="A" Location="http://h1:1400/xml/d.xml" ZoneName="One"/><ZoneGroupMember UUID="B" Location="http://h2:1400/xml/d.xml" ZoneName="Two"/></ZoneGroup><ZoneGroup Coordinator="C" ID="C:1"><ZoneGroupMember UUID="C" Location="http://h3:1400/xml/d.xml" ZoneName="Solo"/></ZoneGroup></ZoneGroups>"#;
+        let (players, groups) = parse_topology(xml);
+        assert_eq!(players.len(), 3);
+        assert_eq!(players[0].base_url, "http://h1:1400");
+        assert_eq!(groups.len(), 1, "single-member groups are not zones");
+        assert_eq!(groups[0].coordinator_uuid, "A");
+        assert_eq!(groups[0].member_uuids, vec!["A", "B"]);
+    }
+
     #[tokio::test]
     async fn discover_lists_visible_players_and_skips_invisible() {
         let server = MockServer::start().await;
         mount_topology(&server).await;
         mount_playing_state(&server).await;
+        mount_group_state(&server).await;
 
         let p = SonosProvider::new_for_test(server.uri()).unwrap();
         let devices = p.discover().await.unwrap();
 
         let names: Vec<_> = devices.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(names, vec!["Living Room", "Kitchen"]);
-        assert!(devices.iter().all(|d| d.kind == AudioDeviceKind::Speaker));
+        assert_eq!(
+            names,
+            vec!["Living Room", "Kitchen", "Den", "Living Room + Kitchen"]
+        );
         assert_eq!(devices[0].provider_id, "RINCON_LIVING");
+        assert!(
+            devices[..3].iter().all(|d| d.kind == AudioDeviceKind::Speaker),
+            "players are speakers"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_exposes_group_as_zone_with_group_volume() {
+        let server = MockServer::start().await;
+        mount_topology(&server).await;
+        mount_playing_state(&server).await;
+        mount_group_state(&server).await;
+
+        let p = SonosProvider::new_for_test(server.uri()).unwrap();
+        let devices = p.discover().await.unwrap();
+
+        let zone = devices
+            .iter()
+            .find(|d| d.kind == AudioDeviceKind::Zone)
+            .expect("group zone device");
+        assert_eq!(zone.provider_id, "group:RINCON_LIVING");
+        assert_eq!(zone.name, "Living Room + Kitchen");
+        assert_eq!(zone.state.volume, 22, "group volume, not player volume");
+    }
+
+    #[tokio::test]
+    async fn set_group_volume_uses_group_rendering_control() {
+        let server = MockServer::start().await;
+        mount_topology(&server).await;
+
+        Mock::given(method("POST"))
+            .and(path("/MediaRenderer/GroupRenderingControl/Control"))
+            .and(header(
+                "SOAPACTION",
+                format!("\"{GROUP_RENDERING}#SetGroupVolume\"").as_str(),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string(soap_ok(
+                "SetGroupVolume",
+                "GroupRenderingControl",
+                "",
+            )))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let p = SonosProvider::new_for_test(server.uri()).unwrap();
+        p.set_state(
+            "group:RINCON_LIVING",
+            &AudioCommand {
+                volume: Some(40),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
