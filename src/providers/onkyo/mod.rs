@@ -120,34 +120,89 @@ fn source_name(code: &str) -> String {
         .unwrap_or_else(|| code.to_string())
 }
 
-/// Resolve a requested source to wire commands. Friendly input names and raw
-/// SLI hex go straight to `SLI`; streaming service names select NET first,
-/// then the service (`NSV<code>0`).
-fn source_commands(requested: &str) -> Result<Vec<String>> {
+/// Resolve a requested source to wire commands for one zone. Friendly input
+/// names and raw hex go straight to the zone's selector; streaming service
+/// names select NET first, then the service (`NSV<code>0`).
+fn source_commands(zone: &ZoneCodes, requested: &str) -> Result<Vec<String>> {
+    let sel = zone.selector;
     let want = requested.trim().to_ascii_lowercase();
     if let Some((code, _)) = SOURCES.iter().find(|(_, n)| *n == want) {
-        return Ok(vec![format!("SLI{code}")]);
+        return Ok(vec![format!("{sel}{code}")]);
     }
     if let Some((code, _)) = NET_SERVICES.iter().find(|(_, n)| *n == want) {
-        return Ok(vec!["SLI2B".to_string(), format!("NSV{code}0")]);
+        return Ok(vec![format!("{sel}2B"), format!("NSV{code}0")]);
     }
-    // Raw SLI hex passthrough (e.g. "2B" or "0x2B").
+    // Raw selector hex passthrough (e.g. "2B" or "0x2B").
     let raw = want.trim_start_matches("0x").to_ascii_uppercase();
     if raw.len() == 2 && raw.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Ok(vec![format!("SLI{raw}")]);
+        return Ok(vec![format!("{sel}{raw}")]);
     }
     Err(anyhow!("unknown audio source '{requested}'"))
 }
 
-fn transport_command(cmd: TransportCmd) -> &'static str {
-    match cmd {
-        TransportCmd::Play => "NTCPLAY",
-        TransportCmd::Pause => "NTCPAUSE",
-        TransportCmd::Stop => "NTCSTOP",
-        TransportCmd::Next => "NTCTRUP",
-        TransportCmd::Previous => "NTCTRDN",
-        TransportCmd::Toggle => "NTCP/P",
+/// Per-zone eISCP command codes. Zone 2 mirrors the main zone with its own
+/// command family (`ZPW`/`ZVL`/`ZMT`/`SLZ`, transport via `NTZ`).
+struct ZoneCodes {
+    power: &'static str,
+    volume: &'static str,
+    mute: &'static str,
+    selector: &'static str,
+    transport: &'static str,
+}
+
+const MAIN: ZoneCodes = ZoneCodes {
+    power: "PWR",
+    volume: "MVL",
+    mute: "AMT",
+    selector: "SLI",
+    transport: "NTC",
+};
+const ZONE2: ZoneCodes = ZoneCodes {
+    power: "ZPW",
+    volume: "ZVL",
+    mute: "ZMT",
+    selector: "SLZ",
+    transport: "NTZ",
+};
+
+fn zone_codes(device_id: &str) -> Option<&'static ZoneCodes> {
+    match device_id {
+        "main" => Some(&MAIN),
+        "zone2" => Some(&ZONE2),
+        _ => None,
     }
+}
+
+/// Map any zone-specific code to (device id, canonical main-zone code) so the
+/// push reader can fold all zones with one `apply_message`.
+fn canonical(code: &str) -> Option<(&'static str, &'static str)> {
+    match code {
+        "PWR" => Some(("main", "PWR")),
+        "MVL" => Some(("main", "MVL")),
+        "AMT" => Some(("main", "AMT")),
+        "SLI" => Some(("main", "SLI")),
+        "NTI" => Some(("main", "NTI")),
+        "NAT" => Some(("main", "NAT")),
+        "NAL" => Some(("main", "NAL")),
+        "NST" => Some(("main", "NST")),
+        "ZPW" => Some(("zone2", "PWR")),
+        "ZVL" => Some(("zone2", "MVL")),
+        "ZMT" => Some(("zone2", "AMT")),
+        "SLZ" => Some(("zone2", "SLI")),
+        _ => None,
+    }
+}
+
+fn transport_command(zone: &ZoneCodes, cmd: TransportCmd) -> String {
+    let op = match cmd {
+        TransportCmd::Play => "PLAY",
+        TransportCmd::Pause => "PAUSE",
+        TransportCmd::Stop => "STOP",
+        TransportCmd::Next => "TRUP",
+        TransportCmd::Previous => "TRDN",
+        TransportCmd::Toggle => "P/P",
+    };
+    format!("{}{op}", zone.transport)
 }
 
 /// Parse the `NST` play-status triplet (`prs`): play state, repeat, shuffle.
@@ -334,9 +389,9 @@ impl AudioProvider for OnkyoProvider {
     }
 
     async fn discover(&self) -> Result<Vec<AudioDevice>> {
-        // Reachability probe + initial state in one round trip.
-        let state = self.get_state("main").await?;
-        Ok(vec![AudioDevice {
+        // Main-zone probe doubles as the reachability check.
+        let main_state = self.get_state("main").await?;
+        let mut devices = vec![AudioDevice {
             id: Uuid::new_v4(),
             provider_id: "main".to_string(),
             name: format!("Onkyo receiver ({})", self.host),
@@ -346,39 +401,59 @@ impl AudioProvider for OnkyoProvider {
                 transport: true,
                 now_playing: true,
             },
-            state,
-        }])
+            state: main_state,
+        }];
+
+        // Zone 2 exists when ZPW answers with a real power state ("00"/"01");
+        // receivers without it stay silent or reply N/A.
+        let probe = self.exchange(&["ZPWQSTN".into()], &["ZPW"]).await?;
+        if probe.get("ZPW").map(|d| d == "00" || d == "01") == Some(true) {
+            let state = self.get_state("zone2").await.unwrap_or_default();
+            devices.push(AudioDevice {
+                id: Uuid::new_v4(),
+                provider_id: "zone2".to_string(),
+                name: format!("Onkyo zone 2 ({})", self.host),
+                kind: AudioDeviceKind::Zone,
+                capabilities: AudioCapabilities {
+                    sources: true,
+                    transport: true,
+                    now_playing: false,
+                },
+                state,
+            });
+        }
+        Ok(devices)
     }
 
     async fn get_state(&self, device_id: &str) -> Result<AudioState> {
-        if device_id != "main" {
-            return Err(anyhow!("unknown Onkyo zone '{device_id}'"));
-        }
+        let zone = zone_codes(device_id)
+            .ok_or_else(|| anyhow!("unknown Onkyo zone '{device_id}'"))?;
 
         let base = self
             .exchange(
                 &[
-                    "PWRQSTN".into(),
-                    "MVLQSTN".into(),
-                    "AMTQSTN".into(),
-                    "SLIQSTN".into(),
+                    format!("{}QSTN", zone.power),
+                    format!("{}QSTN", zone.volume),
+                    format!("{}QSTN", zone.mute),
+                    format!("{}QSTN", zone.selector),
                 ],
-                &["PWR", "MVL", "AMT", "SLI"],
+                &[zone.power, zone.volume, zone.mute, zone.selector],
             )
             .await?;
 
-        let power = base.get("PWR").map(|d| d == "01").unwrap_or(false);
+        let power = base.get(zone.power).map(|d| d == "01").unwrap_or(false);
         let volume = base
-            .get("MVL")
+            .get(zone.volume)
             .and_then(|d| u8::from_str_radix(d, 16).ok())
             .unwrap_or(0)
             .min(100);
-        let mute = base.get("AMT").map(|d| d == "01").unwrap_or(false);
-        let source_code = base.get("SLI").cloned();
+        let mute = base.get(zone.mute).map(|d| d == "01").unwrap_or(false);
+        let source_code = base.get(zone.selector).cloned();
         let source = source_code.as_deref().map(source_name);
 
-        // Track metadata only makes sense on the NET input while powered on.
-        let now_playing = if power && source.as_deref() == Some("net") {
+        // Track metadata only makes sense on the NET input while powered on,
+        // and the NTI/NAT/NAL feed describes the main zone's NET session.
+        let now_playing = if device_id == "main" && power && source.as_deref() == Some("net") {
             let nets = self
                 .exchange(
                     &[
@@ -413,9 +488,8 @@ impl AudioProvider for OnkyoProvider {
     }
 
     async fn set_state(&self, device_id: &str, cmd: &AudioCommand) -> Result<()> {
-        if device_id != "main" {
-            return Err(anyhow!("unknown Onkyo zone '{device_id}'"));
-        }
+        let zone = zone_codes(device_id)
+            .ok_or_else(|| anyhow!("unknown Onkyo zone '{device_id}'"))?;
         if cmd.is_empty() {
             return Ok(());
         }
@@ -424,19 +498,19 @@ impl AudioProvider for OnkyoProvider {
         // source before transport (so PLAY hits the right service).
         let mut commands: Vec<String> = Vec::new();
         if let Some(on) = cmd.power {
-            commands.push(if on { "PWR01" } else { "PWR00" }.to_string());
+            commands.push(format!("{}{}", zone.power, if on { "01" } else { "00" }));
         }
         if let Some(source) = &cmd.source {
-            commands.extend(source_commands(source)?);
+            commands.extend(source_commands(zone, source)?);
         }
         if let Some(volume) = cmd.volume {
-            commands.push(format!("MVL{:02X}", volume.min(100)));
+            commands.push(format!("{}{:02X}", zone.volume, volume.min(100)));
         }
         if let Some(mute) = cmd.mute {
-            commands.push(if mute { "AMT01" } else { "AMT00" }.to_string());
+            commands.push(format!("{}{}", zone.mute, if mute { "01" } else { "00" }));
         }
         if let Some(transport) = cmd.transport {
-            commands.push(transport_command(transport).to_string());
+            commands.push(transport_command(zone, transport));
         }
 
         self.exchange(&commands, &[]).await?;
@@ -454,17 +528,21 @@ impl AudioProvider for OnkyoProvider {
 
         let mut stream = self.connect().await?;
         for q in [
-            "PWRQSTN", "MVLQSTN", "AMTQSTN", "SLIQSTN", "NSTQSTN", "NTIQSTN", "NATQSTN", "NALQSTN",
+            "PWRQSTN", "MVLQSTN", "AMTQSTN", "SLIQSTN", "NSTQSTN", "NTIQSTN", "NATQSTN",
+            "NALQSTN", "ZPWQSTN", "ZVLQSTN", "ZMTQSTN", "SLZQSTN",
         ] {
             stream.write_all(&encode_packet(q)).await?;
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel::<AudioEvent>(64);
         tokio::spawn(async move {
-            let mut state = AudioState {
+            // One accumulator per zone; zone codes fold via their canonical form.
+            let fresh = || AudioState {
                 reachable: Some(true),
                 ..Default::default()
             };
+            let mut main_state = fresh();
+            let mut zone2_state = fresh();
             let mut buf: Vec<u8> = Vec::with_capacity(1024);
             let mut chunk = [0u8; 1024];
             loop {
@@ -479,13 +557,23 @@ impl AudioProvider for OnkyoProvider {
                         continue;
                     }
                     let (code, data) = msg.split_at(3);
-                    if data == "QSTN" {
-                        continue; // another client's query echoed back
+                    if data == "QSTN" || data == "N/A" {
+                        // Someone else's query echo, or "command unsupported"
+                        // (e.g. ZPW on a receiver with no zone 2) — not state.
+                        continue;
                     }
-                    if apply_message(&mut state, code, data)
+                    let Some((device_id, canon)) = canonical(code) else {
+                        continue;
+                    };
+                    let state = if device_id == "zone2" {
+                        &mut zone2_state
+                    } else {
+                        &mut main_state
+                    };
+                    if apply_message(state, canon, data)
                         && tx
                             .send(AudioEvent {
-                                device_id: "main".to_string(),
+                                device_id: device_id.to_string(),
                                 state: state.clone(),
                             })
                             .await
@@ -614,19 +702,32 @@ mod tests {
         assert_eq!(source_name("12"), "tv");
         assert_eq!(source_name("7F"), "7F", "unknown codes pass through");
 
-        assert_eq!(source_commands("tv").unwrap(), vec!["SLI12"]);
-        assert_eq!(source_commands("NET").unwrap(), vec!["SLI2B"]);
-        assert_eq!(source_commands("0x10").unwrap(), vec!["SLI10"]);
-        assert!(source_commands("kazoo").is_err());
+        assert_eq!(source_commands(&MAIN, "tv").unwrap(), vec!["SLI12"]);
+        assert_eq!(source_commands(&MAIN, "NET").unwrap(), vec!["SLI2B"]);
+        assert_eq!(source_commands(&MAIN, "0x10").unwrap(), vec!["SLI10"]);
+        assert!(source_commands(&MAIN, "kazoo").is_err());
+        // Zone 2 uses its own selector family.
+        assert_eq!(source_commands(&ZONE2, "tv").unwrap(), vec!["SLZ12"]);
     }
 
     #[test]
     fn streaming_service_selects_net_input_then_service() {
         assert_eq!(
-            source_commands("spotify").unwrap(),
+            source_commands(&MAIN, "spotify").unwrap(),
             vec!["SLI2B", "NSV0A0"]
         );
-        assert_eq!(source_commands("tunein").unwrap(), vec!["SLI2B", "NSV0E0"]);
+        assert_eq!(
+            source_commands(&MAIN, "tunein").unwrap(),
+            vec!["SLI2B", "NSV0E0"]
+        );
+    }
+
+    #[test]
+    fn canonical_maps_zone2_codes_to_main_equivalents() {
+        assert_eq!(canonical("ZVL"), Some(("zone2", "MVL")));
+        assert_eq!(canonical("ZPW"), Some(("zone2", "PWR")));
+        assert_eq!(canonical("MVL"), Some(("main", "MVL")));
+        assert_eq!(canonical("XYZ"), None);
     }
 
     #[test]
@@ -850,6 +951,7 @@ mod tests {
 
     #[tokio::test]
     async fn discover_returns_single_main_zone_receiver() {
+        // ZPW unscripted → mock answers N/A → no zone 2.
         let (port, _) = spawn_mock_receiver(baseline_scripted()).await;
         let p = OnkyoProvider::new_for_test("127.0.0.1", port);
 
@@ -860,6 +962,78 @@ mod tests {
         assert_eq!(d.kind, AudioDeviceKind::Receiver);
         assert!(d.capabilities.sources && d.capabilities.transport);
         assert!(d.state.power);
+    }
+
+    fn with_zone2(mut scripted: Scripted) -> Scripted {
+        scripted.insert("ZPW", "01".to_string());
+        scripted.insert("ZVL", "14".to_string()); // 0x14 = 20
+        scripted.insert("ZMT", "01".to_string());
+        scripted.insert("SLZ", "23".to_string()); // cd
+        scripted
+    }
+
+    #[tokio::test]
+    async fn discover_includes_zone2_when_receiver_reports_it() {
+        let (port, _) = spawn_mock_receiver(with_zone2(baseline_scripted())).await;
+        let p = OnkyoProvider::new_for_test("127.0.0.1", port);
+
+        let devices = p.discover().await.unwrap();
+        assert_eq!(devices.len(), 2);
+        let z2 = &devices[1];
+        assert_eq!(z2.provider_id, "zone2");
+        assert_eq!(z2.kind, AudioDeviceKind::Zone);
+        assert!(!z2.capabilities.now_playing, "NET metadata is main-zone only");
+        assert!(z2.state.power);
+        assert_eq!(z2.state.volume, 20);
+        assert!(z2.state.mute);
+        assert_eq!(z2.state.source.as_deref(), Some("cd"));
+    }
+
+    #[tokio::test]
+    async fn zone2_set_state_uses_zone_command_family() {
+        let (port, recorded) = spawn_mock_receiver(with_zone2(baseline_scripted())).await;
+        let p = OnkyoProvider::new_for_test("127.0.0.1", port);
+
+        p.set_state(
+            "zone2",
+            &AudioCommand {
+                power: Some(true),
+                volume: Some(25),
+                mute: Some(false),
+                source: Some("bd".into()),
+                transport: Some(TransportCmd::Play),
+            },
+        )
+        .await
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let cmds = recorded.lock().await.clone();
+        assert!(cmds.contains(&"ZPW01".to_string()), "{cmds:?}");
+        assert!(cmds.contains(&"ZVL19".to_string()), "25 = 0x19: {cmds:?}");
+        assert!(cmds.contains(&"ZMT00".to_string()), "{cmds:?}");
+        assert!(cmds.contains(&"SLZ10".to_string()), "{cmds:?}");
+        assert!(cmds.contains(&"NTZPLAY".to_string()), "{cmds:?}");
+    }
+
+    #[tokio::test]
+    async fn event_stream_routes_zone2_codes_to_zone2_device() {
+        let (port, _) = spawn_mock_receiver(with_zone2(baseline_scripted())).await;
+        let p = OnkyoProvider::new_for_test("127.0.0.1", port);
+
+        let mut rx = p.event_stream().await.unwrap();
+        let mut last_zone2 = None;
+        while let Ok(Some(ev)) =
+            tokio::time::timeout(Duration::from_millis(300), rx.recv()).await
+        {
+            if ev.device_id == "zone2" {
+                last_zone2 = Some(ev);
+            }
+        }
+        let ev = last_zone2.expect("zone2 events from the initial QSTN battery");
+        assert!(ev.state.power);
+        assert_eq!(ev.state.volume, 20);
+        assert_eq!(ev.state.source.as_deref(), Some("cd"));
     }
 
     #[tokio::test]
