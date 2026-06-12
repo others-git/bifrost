@@ -4,7 +4,7 @@
 // Floor Plan, or via the per-scene "Apply to" menu here). A room's current
 // colors can also be captured as a new scene from the Lights page.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   applySceneToRoom,
   createPaletteScene,
@@ -16,7 +16,7 @@ import {
 } from "../api";
 import { SceneEditor, SceneSwatch } from "../components/scenes";
 import { useDialogs } from "../components/dialogs";
-import { S } from "../styles";
+import { ACCENT, S } from "../styles";
 
 export function ScenesPage() {
   const [scenes, setScenes] = useState<PaletteScene[]>([]);
@@ -145,39 +145,138 @@ function SceneCard({
         )}
       </div>
       <div style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
-        <select
-          defaultValue=""
-          disabled={rooms.length === 0 || busy}
-          onChange={(e) => {
-            applyTo(e.target.value);
-            e.target.value = "";
-          }}
-          title="Apply this scene to a room"
-          style={{
-            ...S.buttonGhost,
-            flex: 1,
-            padding: "0.35rem 0.5rem",
-            fontSize: "0.8rem",
-            cursor: "pointer",
-          }}
-        >
-          <option value="" disabled>
-            {busy ? "Applying…" : rooms.length === 0 ? "No rooms" : "Apply to room…"}
-          </option>
-          {rooms.map((r) => (
-            <option key={r.id} value={r.id}>
-              {r.name}
-            </option>
-          ))}
-        </select>
+        <RoomPicker rooms={rooms} busy={busy} onPick={applyTo} />
         <button
           onClick={onDelete}
           title="Delete scene"
-          style={{ ...S.buttonGhost, padding: "0 0.55rem", color: "#866" }}
+          style={{ ...S.buttonGhost, padding: "0 0.6rem", color: "#c77", borderColor: "#5a3636" }}
         >
           ×
         </button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * A themed "Apply to room…" dropdown. Replaces the native <select>, whose
+ * OS-rendered option list ignores the dark theme and looked jarring.
+ */
+function RoomPicker({
+  rooms,
+  busy,
+  onPick,
+}: {
+  rooms: Room[];
+  busy: boolean;
+  onPick: (roomId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [hover, setHover] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const disabled = rooms.length === 0 || busy;
+  const label = busy ? "Applying…" : rooms.length === 0 ? "No rooms yet" : "Apply to room…";
+
+  return (
+    <div ref={ref} style={{ position: "relative", flex: 1 }}>
+      <button
+        onClick={() => !disabled && setOpen((o) => !o)}
+        disabled={disabled}
+        title="Apply this scene to a room"
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "0.5rem",
+          width: "100%",
+          padding: "0.4rem 0.6rem",
+          borderRadius: 8,
+          border: `1px solid ${open ? ACCENT : "#3a3a3a"}`,
+          background: "#161616",
+          color: disabled ? "#666" : "#ddd",
+          fontSize: "0.8rem",
+          cursor: disabled ? "default" : "pointer",
+          transition: "border-color 0.15s",
+        }}
+      >
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {label}
+        </span>
+        <span
+          aria-hidden
+          style={{
+            color: "#888",
+            fontSize: "0.7rem",
+            transform: open ? "rotate(180deg)" : "none",
+            transition: "transform 0.15s",
+          }}
+        >
+          ▾
+        </span>
+      </button>
+
+      {open && (
+        <div
+          style={{
+            position: "absolute",
+            top: "calc(100% + 4px)",
+            left: 0,
+            right: 0,
+            zIndex: 30,
+            maxHeight: 220,
+            overflowY: "auto",
+            padding: 4,
+            borderRadius: 10,
+            border: "1px solid #333",
+            background: "#1d1d1d",
+            boxShadow: "0 10px 30px rgba(0,0,0,0.6)",
+          }}
+        >
+          {rooms.map((r) => (
+            <button
+              key={r.id}
+              onClick={() => {
+                onPick(r.id);
+                setOpen(false);
+              }}
+              onMouseEnter={() => setHover(r.id)}
+              onMouseLeave={() => setHover("")}
+              style={{
+                display: "block",
+                width: "100%",
+                textAlign: "left",
+                padding: "0.45rem 0.6rem",
+                borderRadius: 6,
+                border: "none",
+                background: hover === r.id ? "#2c2c2c" : "transparent",
+                color: hover === r.id ? "#fff" : "#cfcfcf",
+                fontSize: "0.82rem",
+                cursor: "pointer",
+                transition: "background 0.12s",
+              }}
+            >
+              {r.name}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

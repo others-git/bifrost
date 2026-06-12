@@ -9,6 +9,31 @@
     <style>
       *, *::before, *::after { box-sizing: border-box; }
       body { margin: 0; font-family: system-ui, sans-serif; background: #0f0f0f; color: #f0f0f0; }
+
+      /* Slow diagonal drift shared by the nav backdrop and the brand wordmark.
+         Oversized background + position pan reads as a living aurora without
+         any layout repaints. */
+      @keyframes bifrost-pan {
+        0%   { background-position: 0% 0%; }
+        50%  { background-position: 100% 100%; }
+        100% { background-position: 0% 0%; }
+      }
+      .bifrost-aurora {
+        background-size: 300% 300%;
+        animation: bifrost-pan 45s ease-in-out infinite;
+      }
+      .bifrost-brand {
+        background-image: linear-gradient(110deg,
+          #7dd3fc 0%, #a5b4fc 25%, #f0abfc 50%, #5eead4 75%, #7dd3fc 100%);
+        background-size: 300% 300%;
+        animation: bifrost-pan 16s ease-in-out infinite;
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .bifrost-aurora, .bifrost-brand { animation: none; }
+      }
     </style>
   </head>
   <body>

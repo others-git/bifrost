@@ -3,7 +3,7 @@
 // stay visually and behaviourally identical.
 
 import { useState } from "react";
-import { S } from "../styles";
+import { ACCENT, S } from "../styles";
 import { LightEditor } from "./LightEditor";
 import { Modal } from "./dialogs";
 import type { PaletteScene } from "../api";
@@ -92,7 +92,7 @@ export function SceneButton({ onClick }: { onClick: () => void }) {
         fontWeight: 600,
         letterSpacing: "0.02em",
         background:
-          "linear-gradient(90deg, rgba(255,153,0,0.22), rgba(255,94,156,0.18) 45%, rgba(34,211,238,0.16))",
+          "linear-gradient(90deg, rgba(56,189,248,0.22), rgba(167,139,250,0.18) 45%, rgba(244,114,182,0.16))",
         boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
       }}
     >
@@ -288,7 +288,7 @@ export function SceneEditor({
           max={100}
           value={brightness}
           onChange={(e) => setBrightness(Number(e.target.value))}
-          style={{ flex: 1, accentColor: "#f90" }}
+          style={{ flex: 1, accentColor: ACCENT }}
         />
         <span style={{ width: 32, textAlign: "right" }}>{brightness}%</span>
       </label>

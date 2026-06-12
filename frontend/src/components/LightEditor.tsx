@@ -366,23 +366,34 @@ export function LightEditor({
               width: 44,
               height: 24,
               borderRadius: 12,
-              border: "none",
+              // Glassy electric pill, matching the page toggles.
+              border: `1px solid ${on ? "rgba(125,211,252,0.55)" : "rgba(255,255,255,0.12)"}`,
               cursor: "pointer",
-              background: on ? "#f90" : "#444",
+              background: on
+                ? "linear-gradient(90deg, rgba(125,211,252,0.45), rgba(34,211,238,0.12) 70%), rgba(10,25,36,0.55)"
+                : "rgba(255,255,255,0.07)",
+              boxShadow: on
+                ? "0 0 14px -4px rgba(56,189,248,0.75), inset 0 1px 0 rgba(255,255,255,0.25)"
+                : "inset 0 1px 0 rgba(255,255,255,0.06)",
               position: "relative",
-              transition: "background 0.2s",
+              transition: "background 0.2s, box-shadow 0.2s, border-color 0.2s",
             }}
           >
             <span
               style={{
                 position: "absolute",
-                top: 3,
-                left: on ? 23 : 3,
+                top: 2,
+                left: on ? 22 : 2,
                 width: 18,
                 height: 18,
                 borderRadius: "50%",
-                background: "#fff",
-                transition: "left 0.2s",
+                background: on
+                  ? "linear-gradient(180deg, #ffffff, #d6f1ff)"
+                  : "rgba(255,255,255,0.4)",
+                boxShadow: on
+                  ? "0 0 8px rgba(125,211,252,0.9), 0 1px 2px rgba(0,0,0,0.45)"
+                  : "0 1px 2px rgba(0,0,0,0.35)",
+                transition: "left 0.2s, background 0.2s, box-shadow 0.2s",
               }}
             />
           </button>

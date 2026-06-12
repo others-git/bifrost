@@ -22,7 +22,7 @@ export function SetupPage({ onComplete }: { onComplete: () => void }) {
   return (
     <div style={S.center}>
       <form onSubmit={submit} style={{ ...S.card, width: 320 }}>
-        <h1 style={{ margin: "0 0 0.25rem", fontSize: "1.6rem", color: "#f90" }}>Bifrost</h1>
+        <h1 className="bifrost-brand" style={{ margin: "0 0 0.25rem", fontSize: "1.6rem", letterSpacing: "0.05em" }}>BIFROST</h1>
         <p style={{ margin: "0 0 0.5rem", color: "#888", fontSize: "0.9rem" }}>
           Create a password to secure your hub.
         </p>

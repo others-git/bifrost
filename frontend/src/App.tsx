@@ -110,13 +110,17 @@ function NavTray({
 
   return (
     <nav
+      className="bifrost-aurora"
       style={{
         width: collapsed ? 56 : 200,
         flexShrink: 0,
         display: "flex",
         flexDirection: "column",
-        borderRight: "1px solid #222",
-        background: "#161616",
+        borderRight: "1px solid #1c2430",
+        // Deep aurora tints (indigo / teal / violet) drifting diagonally —
+        // the .bifrost-aurora class pans this oversized gradient slowly.
+        backgroundImage:
+          "linear-gradient(135deg, #10131a 0%, #0f1a22 22%, #161326 48%, #0e1f28 74%, #10131a 100%)",
         padding: "0.75rem 0.5rem",
         gap: "0.25rem",
         transition: "width 0.15s ease",
@@ -137,11 +141,14 @@ function NavTray({
           whiteSpace: "nowrap",
         }}
       >
-        <span style={{ fontWeight: 800, fontSize: "1.05rem", color: "#f90", letterSpacing: "0.03em" }}>
-          {collapsed ? "B" : "Bifrost"}
+        <span
+          className="bifrost-brand"
+          style={{ fontWeight: 800, fontSize: "1.15rem", letterSpacing: "0.06em" }}
+        >
+          {collapsed ? "B" : "BIFROST"}
         </span>
         {!collapsed && version && (
-          <span style={{ fontSize: "0.7rem", color: "#666" }}>v{version}</span>
+          <span style={{ fontSize: "0.7rem", color: "#5d6878" }}>v{version}</span>
         )}
       </div>
 
@@ -158,15 +165,17 @@ function NavTray({
               gap: "0.65rem",
               padding: collapsed ? "0.55rem 0" : "0.55rem 0.6rem",
               justifyContent: collapsed ? "center" : "flex-start",
-              background: active ? "#222" : "none",
+              background: active ? "rgba(125,211,252,0.09)" : "none",
               border: "none",
               borderRadius: 8,
-              color: active ? "#f90" : "#999",
+              boxShadow: active ? "inset 2px 0 0 0 rgba(125,211,252,0.75)" : "none",
+              color: active ? "#9adcff" : "#8b93a1",
               fontWeight: active ? 700 : 400,
               fontSize: "0.9rem",
               cursor: "pointer",
               whiteSpace: "nowrap",
               overflow: "hidden",
+              transition: "background 0.15s, color 0.15s",
             }}
           >
             <span style={{ fontSize: "1rem", width: 18, textAlign: "center", flexShrink: 0 }}>
@@ -191,7 +200,7 @@ function NavTray({
           background: "none",
           border: "none",
           borderRadius: 8,
-          color: "#666",
+          color: "#6b7585",
           fontSize: "0.9rem",
           cursor: "pointer",
           whiteSpace: "nowrap",
@@ -211,9 +220,9 @@ function NavTray({
           justifyContent: "center",
           padding: "0.45rem 0",
           background: "none",
-          border: "1px solid #2a2a2a",
+          border: "1px solid #232c3a",
           borderRadius: 8,
-          color: "#777",
+          color: "#6b7585",
           fontSize: "0.85rem",
           cursor: "pointer",
         }}

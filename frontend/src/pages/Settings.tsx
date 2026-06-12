@@ -30,7 +30,7 @@ import {
   type ProviderType,
 } from "../api";
 import { useDialogs, type Dialogs } from "../components/dialogs";
-import { S } from "../styles";
+import { ACCENT, S } from "../styles";
 
 interface Props {
   onNavigate: (page: "dashboard") => void;
@@ -560,7 +560,7 @@ function RoomEditForm({
                 type="checkbox"
                 checked={links.has(pg.id)}
                 onChange={() => toggleSet(setLinks, pg.id)}
-                style={{ accentColor: "#f90" }}
+                style={{ accentColor: ACCENT }}
               />
               ⇄ {pg.name}
               <span style={{ color: "#666", fontSize: "0.75rem" }}>
@@ -592,7 +592,7 @@ function RoomEditForm({
                 checked={viaLink || direct.has(l.id)}
                 disabled={viaLink}
                 onChange={() => toggleSet(setDirect, l.id)}
-                style={{ accentColor: "#f90" }}
+                style={{ accentColor: ACCENT }}
               />
               {l.name}
               {viaLink && <span style={{ fontSize: "0.72rem" }}>(via link)</span>}
@@ -757,7 +757,7 @@ function EditCredentialsForm({
           <label key={field.name} style={labelStyle}>
             <span>
               {field.label}
-              {field.required && <span style={{ color: "#f90" }}> *</span>}
+              {field.required && <span style={{ color: ACCENT }}> *</span>}
             </span>
             <div style={{ display: "flex", gap: "0.5rem" }}>
               <input
@@ -903,7 +903,7 @@ function AddProviderForm({
           <label key={field.name} style={labelStyle}>
             <span>
               {field.label}
-              {field.required && <span style={{ color: "#f90" }}> *</span>}
+              {field.required && <span style={{ color: ACCENT }}> *</span>}
             </span>
             {!isHueAppKey && field.hint && (
               <span style={{ color: "#666", fontSize: "0.78rem" }}>{field.hint}</span>

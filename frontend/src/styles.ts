@@ -1,5 +1,10 @@
 import type { CSSProperties } from "react";
 
+/** Electric accent — replaces the old orange (#f90) chrome everywhere. */
+export const ACCENT = "#38bdf8";
+/** Soft glow of the accent, for box-shadows. */
+export const ACCENT_GLOW = "rgba(56,189,248,0.65)";
+
 const center: CSSProperties = {
   display: "flex",
   height: "100vh",
@@ -32,8 +37,8 @@ const button: CSSProperties = {
   padding: "0.6rem 1.2rem",
   borderRadius: 8,
   border: "none",
-  background: "#f90",
-  color: "#000",
+  background: ACCENT,
+  color: "#03121c",
   fontWeight: 700,
   cursor: "pointer",
   fontSize: "0.95rem",

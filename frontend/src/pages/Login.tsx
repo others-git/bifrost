@@ -20,7 +20,7 @@ export function LoginPage({ onSuccess }: { onSuccess: () => void }) {
   return (
     <div style={S.center}>
       <form onSubmit={submit} style={{ ...S.card, width: 300 }}>
-        <h1 style={{ margin: "0 0 0.5rem", fontSize: "1.6rem", color: "#f90" }}>Bifrost</h1>
+        <h1 className="bifrost-brand" style={{ margin: "0 0 0.5rem", fontSize: "1.6rem", letterSpacing: "0.05em" }}>BIFROST</h1>
         <input
           type="password"
           placeholder="Password"

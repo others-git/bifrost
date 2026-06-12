@@ -31,7 +31,7 @@ import {
 import { ColorWheel, hexToHs, hexToRgb, hsvToRgb, LightEditor } from "../components/LightEditor";
 import { SceneButton, SceneModal } from "../components/scenes";
 import { Modal, useDialogs } from "../components/dialogs";
-import { S } from "../styles";
+import { ACCENT, S } from "../styles";
 
 type Tool = "view" | "floor" | "wall" | "erase" | "place" | "room" | "paint";
 
@@ -426,7 +426,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
           <button
             key={p.id}
             onClick={() => setPlanId(p.id)}
-            style={{ ...S.buttonGhost, ...(p.id === planId ? { borderColor: "#f90", color: "#f90" } : {}) }}
+            style={{ ...S.buttonGhost, ...(p.id === planId ? { borderColor: ACCENT, color: ACCENT } : {}) }}
           >
             {p.name}
           </button>
@@ -466,7 +466,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
               <button
                 key={t.id}
                 onClick={() => { setTool(t.id); setPopover(null); setEditor(null); }}
-                style={{ ...S.buttonGhost, ...(tool === t.id ? { borderColor: "#f90", color: "#f90" } : {}) }}
+                style={{ ...S.buttonGhost, ...(tool === t.id ? { borderColor: ACCENT, color: ACCENT } : {}) }}
               >
                 {t.label}
               </button>
@@ -525,7 +525,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                         ...S.buttonGhost,
                         textAlign: "left",
                         fontSize: "0.8rem",
-                        ...(l.id === selectedLight ? { borderColor: "#f90", color: "#f90" } : {}),
+                        ...(l.id === selectedLight ? { borderColor: ACCENT, color: ACCENT } : {}),
                         ...(placedIds.has(l.id) ? { opacity: 0.55 } : {}),
                       }}
                     >
@@ -560,7 +560,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                     max={100}
                     value={paintBrightness}
                     onChange={(e) => setPaintBrightness(Number(e.target.value))}
-                    style={{ flex: 1, accentColor: "#f90" }}
+                    style={{ flex: 1, accentColor: ACCENT }}
                   />
                   <span style={{ width: 36, textAlign: "right" }}>{paintBrightness}%</span>
                 </label>
@@ -644,7 +644,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                       setEditor({ kind: "light", id: p.light_id, anchor: { x: popover.px, y: popover.py } });
                       setPopover(null);
                     }}
-                    style={{ ...S.buttonGhost, fontSize: "0.8rem", textAlign: "left", color: on ? "#f90" : "#888" }}
+                    style={{ ...S.buttonGhost, fontSize: "0.8rem", textAlign: "left", color: on ? ACCENT : "#888" }}
                   >
                     {on ? "● " : "○ "}{light ? lightLabel(light) : p.light_id}
                   </button>
@@ -910,25 +910,37 @@ function Switch({
         width: 40,
         height: 22,
         borderRadius: 11,
-        border: "none",
+        // Glassy electric switch, matching the Lights page toggles.
+        border: `1px solid ${on ? "rgba(125,211,252,0.55)" : "rgba(255,255,255,0.12)"}`,
         cursor: disabled ? "default" : "pointer",
-        background: on ? "linear-gradient(90deg, #ffb340, #f90)" : "#3a372f",
-        boxShadow: on ? "0 0 10px -2px rgba(255,153,0,0.7)" : "none",
+        background: on
+          ? "linear-gradient(90deg, rgba(125,211,252,0.45), rgba(34,211,238,0.12) 70%), rgba(10,25,36,0.55)"
+          : "rgba(255,255,255,0.055)",
+        boxShadow: on
+          ? "0 0 14px -4px rgba(56,189,248,0.75), inset 0 1px 0 rgba(255,255,255,0.25)"
+          : "inset 0 1px 0 rgba(255,255,255,0.06)",
+        backdropFilter: "blur(4px)",
+        WebkitBackdropFilter: "blur(4px)",
         position: "relative",
         opacity: disabled ? 0.5 : 1,
-        transition: "background 0.2s, box-shadow 0.2s",
+        transition: "background 0.2s, box-shadow 0.2s, border-color 0.2s",
       }}
     >
       <span
         style={{
           position: "absolute",
-          top: 2,
+          top: 1,
           left: on ? 20 : 2,
           width: 18,
           height: 18,
           borderRadius: "50%",
-          background: on ? "#fff8ec" : "#bdb6a6",
-          transition: "left 0.2s, background 0.2s",
+          background: on
+            ? "linear-gradient(180deg, #ffffff, #d6f1ff)"
+            : "rgba(255,255,255,0.4)",
+          boxShadow: on
+            ? "0 0 8px rgba(125,211,252,0.9), 0 1px 2px rgba(0,0,0,0.45)"
+            : "0 1px 2px rgba(0,0,0,0.35)",
+          transition: "left 0.2s, background 0.2s, box-shadow 0.2s",
         }}
       />
     </button>
@@ -965,7 +977,7 @@ function RoomEditorPanel({
               textAlign: "left",
               fontSize: "0.8rem",
               borderLeft: `3px solid ${ROOM_COLORS[i % ROOM_COLORS.length]}`,
-              ...(r.id === selectedRoom ? { borderColor: "#f90", color: "#f90" } : {}),
+              ...(r.id === selectedRoom ? { borderColor: ACCENT, color: ACCENT } : {}),
             }}
           >
             {r.name}
@@ -1249,7 +1261,7 @@ function PlanCanvas({
     const hx = ox + gridW * cell;
     const hy = oy + gridH * cell;
     if (pendingSize) {
-      ctx.strokeStyle = "#f90";
+      ctx.strokeStyle = ACCENT;
       ctx.lineWidth = 1.5;
       ctx.setLineDash([5, 4]);
       ctx.strokeRect(ox, oy, gridW * cell, gridH * cell);
@@ -1257,10 +1269,10 @@ function PlanCanvas({
       ctx.font = "600 12px system-ui";
       ctx.textAlign = "right";
       ctx.textBaseline = "bottom";
-      ctx.fillStyle = "#f90";
+      ctx.fillStyle = ACCENT;
       ctx.fillText(`${gridW} × ${gridH}`, hx - 12, hy - 6);
     }
-    ctx.fillStyle = pendingSize ? "#f90" : "#555";
+    ctx.fillStyle = pendingSize ? ACCENT : "#555";
     ctx.strokeStyle = "#0d0d0f";
     ctx.lineWidth = 2;
     ctx.beginPath();

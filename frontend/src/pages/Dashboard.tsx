@@ -29,7 +29,7 @@ const T = {
   text: "#eae4d6",
   dim: "#97907e",
   faint: "#6b6557",
-  amber: "#f90",
+  accent: "#38bdf8",
   panel: "linear-gradient(176deg, #1a1916 0%, #141311 100%)",
   panelBorder: "#2b2822",
   card: "#1d1c18",
@@ -119,7 +119,7 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
             marginTop: "0.7rem",
             height: 1,
             background:
-              "linear-gradient(90deg, rgba(255,153,0,0.55), rgba(255,94,156,0.25) 35%, rgba(34,211,238,0.15) 70%, transparent)",
+              "linear-gradient(90deg, rgba(56,189,248,0.55), rgba(167,139,250,0.3) 35%, rgba(244,114,182,0.18) 70%, transparent)",
           }}
         />
       </header>
@@ -134,7 +134,7 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
               style={{
                 background: "none",
                 border: "none",
-                color: T.amber,
+                color: T.accent,
                 cursor: "pointer",
                 fontSize: "0.875rem",
                 padding: 0,
@@ -306,7 +306,7 @@ function RoomBox({
           .join(", ")})`
       : hexes.length === 1
         ? `linear-gradient(90deg, ${hexes[0]}, ${hexes[0]}33)`
-        : "linear-gradient(90deg, rgba(255,153,0,0.35), transparent 70%)";
+        : "linear-gradient(90deg, rgba(56,189,248,0.35), transparent 70%)";
 
   /** Drive every member from the room widget; members keep their own editors. */
   function cascade(nextHex: string, nextBrightness: number) {
@@ -570,7 +570,7 @@ function LightCard({
           cursor: editable ? "pointer" : "default",
           opacity: offline ? 0.45 : 1,
           transition: "background 0.25s, border-color 0.25s, box-shadow 0.25s",
-          ...(editing ? { outline: `1px solid ${T.amber}` } : {}),
+          ...(editing ? { outline: `1px solid ${T.accent}` } : {}),
         }}
       >
         <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: "0.3rem" }}>
@@ -650,12 +650,20 @@ function VerticalToggle({
         width: 24,
         height: 44,
         borderRadius: 12,
-        border: "1px solid rgba(255,255,255,0.08)",
+        // Glassy track: translucent fill + blur; charged with an ice-blue
+        // current when on. Restrained glow — electric, not neon signage.
+        border: `1px solid ${on ? "rgba(125,211,252,0.55)" : "rgba(255,255,255,0.12)"}`,
         cursor: disabled ? "default" : "pointer",
-        background: on ? "linear-gradient(180deg, #ffb340, #f90)" : "#3a372f",
-        boxShadow: on ? "0 0 12px -2px rgba(255,153,0,0.7)" : "none",
+        background: on
+          ? "linear-gradient(180deg, rgba(125,211,252,0.45), rgba(34,211,238,0.12) 70%), rgba(10,25,36,0.55)"
+          : "rgba(255,255,255,0.055)",
+        boxShadow: on
+          ? "0 0 16px -4px rgba(56,189,248,0.75), inset 0 1px 0 rgba(255,255,255,0.25)"
+          : "inset 0 1px 0 rgba(255,255,255,0.06)",
+        backdropFilter: "blur(4px)",
+        WebkitBackdropFilter: "blur(4px)",
         position: "relative",
-        transition: "background 0.2s, box-shadow 0.2s",
+        transition: "background 0.2s, box-shadow 0.2s, border-color 0.2s",
       }}
     >
       <span
@@ -666,8 +674,13 @@ function VerticalToggle({
           width: 18,
           height: 18,
           borderRadius: "50%",
-          background: on ? "#fff8ec" : "#bdb6a6",
-          transition: "top 0.2s, background 0.2s",
+          background: on
+            ? "linear-gradient(180deg, #ffffff, #d6f1ff)"
+            : "rgba(255,255,255,0.4)",
+          boxShadow: on
+            ? "0 0 8px rgba(125,211,252,0.9), 0 1px 2px rgba(0,0,0,0.45)"
+            : "0 1px 2px rgba(0,0,0,0.35)",
+          transition: "top 0.2s, background 0.2s, box-shadow 0.2s",
         }}
       />
     </button>
