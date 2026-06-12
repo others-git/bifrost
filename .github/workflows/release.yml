@@ -49,6 +49,28 @@ jobs:
       - name: Tests
         run: cargo test
 
+      # ── Static Linux binary ──────────────────────────────────────────────
+      # musl target → a fully static binary that runs on any Linux (incl.
+      # Alpine). The frontend was built above, so rust-embed bakes it in.
+      - name: Add musl target
+        run: rustup target add x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build release binary (static musl)
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+
+      - name: Package binary
+        run: |
+          set -euo pipefail
+          BIN=target/x86_64-unknown-linux-musl/release/bifrost
+          strip "$BIN"
+          mkdir -p dist-bin
+          ASSET="bifrost-${GITHUB_REF_NAME}-x86_64-linux-musl.tar.gz"
+          tar -czf "dist-bin/${ASSET}" -C "$(dirname "$BIN")" bifrost
+          (cd dist-bin && sha256sum "${ASSET}" > "${ASSET}.sha256")
+
       # ── Docker image ─────────────────────────────────────────────────────
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -87,4 +109,5 @@ jobs:
         run: |
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
-            --generate-notes
+            --generate-notes \
+            dist-bin/*
