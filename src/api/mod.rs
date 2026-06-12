@@ -1,4 +1,5 @@
 pub mod apikeys;
+pub mod audio;
 pub mod auth;
 pub mod events;
 pub mod lights;
@@ -19,6 +20,7 @@ use std::sync::Arc;
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .nest("/api-keys", apikeys::router())
+        .nest("/audio", audio::router())
         .nest("/auth", auth::router())
         .nest("/events", events::router())
         .nest("/lights", lights::router())

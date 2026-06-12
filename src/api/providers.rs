@@ -96,7 +96,8 @@ async fn add_provider(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    if !state.registry.is_known(&req.provider_type) {
+    let is_audio = state.registry.is_known_audio(&req.provider_type);
+    if !state.registry.is_known(&req.provider_type) && !is_audio {
         return (
             StatusCode::BAD_REQUEST,
             format!(
@@ -110,7 +111,18 @@ async fn add_provider(
     let creds_json = req.credentials.to_string();
 
     // Smoke-test: try building the provider now so bad credentials fail fast.
-    if let Err(e) = state.registry.build(&req.provider_type, &creds_json) {
+    let build_check = if is_audio {
+        state
+            .registry
+            .build_audio(&req.provider_type, &creds_json)
+            .map(|_| ())
+    } else {
+        state
+            .registry
+            .build(&req.provider_type, &creds_json)
+            .map(|_| ())
+    };
+    if let Err(e) = build_check {
         return (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response();
     }
 
@@ -188,7 +200,15 @@ async fn update_credentials(
     let creds_json = req.credentials.to_string();
 
     // Smoke-test before persisting, like add_provider does.
-    if let Err(e) = state.registry.build(&provider_type, &creds_json) {
+    let build_check = if state.registry.is_known_audio(&provider_type) {
+        state
+            .registry
+            .build_audio(&provider_type, &creds_json)
+            .map(|_| ())
+    } else {
+        state.registry.build(&provider_type, &creds_json).map(|_| ())
+    };
+    if let Err(e) = build_check {
         return (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response();
     }
 
@@ -563,6 +583,21 @@ async fn discover(
 
     let provider_type: String = row.get("provider_type");
     let credentials_enc: String = row.get("credentials");
+
+    // Audio providers populate audio_devices instead of lights.
+    if state.registry.is_known_audio(&provider_type) {
+        return match crate::api::audio::discover_audio_devices(
+            &state,
+            &id,
+            &provider_type,
+            &credentials_enc,
+        )
+        .await
+        {
+            Ok(discovered) => Json(DiscoverResponse { discovered }).into_response(),
+            Err(status) => status.into_response(),
+        };
+    }
 
     let provider = match build_provider(&state, &provider_type, &credentials_enc) {
         Ok(p) => p,

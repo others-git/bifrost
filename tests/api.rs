@@ -2735,3 +2735,301 @@ async fn v1_scene_create_rejects_bad_color() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
+
+// ── Audio devices (Onkyo provider through the full API stack) ─────────────────
+
+mod audio_mock {
+    use bifrost::providers::onkyo::{decode_packet, encode_packet};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::Mutex;
+
+    /// Loopback eISCP receiver: answers `…QSTN` from a scripted state table,
+    /// echoes accepted commands, records everything it hears.
+    pub async fn spawn(scripted: HashMap<&'static str, String>) -> (u16, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let recorded: Arc<Mutex<Vec<String>>> = Arc::default();
+        let rec = Arc::clone(&recorded);
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let scripted = scripted.clone();
+                let rec = Arc::clone(&rec);
+                tokio::spawn(async move {
+                    let mut buf: Vec<u8> = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    loop {
+                        let Ok(n) = sock.read(&mut chunk).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        while let Some((msg, consumed)) = decode_packet(&buf) {
+                            buf.drain(..consumed);
+                            if msg.len() < 3 {
+                                continue;
+                            }
+                            rec.lock().await.push(msg.clone());
+                            let (code, data) = msg.split_at(3);
+                            let reply = if data == "QSTN" {
+                                format!(
+                                    "{code}{}",
+                                    scripted.get(code).cloned().unwrap_or("N/A".into())
+                                )
+                            } else {
+                                msg.clone()
+                            };
+                            let _ = sock.write_all(&encode_packet(&reply)).await;
+                        }
+                    }
+                });
+            }
+        });
+
+        (port, recorded)
+    }
+
+    pub fn receiver_state() -> HashMap<&'static str, String> {
+        HashMap::from([
+            ("PWR", "01".to_string()),
+            ("MVL", "1E".to_string()), // 30
+            ("AMT", "00".to_string()),
+            ("SLI", "12".to_string()), // tv
+        ])
+    }
+}
+
+/// Add an Onkyo provider pointed at the loopback mock and run discovery.
+/// Returns the audio device's Bifrost id.
+async fn setup_onkyo(app: &Router, cookie: &str, port: u16) -> String {
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/providers",
+            cookie,
+            &format!(
+                r#"{{"name":"AV","provider_type":"onkyo","credentials":{{"host":"127.0.0.1","port":{port}}}}}"#
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let provider_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/providers/{provider_id}/discover"),
+            cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(helpers::response_json(resp).await["discovered"], 1);
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/audio/devices", cookie))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let devices = helpers::response_json(resp).await;
+    devices[0]["id"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn audio_routes_require_session() {
+    let app = helpers::test_app_with_password().await;
+    for (method, uri) in [
+        ("GET", "/api/audio/devices"),
+        ("GET", "/api/audio/devices/some-id"),
+        ("PUT", "/api/audio/devices/some-id/state"),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{method} {uri}");
+    }
+}
+
+#[tokio::test]
+async fn provider_types_include_audio_domain() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/providers/types", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let types = helpers::response_json(resp).await;
+    let onkyo = types
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["provider_type"] == "onkyo")
+        .expect("onkyo registered");
+    assert_eq!(onkyo["kind"], "audio");
+    let hue = types
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["provider_type"] == "hue")
+        .unwrap();
+    assert_eq!(hue["kind"], "light");
+}
+
+#[tokio::test]
+async fn onkyo_discover_lists_device_with_live_state() {
+    let (port, _) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let device_id = setup_onkyo(&app, &cookie, port).await;
+
+    let resp = app
+        .oneshot(helpers::authed_get(
+            &format!("/api/audio/devices/{device_id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let device = helpers::response_json(resp).await;
+    assert_eq!(device["kind"], "receiver");
+    assert_eq!(device["state"]["power"], true);
+    assert_eq!(device["state"]["volume"], 30);
+    assert_eq!(device["state"]["source"], "tv");
+}
+
+#[tokio::test]
+async fn audio_set_state_drives_receiver_and_validates() {
+    let (port, recorded) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let device_id = setup_onkyo(&app, &cookie, port).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/audio/devices/{device_id}/state"),
+            &cookie,
+            r#"{"power":true,"volume":45,"source":"spotify"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let cmds = recorded.lock().await.clone();
+    assert!(cmds.contains(&"PWR01".to_string()), "{cmds:?}");
+    assert!(cmds.contains(&"MVL2D".to_string()), "45 = 0x2D: {cmds:?}");
+    assert!(cmds.contains(&"SLI2B".to_string()), "{cmds:?}");
+    assert!(cmds.contains(&"NSV0A0".to_string()), "{cmds:?}");
+
+    // Unknown source → 422 with the offending name.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/audio/devices/{device_id}/state"),
+            &cookie,
+            r#"{"source":"kazoo"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Unknown device → 404.
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/audio/devices/nope/state",
+            &cookie,
+            r#"{"volume":10}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn v1_audio_requires_key_and_mirrors_session_routes() {
+    let (port, recorded) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let device_id = setup_onkyo(&app, &cookie, port).await;
+    let key = create_api_key(&app, &cookie, "audio-app").await;
+
+    // No key → 401.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/audio/devices")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // List + live get with key.
+    let resp = app
+        .clone()
+        .oneshot(bearer_get("/api/v1/audio/devices", &key))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let devices = helpers::response_json(resp).await;
+    assert_eq!(devices.as_array().unwrap().len(), 1);
+
+    let resp = app
+        .clone()
+        .oneshot(bearer_get(&format!("/api/v1/audio/devices/{device_id}"), &key))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(helpers::response_json(resp).await["state"]["volume"], 30);
+
+    // Transport command through v1.
+    let resp = app
+        .oneshot(bearer_json(
+            "PUT",
+            &format!("/api/v1/audio/devices/{device_id}/state"),
+            &key,
+            r#"{"transport":"pause"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        recorded.lock().await.contains(&"NTCPAUSE".to_string()),
+        "{:?}",
+        recorded.lock().await
+    );
+}

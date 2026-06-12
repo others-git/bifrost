@@ -10,6 +10,9 @@
 
 use crate::AppState;
 use crate::api::apikeys::require_api_key;
+use crate::api::audio::{
+    apply_audio_command, get_device_live, list_all_devices, set_audio_status,
+};
 use crate::api::lights::{apply_light_state, get_light_by_id, list_all_lights, set_light_status};
 use crate::api::palette_scenes::{
     NewScene, SceneError, apply_scene_to_room, create_scene as create_palette_scene,
@@ -40,6 +43,9 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/scenes", get(list_scenes).post(create_scene))
         .route("/scenes/from-room/{room_id}", post(create_scene_from))
         .route("/scenes/{id}", axum::routing::delete(remove_scene))
+        .route("/audio/devices", get(list_audio))
+        .route("/audio/devices/{id}", get(get_audio))
+        .route("/audio/devices/{id}/state", put(set_audio))
 }
 
 /// Shared 401 guard. Returns `Err(401)` when the Bearer key is missing/invalid.
@@ -232,4 +238,43 @@ async fn apply_scene(
         }
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+// ── Audio devices ─────────────────────────────────────────────────────────────
+
+async fn list_audio(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(s) = auth(&state, &headers).await {
+        return s.into_response();
+    }
+    match list_all_devices(&state).await {
+        Ok(devices) => Json(devices).into_response(),
+        Err(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn get_audio(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(s) = auth(&state, &headers).await {
+        return s.into_response();
+    }
+    match get_device_live(&state, &id).await {
+        Ok(Some(device)) => Json(device).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn set_audio(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(cmd): Json<crate::models::audio::AudioCommand>,
+) -> impl IntoResponse {
+    if let Err(s) = auth(&state, &headers).await {
+        return s.into_response();
+    }
+    set_audio_status(apply_audio_command(&state, &id, &cmd).await)
 }

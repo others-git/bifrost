@@ -160,6 +160,12 @@ pub fn start_manager_for(
                 Err(e) => tracing::error!("failed to build provider {provider_id}: {e:#}"),
             }
         }
+        None if state.registry.is_known_audio(provider_type) => {
+            // Audio providers are read on demand (LAN round trips are cheap);
+            // no background manager yet. A push subscription (Onkyo unsolicited
+            // eISCP events) is a planned follow-up.
+            tracing::info!("audio provider {provider_id} ({provider_type}) needs no manager");
+        }
         None => tracing::warn!("provider {provider_id} has unknown type '{provider_type}'"),
     }
 }

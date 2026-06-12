@@ -1,10 +1,13 @@
 pub mod govee;
 pub mod govee_lan;
 pub mod hue;
+pub mod onkyo;
 pub mod shelly;
+pub mod sonos;
 pub mod tasmota;
 pub mod wled;
 
+use crate::models::audio::{AudioCommand, AudioDevice, AudioState};
 use crate::models::{Light, LightState};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -48,6 +51,31 @@ pub trait LightProvider: Send + Sync {
     async fn set_group_state(&self, _grouped_ref: &str, _state: &LightState) -> Result<bool> {
         Ok(false)
     }
+}
+
+// ── Audio provider trait ────────────────────────────────────────────────────
+
+/// Runtime interface for audio integrations (receivers, networked speakers).
+/// The shape mirrors `LightProvider`: discovery returns full device snapshots,
+/// reads return full state, writes are sparse commands.
+#[async_trait]
+pub trait AudioProvider: Send + Sync {
+    fn name(&self) -> &str;
+    async fn discover(&self) -> Result<Vec<AudioDevice>>;
+    async fn get_state(&self, device_id: &str) -> Result<AudioState>;
+    async fn set_state(&self, device_id: &str, cmd: &AudioCommand) -> Result<()>;
+}
+
+/// Factory for one audio provider type. Registered in the same
+/// `ProviderRegistry` as light factories — the registry stays the single
+/// place provider types live; light and audio just occupy separate maps.
+pub trait AudioProviderFactory: Send + Sync {
+    /// The stable string key stored in `providers.provider_type` (e.g. `"onkyo"`).
+    fn provider_type(&self) -> &'static str;
+
+    fn build(&self, credentials_json: &str) -> Result<Box<dyn AudioProvider>>;
+
+    fn credentials_schema(&self) -> &'static [CredentialField];
 }
 
 // ── Credential schema (for the setup UI) ───────────────────────────────────
@@ -112,20 +140,46 @@ pub trait ProviderFactory: Send + Sync {
 // ── Registry ────────────────────────────────────────────────────────────────
 
 /// Central registry. Add new providers once here; the rest of the app needs no changes.
+/// Light and audio factories live in separate maps under the same roof — a
+/// provider type string belongs to exactly one of the two domains.
 pub struct ProviderRegistry {
     factories: HashMap<&'static str, Box<dyn ProviderFactory>>,
+    audio_factories: HashMap<&'static str, Box<dyn AudioProviderFactory>>,
 }
 
 impl ProviderRegistry {
     pub fn new() -> Self {
         Self {
             factories: HashMap::new(),
+            audio_factories: HashMap::new(),
         }
     }
 
     pub fn register<F: ProviderFactory + 'static>(&mut self, factory: F) {
         self.factories
             .insert(factory.provider_type(), Box::new(factory));
+    }
+
+    pub fn register_audio<F: AudioProviderFactory + 'static>(&mut self, factory: F) {
+        self.audio_factories
+            .insert(factory.provider_type(), Box::new(factory));
+    }
+
+    /// Build a live audio provider from a type string + decrypted credentials JSON.
+    pub fn build_audio(
+        &self,
+        provider_type: &str,
+        credentials_json: &str,
+    ) -> Result<Box<dyn AudioProvider>> {
+        self.audio_factories
+            .get(provider_type)
+            .ok_or_else(|| anyhow!("unknown audio provider type: {provider_type}"))?
+            .build(credentials_json)
+    }
+
+    /// Returns true if `provider_type` is a registered audio provider.
+    pub fn is_known_audio(&self, provider_type: &str) -> bool {
+        self.audio_factories.contains_key(provider_type)
     }
 
     /// Build a live provider from a type string + decrypted credentials JSON.
@@ -152,19 +206,34 @@ impl ProviderRegistry {
             .map(|f| f.connection_mode())
     }
 
-    /// All registered provider types with their UI schemas, sorted by type name.
+    /// All registered provider types (light and audio) with their UI schemas,
+    /// sorted by type name.
     pub fn all_types(&self) -> Vec<ProviderTypeInfo> {
         let mut types: Vec<_> = self
             .factories
             .values()
             .map(|f| ProviderTypeInfo {
                 provider_type: f.provider_type(),
+                kind: ProviderDomain::Light,
                 schema: f.credentials_schema().to_vec(),
             })
+            .chain(self.audio_factories.values().map(|f| ProviderTypeInfo {
+                provider_type: f.provider_type(),
+                kind: ProviderDomain::Audio,
+                schema: f.credentials_schema().to_vec(),
+            }))
             .collect();
         types.sort_by_key(|t| t.provider_type);
         types
     }
+}
+
+/// Which domain a provider type belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderDomain {
+    Light,
+    Audio,
 }
 
 impl Default for ProviderRegistry {
@@ -176,6 +245,7 @@ impl Default for ProviderRegistry {
 #[derive(Debug, Serialize)]
 pub struct ProviderTypeInfo {
     pub provider_type: &'static str,
+    pub kind: ProviderDomain,
     pub schema: Vec<CredentialField>,
 }
 
@@ -191,6 +261,8 @@ pub fn default_registry() -> ProviderRegistry {
     r.register(shelly::ShellyProviderFactory);
     r.register(tasmota::TasmotaProviderFactory);
     r.register(wled::WledProviderFactory);
+    r.register_audio(onkyo::OnkyoProviderFactory);
+    r.register_audio(sonos::SonosProviderFactory);
     r
 }
 
@@ -325,6 +397,45 @@ pub(crate) mod tests {
     fn connection_mode_for_unknown_type_is_none() {
         let reg = ProviderRegistry::new();
         assert!(reg.connection_mode("nonexistent").is_none());
+    }
+
+    #[test]
+    fn default_registry_contains_onkyo_and_sonos_as_audio() {
+        let reg = default_registry();
+        assert!(reg.is_known_audio("onkyo"));
+        assert!(reg.is_known_audio("sonos"));
+        // Audio types are not light types and vice versa.
+        assert!(!reg.is_known("onkyo"));
+        assert!(!reg.is_known_audio("hue"));
+        // Builds without touching the network.
+        assert!(reg.build_audio("onkyo", r#"{"host":"10.0.0.9"}"#).is_ok());
+        assert!(reg.build_audio("sonos", r#"{"host":"10.0.0.9"}"#).is_ok());
+    }
+
+    #[test]
+    fn build_audio_unknown_type_returns_error() {
+        let reg = ProviderRegistry::new();
+        let err = reg
+            .build_audio("nonexistent", "{}")
+            .err()
+            .expect("expected an error");
+        assert!(err.to_string().contains("nonexistent"));
+    }
+
+    #[test]
+    fn all_types_tags_light_and_audio_domains() {
+        let reg = default_registry();
+        let types = reg.all_types();
+        let kind_of = |t: &str| {
+            types
+                .iter()
+                .find(|i| i.provider_type == t)
+                .map(|i| i.kind)
+                .unwrap()
+        };
+        assert_eq!(kind_of("hue"), ProviderDomain::Light);
+        assert_eq!(kind_of("onkyo"), ProviderDomain::Audio);
+        assert_eq!(kind_of("sonos"), ProviderDomain::Audio);
     }
 
     #[test]
