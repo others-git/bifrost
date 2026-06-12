@@ -359,20 +359,24 @@ test + API sync test.
 
 ---
 
-## Milestone 14 — Rooms aggregate multiple audio devices + volume fan-out
+## Milestone 14 — Rooms aggregate multiple audio devices + volume fan-out ✅ DONE
 
 A Room can contain **any number of audio devices** (e.g. two Sonos in one
-physical office). Room volume/mute **fans out** to all audio members instead of
-a single linked device. Because a given percentage is not the same loudness on
-every speaker, add **per-device, per-room volume offsets** (human-ear
-calibration): room→20% sets device A to 20% and device B to 20%+offset.
+physical office). Room volume/mute **fans out** to all audio members; each
+member carries a **per-room volume offset** (signed %, clamped 0–100) for
+human-ear calibration.
 
-- [ ] Model: room ↔ multiple audio devices — replace the single `room_audio`
-  row with a room↔audio membership table; the synced audio provider-group link
-  feeds it.
-- [ ] Per-device-per-room offset (signed %), clamped to 0–100 after applying.
-- [ ] Room volume/mute command fans out to all audio members with offsets applied.
-- [ ] UI: room volume control + per-device offset calibration in the room editor.
+Shipped: migration 0018 `room_audio_devices` (replaces single `room_audio`;
+existing links migrated, offset 0). `effective_audio_members` mirrors
+`effective_members` for lights — explicit membership ∪ synced audio-group links
+(`room_links`→`provider_group_audio_devices`), so **sync_groups is unchanged**.
+`PUT /rooms/{id}/audio` sets membership + offsets (replace-all);
+`PUT /rooms/{id}/audio/state` fans out volume/mute (offset applied via the
+shared `apply_audio_command`). Room listings carry `audio_devices`
+(session, with offsets) / `audio_device_ids` (v1). Floor-Plan `RoomAudioRow`
+rewritten: a room volume/mute strip + a ♪ panel to choose members and calibrate
+each offset (−50…+50%). Tests: membership set/list/clear, two-device fan-out
+with offsets, empty-room 404.
 
 ## Milestone 15 — Scenes capture full device state (audio-aware)
 

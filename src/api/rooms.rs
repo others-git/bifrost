@@ -9,9 +9,11 @@
 //! single linked group; otherwise it fans out per light in parallel.
 
 use crate::AppState;
+use crate::api::audio::apply_audio_command;
 use crate::api::auth::require_session;
 use crate::api::lights::build_provider;
 use crate::models::LightState;
+use crate::models::audio::AudioCommand;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -30,7 +32,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/", get(list_rooms).post(create_room))
         .route("/{id}", delete(remove_room))
         .route("/{id}/merge", post(merge_rooms))
-        .route("/{id}/audio", put(set_room_audio))
+        .route("/{id}/audio", put(set_room_audio_devices))
+        .route("/{id}/audio/state", put(set_room_audio_state))
         .route("/{id}/enabled", put(set_room_enabled))
         .route("/{id}/lights", put(set_direct_lights))
         .route("/{id}/links", put(set_links))
@@ -62,8 +65,9 @@ struct RoomInfo {
     light_ids: Vec<String>,
     direct_light_ids: Vec<String>,
     links: Vec<LinkInfo>,
-    /// Linked audio device (volume/mute on the room's controls), if any.
-    audio_device_id: Option<String>,
+    /// Audio devices this room controls (volume/mute fans out to all), each
+    /// with its per-room volume offset.
+    audio_devices: Vec<RoomAudioMember>,
     /// Disabled rooms are hidden from the Dashboard/Floor Plan and the public
     /// API, but still listed in Settings so they can be re-enabled.
     enabled: bool,
@@ -141,33 +145,48 @@ pub(crate) async fn effective_member_ids(state: &AppState, room_id: &str) -> Vec
         .collect()
 }
 
-/// The room's effective audio device: an explicit manual link (`room_audio`)
-/// wins; otherwise fall back to a linked audio provider-group's device, so a
-/// synced room gets its speaker automatically. Shared by the session and v1
-/// room listings so they can't drift.
-pub(crate) async fn room_audio_device_id(state: &AppState, room_id: &str) -> Option<String> {
-    if let Some(id) = sqlx::query("SELECT audio_device_id FROM room_audio WHERE room_id = ?")
-        .bind(room_id)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .map(|r| r.get::<String, _>("audio_device_id"))
-    {
-        return Some(id);
-    }
+/// One audio device's membership in a room, with its per-room volume offset.
+#[derive(Serialize)]
+pub(crate) struct RoomAudioMember {
+    pub(crate) audio_device_id: String,
+    /// Signed %, added to the room volume then clamped 0–100 per device.
+    pub(crate) volume_offset: i64,
+}
+
+/// A room's effective audio devices — the audio analog of `effective_members`
+/// (lights): explicit membership (`room_audio_devices`) ∪ devices from linked
+/// audio provider-groups (`room_links` → `provider_group_audio_devices`), with
+/// the per-room `volume_offset` (0 when there's no explicit row). Shared by the
+/// session and v1 room listings so they can't drift.
+pub(crate) async fn effective_audio_members(
+    state: &AppState,
+    room_id: &str,
+) -> Vec<RoomAudioMember> {
     sqlx::query(
-        "SELECT pga.audio_device_id
-         FROM room_links rl
-         JOIN provider_group_audio_devices pga ON pga.provider_group_id = rl.provider_group_id
-         WHERE rl.room_id = ? LIMIT 1",
+        "SELECT d.id AS audio_device_id, COALESCE(rad.volume_offset, 0) AS volume_offset
+         FROM audio_devices d
+         LEFT JOIN room_audio_devices rad
+           ON rad.room_id = ?1 AND rad.audio_device_id = d.id
+         WHERE d.id IN (
+             SELECT audio_device_id FROM room_audio_devices WHERE room_id = ?1
+             UNION
+             SELECT pga.audio_device_id
+             FROM room_links rl
+             JOIN provider_group_audio_devices pga ON pga.provider_group_id = rl.provider_group_id
+             WHERE rl.room_id = ?1
+         )
+         ORDER BY d.name",
     )
     .bind(room_id)
-    .fetch_optional(&state.db)
+    .fetch_all(&state.db)
     .await
-    .ok()
-    .flatten()
-    .map(|r| r.get("audio_device_id"))
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| RoomAudioMember {
+        audio_device_id: r.get("audio_device_id"),
+        volume_offset: r.get("volume_offset"),
+    })
+    .collect()
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────
@@ -224,13 +243,13 @@ async fn list_rooms(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
         })
         .collect();
 
-        let audio_device_id = room_audio_device_id(&state, &id).await;
+        let audio_devices = effective_audio_members(&state, &id).await;
 
         out.push(RoomInfo {
             light_ids: effective_member_ids(&state, &id).await,
             direct_light_ids: direct,
             links,
-            audio_device_id,
+            audio_devices,
             enabled: room.get::<i64, _>("enabled") != 0,
             id,
             name: room.get("name"),
@@ -269,13 +288,24 @@ async fn set_room_enabled(
 
 #[derive(Deserialize)]
 struct SetRoomAudioRequest {
-    /// `null` clears the link.
-    audio_device_id: Option<String>,
+    /// Replaces the room's explicit audio membership. Synced audio-group
+    /// members stay live via room_links; include a device here to set its
+    /// offset (or to add it manually).
+    #[serde(default)]
+    devices: Vec<RoomAudioInput>,
 }
 
-/// Link (or unlink) an audio device to a room so the room's controls carry
-/// volume/mute. One device per room; several rooms may share one device.
-async fn set_room_audio(
+#[derive(Deserialize)]
+struct RoomAudioInput {
+    audio_device_id: String,
+    #[serde(default)]
+    volume_offset: i64,
+}
+
+/// Set the room's explicit audio devices + per-device volume offsets (replace-
+/// all, like `set_links`). Effective membership also includes synced audio-
+/// group devices via room_links.
+async fn set_room_audio_devices(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -288,35 +318,85 @@ async fn set_room_audio(
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    match req.audio_device_id {
-        Some(device_id) => {
-            let known = sqlx::query("SELECT 1 FROM audio_devices WHERE id = ?")
-                .bind(&device_id)
-                .fetch_optional(&state.db)
-                .await
-                .ok()
-                .flatten()
-                .is_some();
-            if !known {
-                return (StatusCode::UNPROCESSABLE_ENTITY, "unknown audio device").into_response();
-            }
-            let _ = sqlx::query(
-                "INSERT INTO room_audio (room_id, audio_device_id) VALUES (?, ?)
-                 ON CONFLICT (room_id) DO UPDATE SET audio_device_id = excluded.audio_device_id",
+    for d in &req.devices {
+        let known = sqlx::query("SELECT 1 FROM audio_devices WHERE id = ?")
+            .bind(&d.audio_device_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        if !known {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("unknown audio device '{}'", d.audio_device_id),
             )
-            .bind(&id)
-            .bind(&device_id)
-            .execute(&state.db)
-            .await;
-        }
-        None => {
-            let _ = sqlx::query("DELETE FROM room_audio WHERE room_id = ?")
-                .bind(&id)
-                .execute(&state.db)
-                .await;
+                .into_response();
         }
     }
+
+    let _ = sqlx::query("DELETE FROM room_audio_devices WHERE room_id = ?")
+        .bind(&id)
+        .execute(&state.db)
+        .await;
+    for d in &req.devices {
+        let _ = sqlx::query(
+            "INSERT OR REPLACE INTO room_audio_devices (room_id, audio_device_id, volume_offset)
+             VALUES (?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&d.audio_device_id)
+        .bind(d.volume_offset)
+        .execute(&state.db)
+        .await;
+    }
     StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct RoomAudioStateRequest {
+    #[serde(default)]
+    volume: Option<u8>,
+    #[serde(default)]
+    mute: Option<bool>,
+}
+
+/// Fan a volume/mute command out to every audio device in the room, applying
+/// each device's per-room offset to the volume (clamped 0–100).
+async fn set_room_audio_state(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<RoomAudioStateRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let members = effective_audio_members(&state, &id).await;
+    if members.is_empty() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let mut applied = 0usize;
+    let mut failed = 0usize;
+    for m in &members {
+        let volume = req
+            .volume
+            .map(|v| (v as i64 + m.volume_offset).clamp(0, 100) as u8);
+        let cmd = AudioCommand {
+            volume,
+            mute: req.mute,
+            ..Default::default()
+        };
+        if cmd.is_empty() {
+            continue;
+        }
+        match apply_audio_command(&state, &m.audio_device_id, &cmd).await {
+            crate::api::audio::SetAudioOutcome::Ok => applied += 1,
+            _ => failed += 1,
+        }
+    }
+    Json(serde_json::json!({ "applied": applied, "failed": failed })).into_response()
 }
 
 async fn list_provider_groups(

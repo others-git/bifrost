@@ -397,18 +397,40 @@ export interface Room {
   light_ids: string[];
   direct_light_ids: string[];
   links: RoomLink[];
-  /** Linked audio device (volume/mute on the room's controls), if any. */
-  audio_device_id?: string | null;
+  /** Audio devices this room controls (volume/mute fans out to all), each with
+   * its per-room volume offset. */
+  audio_devices: RoomAudioMember[];
   /** Disabled rooms are hidden from the Dashboard/Floor Plan; managed in Settings. */
   enabled: boolean;
 }
 
-/** Link (or, with null, unlink) an audio device to a room. */
-export async function setRoomAudio(roomId: string, audioDeviceId: string | null): Promise<void> {
+export interface RoomAudioMember {
+  audio_device_id: string;
+  /** Signed %, added to the room volume then clamped 0–100 for this device. */
+  volume_offset: number;
+}
+
+/** Replace a room's explicit audio devices + per-device volume offsets. */
+export async function setRoomAudioDevices(
+  roomId: string,
+  devices: RoomAudioMember[],
+): Promise<void> {
   await fetch(`/api/rooms/${roomId}/audio`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ audio_device_id: audioDeviceId }),
+    body: JSON.stringify({ devices }),
+  });
+}
+
+/** Fan a volume/mute command out to every audio device in the room (offsets applied). */
+export async function setRoomAudioState(
+  roomId: string,
+  cmd: { volume?: number; mute?: boolean },
+): Promise<void> {
+  await fetch(`/api/rooms/${roomId}/audio/state`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(cmd),
   });
 }
 

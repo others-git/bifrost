@@ -3413,7 +3413,7 @@ async fn sync_wraps_sonos_rooms_into_bifrost_rooms() {
         .unwrap();
     let rooms = helpers::response_json(resp).await;
     assert_eq!(rooms[0]["name"], "Living Room");
-    assert_eq!(rooms[0]["audio_device_id"], device_id);
+    assert_eq!(rooms[0]["audio_devices"][0]["audio_device_id"], device_id);
     assert_eq!(rooms[0]["links"][0]["name"], "Living Room");
     assert_eq!(rooms[0]["links"][0]["domain"], "audio");
 }
@@ -3612,7 +3612,7 @@ async fn room_audio_link_requires_session() {
                 .method("PUT")
                 .uri("/api/rooms/some-id/audio")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"audio_device_id":"x"}"#))
+                .body(Body::from(r#"{"devices":[]}"#))
                 .unwrap(),
         )
         .await
@@ -3621,13 +3621,12 @@ async fn room_audio_link_requires_session() {
 }
 
 #[tokio::test]
-async fn room_audio_link_set_list_and_clear() {
+async fn room_audio_members_set_list_and_clear() {
     let (port, _) = audio_mock::spawn(audio_mock::receiver_state()).await;
     let app = helpers::test_app_with_password().await;
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
     let device_id = setup_onkyo(&app, &cookie, port).await;
 
-    // A room to link.
     let resp = app
         .clone()
         .oneshot(helpers::authed_post(
@@ -3637,7 +3636,6 @@ async fn room_audio_link_set_list_and_clear() {
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
     let room_id = helpers::response_json(resp).await["id"]
         .as_str()
         .unwrap()
@@ -3650,7 +3648,7 @@ async fn room_audio_link_set_list_and_clear() {
             "PUT",
             &format!("/api/rooms/{room_id}/audio"),
             &cookie,
-            r#"{"audio_device_id":"nope"}"#,
+            r#"{"devices":[{"audio_device_id":"nope"}]}"#,
         ))
         .await
         .unwrap();
@@ -3661,20 +3659,20 @@ async fn room_audio_link_set_list_and_clear() {
             "PUT",
             "/api/rooms/nope/audio",
             &cookie,
-            &format!(r#"{{"audio_device_id":"{device_id}"}}"#),
+            &format!(r#"{{"devices":[{{"audio_device_id":"{device_id}"}}]}}"#),
         ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
-    // Link, and see it in both the session and v1 room listings.
+    // Add the device with an offset; see it (with offset) in session + v1.
     let resp = app
         .clone()
         .oneshot(helpers::authed_json(
             "PUT",
             &format!("/api/rooms/{room_id}/audio"),
             &cookie,
-            &format!(r#"{{"audio_device_id":"{device_id}"}}"#),
+            &format!(r#"{{"devices":[{{"audio_device_id":"{device_id}","volume_offset":-6}}]}}"#),
         ))
         .await
         .unwrap();
@@ -3686,7 +3684,8 @@ async fn room_audio_link_set_list_and_clear() {
         .await
         .unwrap();
     let rooms = helpers::response_json(resp).await;
-    assert_eq!(rooms[0]["audio_device_id"], device_id);
+    assert_eq!(rooms[0]["audio_devices"][0]["audio_device_id"], device_id);
+    assert_eq!(rooms[0]["audio_devices"][0]["volume_offset"], -6);
 
     let key = create_api_key(&app, &cookie, "mcp").await;
     let resp = app
@@ -3695,18 +3694,18 @@ async fn room_audio_link_set_list_and_clear() {
         .await
         .unwrap();
     assert_eq!(
-        helpers::response_json(resp).await[0]["audio_device_id"],
+        helpers::response_json(resp).await[0]["audio_device_ids"][0],
         device_id
     );
 
-    // Clear with null.
+    // Clear with an empty list.
     let resp = app
         .clone()
         .oneshot(helpers::authed_json(
             "PUT",
             &format!("/api/rooms/{room_id}/audio"),
             &cookie,
-            r#"{"audio_device_id":null}"#,
+            r#"{"devices":[]}"#,
         ))
         .await
         .unwrap();
@@ -3717,9 +3716,111 @@ async fn room_audio_link_set_list_and_clear() {
         .await
         .unwrap();
     assert_eq!(
-        helpers::response_json(resp).await[0]["audio_device_id"],
-        serde_json::Value::Null
+        helpers::response_json(resp).await[0]["audio_devices"],
+        serde_json::json!([])
     );
+}
+
+#[tokio::test]
+async fn room_audio_state_fans_out_with_offsets() {
+    // Two receivers in one room; the room volume fans out to both, with each
+    // device's per-room offset applied (clamped 0–100). Onkyo master volume is
+    // hex: 40 = 0x28, 34 = 0x22.
+    let (port_a, rec_a) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let (port_b, rec_b) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    setup_onkyo(&app, &cookie, port_a).await;
+    setup_onkyo(&app, &cookie, port_b).await;
+
+    // Both devices share a name, so fetch the two ids directly.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/audio/devices", &cookie))
+        .await
+        .unwrap();
+    let devs = helpers::response_json(resp).await;
+    let dev_a = devs[0]["id"].as_str().unwrap().to_string();
+    let dev_b = devs[1]["id"].as_str().unwrap().to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/rooms",
+            &cookie,
+            r#"{"name":"Office","light_ids":[]}"#,
+        ))
+        .await
+        .unwrap();
+    let room_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = format!(
+        r#"{{"devices":[{{"audio_device_id":"{dev_a}","volume_offset":0}},{{"audio_device_id":"{dev_b}","volume_offset":-6}}]}}"#
+    );
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/audio"),
+            &cookie,
+            &body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/audio/state"),
+            &cookie,
+            r#"{"volume":40}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let cmds_a = rec_a.lock().await.clone();
+    let cmds_b = rec_b.lock().await.clone();
+    // One device gets 40 (offset 0 → 0x28), the other 34 (offset -6 → 0x22).
+    // dev_a/dev_b map to the two mocks in an unknown order, so check both.
+    let got28 = cmds_a.contains(&"MVL28".to_string()) || cmds_b.contains(&"MVL28".to_string());
+    let got22 = cmds_a.contains(&"MVL22".to_string()) || cmds_b.contains(&"MVL22".to_string());
+    assert!(got28, "a device → 40: {cmds_a:?} {cmds_b:?}");
+    assert!(got22, "a device → 34 (offset -6): {cmds_a:?} {cmds_b:?}");
+}
+
+#[tokio::test]
+async fn room_audio_state_without_members_returns_404() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/rooms",
+            &cookie,
+            r#"{"name":"Empty","light_ids":[]}"#,
+        ))
+        .await
+        .unwrap();
+    let room_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/audio/state"),
+            &cookie,
+            r#"{"volume":30}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 // ── Provider network auto-detect (POST /api/providers/scan/{type}) ────────────

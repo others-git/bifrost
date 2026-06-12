@@ -5,19 +5,21 @@ import { LoginPage } from "./pages/Login";
 import { DashboardPage } from "./pages/Dashboard";
 import { AudioPage } from "./pages/Audio";
 import { ScenesPage } from "./pages/Scenes";
+import { RoomsPage } from "./pages/Rooms";
 import { FloorPlanPage } from "./pages/FloorPlan";
 import { SettingsPage } from "./pages/Settings";
 import { S } from "./styles";
 import { useViewport } from "./useViewport";
 
 /** Pages reachable from the nav tray. */
-type NavPage = "dashboard" | "audio" | "scenes" | "plan" | "settings";
+type NavPage = "dashboard" | "audio" | "scenes" | "rooms" | "plan" | "settings";
 type Page = "loading" | "setup" | "login" | NavPage;
 
 const NAV_ITEMS: { id: NavPage; glyph: string; label: string }[] = [
   { id: "dashboard", glyph: "◉", label: "Lights" },
   { id: "audio", glyph: "♪", label: "Audio" },
   { id: "scenes", glyph: "✦", label: "Scenes" },
+  { id: "rooms", glyph: "⌂", label: "Rooms" },
   { id: "plan", glyph: "▦", label: "Floor Plan" },
   { id: "settings", glyph: "⚙", label: "Settings" },
 ];
@@ -96,6 +98,7 @@ export function App() {
         )}
         {page === "audio" && <AudioPage />}
         {page === "scenes" && <ScenesPage />}
+        {page === "rooms" && <RoomsPage />}
         {page === "plan" &&
           (isMobile ? (
             <div style={{ padding: "3rem 1.2rem", textAlign: "center", color: "#888" }}>

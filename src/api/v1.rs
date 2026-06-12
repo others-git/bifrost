@@ -22,7 +22,7 @@ use crate::api::palette_scenes::{
     list_scenes as list_palette_scenes,
 };
 use crate::api::rooms::{
-    apply_uniform_state, effective_member_ids, effective_members, room_audio_device_id,
+    apply_uniform_state, effective_audio_members, effective_member_ids, effective_members,
 };
 use crate::models::LightState;
 use axum::{
@@ -112,8 +112,8 @@ struct V1Room {
     name: String,
     /// Effective members (linked provider-group lights ∪ direct lights).
     light_ids: Vec<String>,
-    /// Linked audio device, if any — control it via /audio/devices/{id}/state.
-    audio_device_id: Option<String>,
+    /// Audio devices the room controls — drive each via /audio/devices/{id}/state.
+    audio_device_ids: Vec<String>,
 }
 
 async fn list_rooms(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
@@ -131,11 +131,15 @@ async fn list_rooms(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
     for row in rows {
         let id: String = row.get("id");
         let light_ids = effective_member_ids(&state, &id).await;
-        let audio_device_id = room_audio_device_id(&state, &id).await;
+        let audio_device_ids = effective_audio_members(&state, &id)
+            .await
+            .into_iter()
+            .map(|m| m.audio_device_id)
+            .collect();
         out.push(V1Room {
             name: row.get("name"),
             light_ids,
-            audio_device_id,
+            audio_device_ids,
             id,
         });
     }

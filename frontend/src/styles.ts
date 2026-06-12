@@ -64,4 +64,17 @@ const buttonDanger: CSSProperties = {
   fontSize: "0.875rem",
 };
 
-export const S = { center, card, input, button, buttonGhost, buttonDanger };
+/** Outlined accent button — the primary "Save" action inside config editors.
+ * Defaults to the light accent; pass a color override for audio (violet). */
+const buttonAccent: CSSProperties = {
+  padding: "0.45rem 0.9rem",
+  borderRadius: 8,
+  border: `1px solid ${ACCENT}`,
+  background: "transparent",
+  color: ACCENT,
+  cursor: "pointer",
+  fontSize: "0.85rem",
+  fontWeight: 600,
+};
+
+export const S = { center, card, input, button, buttonGhost, buttonDanger, buttonAccent };
