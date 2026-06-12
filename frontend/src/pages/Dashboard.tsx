@@ -21,6 +21,7 @@ import {
 import { hexToRgb, LightEditor } from "../components/LightEditor";
 import { SceneButton, SceneModal } from "../components/scenes";
 import { useDialogs, type Dialogs } from "../components/dialogs";
+import { useViewport } from "../useViewport";
 
 // ── Lamplight theme ──────────────────────────────────────────────────────────
 // Warm-tinted darks (charcoal with a candle cast) instead of neutral grays;
@@ -51,6 +52,7 @@ interface Props {
 }
 
 export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
+  const { isMobile } = useViewport();
   // Local copy so SSE events can update individual lights without a full server round-trip.
   const [localLights, setLocalLights] = useState<Light[]>(lights);
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -67,6 +69,9 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
   useEffect(() => { getProviders().then(setProviders); }, []);
   useEffect(() => { loadScenes(); }, []);
   // Re-fetch rooms alongside light refreshes so membership stays current.
+  // Keep all rooms (incl. disabled) so their members still count as "assigned";
+  // RoomSections renders only the enabled ones, so a disabled room's lights are
+  // hidden rather than leaking into the "no room" bucket.
   useEffect(() => { getRooms().then(setRooms); }, [lights]);
 
   // Real-time light state from Hue SSE → our SSE → browser.
@@ -100,7 +105,7 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
   const onCount = localLights.filter((l) => l.last_state?.on).length;
 
   return (
-    <div style={{ padding: "2rem", maxWidth: 1020, margin: "0 auto", color: T.text }}>
+    <div style={{ padding: isMobile ? "1rem 0.85rem" : "2rem", maxWidth: 1020, margin: "0 auto", color: T.text }}>
       <header style={{ marginBottom: "1.4rem" }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: "0.9rem" }}>
           <h1 style={{ ...label, margin: 0, fontSize: "1rem", letterSpacing: "0.22em", color: T.text }}>
@@ -185,6 +190,7 @@ function RoomSections({
   onLocalUpdate: (id: string, state: LightState) => void;
   onChanged: () => void;
 }) {
+  const { isMobile } = useViewport();
   const lightById = new Map(lights.map((l) => [l.id, l]));
   const assigned = new Set<string>();
 
@@ -193,10 +199,12 @@ function RoomSections({
       const members = room.light_ids
         .map((id) => lightById.get(id))
         .filter((l): l is Light => l !== undefined);
+      // Mark members of every room (even disabled) as assigned, so a disabled
+      // room's lights don't fall through into the "no room" buckets below.
       for (const l of members) assigned.add(l.id);
       return { room, members };
     })
-    .filter((s) => s.members.length > 0)
+    .filter((s) => s.members.length > 0 && s.room.enabled)
     .sort((a, b) => a.room.name.localeCompare(b.room.name));
 
   const providerName = new Map(providers.map((p) => [p.id, p.name]));
@@ -210,7 +218,7 @@ function RoomSections({
   );
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "1.1rem" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: isMobile ? "0.7rem" : "1.1rem" }}>
       {roomSections.map(({ room, members }) => (
         <RoomBox
           key={room.id}
@@ -279,6 +287,7 @@ function RoomBox({
   onLocalUpdate: (id: string, state: LightState) => void;
   onChanged: () => void;
 }) {
+  const { isMobile } = useViewport();
   const tuneRef = useRef<HTMLDivElement>(null);
   const [editing, setEditing] = useState(false);
   const [scenesOpen, setScenesOpen] = useState(false);
@@ -290,6 +299,25 @@ function RoomBox({
   const showColor = lights.some((l) => l.capabilities.color_rgb);
   const showBrightness = lights.some((l) => l.capabilities.dimmable);
   const tunable = !!roomId && (showColor || showBrightness);
+
+  // A room with exactly one light is redundant — the header's room toggle
+  // already controls that light. Collapse to just the header (no inner card),
+  // surfacing the light's name + level in the subtitle.
+  const collapsed = !!roomId && lights.length === 1;
+  const subtitle = collapsed
+    ? (() => {
+        const one = lights[0];
+        const st = one.last_state;
+        const tail = st?.on
+          ? one.capabilities.dimmable
+            ? ` · ${Math.round(st.brightness ?? 100)}%`
+            : " · on"
+          : " · off";
+        return `${one.name}${tail}`;
+      })()
+    : `${lights.length} light${lights.length !== 1 ? "s" : ""}${
+        roomId ? (anyOn ? ` · ${lit.length} on` : " · off") : ""
+      }`;
 
   const hexes = litHexes(lights);
   const roomHex = hexes[0] ?? "#ffb84d";
@@ -393,14 +421,14 @@ function RoomBox({
       {/* The whole header is the room's color/brightness trigger. */}
       <header
         ref={tuneRef}
-        onClick={() => { if (tunable) setEditing(true); }}
+        onClick={() => { if (tunable) setEditing((v) => !v); }}
         title={tunable ? "Set the whole room's color and brightness" : undefined}
         style={{
           display: "flex",
           alignItems: "center",
-          gap: "0.7rem",
-          padding: "0.75rem 1rem 0.7rem",
-          borderBottom: `1px solid ${T.hairline}`,
+          gap: isMobile ? "0.5rem" : "0.7rem",
+          padding: isMobile ? "0.5rem 0.7rem 0.45rem" : "0.75rem 1rem 0.7rem",
+          borderBottom: collapsed ? "none" : `1px solid ${T.hairline}`,
           cursor: tunable ? "pointer" : "default",
         }}
       >
@@ -435,9 +463,8 @@ function RoomBox({
         >
           {name}
         </span>
-        <span style={{ fontSize: "0.72rem", color: T.faint, whiteSpace: "nowrap" }}>
-          {lights.length} light{lights.length !== 1 ? "s" : ""}
-          {roomId ? (anyOn ? ` · ${lit.length} on` : " · off") : ""}
+        <span style={{ fontSize: "0.72rem", color: T.faint, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {subtitle}
         </span>
 
         <span style={{ flex: 1 }} />
@@ -445,23 +472,27 @@ function RoomBox({
         {roomId && <VerticalToggle on={anyOn} onToggle={toggleAll} disabled={busy} />}
       </header>
 
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(215px, 1fr))",
-          gap: "0.7rem",
-          padding: "0.85rem 1rem 1rem",
-        }}
-      >
-        {lights.map((light) => (
-          <LightCard
-            key={light.id}
-            light={light}
-            onLocalUpdate={onLocalUpdate}
-            onChanged={onChanged}
-          />
-        ))}
-      </div>
+      {!collapsed && (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: isMobile
+              ? "repeat(2, minmax(0, 1fr))"
+              : "repeat(auto-fill, minmax(215px, 1fr))",
+            gap: isMobile ? "0.4rem" : "0.7rem",
+            padding: isMobile ? "0.55rem 0.6rem 0.65rem" : "0.85rem 1rem 1rem",
+          }}
+        >
+          {lights.map((light) => (
+            <LightCard
+              key={light.id}
+              light={light}
+              onLocalUpdate={onLocalUpdate}
+              onChanged={onChanged}
+            />
+          ))}
+        </div>
+      )}
 
       {editing && tuneRef.current && (
         <LightEditor
@@ -512,6 +543,7 @@ function LightCard({
   onLocalUpdate: (id: string, state: LightState) => void;
   onChanged: () => void;
 }) {
+  const { isMobile } = useViewport();
   const cardRef = useRef<HTMLDivElement>(null);
   const [editing, setEditing] = useState(false);
   const commitTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -548,16 +580,16 @@ function LightCard({
     <>
       <div
         ref={cardRef}
-        onClick={() => { if (editable) setEditing(true); }}
+        onClick={() => { if (editable) setEditing((v) => !v); }}
         title={editable ? "Open the light editor" : undefined}
         style={{
           display: "flex",
           flexDirection: "row",
           alignItems: "center",
           justifyContent: "space-between",
-          gap: "0.75rem",
-          padding: "0.8rem 0.95rem",
-          borderRadius: 12,
+          gap: isMobile ? "0.35rem" : "0.75rem",
+          padding: isMobile ? "0.45rem 0.55rem" : "0.8rem 0.95rem",
+          borderRadius: isMobile ? 10 : 12,
           // Lit cards carry a wash of their own color in the corner and a soft
           // glow; off cards sink into the room box.
           background: isOn
@@ -573,11 +605,11 @@ function LightCard({
           ...(editing ? { outline: `1px solid ${T.accent}` } : {}),
         }}
       >
-        <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+        <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: isMobile ? "0.1rem" : "0.3rem" }}>
           <span
             style={{
               fontWeight: 600,
-              fontSize: "0.92rem",
+              fontSize: isMobile ? "0.8rem" : "0.92rem",
               color: isOn ? T.text : T.dim,
               overflow: "hidden",
               textOverflow: "ellipsis",
@@ -591,7 +623,7 @@ function LightCard({
             {isOn && light.capabilities.color_rgb && (
               <span style={{ width: 9, height: 9, borderRadius: "50%", background: hex, boxShadow: `0 0 6px ${hex}`, display: "inline-block" }} />
             )}
-            {isOn ? (light.capabilities.dimmable ? `${+brightness.toFixed(2)}%` : "on") : "off"}
+            {isOn ? (light.capabilities.dimmable ? `${Math.round(brightness)}%` : "on") : "off"}
           </span>
         </div>
         {offline ? (

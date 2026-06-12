@@ -10,7 +10,7 @@ pub mod wled;
 
 use discovery::DeviceDiscovery;
 
-use crate::models::audio::{AudioCommand, AudioDevice, AudioEvent, AudioState};
+use crate::models::audio::{AudioCommand, AudioDevice, AudioEvent, AudioFavorite, AudioState};
 use crate::models::{Light, LightState};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -75,6 +75,28 @@ pub trait AudioProvider: Send + Sync {
     /// factory advertises `AudioConnectionMode::Push`.
     async fn event_stream(&self) -> Result<tokio::sync::mpsc::Receiver<AudioEvent>> {
         Err(anyhow!("{} does not support push events", self.name()))
+    }
+
+    /// List the provider's saved favorites/presets that can be started on this
+    /// device (e.g. Sonos Favorites). Default: none — providers without a
+    /// favorites concept (or where the protocol can't enumerate them, like
+    /// Onkyo eISCP) simply report an empty list.
+    async fn list_favorites(&self, _device_id: &str) -> Result<Vec<AudioFavorite>> {
+        Ok(Vec::new())
+    }
+
+    /// Start playing a favorite (by its provider-native id from
+    /// `list_favorites`) on this device. Default: unsupported.
+    async fn play_favorite(&self, _device_id: &str, _favorite_id: &str) -> Result<()> {
+        Err(anyhow!("{} does not support favorites", self.name()))
+    }
+
+    /// The provider's own rooms/zones (e.g. each Sonos player's room), mirrored
+    /// locally and wrapped by Bifrost Rooms — the audio analog of
+    /// `LightProvider::discover_groups`. `ProviderGroup::member_device_ids` hold
+    /// audio device ids (matching `AudioDevice::provider_id`). Default: none.
+    async fn discover_groups(&self) -> Result<Vec<ProviderGroup>> {
+        Ok(vec![])
     }
 }
 
@@ -273,6 +295,18 @@ impl ProviderRegistry {
     /// Returns true if `provider_type` is registered.
     pub fn is_known(&self, provider_type: &str) -> bool {
         self.factories.contains_key(provider_type)
+    }
+
+    /// The credential schema for a single provider type (light or audio), if
+    /// registered. Lets the API tell which fields are secret when prefilling
+    /// the edit form.
+    pub fn schema(&self, provider_type: &str) -> Option<&'static [CredentialField]> {
+        if let Some(f) = self.factories.get(provider_type) {
+            return Some(f.credentials_schema());
+        }
+        self.audio_factories
+            .get(provider_type)
+            .map(|f| f.credentials_schema())
     }
 
     /// How the runtime should keep this provider type's state fresh.

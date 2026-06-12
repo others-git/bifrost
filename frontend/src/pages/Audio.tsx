@@ -2,14 +2,10 @@
 // Separate from Lights — these are their own device class. Live state arrives
 // via the audio_state SSE stream (Onkyo push) with a slow poll as a fallback.
 
-import { useEffect, useRef, useState } from "react";
-import {
-  getAudioDevices,
-  getAudioDevice,
-  setAudioState,
-  type AudioCommand,
-  type AudioDevice,
-} from "../api";
+import { useEffect, useState } from "react";
+import { getAudioDevices, getAudioDevice, setAudioState, type AudioDevice } from "../api";
+import { AudioControls, KIND_LABEL, PowerButton } from "../components/AudioControls";
+import { useViewport } from "../useViewport";
 
 const ACCENT = "#a78bfa"; // violet — audio's counterpart to the lamps' warm glow
 
@@ -24,15 +20,10 @@ const T = {
   cardBorder: "#2c2922",
 };
 
-const KIND_LABEL: Record<string, string> = {
-  receiver: "Receiver",
-  speaker: "Speaker",
-  zone: "Zone",
-};
-
 export function AudioPage() {
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [loading, setLoading] = useState(true);
+  const { isMobile } = useViewport();
 
   useEffect(() => {
     let cancelled = false;
@@ -88,7 +79,7 @@ export function AudioPage() {
   }
 
   return (
-    <div style={{ padding: "2rem", maxWidth: 1020, margin: "0 auto", color: T.text }}>
+    <div style={{ padding: isMobile ? "1rem 0.85rem" : "2rem", maxWidth: 1020, margin: "0 auto", color: T.text }}>
       <header style={{ marginBottom: "1.4rem" }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: "0.9rem" }}>
           <h1
@@ -133,12 +124,14 @@ export function AudioPage() {
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
-            gap: "1rem",
+            gridTemplateColumns: isMobile
+              ? "repeat(2, minmax(0, 1fr))"
+              : "repeat(auto-fill, minmax(320px, 1fr))",
+            gap: isMobile ? "0.6rem" : "1rem",
           }}
         >
           {devices.map((d) => (
-            <AudioDeviceCard key={d.id} device={d} onLocalPatch={patchLocal} />
+            <AudioDeviceCard key={d.id} device={d} onLocalPatch={patchLocal} compact={isMobile} />
           ))}
         </div>
       )}
@@ -149,48 +142,21 @@ export function AudioPage() {
 function AudioDeviceCard({
   device,
   onLocalPatch,
+  compact = false,
 }: {
   device: AudioDevice;
   onLocalPatch: (id: string, patch: Partial<AudioDevice["state"]>) => void;
+  compact?: boolean;
 }) {
-  const volumeTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const s = device.state;
   const offline = s.reachable === false;
-  const np = s.now_playing;
+  const playing = s.now_playing?.play_state === "playing";
   const cap = device.capabilities;
 
-  async function send(cmd: AudioCommand) {
-    const err = await setAudioState(device.id, cmd);
-    if (err) console.warn("audio command failed:", err);
-  }
-
-  function setVolume(v: number) {
-    onLocalPatch(device.id, { volume: v });
-    clearTimeout(volumeTimer.current);
-    volumeTimer.current = setTimeout(() => send({ volume: v }), 250);
-  }
-  function toggleMute() {
-    onLocalPatch(device.id, { mute: !s.mute });
-    send({ mute: !s.mute });
-  }
   function togglePower() {
     onLocalPatch(device.id, { power: !s.power });
-    send({ power: !s.power });
+    setAudioState(device.id, { power: !s.power });
   }
-
-  const playing = np?.play_state === "playing";
-  const trackTitle = np?.title;
-  const trackSub = [np?.artist, np?.album].filter(Boolean).join(" · ");
-  // What "now playing" reads as when there's no track metadata.
-  const idleLine = offline
-    ? "Offline"
-    : !s.power && cap.sources
-      ? "Standby"
-      : np?.play_state === "stopped"
-        ? "Stopped"
-        : s.source
-          ? `Source · ${s.source}`
-          : "Idle";
 
   return (
     <section
@@ -209,7 +175,7 @@ function AudioDeviceCard({
           display: "flex",
           alignItems: "center",
           gap: "0.6rem",
-          padding: "0.85rem 1rem 0.6rem",
+          padding: compact ? "0.6rem 0.7rem 0.5rem" : "0.85rem 1rem 0.6rem",
           borderBottom: `1px solid ${T.cardBorder}`,
         }}
       >
@@ -217,7 +183,7 @@ function AudioDeviceCard({
           <div
             style={{
               fontWeight: 600,
-              fontSize: "0.98rem",
+              fontSize: compact ? "0.86rem" : "0.98rem",
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
@@ -246,159 +212,9 @@ function AudioDeviceCard({
         )}
       </header>
 
-      <div style={{ padding: "0.9rem 1rem 1rem", display: "flex", flexDirection: "column", gap: "0.85rem" }}>
-        {/* Now playing */}
-        <div style={{ minHeight: "2.4rem" }}>
-          {trackTitle ? (
-            <>
-              <div
-                style={{
-                  fontSize: "0.92rem",
-                  color: T.text,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {trackTitle}
-              </div>
-              {trackSub && (
-                <div
-                  style={{
-                    fontSize: "0.78rem",
-                    color: T.dim,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {trackSub}
-                </div>
-              )}
-            </>
-          ) : (
-            <div style={{ fontSize: "0.85rem", color: T.dim }}>{idleLine}</div>
-          )}
-        </div>
-
-        {/* Transport */}
-        {cap.transport && !offline && (
-          <div style={{ display: "flex", justifyContent: "center", gap: "0.6rem", alignItems: "center" }}>
-            <TransportButton glyph="⏮" title="Previous" onClick={() => send({ transport: "previous" })} />
-            <TransportButton
-              glyph={playing ? "⏸" : "▶"}
-              title="Play / pause"
-              big
-              onClick={() => send({ transport: "toggle" })}
-            />
-            <TransportButton glyph="⏭" title="Next" onClick={() => send({ transport: "next" })} />
-          </div>
-        )}
-
-        {/* Volume */}
-        {!offline && (
-          <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
-            <button
-              onClick={toggleMute}
-              title={s.mute ? "Unmute" : "Mute"}
-              style={{
-                background: "none",
-                border: "none",
-                cursor: "pointer",
-                fontSize: "1rem",
-                padding: 0,
-                opacity: s.mute ? 1 : 0.6,
-              }}
-            >
-              {s.mute ? "🔇" : "🔊"}
-            </button>
-            <input
-              type="range"
-              min={0}
-              max={100}
-              value={s.volume}
-              onChange={(e) => setVolume(Number(e.target.value))}
-              style={{ flex: 1, accentColor: ACCENT }}
-            />
-            <span style={{ fontSize: "0.78rem", color: T.dim, width: 30, textAlign: "right" }}>
-              {s.volume}
-            </span>
-          </div>
-        )}
+      <div style={{ padding: compact ? "0.6rem 0.7rem 0.7rem" : "0.9rem 1rem 1rem" }}>
+        <AudioControls device={device} onLocalPatch={onLocalPatch} compact={compact} />
       </div>
     </section>
-  );
-}
-
-function TransportButton({
-  glyph,
-  title,
-  onClick,
-  big,
-}: {
-  glyph: string;
-  title: string;
-  onClick: () => void;
-  big?: boolean;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      title={title}
-      style={{
-        width: big ? 48 : 40,
-        height: big ? 48 : 40,
-        borderRadius: "50%",
-        border: `1px solid ${big ? ACCENT : T.cardBorder}`,
-        background: big ? `${ACCENT}22` : "rgba(255,255,255,0.04)",
-        color: big ? "#fff" : T.dim,
-        cursor: "pointer",
-        fontSize: big ? "1.2rem" : "0.95rem",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-      }}
-    >
-      {glyph}
-    </button>
-  );
-}
-
-/** Power for receivers/zones: a glassy electric pill, matching the light toggles. */
-function PowerButton({ on, onToggle }: { on: boolean; onToggle: () => void }) {
-  return (
-    <button
-      onClick={onToggle}
-      aria-label={on ? "Turn off" : "Turn on"}
-      title={on ? "Power off" : "Power on"}
-      style={{
-        flexShrink: 0,
-        width: 44,
-        height: 24,
-        borderRadius: 12,
-        border: `1px solid ${on ? "rgba(167,139,250,0.6)" : "rgba(255,255,255,0.12)"}`,
-        cursor: "pointer",
-        background: on
-          ? "linear-gradient(90deg, rgba(167,139,250,0.5), rgba(56,189,248,0.12) 70%), rgba(20,16,30,0.55)"
-          : "rgba(255,255,255,0.06)",
-        boxShadow: on ? `0 0 14px -4px ${ACCENT}` : "inset 0 1px 0 rgba(255,255,255,0.06)",
-        position: "relative",
-        transition: "background 0.2s, box-shadow 0.2s, border-color 0.2s",
-      }}
-    >
-      <span
-        style={{
-          position: "absolute",
-          top: 2,
-          left: on ? 22 : 2,
-          width: 18,
-          height: 18,
-          borderRadius: "50%",
-          background: on ? "linear-gradient(180deg, #ffffff, #e6dbff)" : "rgba(255,255,255,0.4)",
-          boxShadow: on ? `0 0 8px ${ACCENT}` : "0 1px 2px rgba(0,0,0,0.35)",
-          transition: "left 0.2s",
-        }}
-      />
-    </button>
   );
 }

@@ -193,6 +193,15 @@ export interface AudioCapabilities {
   sources: boolean;
   transport: boolean;
   now_playing: boolean;
+  /** Device exposes saved favorites the user can start playing (Sonos). */
+  favorites?: boolean;
+}
+
+/** A saved favorite/preset (e.g. a Sonos Favorite) playable by reference. */
+export interface AudioFavorite {
+  id: string;
+  title: string;
+  subtitle?: string;
 }
 
 export interface AudioDevice {
@@ -239,6 +248,27 @@ export async function setAudioState(id: string, cmd: AudioCommand): Promise<stri
   return (await res.text()) || `HTTP ${res.status}`;
 }
 
+/** List a device's saved favorites (live read from the provider). */
+export async function getAudioFavorites(id: string): Promise<AudioFavorite[]> {
+  const res = await fetch(`/api/audio/devices/${id}/favorites`);
+  if (!res.ok) return [];
+  return res.json();
+}
+
+/** Start playing a favorite by its provider-native id. */
+export async function playAudioFavorite(
+  id: string,
+  favoriteId: string,
+): Promise<string | null> {
+  const res = await fetch(`/api/audio/devices/${id}/favorites/play`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ favorite_id: favoriteId }),
+  });
+  if (res.ok) return null;
+  return (await res.text()) || `HTTP ${res.status}`;
+}
+
 export async function getProviders(): Promise<Provider[]> {
   const res = await fetch("/api/providers");
   if (!res.ok) return [];
@@ -275,7 +305,26 @@ export async function removeProvider(id: string): Promise<void> {
   await fetch(`/api/providers/${id}`, { method: "DELETE" });
 }
 
-/** Replace an existing provider's credentials (recovery after key rotation). */
+/** A provider's current non-secret configuration, used to prefill the edit form. */
+export interface ProviderConfig {
+  name: string;
+  provider_type: string;
+  /** Current values for non-secret fields (e.g. host/IP). Secrets are omitted. */
+  values: Record<string, unknown>;
+  /** False when stored credentials can't be decrypted — re-enter everything. */
+  decryptable: boolean;
+}
+
+export async function getProviderConfig(id: string): Promise<ProviderConfig | null> {
+  const res = await fetch(`/api/providers/${id}/config`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+/**
+ * Update a provider's IP/credentials. Submitted fields are merged over the
+ * stored ones, so a blank secret field keeps its current value.
+ */
 export async function updateProviderCredentials(
   id: string,
   credentials: Record<string, string>,
@@ -337,6 +386,8 @@ export interface RoomLink {
   provider_group_id: string;
   name: string;
   provider_id: string;
+  /** Which domain the linked provider room/zone belongs to. */
+  domain: "light" | "audio";
 }
 
 export interface Room {
@@ -348,6 +399,8 @@ export interface Room {
   links: RoomLink[];
   /** Linked audio device (volume/mute on the room's controls), if any. */
   audio_device_id?: string | null;
+  /** Disabled rooms are hidden from the Dashboard/Floor Plan; managed in Settings. */
+  enabled: boolean;
 }
 
 /** Link (or, with null, unlink) an audio device to a room. */
@@ -364,7 +417,11 @@ export interface ProviderGroupInfo {
   provider_id: string;
   provider_group_id: string;
   name: string;
+  /** Which domain's devices this mirror groups. */
+  domain: "light" | "audio";
   light_ids: string[];
+  /** Member audio devices (audio groups); empty for light groups. */
+  audio_device_ids: string[];
 }
 
 export async function getRooms(): Promise<Room[]> {
@@ -401,6 +458,15 @@ export async function mergeRooms(targetRoomId: string, sourceRoomId: string): Pr
 
 export async function removeRoom(id: string): Promise<void> {
   await fetch(`/api/rooms/${id}`, { method: "DELETE" });
+}
+
+/** Enable or disable a room (disabled rooms are hidden from Dashboard/Floor Plan). */
+export async function setRoomEnabled(id: string, enabled: boolean): Promise<void> {
+  await fetch(`/api/rooms/${id}/enabled`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
 }
 
 /** Replace the room's DIRECT lights (linked members are unaffected). */
@@ -544,6 +610,14 @@ export interface Placement {
   points?: [number, number][];
 }
 
+/** An audio device placed on the plan — point only (no LED-strip points). */
+export interface AudioPlacement {
+  audio_device_id: string;
+  x: number;
+  y: number;
+  mount: Mount;
+}
+
 export interface PlanSummary {
   id: string;
   name: string;
@@ -569,6 +643,7 @@ export interface PlanDetail {
   tiles: [number, number][];
   walls: Wall[];
   lights: Placement[];
+  audio: AudioPlacement[];
   rooms: PlanRoom[];
 }
 
@@ -619,6 +694,15 @@ export async function putPlanSize(id: string, width: number, height: number): Pr
 
 export async function putPlanLights(id: string, placements: Placement[]): Promise<void> {
   const res = await fetch(`/api/plans/${id}/lights`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ placements }),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+}
+
+export async function putPlanAudio(id: string, placements: AudioPlacement[]): Promise<void> {
+  const res = await fetch(`/api/plans/${id}/audio`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ placements }),

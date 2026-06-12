@@ -5,6 +5,8 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { rgbToHex } from "../api";
+import { useViewport } from "../useViewport";
+import { sheetStyle } from "./sheet";
 
 // ── HSV color math (h in degrees, s/v in 0..1) ──────────────────────────────
 
@@ -243,6 +245,7 @@ export function LightEditor({
   /** Extra controls rendered at the bottom (e.g. a room's scene selector). */
   children?: ReactNode;
 }) {
+  const { isMobile } = useViewport();
   const panelRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   // Uncontrolled after mount: seeding from props once avoids hex→hsv→hex
@@ -252,6 +255,8 @@ export function LightEditor({
   const hex = rgbToHex(...hsvToRgb(hue, sat, 1));
 
   useLayoutEffect(() => {
+    // On phones the editor is a bottom sheet — no anchor math needed.
+    if (isMobile) return;
     const panel = panelRef.current;
     if (!panel) return;
     const rect =
@@ -266,11 +271,16 @@ export function LightEditor({
     let top = rect.top + rect.height / 2 - h / 2;
     top = Math.max(8, Math.min(window.innerHeight - h - 8, top));
     setPos({ left, top });
-  }, [anchor]);
+  }, [anchor, isMobile]);
 
   useEffect(() => {
     const onDown = (e: PointerEvent) => {
-      if (panelRef.current && !panelRef.current.contains(e.target as Node)) onClose();
+      const target = e.target as Node;
+      if (panelRef.current?.contains(target)) return;
+      // Clicks on the trigger element are handled by the trigger itself (so it
+      // can toggle the editor closed); don't also self-close here.
+      if (anchor instanceof HTMLElement && anchor.contains(target)) return;
+      onClose();
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -283,7 +293,7 @@ export function LightEditor({
       document.removeEventListener("pointerdown", onDown);
       window.removeEventListener("keydown", onKey);
     };
-  }, [onClose]);
+  }, [onClose, anchor]);
 
   function applyColor(h: number, s: number) {
     setHs([h, s]);
@@ -298,21 +308,25 @@ export function LightEditor({
   return createPortal(
     <div
       ref={panelRef}
-      style={{
-        position: "fixed",
-        left: pos?.left ?? 0,
-        top: pos?.top ?? 0,
-        visibility: pos ? "visible" : "hidden",
-        zIndex: 60,
-        background: "#1c1c20",
-        border: "1px solid #333",
-        borderRadius: 14,
-        padding: "0.9rem",
-        boxShadow: "0 8px 30px rgba(0,0,0,0.6)",
-        display: "flex",
-        flexDirection: "column",
-        gap: "0.7rem",
-      }}
+      style={
+        isMobile
+          ? sheetStyle
+          : {
+              position: "fixed",
+              left: pos?.left ?? 0,
+              top: pos?.top ?? 0,
+              visibility: pos ? "visible" : "hidden",
+              zIndex: 60,
+              background: "#1c1c20",
+              border: "1px solid #333",
+              borderRadius: 14,
+              padding: "0.9rem",
+              boxShadow: "0 8px 30px rgba(0,0,0,0.6)",
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.7rem",
+            }
+      }
     >
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem" }}>
         <span style={{ fontWeight: 600, fontSize: "0.9rem", color: "#eee", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>

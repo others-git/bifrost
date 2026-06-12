@@ -8,15 +8,25 @@ import { ScenesPage } from "./pages/Scenes";
 import { FloorPlanPage } from "./pages/FloorPlan";
 import { SettingsPage } from "./pages/Settings";
 import { S } from "./styles";
+import { useViewport } from "./useViewport";
 
 /** Pages reachable from the nav tray. */
 type NavPage = "dashboard" | "audio" | "scenes" | "plan" | "settings";
 type Page = "loading" | "setup" | "login" | NavPage;
 
+const NAV_ITEMS: { id: NavPage; glyph: string; label: string }[] = [
+  { id: "dashboard", glyph: "◉", label: "Lights" },
+  { id: "audio", glyph: "♪", label: "Audio" },
+  { id: "scenes", glyph: "✦", label: "Scenes" },
+  { id: "plan", glyph: "▦", label: "Floor Plan" },
+  { id: "settings", glyph: "⚙", label: "Settings" },
+];
+
 export function App() {
   const [page, setPage] = useState<Page>("loading");
   const [lights, setLights] = useState<Light[]>([]);
   const [version, setVersion] = useState("");
+  const { isMobile } = useViewport();
 
   useEffect(() => {
     getHealth().then((h) => setVersion(h.version));
@@ -47,37 +57,151 @@ export function App() {
   if (page === "setup") return <SetupPage onComplete={() => setPage("login")} />;
   if (page === "login") return <LoginPage onSuccess={() => init()} />;
 
+  const navigate = (p: NavPage) => {
+    if (p === "dashboard" || p === "scenes" || p === "plan")
+      refreshLights().then(() => setPage(p));
+    else setPage(p);
+  };
+  const onLogout = async () => {
+    await logout();
+    setPage("login");
+  };
+
   return (
-    <div style={{ display: "flex", minHeight: "100vh", background: "#111", color: "#f0f0f0" }}>
-      <NavTray
-        version={version}
-        page={page}
-        onNavigate={(p) => {
-          if (p === "dashboard" || p === "scenes" || p === "plan")
-            refreshLights().then(() => setPage(p));
-          else setPage(p);
+    <div
+      style={{
+        display: "flex",
+        flexDirection: isMobile ? "column" : "row",
+        minHeight: "100vh",
+        background: "#111",
+        color: "#f0f0f0",
+      }}
+    >
+      {isMobile ? (
+        <MobileTopBar version={version} page={page} onLogout={onLogout} />
+      ) : (
+        <NavTray version={version} page={page} onNavigate={navigate} onLogout={onLogout} />
+      )}
+
+      <main
+        style={{
+          flex: 1,
+          minWidth: 0,
+          // Clear the fixed bottom tab bar (plus the phone's home-bar inset).
+          paddingBottom: isMobile ? "calc(58px + env(safe-area-inset-bottom))" : 0,
         }}
-        onLogout={async () => {
-          await logout();
-          setPage("login");
-        }}
-      />
-      <main style={{ flex: 1, minWidth: 0 }}>
+      >
         {page === "dashboard" && (
-          <DashboardPage
-            lights={lights}
-            onRefresh={refreshLights}
-            onNavigate={(p) => setPage(p)}
-          />
+          <DashboardPage lights={lights} onRefresh={refreshLights} onNavigate={(p) => setPage(p)} />
         )}
         {page === "audio" && <AudioPage />}
         {page === "scenes" && <ScenesPage />}
-        {page === "plan" && <FloorPlanPage lights={lights} />}
-        {page === "settings" && (
-          <SettingsPage onNavigate={(p) => setPage(p)} />
-        )}
+        {page === "plan" &&
+          (isMobile ? (
+            <div style={{ padding: "3rem 1.2rem", textAlign: "center", color: "#888" }}>
+              The Floor Plan is available on a larger screen.
+            </div>
+          ) : (
+            <FloorPlanPage lights={lights} />
+          ))}
+        {page === "settings" && <SettingsPage onNavigate={(p) => setPage(p)} />}
       </main>
+
+      {isMobile && <BottomNav page={page} onNavigate={navigate} />}
     </div>
+  );
+}
+
+/** Slim top bar for phones — brand + sign-out (the bottom tab bar has no room). */
+function MobileTopBar({
+  version,
+  page,
+  onLogout,
+}: {
+  version: string;
+  page: Page;
+  onLogout: () => void;
+}) {
+  const title = NAV_ITEMS.find((i) => i.id === page)?.label;
+  return (
+    <header
+      className="bifrost-aurora"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "0.6rem",
+        padding: "calc(0.5rem + env(safe-area-inset-top)) 0.9rem 0.5rem",
+        borderBottom: "1px solid #1c2430",
+        backgroundImage:
+          "linear-gradient(135deg, #10131a 0%, #0f1a22 22%, #161326 48%, #0e1f28 74%, #10131a 100%)",
+        position: "sticky",
+        top: 0,
+        zIndex: 30,
+      }}
+    >
+      <span
+        className="bifrost-brand"
+        style={{ fontWeight: 800, fontSize: "1.05rem", letterSpacing: "0.06em" }}
+      >
+        BIFROST
+      </span>
+      {title && <span style={{ fontSize: "0.85rem", color: "#8b93a1" }}>{title}</span>}
+      <span style={{ flex: 1 }} />
+      {version && <span style={{ fontSize: "0.65rem", color: "#5d6878" }}>v{version}</span>}
+      <button
+        onClick={onLogout}
+        aria-label="Sign out"
+        style={{ background: "none", border: "none", color: "#6b7585", cursor: "pointer", fontSize: "1.1rem", padding: "0.2rem 0.3rem" }}
+      >
+        ⏻
+      </button>
+    </header>
+  );
+}
+
+/** Bottom tab bar for phones — thumb-reachable, fixed to the viewport bottom. */
+function BottomNav({ page, onNavigate }: { page: Page; onNavigate: (p: NavPage) => void }) {
+  return (
+    <nav
+      style={{
+        position: "fixed",
+        left: 0,
+        right: 0,
+        bottom: 0,
+        zIndex: 40,
+        display: "flex",
+        borderTop: "1px solid #1c2430",
+        background: "#0d1117",
+        paddingBottom: "env(safe-area-inset-bottom)",
+      }}
+    >
+      {/* Floor Plan is a desktop tool — hidden from the mobile tab bar for now. */}
+      {NAV_ITEMS.filter((item) => item.id !== "plan").map((item) => {
+        const active = page === item.id;
+        return (
+          <button
+            key={item.id}
+            onClick={() => onNavigate(item.id)}
+            aria-label={item.label}
+            style={{
+              flex: 1,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: "0.15rem",
+              padding: "0.5rem 0.2rem",
+              background: "none",
+              border: "none",
+              color: active ? "#9adcff" : "#7c8595",
+              cursor: "pointer",
+            }}
+          >
+            <span style={{ fontSize: "1.25rem", lineHeight: 1 }}>{item.glyph}</span>
+            <span style={{ fontSize: "0.62rem", fontWeight: active ? 700 : 400 }}>{item.label}</span>
+          </button>
+        );
+      })}
+    </nav>
   );
 }
 
@@ -105,13 +229,7 @@ function NavTray({
     });
   }
 
-  const items: { id: NavPage; glyph: string; label: string }[] = [
-    { id: "dashboard", glyph: "◉", label: "Lights" },
-    { id: "audio", glyph: "♪", label: "Audio" },
-    { id: "scenes", glyph: "✦", label: "Scenes" },
-    { id: "plan", glyph: "▦", label: "Floor Plan" },
-    { id: "settings", glyph: "⚙", label: "Settings" },
-  ];
+  const items = NAV_ITEMS;
 
   return (
     <nav

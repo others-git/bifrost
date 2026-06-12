@@ -16,9 +16,11 @@ import {
 } from "../api";
 import { SceneEditor, SceneSwatch } from "../components/scenes";
 import { useDialogs } from "../components/dialogs";
+import { useViewport } from "../useViewport";
 import { ACCENT, S } from "../styles";
 
 export function ScenesPage() {
+  const { isMobile } = useViewport();
   const [scenes, setScenes] = useState<PaletteScene[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
   const [loading, setLoading] = useState(true);
@@ -48,7 +50,7 @@ export function ScenesPage() {
   }
 
   return (
-    <div style={{ padding: "1.5rem 2rem", maxWidth: 1100, margin: "0 auto" }}>
+    <div style={{ padding: isMobile ? "1rem 0.85rem" : "1.5rem 2rem", maxWidth: 1100, margin: "0 auto" }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: "0.75rem", marginBottom: "1rem" }}>
         <h1 style={{ margin: 0, fontSize: "1.4rem" }}>Scenes</h1>
         <span style={{ color: "#666", fontSize: "0.85rem" }}>

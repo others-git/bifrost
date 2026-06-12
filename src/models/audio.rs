@@ -37,6 +37,24 @@ pub struct AudioCapabilities {
     pub transport: bool,
     /// Device reports track metadata (title/artist/album).
     pub now_playing: bool,
+    /// Device exposes saved favorites/presets the user can start playing
+    /// (e.g. Sonos Favorites). `#[serde(default)]` keeps state stored before
+    /// this field existed deserializable — it reads back as `false` until the
+    /// next discovery refreshes it.
+    #[serde(default)]
+    pub favorites: bool,
+}
+
+/// A saved favorite/preset on a provider (e.g. a Sonos Favorite) that the user
+/// can start playing by reference — no search or accounts involved. `id` is
+/// provider-native and opaque; the client passes it back verbatim to play.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioFavorite {
+    pub id: String,
+    pub title: String,
+    /// Optional secondary line (service name, description, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle: Option<String>,
 }
 
 /// Full state snapshot, as returned by `get_state` and stored in

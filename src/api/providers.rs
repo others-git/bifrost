@@ -21,6 +21,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/scan/{provider_type}", post(scan_network))
         .route("/hue/pair", post(hue_pair))
         .route("/{id}", delete(remove_provider))
+        .route("/{id}/config", get(provider_config))
         .route("/{id}/credentials", put(update_credentials))
         .route("/{id}/status", get(provider_status))
         .route("/{id}/discover", post(discover))
@@ -233,6 +234,85 @@ async fn add_provider(
     }
 }
 
+// ── Current configuration (to prefill the edit form) ───────────────────────
+
+#[derive(Serialize)]
+struct ProviderConfig {
+    name: String,
+    provider_type: String,
+    /// Current values for non-secret fields (e.g. host/IP). Password-kind
+    /// fields are deliberately omitted — secrets are never sent to the client;
+    /// the edit form leaves them blank and the update path keeps them as-is.
+    values: serde_json::Map<String, serde_json::Value>,
+    /// False when the stored credentials can't be decrypted (e.g. the
+    /// BIFROST_SECRET changed). The form then re-collects every field, secrets
+    /// included, because there's nothing to merge onto.
+    decryptable: bool,
+}
+
+/// Return a provider's current non-secret configuration so the edit form can
+/// prefill the IP/host without the user re-typing everything.
+async fn provider_config(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let row = sqlx::query("SELECT provider_type, name, credentials FROM providers WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await;
+    let row = match row {
+        Ok(Some(r)) => r,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("db error: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let provider_type: String = row.get("provider_type");
+    let name: String = row.get("name");
+    let credentials_enc: String = row.get("credentials");
+
+    // Which fields are secret (never returned to the client)?
+    let secret: std::collections::HashSet<&str> = state
+        .registry
+        .schema(&provider_type)
+        .unwrap_or(&[])
+        .iter()
+        .filter(|f| matches!(f.kind, crate::providers::FieldKind::Password))
+        .map(|f| f.name)
+        .collect();
+
+    let (values, decryptable) = match state.decrypt_credentials(&credentials_enc) {
+        Ok(json) => {
+            let mut map = serde_json::Map::new();
+            if let Ok(serde_json::Value::Object(obj)) =
+                serde_json::from_str::<serde_json::Value>(&json)
+            {
+                for (k, v) in obj {
+                    if !secret.contains(k.as_str()) {
+                        map.insert(k, v);
+                    }
+                }
+            }
+            (map, true)
+        }
+        Err(_) => (serde_json::Map::new(), false),
+    };
+
+    Json(ProviderConfig {
+        name,
+        provider_type,
+        values,
+        decryptable,
+    })
+    .into_response()
+}
+
 #[derive(Deserialize)]
 struct UpdateCredentialsRequest {
     credentials: serde_json::Value,
@@ -251,12 +331,12 @@ async fn update_credentials(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let row = sqlx::query("SELECT provider_type FROM providers WHERE id = ?")
+    let row = sqlx::query("SELECT provider_type, credentials FROM providers WHERE id = ?")
         .bind(&id)
         .fetch_optional(&state.db)
         .await;
-    let provider_type: String = match row {
-        Ok(Some(r)) => r.get("provider_type"),
+    let (provider_type, credentials_enc): (String, String) = match row {
+        Ok(Some(r)) => (r.get("provider_type"), r.get("credentials")),
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
         Err(e) => {
             tracing::error!("db error: {e}");
@@ -264,7 +344,30 @@ async fn update_credentials(
         }
     };
 
-    let creds_json = req.credentials.to_string();
+    // Merge the submitted fields over the currently-stored ones, so the edit
+    // form can change just the IP while leaving secret fields (app keys, API
+    // keys) blank to keep them. A blank string means "unchanged". When the old
+    // credentials can't be decrypted (e.g. BIFROST_SECRET changed) we start
+    // from nothing — the form re-collects every field in that case.
+    let mut merged = state
+        .decrypt_credentials(&credentials_enc)
+        .ok()
+        .and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok())
+        .and_then(|v| match v {
+            serde_json::Value::Object(o) => Some(o),
+            _ => None,
+        })
+        .unwrap_or_default();
+    if let Some(obj) = req.credentials.as_object() {
+        for (k, v) in obj {
+            // An empty string keeps the stored value (don't wipe a secret).
+            if v.as_str() == Some("") {
+                continue;
+            }
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    let creds_json = serde_json::Value::Object(merged).to_string();
 
     // Smoke-test before persisting, like add_provider does.
     let build_check = if state.registry.is_known_audio(&provider_type) {
@@ -402,19 +505,37 @@ async fn sync_groups(
     let provider_type: String = row.get("provider_type");
     let credentials_enc: String = row.get("credentials");
 
-    let provider = match build_provider(&state, &provider_type, &credentials_enc) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!("failed to build provider: {e:#}");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    // Audio providers (Sonos) mirror their rooms/zones through the same
+    // provider_groups + room_links machinery as lights; only the provider build
+    // and the member table differ by domain.
+    let is_audio = state.registry.is_known_audio(&provider_type);
+    let provider_groups = if is_audio {
+        match crate::api::audio::build_audio_provider(&state, &provider_type, &credentials_enc) {
+            Ok(p) => match p.discover_groups().await {
+                Ok(g) => g,
+                Err(e) => {
+                    tracing::error!("audio group discovery error: {e:#}");
+                    return StatusCode::BAD_GATEWAY.into_response();
+                }
+            },
+            Err(e) => {
+                tracing::error!("failed to build audio provider: {e:#}");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
         }
-    };
-
-    let provider_groups = match provider.discover_groups().await {
-        Ok(g) => g,
-        Err(e) => {
-            tracing::error!("group discovery error: {e:#}");
-            return StatusCode::BAD_GATEWAY.into_response();
+    } else {
+        match build_provider(&state, &provider_type, &credentials_enc) {
+            Ok(p) => match p.discover_groups().await {
+                Ok(g) => g,
+                Err(e) => {
+                    tracing::error!("group discovery error: {e:#}");
+                    return StatusCode::BAD_GATEWAY.into_response();
+                }
+            },
+            Err(e) => {
+                tracing::error!("failed to build provider: {e:#}");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
         }
     };
 
@@ -473,26 +594,54 @@ async fn sync_groups(
             }
         };
 
-        // Refresh members (matched to discovered lights by device id).
-        let _ = sqlx::query("DELETE FROM provider_group_lights WHERE provider_group_id = ?")
-            .bind(&mirror_id)
-            .execute(&state.db)
-            .await;
-        for device_id in &pg.member_device_ids {
-            if let Ok(Some(r)) =
-                sqlx::query("SELECT id FROM lights WHERE provider_id = ? AND device_id = ?")
-                    .bind(&id)
-                    .bind(device_id)
-                    .fetch_optional(&state.db)
-                    .await
-            {
-                let _ = sqlx::query(
-                    "INSERT OR IGNORE INTO provider_group_lights (provider_group_id, light_id) VALUES (?, ?)",
+        // Refresh members (matched to discovered devices by device id). Audio
+        // groups populate provider_group_audio_devices; light groups the
+        // existing provider_group_lights.
+        if is_audio {
+            let _ =
+                sqlx::query("DELETE FROM provider_group_audio_devices WHERE provider_group_id = ?")
+                    .bind(&mirror_id)
+                    .execute(&state.db)
+                    .await;
+            for device_id in &pg.member_device_ids {
+                if let Ok(Some(r)) = sqlx::query(
+                    "SELECT id FROM audio_devices WHERE provider_id = ? AND device_id = ?",
                 )
+                .bind(&id)
+                .bind(device_id)
+                .fetch_optional(&state.db)
+                .await
+                {
+                    let _ = sqlx::query(
+                        "INSERT OR IGNORE INTO provider_group_audio_devices (provider_group_id, audio_device_id) VALUES (?, ?)",
+                    )
+                    .bind(&mirror_id)
+                    .bind(r.get::<String, _>("id"))
+                    .execute(&state.db)
+                    .await;
+                }
+            }
+        } else {
+            let _ = sqlx::query("DELETE FROM provider_group_lights WHERE provider_group_id = ?")
                 .bind(&mirror_id)
-                .bind(r.get::<String, _>("id"))
                 .execute(&state.db)
                 .await;
+            for device_id in &pg.member_device_ids {
+                if let Ok(Some(r)) =
+                    sqlx::query("SELECT id FROM lights WHERE provider_id = ? AND device_id = ?")
+                        .bind(&id)
+                        .bind(device_id)
+                        .fetch_optional(&state.db)
+                        .await
+                {
+                    let _ = sqlx::query(
+                        "INSERT OR IGNORE INTO provider_group_lights (provider_group_id, light_id) VALUES (?, ?)",
+                    )
+                    .bind(&mirror_id)
+                    .bind(r.get::<String, _>("id"))
+                    .execute(&state.db)
+                    .await;
+                }
             }
         }
 

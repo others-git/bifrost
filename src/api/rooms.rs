@@ -31,6 +31,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{id}", delete(remove_room))
         .route("/{id}/merge", post(merge_rooms))
         .route("/{id}/audio", put(set_room_audio))
+        .route("/{id}/enabled", put(set_room_enabled))
         .route("/{id}/lights", put(set_direct_lights))
         .route("/{id}/links", put(set_links))
         .route("/{id}/state", put(set_room_state))
@@ -49,6 +50,8 @@ struct LinkInfo {
     provider_group_id: String,
     name: String,
     provider_id: String,
+    /// "light" or "audio" — which domain this linked provider room/zone is.
+    domain: String,
 }
 
 #[derive(Serialize)]
@@ -61,6 +64,9 @@ struct RoomInfo {
     links: Vec<LinkInfo>,
     /// Linked audio device (volume/mute on the room's controls), if any.
     audio_device_id: Option<String>,
+    /// Disabled rooms are hidden from the Dashboard/Floor Plan and the public
+    /// API, but still listed in Settings so they can be re-enabled.
+    enabled: bool,
 }
 
 #[derive(Serialize)]
@@ -69,7 +75,21 @@ struct ProviderGroupInfo {
     provider_id: String,
     provider_group_id: String,
     name: String,
+    /// "light" or "audio" — which domain's devices this group mirrors.
+    domain: String,
+    /// Member lights (light groups) — empty for audio groups.
     light_ids: Vec<String>,
+    /// Member audio devices (audio groups) — empty for light groups.
+    audio_device_ids: Vec<String>,
+}
+
+/// "audio" if the provider type is a registered audio provider, else "light".
+fn domain_label(state: &AppState, provider_type: &str) -> &'static str {
+    if state.registry.is_known_audio(provider_type) {
+        "audio"
+    } else {
+        "light"
+    }
 }
 
 // ── Membership resolution ────────────────────────────────────────────────────
@@ -121,6 +141,35 @@ pub(crate) async fn effective_member_ids(state: &AppState, room_id: &str) -> Vec
         .collect()
 }
 
+/// The room's effective audio device: an explicit manual link (`room_audio`)
+/// wins; otherwise fall back to a linked audio provider-group's device, so a
+/// synced room gets its speaker automatically. Shared by the session and v1
+/// room listings so they can't drift.
+pub(crate) async fn room_audio_device_id(state: &AppState, room_id: &str) -> Option<String> {
+    if let Some(id) = sqlx::query("SELECT audio_device_id FROM room_audio WHERE room_id = ?")
+        .bind(room_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .map(|r| r.get::<String, _>("audio_device_id"))
+    {
+        return Some(id);
+    }
+    sqlx::query(
+        "SELECT pga.audio_device_id
+         FROM room_links rl
+         JOIN provider_group_audio_devices pga ON pga.provider_group_id = rl.provider_group_id
+         WHERE rl.room_id = ? LIMIT 1",
+    )
+    .bind(room_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .map(|r| r.get("audio_device_id"))
+}
+
 // ── Handlers ────────────────────────────────────────────────────────────────
 
 async fn list_rooms(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
@@ -128,7 +177,7 @@ async fn list_rooms(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let rooms = match sqlx::query("SELECT id, name FROM rooms ORDER BY created_at")
+    let rooms = match sqlx::query("SELECT id, name, enabled FROM rooms ORDER BY created_at")
         .fetch_all(&state.db)
         .await
     {
@@ -153,8 +202,10 @@ async fn list_rooms(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
             .collect();
 
         let links: Vec<LinkInfo> = sqlx::query(
-            "SELECT pg.id, pg.name, pg.provider_id
-             FROM room_links rl JOIN provider_groups pg ON pg.id = rl.provider_group_id
+            "SELECT pg.id, pg.name, pg.provider_id, p.provider_type
+             FROM room_links rl
+             JOIN provider_groups pg ON pg.id = rl.provider_group_id
+             JOIN providers p ON p.id = pg.provider_id
              WHERE rl.room_id = ?",
         )
         .bind(&id)
@@ -162,33 +213,58 @@ async fn list_rooms(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
         .await
         .unwrap_or_default()
         .into_iter()
-        .map(|r| LinkInfo {
-            provider_group_id: r.get("id"),
-            name: r.get("name"),
-            provider_id: r.get("provider_id"),
+        .map(|r| {
+            let provider_type: String = r.get("provider_type");
+            LinkInfo {
+                provider_group_id: r.get("id"),
+                name: r.get("name"),
+                provider_id: r.get("provider_id"),
+                domain: domain_label(&state, &provider_type).to_string(),
+            }
         })
         .collect();
 
-        let audio_device_id: Option<String> =
-            sqlx::query("SELECT audio_device_id FROM room_audio WHERE room_id = ?")
-                .bind(&id)
-                .fetch_optional(&state.db)
-                .await
-                .ok()
-                .flatten()
-                .map(|r| r.get("audio_device_id"));
+        let audio_device_id = room_audio_device_id(&state, &id).await;
 
         out.push(RoomInfo {
             light_ids: effective_member_ids(&state, &id).await,
             direct_light_ids: direct,
             links,
             audio_device_id,
+            enabled: room.get::<i64, _>("enabled") != 0,
             id,
             name: room.get("name"),
         });
     }
 
     Json(out).into_response()
+}
+
+#[derive(Deserialize)]
+struct SetRoomEnabledRequest {
+    enabled: bool,
+}
+
+/// Enable or disable a room. Disabled rooms are hidden from the Dashboard, Floor
+/// Plan, and the public API, but kept (and re-enableable) in Settings.
+async fn set_room_enabled(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<SetRoomEnabledRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !room_exists(&state, &id).await {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let _ = sqlx::query("UPDATE rooms SET enabled = ? WHERE id = ?")
+        .bind(if req.enabled { 1 } else { 0 })
+        .bind(&id)
+        .execute(&state.db)
+        .await;
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(Deserialize)]
@@ -252,7 +328,9 @@ async fn list_provider_groups(
     }
 
     let rows = sqlx::query(
-        "SELECT id, provider_id, provider_group_id, name FROM provider_groups ORDER BY name",
+        "SELECT pg.id, pg.provider_id, pg.provider_group_id, pg.name, p.provider_type
+         FROM provider_groups pg JOIN providers p ON p.id = pg.provider_id
+         ORDER BY pg.name",
     )
     .fetch_all(&state.db)
     .await
@@ -261,20 +339,40 @@ async fn list_provider_groups(
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         let id: String = r.get("id");
-        let light_ids =
-            sqlx::query("SELECT light_id FROM provider_group_lights WHERE provider_group_id = ?")
-                .bind(&id)
-                .fetch_all(&state.db)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|l| l.get("light_id"))
-                .collect();
+        let provider_type: String = r.get("provider_type");
+        let domain = domain_label(&state, &provider_type);
+        let (light_ids, audio_device_ids): (Vec<String>, Vec<String>) = if domain == "audio" {
+            let audio = sqlx::query(
+                "SELECT audio_device_id FROM provider_group_audio_devices WHERE provider_group_id = ?",
+            )
+            .bind(&id)
+            .fetch_all(&state.db)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|a| a.get("audio_device_id"))
+            .collect();
+            (Vec::new(), audio)
+        } else {
+            let lights = sqlx::query(
+                "SELECT light_id FROM provider_group_lights WHERE provider_group_id = ?",
+            )
+            .bind(&id)
+            .fetch_all(&state.db)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|l| l.get("light_id"))
+            .collect();
+            (lights, Vec::new())
+        };
         out.push(ProviderGroupInfo {
             provider_id: r.get("provider_id"),
             provider_group_id: r.get("provider_group_id"),
             name: r.get("name"),
+            domain: domain.to_string(),
             light_ids,
+            audio_device_ids,
             id,
         });
     }

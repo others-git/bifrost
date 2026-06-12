@@ -5,10 +5,57 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Bifrost</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="apple-touch-icon" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <!-- PWA: installable, app-like full-screen shell -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#0f0f0f" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Bifrost" />
     <style>
       *, *::before, *::after { box-sizing: border-box; }
-      body { margin: 0; font-family: system-ui, sans-serif; background: #0f0f0f; color: #f0f0f0; }
+      body {
+        margin: 0;
+        font-family: "Inter Variable", system-ui, sans-serif;
+        /* Slightly heavier than the usual 400 — easier on aging eyes at the
+           small sizes used throughout the UI. */
+        font-weight: 450;
+        font-size: 16.5px;
+        background: #0f0f0f;
+        color: #f0f0f0;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        text-rendering: optimizeLegibility;
+      }
+
+      /* Touch ergonomics on phones: bigger range thumbs + taller hit area, so
+         volume/brightness sliders are easy to grab. (Inline styles can't reach
+         these pseudo-elements.) */
+      @media (max-width: 640px) {
+        input[type="range"] { height: 1.9rem; }
+        input[type="range"]::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 22px;
+          height: 22px;
+          border-radius: 50%;
+          background: #eaeaea;
+          margin-top: -9px;
+        }
+        input[type="range"]::-webkit-slider-runnable-track {
+          height: 4px;
+          border-radius: 2px;
+          background: rgba(255, 255, 255, 0.18);
+        }
+        input[type="range"]::-moz-range-thumb {
+          width: 22px;
+          height: 22px;
+          border: none;
+          border-radius: 50%;
+          background: #eaeaea;
+        }
+      }
 
       /* Slow diagonal drift shared by the nav backdrop and the brand wordmark.
          Oversized background + position pan reads as a living aurora without

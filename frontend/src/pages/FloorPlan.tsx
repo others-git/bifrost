@@ -9,6 +9,7 @@ import {
   getPlans,
   getRooms,
   mergePatch,
+  putPlanAudio,
   putPlanLayout,
   putPlanLights,
   putPlanRooms,
@@ -22,6 +23,7 @@ import {
   setRoomState,
   xyToRgb,
   type AudioDevice,
+  type AudioPlacement,
   type Light,
   type LightState,
   type LightStatePatch,
@@ -33,6 +35,7 @@ import {
   type Room,
 } from "../api";
 import { ColorWheel, hexToHs, hexToRgb, hsvToRgb, LightEditor } from "../components/LightEditor";
+import { AudioEditor } from "../components/AudioControls";
 import { SceneButton, SceneModal } from "../components/scenes";
 import { Modal, useDialogs } from "../components/dialogs";
 import { ACCENT, S } from "../styles";
@@ -44,10 +47,13 @@ const TOOLS: { id: Tool; label: string; hint: string }[] = [
   { id: "floor", label: "Floor", hint: "Click-drag to paint floor tiles." },
   { id: "wall", label: "Wall", hint: "Click-drag along tile boundaries to draw walls. Leave gaps for doors." },
   { id: "erase", label: "Erase", hint: "Click-drag to remove tiles, walls, and room assignments." },
-  { id: "place", label: "Lights", hint: "Pick a light from the palette, then click a tile — near an edge wall-mounts it, the middle ceiling-mounts it. Drag across tiles to lay an LED strip. Click a placed light to remove it." },
+  { id: "place", label: "Devices", hint: "Pick Lights or Speakers, choose a device, then click a tile to place it. Lights near an edge wall-mount; drag across tiles to lay an LED strip. Click a placed device to remove it." },
   { id: "room", label: "Rooms", hint: "Pick or create a room on the right, then click-drag tiles to paint it. A tile belongs to one room." },
-  { id: "paint", label: "Paint", hint: "Pick a color and brightness on the right, then click or brush across lights to color them live." },
+  { id: "paint", label: "Brush", hint: "Pick a color and brightness on the right, then click or brush across lights to color them live." },
 ];
+
+/** Device category chosen under the Devices tool. */
+type PlaceCategory = "light" | "audio";
 
 const ROOM_COLORS = ["#8b5cf6", "#3b82f6", "#22d3ee", "#4ade80", "#facc15", "#fb923c", "#f43f5e"];
 
@@ -127,9 +133,10 @@ interface Popover {
   placements: Placement[];
 }
 
-/** What the shared light editor is currently pointed at. */
+/** What the shared editor fly-out is currently pointed at. */
 type EditorTarget =
   | { kind: "light"; id: string; anchor: HTMLElement | { x: number; y: number } }
+  | { kind: "audio"; id: string; anchor: HTMLElement | { x: number; y: number } }
   | { kind: "room"; roomId: string; anchor: HTMLElement };
 
 export function FloorPlanPage({ lights }: { lights: Light[] }) {
@@ -142,12 +149,18 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
   const [tiles, setTiles] = useState<Set<string>>(new Set());
   const [walls, setWalls] = useState<Set<string>>(new Set());
   const [placements, setPlacements] = useState<Placement[]>([]);
+  const [audioPlacements, setAudioPlacements] = useState<AudioPlacement[]>([]);
   const [rooms, setRooms] = useState<EditRoom[]>([]);
   const [dirty, setDirty] = useState(false);
 
   const [tool, setTool] = useState<Tool>("view");
-  const [selectedLight, setSelectedLight] = useState<string>("");
+  // Which device + category the Devices tool will place.
+  const [placeCategory, setPlaceCategory] = useState<PlaceCategory>("light");
+  const [selected, setSelected] = useState<{ kind: PlaceCategory; id: string } | null>(null);
   const [selectedRoom, setSelectedRoom] = useState<string>("");
+  // Audio devices (for the Speakers palette + on-plan fly-out), keyed by id;
+  // patched optimistically by the fly-out.
+  const [audioById, setAudioById] = useState<Map<string, AudioDevice>>(new Map());
   const [paintColor, setPaintColor] = useState("#ff9900");
   const [paintBrightness, setPaintBrightness] = useState(100);
   const [popover, setPopover] = useState<Popover | null>(null);
@@ -204,6 +217,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
     setTiles(new Set(p.tiles.map(([x, y]) => tileKey(x, y))));
     setWalls(new Set(p.walls.map((w) => wallKey(w.x, w.y, w.dir))));
     setPlacements(p.lights);
+    setAudioPlacements(p.audio);
     setRooms(
       p.rooms.map((r) => ({
         id: r.id,
@@ -215,6 +229,20 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
     setPopover(null);
   }
 
+  // Audio devices for the Speakers palette + on-plan fly-out.
+  async function loadAudioDevices() {
+    const list = await getAudioDevices();
+    setAudioById(new Map(list.map((d) => [d.id, d])));
+  }
+
+  function patchAudio(id: string, patch: Partial<AudioDevice["state"]>) {
+    setAudioById((prev) => {
+      const dev = prev.get(id);
+      if (!dev) return prev;
+      return new Map(prev).set(id, { ...dev, state: { ...dev.state, ...patch } });
+    });
+  }
+
   useEffect(() => { loadPlans(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     getRooms().then(setAllRooms);
@@ -222,6 +250,9 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
   useEffect(() => {
     getPaletteScenes().then(setScenes);
   }, []);
+  useEffect(() => {
+    loadAudioDevices();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!planId) { setPlan(null); return; }
@@ -269,6 +300,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
     try {
       await putPlanLayout(plan.id, tileArr, wallArr);
       await putPlanLights(plan.id, placements);
+      await putPlanAudio(plan.id, audioPlacements);
       await putPlanRooms(plan.id, roomArr);
       // Reload to pick up server-assigned Room bindings and memberships.
       await loadPlan(plan.id);
@@ -383,7 +415,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
       setStatesById((prev) => new Map(prev).set(target.id, next));
       clearTimeout(editTimer.current);
       editTimer.current = setTimeout(() => { setLightState(target.id, next); }, 200);
-    } else {
+    } else if (target.kind === "room") {
       const room = allRooms.find((r) => r.id === target.roomId);
       if (!room) return;
       setStatesById((prev) => {
@@ -421,33 +453,77 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
   }
 
   const placedIds = new Set(placements.map((p) => p.light_id));
+  const placedAudioIds = new Set(audioPlacements.map((p) => p.audio_device_id));
+
+  const toolButton = (id: Tool) => {
+    const t = TOOLS.find((x) => x.id === id)!;
+    const active = tool === id;
+    return (
+      <button
+        onClick={() => { setTool(id); setPopover(null); setEditor(null); }}
+        title={t.hint}
+        style={{
+          padding: "0.28rem 0.5rem",
+          borderRadius: 6,
+          border: `1px solid ${active ? ACCENT : "#3a3a3a"}`,
+          background: active ? `${ACCENT}1a` : "transparent",
+          color: active ? ACCENT : "#bbb",
+          cursor: "pointer",
+          fontSize: "0.8rem",
+          textAlign: "left",
+        }}
+      >
+        {t.label}
+      </button>
+    );
+  };
 
   return (
     <div style={{ padding: "1.5rem 2rem" }}>
-      {/* Plan switcher row */}
-      <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "0.9rem", flexWrap: "wrap" }}>
-        {plans.map((p) => (
-          <button
-            key={p.id}
-            onClick={() => setPlanId(p.id)}
-            style={{ ...S.buttonGhost, ...(p.id === planId ? { borderColor: ACCENT, color: ACCENT } : {}) }}
-          >
-            {p.name}
-          </button>
-        ))}
-        <button onClick={() => setShowNewPlan(true)} style={S.buttonGhost}>+ New floor plan</button>
+      {/* Plan tabs */}
+      <div style={{ display: "flex", alignItems: "center", gap: "0.1rem", marginBottom: "0.9rem", borderBottom: "1px solid #262626", flexWrap: "wrap" }}>
+        {plans.map((p) => {
+          const active = p.id === planId;
+          return (
+            <button
+              key={p.id}
+              onClick={() => setPlanId(p.id)}
+              style={{
+                background: active ? "#1b1b1f" : "transparent",
+                border: "none",
+                borderTopLeftRadius: 6,
+                borderTopRightRadius: 6,
+                borderBottom: `2px solid ${active ? ACCENT : "transparent"}`,
+                color: active ? ACCENT : "#999",
+                cursor: "pointer",
+                padding: "0.45rem 0.9rem",
+                fontSize: "0.85rem",
+                fontWeight: active ? 600 : 400,
+              }}
+            >
+              {p.name}
+            </button>
+          );
+        })}
+        <button
+          onClick={() => setShowNewPlan(true)}
+          title="New floor plan"
+          style={{ background: "transparent", border: "none", color: "#777", cursor: "pointer", padding: "0.45rem 0.8rem", fontSize: "0.85rem" }}
+        >
+          + New
+        </button>
         {plan && (
           <>
             <span style={{ flex: 1 }} />
             {dirty && (
               <span style={{ color: "#a86", fontSize: "0.72rem", maxWidth: 280, textAlign: "right" }}>
-                Saving adds lights placed inside a room to that room (never removes).
+                Saving adds devices placed inside a room to that room (never removes).
               </span>
             )}
-            <button onClick={handleSave} disabled={!dirty} style={dirty ? S.button : S.buttonGhost}>
+            <button onClick={handleSave} disabled={!dirty} style={{ ...(dirty ? S.button : S.buttonGhost), marginLeft: "0.5rem" }}>
               {dirty ? "Save changes" : "Saved"}
             </button>
-            <button onClick={handleDelete} style={S.buttonDanger}>Delete</button>
+            <button onClick={handleDelete} style={{ ...S.buttonDanger, marginLeft: "0.4rem" }}>Delete</button>
           </>
         )}
       </div>
@@ -464,37 +540,63 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
         </p>
       ) : (
         <>
-          {/* Toolbar */}
-          <div style={{ display: "flex", gap: "0.4rem", marginBottom: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
-            {TOOLS.map((t) => (
-              <button
-                key={t.id}
-                onClick={() => { setTool(t.id); setPopover(null); setEditor(null); }}
-                style={{ ...S.buttonGhost, ...(tool === t.id ? { borderColor: ACCENT, color: ACCENT } : {}) }}
-              >
-                {t.label}
-              </button>
-            ))}
-            <span style={{ color: "#666", fontSize: "0.78rem", marginLeft: "0.5rem" }}>
-              {TOOLS.find((t) => t.id === tool)?.hint}
-            </span>
-          </div>
-
           <div style={{ display: "flex", gap: "1rem", alignItems: "flex-start" }}>
+            {/* Left tool rail */}
+            <div style={{ width: 92, flexShrink: 0, display: "flex", flexDirection: "column", gap: "0.15rem" }}>
+              {toolButton("view")}
+              <RailLabel>Draft</RailLabel>
+              {toolButton("floor")}
+              {toolButton("wall")}
+              {toolButton("erase")}
+              {toolButton("room")}
+              <RailLabel>Place</RailLabel>
+              {toolButton("place")}
+              {tool === "place" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.15rem", marginLeft: "0.15rem", paddingLeft: "0.4rem", borderLeft: `2px solid ${ACCENT}55` }}>
+                  {(["light", "audio"] as PlaceCategory[]).map((cat) => (
+                    <button
+                      key={cat}
+                      onClick={() => { setPlaceCategory(cat); setSelected(null); }}
+                      style={{
+                        padding: "0.22rem 0.4rem",
+                        borderRadius: 5,
+                        border: `1px solid ${placeCategory === cat ? ACCENT : "#333"}`,
+                        background: placeCategory === cat ? `${ACCENT}1a` : "transparent",
+                        color: placeCategory === cat ? ACCENT : "#999",
+                        cursor: "pointer",
+                        fontSize: "0.72rem",
+                        textAlign: "left",
+                      }}
+                    >
+                      {cat === "light" ? "Lights" : "Speakers"}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <RailLabel>Color</RailLabel>
+              {toolButton("paint")}
+              <span style={{ color: "#666", fontSize: "0.68rem", marginTop: "0.5rem", lineHeight: 1.3 }}>
+                {TOOLS.find((t) => t.id === tool)?.hint}
+              </span>
+            </div>
+
             <PlanCanvas
               plan={plan}
               tiles={tiles}
               walls={walls}
               placements={placements}
+              audioPlacements={audioPlacements}
+              audioById={audioById}
               rooms={rooms}
               selectedRoom={selectedRoom}
               statesById={statesById}
               tool={tool}
-              selectedLight={selectedLight}
+              selected={selected}
               onMutate={(fn) => { fn(); setDirty(true); setPopover(null); }}
               setTiles={setTiles}
               setWalls={setWalls}
               setPlacements={setPlacements}
+              setAudioPlacements={setAudioPlacements}
               setRooms={setRooms}
               onLightClick={(pls, px, py) => {
                 if (pls.length === 1) {
@@ -503,6 +605,9 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                   setPopover({ px, py, placements: pls });
                 }
               }}
+              onAudioClick={(deviceId, px, py) =>
+                setEditor({ kind: "audio", id: deviceId, anchor: { x: px, y: py } })
+              }
               onResize={handleResize}
               onPaint={paintLight}
             />
@@ -518,27 +623,59 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
               />
             )}
 
-            {tool === "place" && (
+            {tool === "place" && placeCategory === "light" && (
               <div style={{ width: 220, flexShrink: 0 }}>
                 <h3 style={{ margin: "0 0 0.5rem", fontSize: "0.9rem", color: "#aaa" }}>Lights</h3>
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
-                  {lights.map((l) => (
-                    <button
-                      key={l.id}
-                      onClick={() => setSelectedLight(l.id === selectedLight ? "" : l.id)}
-                      style={{
-                        ...S.buttonGhost,
-                        textAlign: "left",
-                        fontSize: "0.8rem",
-                        ...(l.id === selectedLight ? { borderColor: ACCENT, color: ACCENT } : {}),
-                        ...(placedIds.has(l.id) ? { opacity: 0.55 } : {}),
-                      }}
-                    >
-                      {placedIds.has(l.id) ? "✓ " : ""}{lightLabel(l)}
-                    </button>
-                  ))}
+                  {lights.map((l) => {
+                    const sel = selected?.kind === "light" && selected.id === l.id;
+                    return (
+                      <button
+                        key={l.id}
+                        onClick={() => setSelected(sel ? null : { kind: "light", id: l.id })}
+                        style={{
+                          ...S.buttonGhost,
+                          textAlign: "left",
+                          fontSize: "0.8rem",
+                          ...(sel ? { borderColor: ACCENT, color: ACCENT } : {}),
+                          ...(placedIds.has(l.id) ? { opacity: 0.55 } : {}),
+                        }}
+                      >
+                        {placedIds.has(l.id) ? "✓ " : ""}{lightLabel(l)}
+                      </button>
+                    );
+                  })}
                   {lights.length === 0 && (
                     <span style={{ color: "#666", fontSize: "0.8rem" }}>No lights discovered yet.</span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {tool === "place" && placeCategory === "audio" && (
+              <div style={{ width: 220, flexShrink: 0 }}>
+                <h3 style={{ margin: "0 0 0.5rem", fontSize: "0.9rem", color: "#aaa" }}>Speakers</h3>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+                  {[...audioById.values()].map((d) => {
+                    const sel = selected?.kind === "audio" && selected.id === d.id;
+                    return (
+                      <button
+                        key={d.id}
+                        onClick={() => setSelected(sel ? null : { kind: "audio", id: d.id })}
+                        style={{
+                          ...S.buttonGhost,
+                          textAlign: "left",
+                          fontSize: "0.8rem",
+                          ...(sel ? { borderColor: ACCENT, color: ACCENT } : {}),
+                          ...(placedAudioIds.has(d.id) ? { opacity: 0.55 } : {}),
+                        }}
+                      >
+                        {placedAudioIds.has(d.id) ? "✓ " : ""}{d.name}
+                      </button>
+                    );
+                  })}
+                  {audioById.size === 0 && (
+                    <span style={{ color: "#666", fontSize: "0.8rem" }}>No audio devices discovered yet.</span>
                   )}
                 </div>
               </div>
@@ -685,6 +822,18 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
             />
           );
         }
+        if (editor.kind === "audio") {
+          const device = audioById.get(editor.id);
+          if (!device) return null;
+          return (
+            <AudioEditor
+              device={device}
+              anchor={editor.anchor}
+              onLocalPatch={patchAudio}
+              onClose={() => setEditor(null)}
+            />
+          );
+        }
         const room = allRooms.find((r) => r.id === editor.roomId);
         if (!room) return null;
         const anyOn = room.light_ids.some((id) => statesById.get(id)?.on);
@@ -797,6 +946,26 @@ function NewPlanDialog({
   );
 }
 
+/** Small uppercase section label in the left tool rail. A hairline divider on
+ * top keeps groups clearly separated without wasting vertical space. */
+function RailLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <span
+      style={{
+        color: "#6a675d",
+        fontSize: "0.58rem",
+        letterSpacing: "0.1em",
+        textTransform: "uppercase",
+        marginTop: "0.45rem",
+        paddingTop: "0.3rem",
+        borderTop: "1px solid #232323",
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
 // ── Room controller (right of canvas, view mode) ────────────────────────────
 
 function RoomController({
@@ -836,7 +1005,8 @@ function RoomController({
       room: rooms.find((r) => r.id === region.room_id),
       color: ROOM_COLORS[i % ROOM_COLORS.length],
     }))
-    .filter((b): b is { region: typeof b.region; room: Room; color: string } => !!b.room);
+    // Disabled rooms are hidden from the planner's room controller.
+    .filter((b): b is { region: typeof b.region; room: Room; color: string } => !!b.room && b.room.enabled);
 
   if (bound.length === 0) return null;
 
@@ -1157,22 +1327,99 @@ function distToSegment(px: number, py: number, x1: number, y1: number, x2: numbe
   return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
 }
 
+// ── Device glyphs (simple vector icons drawn on the canvas) ──────────────────
+
+const AUDIO_HEX = "#a78bfa";
+
+function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+  ctx.beginPath();
+  if (typeof ctx.roundRect === "function") ctx.roundRect(x, y, w, h, r);
+  else ctx.rect(x, y, w, h);
+}
+
+/** Light bulb: a screw base under the (colored) glass. The glass circle itself
+ * is drawn by the caller so it can carry the live light color + glow; this adds
+ * the base that makes it read as a bulb. */
+function drawBulbBase(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: number) {
+  const bw = r * 0.95;
+  const bh = r * 0.7;
+  const bx = cx - bw / 2;
+  const by = cy + r * 0.72;
+  ctx.fillStyle = "#2b2b30";
+  ctx.strokeStyle = "rgba(0,0,0,0.55)";
+  ctx.lineWidth = 1;
+  roundRectPath(ctx, bx, by, bw, bh, Math.max(1, r * 0.18));
+  ctx.fill();
+  ctx.stroke();
+  // a couple of thread lines
+  ctx.strokeStyle = "rgba(255,255,255,0.18)";
+  ctx.beginPath();
+  ctx.moveTo(bx, by + bh * 0.4);
+  ctx.lineTo(bx + bw, by + bh * 0.4);
+  ctx.moveTo(bx, by + bh * 0.72);
+  ctx.lineTo(bx + bw, by + bh * 0.72);
+  ctx.stroke();
+}
+
+/** Speaker: a tall cabinet with a tweeter + woofer. */
+function drawSpeakerIcon(ctx: CanvasRenderingContext2D, cx: number, cy: number, s: number) {
+  ctx.strokeStyle = AUDIO_HEX;
+  ctx.fillStyle = "rgba(167,139,250,0.16)";
+  ctx.lineWidth = Math.max(1, s * 0.07);
+  const w = s * 0.66, h = s;
+  const x = cx - w / 2, y = cy - h / 2;
+  roundRectPath(ctx, x, y, w, h, s * 0.12);
+  ctx.fill();
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cx, y + h * 0.28, Math.max(1, s * 0.08), 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cx, y + h * 0.64, Math.max(1.5, s * 0.17), 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+/** Receiver: a wide flat chassis with a display slot and two knobs. */
+function drawReceiverIcon(ctx: CanvasRenderingContext2D, cx: number, cy: number, s: number) {
+  ctx.strokeStyle = AUDIO_HEX;
+  ctx.fillStyle = "rgba(167,139,250,0.16)";
+  ctx.lineWidth = Math.max(1, s * 0.07);
+  const w = s * 1.15, h = s * 0.62;
+  const x = cx - w / 2, y = cy - h / 2;
+  roundRectPath(ctx, x, y, w, h, s * 0.1);
+  ctx.fill();
+  ctx.stroke();
+  // display on the left
+  ctx.strokeRect(x + w * 0.1, cy - h * 0.18, w * 0.34, h * 0.36);
+  // two knobs on the right
+  ctx.beginPath();
+  ctx.arc(x + w * 0.72, cy, Math.max(1, s * 0.08), 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(x + w * 0.9, cy, Math.max(1, s * 0.08), 0, Math.PI * 2);
+  ctx.stroke();
+}
+
 function PlanCanvas({
   plan,
   tiles,
   walls,
   placements,
+  audioPlacements,
+  audioById,
   rooms,
   selectedRoom,
   statesById,
   tool,
-  selectedLight,
+  selected,
   onMutate,
   setTiles,
   setWalls,
   setPlacements,
+  setAudioPlacements,
   setRooms,
   onLightClick,
+  onAudioClick,
   onResize,
   onPaint,
 }: {
@@ -1180,17 +1427,21 @@ function PlanCanvas({
   tiles: Set<string>;
   walls: Set<string>;
   placements: Placement[];
+  audioPlacements: AudioPlacement[];
+  audioById: Map<string, AudioDevice>;
   rooms: EditRoom[];
   selectedRoom: string;
   statesById: Map<string, LightState>;
   tool: Tool;
-  selectedLight: string;
+  selected: { kind: PlaceCategory; id: string } | null;
   onMutate: (fn: () => void) => void;
   setTiles: React.Dispatch<React.SetStateAction<Set<string>>>;
   setWalls: React.Dispatch<React.SetStateAction<Set<string>>>;
   setPlacements: React.Dispatch<React.SetStateAction<Placement[]>>;
+  setAudioPlacements: React.Dispatch<React.SetStateAction<AudioPlacement[]>>;
   setRooms: React.Dispatch<React.SetStateAction<EditRoom[]>>;
   onLightClick: (placements: Placement[], px: number, py: number) => void;
+  onAudioClick: (deviceId: string, px: number, py: number) => void;
   onResize: (width: number, height: number) => void;
   onPaint: (lightId: string) => void;
 }) {
@@ -1316,7 +1567,7 @@ function PlanCanvas({
         }
         const cx = ox + (sx / room.tiles.size) * cell;
         const cy = oy + (sy / room.tiles.size) * cell;
-        ctx.font = `600 ${Math.max(10, cell * 0.45)}px system-ui`;
+        ctx.font = `600 ${Math.max(10, cell * 0.45)}px "Inter Variable", system-ui`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillStyle = "rgba(255,255,255,0.55)";
@@ -1346,14 +1597,14 @@ function PlanCanvas({
         ctx.lineCap = "round";
         ctx.lineJoin = "round";
         ctx.globalAlpha = 0.3 * Math.min(1, ((st.brightness ?? 100) / 100) + 0.3);
-        ctx.lineWidth = Math.max(9, cell * 0.55);
+        ctx.lineWidth = Math.max(5, cell * 0.34);
         ctx.stroke(run);
         ctx.globalAlpha = 1;
       }
       ctx.strokeStyle = color;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
-      ctx.lineWidth = Math.max(3, cell * 0.14);
+      ctx.lineWidth = Math.max(1.5, cell * 0.07);
       ctx.stroke(run);
     }
 
@@ -1391,6 +1642,8 @@ function PlanCanvas({
         ctx.fill();
         ctx.globalAlpha = 1;
       }
+      // Bulb: screw base under the colored glass (skipped when too small).
+      if (cell >= 14) drawBulbBase(ctx, cx, cy, r);
       ctx.fillStyle = fill;
       ctx.beginPath();
       ctx.arc(cx, cy, r, 0, Math.PI * 2);
@@ -1401,10 +1654,25 @@ function PlanCanvas({
 
       if (group.length > 1) {
         ctx.fillStyle = "#fff";
-        ctx.font = `${Math.max(9, cell * 0.3)}px system-ui`;
+        ctx.font = `${Math.max(9, cell * 0.3)}px "Inter Variable", system-ui`;
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
         ctx.fillText(`×${group.length}`, cx + r + 2, cy);
+      }
+    }
+
+    // Audio devices — a speaker or receiver glyph, by the device's kind.
+    for (const p of audioPlacements) {
+      const [mx, my] = mountOffset(p.mount);
+      const cx = ox + (p.x + mx) * cell;
+      const cy = oy + (p.y + my) * cell;
+      const sz = Math.max(11, cell * 0.5);
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      if (audioById.get(p.audio_device_id)?.kind === "receiver") {
+        drawReceiverIcon(ctx, cx, cy, sz);
+      } else {
+        drawSpeakerIcon(ctx, cx, cy, sz);
       }
     }
 
@@ -1418,7 +1686,7 @@ function PlanCanvas({
       ctx.setLineDash([5, 4]);
       ctx.strokeRect(ox, oy, gridW * cell, gridH * cell);
       ctx.setLineDash([]);
-      ctx.font = "600 12px system-ui";
+      ctx.font = "600 12px 'Inter Variable', system-ui";
       ctx.textAlign = "right";
       ctx.textBaseline = "bottom";
       ctx.fillStyle = ACCENT;
@@ -1432,11 +1700,11 @@ function PlanCanvas({
     ctx.fill();
     ctx.stroke();
     ctx.fillStyle = "#0d0d0f";
-    ctx.font = "700 9px system-ui";
+    ctx.font = "700 9px 'Inter Variable', system-ui";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText("⤡", hx, hy + 0.5);
-  }, [view, plan, tiles, walls, placements, rooms, selectedRoom, tool, statesById, pendingSize]);
+  }, [view, plan, tiles, walls, placements, audioPlacements, audioById, rooms, selectedRoom, tool, statesById, pendingSize]);
 
   useEffect(() => { draw(); }, [draw]);
   useEffect(() => {
@@ -1520,27 +1788,48 @@ function PlanCanvas({
         }
       });
     } else if (tool === "place" && e.type === "pointerdown" && inBounds) {
-      // Hit an existing placement? Remove it.
+      // Hit an existing placement (light or speaker)? Remove it.
       const hit = hitPlacement(gx, gy);
       if (hit) {
         onMutate(() => setPlacements((prev) => prev.filter((p) => p.light_id !== hit.light_id)));
         return;
       }
-      if (!selectedLight) return;
+      const audioHit = hitAudio(gx, gy);
+      if (audioHit) {
+        onMutate(() =>
+          setAudioPlacements((prev) =>
+            prev.filter((p) => p.audio_device_id !== audioHit.audio_device_id),
+          ),
+        );
+        return;
+      }
+      if (!selected) return;
       const fx = gx - tx, fy = gy - ty;
       const m = Math.min(fx, 1 - fx, fy, 1 - fy);
       let mount: Mount = "c";
       if (m < 0.28) {
         mount = fy === m ? "n" : 1 - fy === m ? "s" : fx === m ? "w" : "e";
       }
+      if (selected.kind === "audio") {
+        // Speakers are point placements — no strip drag.
+        const deviceId = selected.id;
+        onMutate(() =>
+          setAudioPlacements((prev) => [
+            ...prev.filter((p) => p.audio_device_id !== deviceId),
+            { audio_device_id: deviceId, x: tx, y: ty, mount },
+          ]),
+        );
+        return;
+      }
+      const lightId = selected.id;
       onMutate(() =>
         setPlacements((prev) => [
-          ...prev.filter((p) => p.light_id !== selectedLight),
-          { light_id: selectedLight, x: tx, y: ty, mount },
+          ...prev.filter((p) => p.light_id !== lightId),
+          { light_id: lightId, x: tx, y: ty, mount },
         ]),
       );
       if (drag.current) {
-        drag.current.placing = selectedLight;
+        drag.current.placing = lightId;
         drag.current.path = [[tx, ty]];
       }
     } else if (tool === "paint") {
@@ -1567,6 +1856,14 @@ function PlanCanvas({
         const dx = gx - (p.x + mx), dy = gy - (p.y + my);
         if (Math.hypot(dx, dy) < 0.3) return p;
       }
+    }
+    return null;
+  }
+
+  function hitAudio(gx: number, gy: number): AudioPlacement | null {
+    for (const p of audioPlacements) {
+      const [mx, my] = mountOffset(p.mount);
+      if (Math.hypot(gx - (p.x + mx), gy - (p.y + my)) < 0.35) return p;
     }
     return null;
   }
@@ -1669,6 +1966,11 @@ function PlanCanvas({
         const k = `${hit.x},${hit.y},${hit.mount}`;
         const cluster = placements.filter((p) => `${p.x},${p.y},${p.mount}` === k);
         onLightClick(cluster, e.clientX, e.clientY);
+        return;
+      }
+      const audioHit = hitAudio(gx, gy);
+      if (audioHit) {
+        onAudioClick(audioHit.audio_device_id, e.clientX, e.clientY);
       }
     }
   }

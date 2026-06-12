@@ -8,15 +8,15 @@
 
 use crate::AppState;
 use crate::api::auth::require_session;
-use crate::models::audio::{AudioCapabilities, AudioCommand, AudioState};
+use crate::models::audio::{AudioCapabilities, AudioCommand, AudioFavorite, AudioState};
 use axum::{
     Json, Router,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::{get, put},
+    routing::{get, post, put},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::sync::Arc;
 
@@ -25,6 +25,15 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/devices", get(list_devices_handler))
         .route("/devices/{id}", get(get_device_handler))
         .route("/devices/{id}/state", put(set_device_handler))
+        .route("/devices/{id}/favorites", get(list_favorites_handler))
+        .route("/devices/{id}/favorites/play", post(play_favorite_handler))
+}
+
+/// Body for "play a favorite" — the id is carried here rather than in the path
+/// because provider-native ids (e.g. Sonos `FV:2/12`) contain slashes.
+#[derive(Deserialize)]
+pub(crate) struct PlayFavoriteRequest {
+    pub favorite_id: String,
 }
 
 // ── Wire shape ───────────────────────────────────────────────────────────────
@@ -186,6 +195,120 @@ pub(crate) async fn apply_audio_command(
     }
 }
 
+/// Look up an audio device's provider-native id and a live provider built from
+/// its (decrypted) credentials. Shared by the favorites services.
+enum ProviderLookup {
+    Found(String, Box<dyn crate::providers::AudioProvider>),
+    NotFound,
+    Db,
+}
+
+async fn lookup_audio_provider(state: &AppState, id: &str) -> ProviderLookup {
+    let row = sqlx::query(
+        "SELECT a.device_id, p.provider_type, p.credentials
+         FROM audio_devices a JOIN providers p ON a.provider_id = p.id
+         WHERE a.id = ? AND p.enabled = 1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await;
+    let row = match row {
+        Ok(Some(r)) => r,
+        Ok(None) => return ProviderLookup::NotFound,
+        Err(e) => {
+            tracing::error!("db error: {e}");
+            return ProviderLookup::Db;
+        }
+    };
+    let device_id: String = row.get("device_id");
+    let provider_type: String = row.get("provider_type");
+    let credentials: String = row.get("credentials");
+    match build_audio_provider(state, &provider_type, &credentials) {
+        Ok(p) => ProviderLookup::Found(device_id, p),
+        Err(e) => {
+            tracing::error!("failed to build audio provider: {e:#}");
+            ProviderLookup::Db
+        }
+    }
+}
+
+// ── Favorites (list + play) ──────────────────────────────────────────────────
+
+pub(crate) enum FavoritesOutcome {
+    Ok(Vec<AudioFavorite>),
+    NotFound,
+    Unreachable,
+    Db,
+}
+
+pub(crate) async fn list_device_favorites(state: &AppState, id: &str) -> FavoritesOutcome {
+    let (device_id, provider) = match lookup_audio_provider(state, id).await {
+        ProviderLookup::Found(d, p) => (d, p),
+        ProviderLookup::NotFound => return FavoritesOutcome::NotFound,
+        ProviderLookup::Db => return FavoritesOutcome::Db,
+    };
+    match provider.list_favorites(&device_id).await {
+        Ok(favs) => FavoritesOutcome::Ok(favs),
+        Err(e) => {
+            tracing::debug!("audio favorites unavailable for {id}: {e:#}");
+            FavoritesOutcome::Unreachable
+        }
+    }
+}
+
+pub(crate) fn favorites_response(outcome: FavoritesOutcome) -> axum::response::Response {
+    match outcome {
+        FavoritesOutcome::Ok(favs) => Json(favs).into_response(),
+        FavoritesOutcome::NotFound => StatusCode::NOT_FOUND.into_response(),
+        FavoritesOutcome::Unreachable => StatusCode::BAD_GATEWAY.into_response(),
+        FavoritesOutcome::Db => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+pub(crate) enum PlayFavoriteOutcome {
+    Ok,
+    NotFound,
+    BadFavorite(String),
+    Unreachable,
+    Db,
+}
+
+pub(crate) async fn play_device_favorite(
+    state: &AppState,
+    id: &str,
+    favorite_id: &str,
+) -> PlayFavoriteOutcome {
+    let (device_id, provider) = match lookup_audio_provider(state, id).await {
+        ProviderLookup::Found(d, p) => (d, p),
+        ProviderLookup::NotFound => return PlayFavoriteOutcome::NotFound,
+        ProviderLookup::Db => return PlayFavoriteOutcome::Db,
+    };
+    match provider.play_favorite(&device_id, favorite_id).await {
+        Ok(()) => PlayFavoriteOutcome::Ok,
+        // An unknown favorite id (or a provider without favorites) is the
+        // caller's mistake, not a gateway fault.
+        Err(e) if e.to_string().contains("unknown") || e.to_string().contains("not support") => {
+            PlayFavoriteOutcome::BadFavorite(e.to_string())
+        }
+        Err(e) => {
+            tracing::error!("audio play_favorite error: {e:#}");
+            PlayFavoriteOutcome::Unreachable
+        }
+    }
+}
+
+pub(crate) fn play_favorite_response(outcome: PlayFavoriteOutcome) -> axum::response::Response {
+    match outcome {
+        PlayFavoriteOutcome::Ok => StatusCode::NO_CONTENT.into_response(),
+        PlayFavoriteOutcome::NotFound => StatusCode::NOT_FOUND.into_response(),
+        PlayFavoriteOutcome::BadFavorite(m) => {
+            (StatusCode::UNPROCESSABLE_ENTITY, m).into_response()
+        }
+        PlayFavoriteOutcome::Unreachable => StatusCode::BAD_GATEWAY.into_response(),
+        PlayFavoriteOutcome::Db => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 pub(crate) fn set_audio_status(outcome: SetAudioOutcome) -> axum::response::Response {
     match outcome {
         SetAudioOutcome::Ok => StatusCode::NO_CONTENT.into_response(),
@@ -285,4 +408,27 @@ async fn set_device_handler(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     set_audio_status(apply_audio_command(&state, &id, &cmd).await)
+}
+
+async fn list_favorites_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    favorites_response(list_device_favorites(&state, &id).await)
+}
+
+async fn play_favorite_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<PlayFavoriteRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    play_favorite_response(play_device_favorite(&state, &id, &req.favorite_id).await)
 }

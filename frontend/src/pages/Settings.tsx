@@ -5,6 +5,7 @@ import {
   discoverLights,
   getProviderGroups,
   getLights,
+  getProviderConfig,
   getProviderStatus,
   getProviderTypes,
   getProviders,
@@ -17,6 +18,7 @@ import {
   removeRoom,
   removeProvider,
   setRoomDirectLights,
+  setRoomEnabled,
   setRoomLinks,
   updateProviderCredentials,
   getApiKeys,
@@ -34,6 +36,7 @@ import {
   type ProviderType,
 } from "../api";
 import { useDialogs, type Dialogs } from "../components/dialogs";
+import { useViewport } from "../useViewport";
 import { ACCENT, S } from "../styles";
 
 interface Props {
@@ -42,6 +45,7 @@ interface Props {
 
 export function SettingsPage({ onNavigate: _onNavigate }: Props) {
   const dialogs = useDialogs();
+  const { isMobile } = useViewport();
   const [providers, setProviders] = useState<Provider[]>([]);
   const [types, setTypes] = useState<ProviderType[]>([]);
   const [showAdd, setShowAdd] = useState(false);
@@ -92,7 +96,7 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
   }
 
   return (
-    <div style={{ padding: "2rem", maxWidth: 720, margin: "0 auto" }}>
+    <div style={{ padding: isMobile ? "1rem 0.85rem" : "2rem", maxWidth: 720, margin: "0 auto" }}>
       <h2 style={{ margin: "0 0 1.5rem", fontSize: "1.2rem", color: "#ccc" }}>Providers</h2>
 
       {toast && (
@@ -545,18 +549,35 @@ function RoomCard({
   }
 
   return (
-    <div style={{ ...S.card, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: "1rem" }}>
+    <div
+      style={{
+        ...S.card,
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: "1rem",
+        flexWrap: "wrap",
+        opacity: room.enabled ? 1 : 0.55,
+      }}
+    >
       <div style={{ minWidth: 0 }}>
-        <div style={{ fontWeight: 600 }}>{room.name}</div>
+        <div style={{ fontWeight: 600 }}>
+          {room.name}
+          {!room.enabled && (
+            <span style={{ marginLeft: "0.5rem", color: "#a86", fontSize: "0.72rem", border: "1px solid #543", borderRadius: 4, padding: "0 0.35rem" }}>
+              disabled
+            </span>
+          )}
+        </div>
         <div style={{ color: "#888", fontSize: "0.8rem", marginTop: "0.25rem", display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
           <span>{room.light_ids.length} light{room.light_ids.length !== 1 ? "s" : ""}</span>
           {room.links.map((l) => (
             <span
               key={l.provider_group_id}
-              title="Synced provider room/zone"
+              title={l.domain === "audio" ? "Synced audio room/zone" : "Synced provider room/zone"}
               style={{ border: "1px solid #333", borderRadius: 4, padding: "0 0.35rem", color: "#9a9", fontSize: "0.72rem" }}
             >
-              ⇄ {l.name}
+              {l.domain === "audio" ? "♪" : "⇄"} {l.name}
             </span>
           ))}
         </div>
@@ -576,6 +597,13 @@ function RoomCard({
             ))}
           </select>
         )}
+        <button
+          onClick={async () => { await setRoomEnabled(room.id, !room.enabled); await onChanged(); }}
+          title={room.enabled ? "Hide this room from the Dashboard and Floor Plan" : "Show this room again"}
+          style={S.buttonGhost}
+        >
+          {room.enabled ? "Disable" : "Enable"}
+        </button>
         <button onClick={() => setEditing(true)} style={S.buttonGhost}>Edit</button>
         <button onClick={onRemove} style={S.buttonDanger}>Remove</button>
       </div>
@@ -650,28 +678,57 @@ function RoomEditForm({
       )}
       {nameLocked && <h3 style={{ margin: 0, fontSize: "1rem", color: "#ccc" }}>{name}</h3>}
 
-      {providerGroups.length > 0 && (
+      {providerGroups.some((pg) => pg.domain === "light") && (
         <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
           <span style={{ fontSize: "0.875rem", color: "#aaa" }}>
             Linked provider rooms <span style={{ color: "#666" }}>(membership syncs automatically)</span>
           </span>
-          {providerGroups.map((pg) => (
-            <label
-              key={pg.id}
-              style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.875rem", color: "#ccc", cursor: "pointer" }}
-            >
-              <input
-                type="checkbox"
-                checked={links.has(pg.id)}
-                onChange={() => toggleSet(setLinks, pg.id)}
-                style={{ accentColor: ACCENT }}
-              />
-              ⇄ {pg.name}
-              <span style={{ color: "#666", fontSize: "0.75rem" }}>
-                {pg.light_ids.length} light{pg.light_ids.length !== 1 ? "s" : ""}
-              </span>
-            </label>
-          ))}
+          {providerGroups
+            .filter((pg) => pg.domain === "light")
+            .map((pg) => (
+              <label
+                key={pg.id}
+                style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.875rem", color: "#ccc", cursor: "pointer" }}
+              >
+                <input
+                  type="checkbox"
+                  checked={links.has(pg.id)}
+                  onChange={() => toggleSet(setLinks, pg.id)}
+                  style={{ accentColor: ACCENT }}
+                />
+                ⇄ {pg.name}
+                <span style={{ color: "#666", fontSize: "0.75rem" }}>
+                  {pg.light_ids.length} light{pg.light_ids.length !== 1 ? "s" : ""}
+                </span>
+              </label>
+            ))}
+        </div>
+      )}
+
+      {providerGroups.some((pg) => pg.domain === "audio") && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
+          <span style={{ fontSize: "0.875rem", color: "#aaa" }}>
+            Linked audio rooms/zones <span style={{ color: "#666" }}>(sets the room's speaker)</span>
+          </span>
+          {providerGroups
+            .filter((pg) => pg.domain === "audio")
+            .map((pg) => (
+              <label
+                key={pg.id}
+                style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.875rem", color: "#ccc", cursor: "pointer" }}
+              >
+                <input
+                  type="checkbox"
+                  checked={links.has(pg.id)}
+                  onChange={() => toggleSet(setLinks, pg.id)}
+                  style={{ accentColor: ACCENT }}
+                />
+                ♪ {pg.name}
+                <span style={{ color: "#666", fontSize: "0.75rem" }}>
+                  {pg.audio_device_ids.length} device{pg.audio_device_ids.length !== 1 ? "s" : ""}
+                </span>
+              </label>
+            ))}
         </div>
       )}
 
@@ -732,6 +789,7 @@ function ProviderCard({
   onDiscover: () => Promise<void>;
   onImportGroups: () => Promise<void>;
 }) {
+  const { isMobile } = useViewport();
   const [status, setStatus] = useState<ConnectionStatus | null>(null);
   const [discovering, setDiscovering] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -760,7 +818,15 @@ function ProviderCard({
 
   return (
     <div style={{ ...S.card, gap: "0.75rem" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1rem" }}>
+      <div
+        style={{
+          display: "flex",
+          flexDirection: isMobile ? "column" : "row",
+          alignItems: isMobile ? "stretch" : "center",
+          justifyContent: "space-between",
+          gap: isMobile ? "0.6rem" : "1rem",
+        }}
+      >
         <div style={{ minWidth: 0 }}>
           <div style={{ fontWeight: 600 }}>{provider.name}</div>
           <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.25rem" }}>
@@ -771,24 +837,24 @@ function ProviderCard({
             {status && <StatusBadge state={status.state} />}
           </div>
         </div>
-        <div style={{ display: "flex", gap: "0.5rem", flexShrink: 0 }}>
+        <div style={{ display: "flex", gap: "0.5rem", flexShrink: 0, flexWrap: "wrap" }}>
           <button onClick={handleDiscover} disabled={discovering} style={S.buttonGhost}>
             {discovering ? "…" : "Discover"}
           </button>
           <button
             onClick={handleImport}
             disabled={importing}
-            title="Sync the provider's rooms/zones into Bifrost Rooms"
+            title="Sync this provider's rooms/zones into Bifrost Rooms"
             style={S.buttonGhost}
           >
-            {importing ? "…" : "Sync rooms"}
+            {importing ? "…" : "Sync"}
           </button>
           <button
             onClick={() => setEditingCreds((v) => !v)}
-            title="Re-enter credentials (e.g. after a BIFROST_SECRET change)"
+            title="Reconfigure this provider's IP and credentials"
             style={S.buttonGhost}
           >
-            {editingCreds ? "Close" : "Edit credentials"}
+            {editingCreds ? "Close" : "Edit"}
           </button>
           <button onClick={onRemove} style={S.buttonDanger}>Remove</button>
         </div>
@@ -808,8 +874,10 @@ function ProviderCard({
   );
 }
 
-/// Re-enter credentials for an existing provider. The provider row (and all
-/// lights, scenes, groups, plans referencing it) stays intact.
+/// Edit an existing provider's IP and credentials in place. Non-secret fields
+/// (host/IP) are prefilled; secret fields stay blank and keep their stored
+/// value unless re-entered. The provider row (and all lights, scenes, groups,
+/// plans referencing it) stays intact.
 function EditCredentialsForm({
   provider,
   schema,
@@ -822,10 +890,24 @@ function EditCredentialsForm({
   onCancel: () => void;
 }) {
   const [credentials, setCredentials] = useState<Record<string, string>>({});
+  // When false, stored credentials couldn't be decrypted (e.g. BIFROST_SECRET
+  // changed) — every field, secrets included, must be re-entered.
+  const [decryptable, setDecryptable] = useState(true);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [pairing, setPairing] = useState(false);
   const [pairMsg, setPairMsg] = useState("");
+
+  // Prefill the current non-secret values so the user can tweak just the IP.
+  useEffect(() => {
+    getProviderConfig(provider.id).then((cfg) => {
+      if (!cfg) return;
+      setDecryptable(cfg.decryptable);
+      setCredentials(
+        Object.fromEntries(Object.entries(cfg.values).map(([k, v]) => [k, String(v)])),
+      );
+    });
+  }, [provider.id]);
 
   function setField(name: string, value: string) {
     setCredentials((prev) => ({ ...prev, [name]: value }));
@@ -858,21 +940,32 @@ function EditCredentialsForm({
 
   return (
     <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: "0.6rem", borderTop: "1px solid #2a2a2a", paddingTop: "0.75rem" }}>
+      {!decryptable && (
+        <p style={{ color: "#fa0", margin: 0, fontSize: "0.8rem" }}>
+          The stored credentials couldn't be read (the encryption secret may have changed).
+          Re-enter every field below.
+        </p>
+      )}
       {schema.map((field) => {
         const isHueAppKey = provider.provider_type === "hue" && field.name === "app_key";
+        const isSecret = field.kind === "password";
+        // Secret fields keep their stored value when left blank, so they're
+        // only required when we couldn't decrypt the existing credentials.
+        const required = isSecret ? !decryptable : field.required;
         return (
           <label key={field.name} style={labelStyle}>
             <span>
               {field.label}
-              {field.required && <span style={{ color: ACCENT }}> *</span>}
+              {required && <span style={{ color: ACCENT }}> *</span>}
             </span>
             <div style={{ display: "flex", gap: "0.5rem" }}>
               <input
                 type={field.kind === "password" ? "password" : "text"}
                 value={credentials[field.name] ?? ""}
                 onChange={(e) => setField(field.name, e.target.value)}
+                placeholder={isSecret && decryptable ? "Leave blank to keep current" : undefined}
                 style={{ ...S.input, flex: 1 }}
-                required={field.required}
+                required={required}
                 autoComplete={field.kind === "password" ? "new-password" : "off"}
               />
               {isHueAppKey && (
@@ -897,7 +990,7 @@ function EditCredentialsForm({
       {error && <p style={{ color: "#f66", margin: 0, fontSize: "0.875rem" }}>{error}</p>}
       <div style={{ display: "flex", gap: "0.5rem" }}>
         <button type="submit" style={S.button} disabled={saving}>
-          {saving ? "Saving…" : "Save credentials"}
+          {saving ? "Saving…" : "Save"}
         </button>
         <button type="button" onClick={onCancel} style={S.buttonGhost}>Cancel</button>
       </div>

@@ -294,6 +294,10 @@ direct lights (scenes and plan bindings follow). Which groups were provider
 imports wasn't recorded, so run **Sync rooms** once per provider — mirrors
 are created and linked to same-named Rooms automatically.
 
+## AI usage disclosure
+
+Bifrost is built with heavy use of AI assistance — primarily [Claude Code](https://claude.com/claude-code) (Anthropic's Claude models). AI contributed to the code, tests, and documentation throughout. Every change is gated by the same CI as any other (`cargo fmt`, `cargo clippy -D warnings`, the full test suite, and the frontend build), and changes are reviewed before landing. AI-assisted commits are marked with a `Co-Authored-By: Claude` trailer.
+
 ## License
 
 MIT

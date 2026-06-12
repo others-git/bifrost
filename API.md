@@ -154,11 +154,16 @@ Receivers and networked speakers (Onkyo via eISCP, Sonos via local UPnP).
 }
 ```
 
+A device's `capabilities` may also include `"favorites": true` (Sonos) — the
+device exposes saved favorites you can start playing (see below).
+
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/v1/audio/devices` | All audio devices (cached state) |
 | `GET` | `/api/v1/audio/devices/{id}` | One device — live read, refreshes the cache |
 | `PUT` | `/api/v1/audio/devices/{id}/state` | Send a command (body below) |
+| `GET` | `/api/v1/audio/devices/{id}/favorites` | List saved favorites (live read) |
+| `POST` | `/api/v1/audio/devices/{id}/favorites/play` | Start a favorite (body below) |
 
 `PUT …/state` takes a **sparse command** — only the fields present are applied:
 
@@ -181,6 +186,30 @@ maps to play/pause.
 
 Responses: `204` success, `404` unknown device, `422` invalid command (e.g.
 unknown source — message in body), `502` device unreachable.
+
+#### Favorites
+
+Favorites are the presets the user already saved on the provider (e.g. Sonos
+Favorites — playlists, stations). No accounts or search: you list them and
+start one by reference.
+
+```json
+// GET …/favorites
+[
+  { "id": "FV:2/12", "title": "Jazz", "subtitle": "Spotify" },
+  { "id": "FV:2/3", "title": "BBC Radio 6", "subtitle": "TuneIn" }
+]
+```
+
+`POST …/favorites/play` takes the id in the body (provider ids contain slashes):
+
+```json
+{ "favorite_id": "FV:2/12" }
+```
+
+Responses: list → `200` with the array (empty for providers without favorites,
+such as Onkyo); play → `204` success, `404` unknown device, `422` unknown
+favorite, `502` device unreachable.
 
 ## Status codes
 

@@ -409,6 +409,9 @@ impl AudioProvider for OnkyoProvider {
                 sources: true,
                 transport: true,
                 now_playing: true,
+                // eISCP can select NET services (Spotify, etc.) but can't
+                // enumerate saved presets, so no favorites list.
+                favorites: false,
             },
             state: main_state,
         }];
@@ -427,6 +430,7 @@ impl AudioProvider for OnkyoProvider {
                     sources: true,
                     transport: true,
                     now_playing: false,
+                    favorites: false,
                 },
                 state,
             });

@@ -194,10 +194,19 @@ async fn serve_frontend(uri: axum::http::Uri) -> axum::response::Response {
     let path = if path.is_empty() { "index.html" } else { path };
 
     match FrontendAssets::get(path) {
-        Some(content) => axum::response::Response::builder()
-            .header("content-type", content.metadata.mimetype())
-            .body(axum::body::Body::from(content.data.to_vec()))
-            .unwrap(),
+        Some(content) => {
+            // mime_guess doesn't always know `.webmanifest`; serve the PWA
+            // manifest with the spec type so install works reliably.
+            let content_type = if path.ends_with(".webmanifest") {
+                "application/manifest+json"
+            } else {
+                content.metadata.mimetype()
+            };
+            axum::response::Response::builder()
+                .header("content-type", content_type)
+                .body(axum::body::Body::from(content.data.to_vec()))
+                .unwrap()
+        }
         None => match FrontendAssets::get("index.html") {
             Some(content) => axum::response::Response::builder()
                 .header("content-type", "text/html")

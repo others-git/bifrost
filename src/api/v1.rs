@@ -10,14 +10,20 @@
 
 use crate::AppState;
 use crate::api::apikeys::require_api_key;
-use crate::api::audio::{apply_audio_command, get_device_live, list_all_devices, set_audio_status};
+use crate::api::audio::{
+    PlayFavoriteRequest, apply_audio_command, favorites_response, get_device_live,
+    list_all_devices, list_device_favorites, play_device_favorite, play_favorite_response,
+    set_audio_status,
+};
 use crate::api::lights::{apply_light_state, get_light_by_id, list_all_lights, set_light_status};
 use crate::api::palette_scenes::{
     NewScene, SceneError, apply_scene_to_room, create_scene as create_palette_scene,
     create_scene_from_room, delete_scene as delete_palette_scene,
     list_scenes as list_palette_scenes,
 };
-use crate::api::rooms::{apply_uniform_state, effective_member_ids, effective_members};
+use crate::api::rooms::{
+    apply_uniform_state, effective_member_ids, effective_members, room_audio_device_id,
+};
 use crate::models::LightState;
 use axum::{
     Json, Router,
@@ -44,6 +50,11 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/audio/devices", get(list_audio))
         .route("/audio/devices/{id}", get(get_audio))
         .route("/audio/devices/{id}/state", put(set_audio))
+        .route("/audio/devices/{id}/favorites", get(list_audio_favorites))
+        .route(
+            "/audio/devices/{id}/favorites/play",
+            post(play_audio_favorite),
+        )
 }
 
 /// Shared 401 guard. Returns `Err(401)` when the Bearer key is missing/invalid.
@@ -110,7 +121,8 @@ async fn list_rooms(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
         return s.into_response();
     }
 
-    let rows = sqlx::query("SELECT id, name FROM rooms ORDER BY created_at")
+    // Disabled rooms are hidden from the public API too.
+    let rows = sqlx::query("SELECT id, name FROM rooms WHERE enabled = 1 ORDER BY created_at")
         .fetch_all(&state.db)
         .await
         .unwrap_or_default();
@@ -119,14 +131,7 @@ async fn list_rooms(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
     for row in rows {
         let id: String = row.get("id");
         let light_ids = effective_member_ids(&state, &id).await;
-        let audio_device_id: Option<String> =
-            sqlx::query("SELECT audio_device_id FROM room_audio WHERE room_id = ?")
-                .bind(&id)
-                .fetch_optional(&state.db)
-                .await
-                .ok()
-                .flatten()
-                .map(|r| r.get("audio_device_id"));
+        let audio_device_id = room_audio_device_id(&state, &id).await;
         out.push(V1Room {
             name: row.get("name"),
             light_ids,
@@ -286,4 +291,27 @@ async fn set_audio(
         return s.into_response();
     }
     set_audio_status(apply_audio_command(&state, &id, &cmd).await)
+}
+
+async fn list_audio_favorites(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(s) = auth(&state, &headers).await {
+        return s.into_response();
+    }
+    favorites_response(list_device_favorites(&state, &id).await)
+}
+
+async fn play_audio_favorite(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<PlayFavoriteRequest>,
+) -> impl IntoResponse {
+    if let Err(s) = auth(&state, &headers).await {
+        return s.into_response();
+    }
+    play_favorite_response(play_device_favorite(&state, &id, &req.favorite_id).await)
 }

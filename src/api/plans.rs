@@ -26,6 +26,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{id}", get(get_plan).delete(remove_plan))
         .route("/{id}/layout", put(set_layout))
         .route("/{id}/lights", put(set_lights))
+        .route("/{id}/audio", put(set_audio_placements))
         .route("/{id}/rooms", put(set_rooms))
         .route("/{id}/size", put(set_size))
 }
@@ -85,6 +86,16 @@ impl Mount {
             Self::W => "w",
         }
     }
+
+    fn from_db(s: &str) -> Self {
+        match s {
+            "n" => Self::N,
+            "s" => Self::S,
+            "e" => Self::E,
+            "w" => Self::W,
+            _ => Self::C,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -97,6 +108,15 @@ struct Placement {
     /// runs have one, cornered runs more. None for a point light.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     points: Option<Vec<[i64; 2]>>,
+}
+
+/// An audio device placed on the plan. Point-only — no LED-strip `points`.
+#[derive(Serialize, Deserialize)]
+struct AudioPlacement {
+    audio_device_id: String,
+    x: i64,
+    y: i64,
+    mount: Mount,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -120,6 +140,7 @@ struct PlanDetail {
     tiles: Vec<[i64; 2]>,
     walls: Vec<Wall>,
     lights: Vec<Placement>,
+    audio: Vec<AudioPlacement>,
     rooms: Vec<Room>,
 }
 
@@ -260,18 +281,28 @@ async fn get_plan(
                 light_id: r.get("light_id"),
                 x: r.get("x"),
                 y: r.get("y"),
-                mount: match r.get::<String, _>("mount").as_str() {
-                    "n" => Mount::N,
-                    "s" => Mount::S,
-                    "e" => Mount::E,
-                    "w" => Mount::W,
-                    _ => Mount::C,
-                },
+                mount: Mount::from_db(&r.get::<String, _>("mount")),
                 points: r
                     .get::<Option<String>, _>("points")
                     .and_then(|j| serde_json::from_str(&j).ok()),
             })
             .collect();
+
+    let audio = sqlx::query(
+        "SELECT audio_device_id, x, y, mount FROM plan_audio_devices WHERE plan_id = ?",
+    )
+    .bind(&id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| AudioPlacement {
+        audio_device_id: r.get("audio_device_id"),
+        x: r.get("x"),
+        y: r.get("y"),
+        mount: Mount::from_db(&r.get::<String, _>("mount")),
+    })
+    .collect();
 
     let rooms = load_rooms(&state, &id).await;
 
@@ -283,6 +314,7 @@ async fn get_plan(
         tiles,
         walls,
         lights,
+        audio,
         rooms,
     })
     .into_response()
@@ -508,6 +540,12 @@ async fn set_size(
     .bind(req.height)
     .execute(&state.db)
     .await;
+    let _ = sqlx::query("DELETE FROM plan_audio_devices WHERE plan_id = ? AND (x >= ? OR y >= ?)")
+        .bind(&id)
+        .bind(req.width)
+        .bind(req.height)
+        .execute(&state.db)
+        .await;
     let _ = sqlx::query(
         "DELETE FROM plan_room_tiles WHERE room_id IN (SELECT id FROM plan_rooms WHERE plan_id = ?)
          AND (x >= ? OR y >= ?)",
@@ -610,6 +648,87 @@ async fn set_lights(
 
     // Add-on-save: newly placed lights join their region's Room.
     add_placed_lights_to_rooms(&state, &id).await;
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct SetAudioRequest {
+    placements: Vec<AudioPlacement>,
+}
+
+/// Replace all audio-device placements on the plan (point placements only).
+async fn set_audio_placements(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<SetAudioRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let Some((width, height)) = plan_dims(&state, &id).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    for p in &req.placements {
+        if !(0..width).contains(&p.x) || !(0..height).contains(&p.y) {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "placement ({}, {}) is outside the {width}x{height} grid",
+                    p.x, p.y
+                ),
+            )
+                .into_response();
+        }
+        let known = sqlx::query("SELECT 1 FROM audio_devices WHERE id = ?")
+            .bind(&p.audio_device_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        if !known {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("unknown audio device '{}'", p.audio_device_id),
+            )
+                .into_response();
+        }
+    }
+
+    let mut tx = match state.db.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::error!("set_audio_placements: begin failed: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let _ = sqlx::query("DELETE FROM plan_audio_devices WHERE plan_id = ?")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await;
+
+    for p in &req.placements {
+        let _ = sqlx::query(
+            "INSERT OR REPLACE INTO plan_audio_devices (plan_id, audio_device_id, x, y, mount) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&p.audio_device_id)
+        .bind(p.x)
+        .bind(p.y)
+        .bind(p.mount.as_str())
+        .execute(&mut *tx)
+        .await;
+    }
+
+    if let Err(e) = tx.commit().await {
+        tracing::error!("set_audio_placements: commit failed: {e}");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
 
     StatusCode::NO_CONTENT.into_response()
 }

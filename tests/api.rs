@@ -896,6 +896,103 @@ async fn lights_placement_rejects_unknown_light() {
 }
 
 #[tokio::test]
+async fn audio_placement_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/plans/some-id/audio")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"placements":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn audio_placement_roundtrips_with_mount() {
+    let (port, _) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let device_id = setup_onkyo(&app, &cookie, port).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/plans",
+            &cookie,
+            r#"{"name":"P","width":10,"height":10}"#,
+        ))
+        .await
+        .unwrap();
+    let plan_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = format!(
+        r#"{{"placements":[{{"audio_device_id":"{device_id}","x":2,"y":5,"mount":"e"}}]}}"#
+    );
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/plans/{plan_id}/audio"),
+            &cookie,
+            &body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(helpers::authed_get(
+            &format!("/api/plans/{plan_id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    let plan = helpers::response_json(resp).await;
+    assert_eq!(plan["audio"][0]["audio_device_id"], device_id);
+    assert_eq!(plan["audio"][0]["x"], 2);
+    assert_eq!(plan["audio"][0]["mount"], "e");
+}
+
+#[tokio::test]
+async fn audio_placement_rejects_unknown_device() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/plans",
+            &cookie,
+            r#"{"name":"P","width":10,"height":10}"#,
+        ))
+        .await
+        .unwrap();
+    let plan_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/plans/{plan_id}/audio"),
+            &cookie,
+            r#"{"placements":[{"audio_device_id":"ghost","x":1,"y":1,"mount":"c"}]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
 async fn strip_placement_roundtrips_cornered_polyline() {
     let bridge = wled_mock().await;
     let (app, light_id) = helpers::test_app_with_light(&bridge.uri()).await;
@@ -1270,17 +1367,141 @@ async fn update_credentials_rejects_invalid_shape() {
     let (app, _light_id) = helpers::test_app_with_light(&bridge.uri()).await;
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
 
-    // Missing device_ip — the smoke build must reject it.
+    // device_ip overwritten with a non-string — the merged creds fail the
+    // smoke build, so the update is rejected.
     let resp = app
         .oneshot(helpers::authed_json(
             "PUT",
             "/api/providers/prov-test-1/credentials",
             &cookie,
-            r#"{"credentials":{}}"#,
+            r#"{"credentials":{"device_ip":123}}"#,
         ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn update_credentials_merges_blank_fields_keeping_stored_values() {
+    // Submitting an empty string for a field must keep the stored value rather
+    // than wipe it — this is how the edit form keeps secrets the user left
+    // blank. WLED has only device_ip; a blank submission is a no-op, and the
+    // stored value must survive (verified via the config endpoint).
+    let bridge = wled_mock().await;
+    let (app, _light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/providers/prov-test-1/credentials",
+            &cookie,
+            r#"{"credentials":{"device_ip":""}}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(helpers::authed_get(
+            "/api/providers/prov-test-1/config",
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    let body = helpers::response_json(resp).await;
+    assert_eq!(
+        body["values"]["device_ip"],
+        bridge.uri(),
+        "blank update wiped the stored device_ip"
+    );
+}
+
+// ── Provider config (prefill the edit form) ─────────────────────────────────
+
+#[tokio::test]
+async fn provider_config_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/providers/some-id/config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn provider_config_unknown_provider_returns_404() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .oneshot(helpers::authed_get("/api/providers/nope/config", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn provider_config_returns_non_secret_values_for_prefill() {
+    let bridge = wled_mock().await;
+    let (app, _light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .oneshot(helpers::authed_get(
+            "/api/providers/prov-test-1/config",
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["provider_type"], "wled");
+    assert_eq!(body["decryptable"], true);
+    // device_ip is non-secret, so it's returned to prefill the form.
+    assert_eq!(body["values"]["device_ip"], bridge.uri());
+}
+
+#[tokio::test]
+async fn provider_config_omits_secret_fields() {
+    // Govee's only credential is the api_key (a password-kind secret). The
+    // config endpoint must never echo it back to the client.
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "POST",
+            "/api/providers",
+            &cookie,
+            r#"{"name":"Govee","provider_type":"govee","credentials":{"api_key":"super-secret"}}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = helpers::response_json(resp).await;
+    let id = created["id"].as_str().unwrap();
+
+    let resp = app
+        .oneshot(helpers::authed_get(
+            &format!("/api/providers/{id}/config"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["decryptable"], true);
+    assert!(
+        body["values"].get("api_key").is_none(),
+        "secret api_key leaked in config response: {body}"
+    );
 }
 
 #[tokio::test]
@@ -1545,6 +1766,83 @@ async fn delete_room_removes_it() {
         .await
         .unwrap();
     assert_eq!(helpers::response_json(resp).await, serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn set_room_enabled_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/rooms/some-id/enabled")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"enabled":false}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn disabled_room_stays_in_settings_list_but_is_hidden_from_v1() {
+    let bridge = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let body = format!(r#"{{"name":"Office","light_ids":["{light_id}"]}}"#);
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post("/api/rooms", &cookie, &body))
+        .await
+        .unwrap();
+    let room_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Rooms default to enabled.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/rooms", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(helpers::response_json(resp).await[0]["enabled"], true);
+
+    // Disable it.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/enabled"),
+            &cookie,
+            r#"{"enabled":false}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Still listed (and flagged) for the session API / Settings.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/rooms", &cookie))
+        .await
+        .unwrap();
+    let rooms = helpers::response_json(resp).await;
+    assert_eq!(rooms.as_array().unwrap().len(), 1);
+    assert_eq!(rooms[0]["enabled"], false);
+
+    // Hidden from the public API.
+    let key = create_api_key(&app, &cookie, "k").await;
+    let resp = app
+        .oneshot(bearer_get("/api/v1/rooms", &key))
+        .await
+        .unwrap();
+    assert_eq!(
+        helpers::response_json(resp).await.as_array().unwrap().len(),
+        0
+    );
 }
 
 // ── Provider-group sync ──────────────────────────────────────────────────────
@@ -2852,10 +3150,18 @@ async fn setup_onkyo(app: &Router, cookie: &str, port: u16) -> String {
 #[tokio::test]
 async fn audio_routes_require_session() {
     let app = helpers::test_app_with_password().await;
-    for (method, uri) in [
-        ("GET", "/api/audio/devices"),
-        ("GET", "/api/audio/devices/some-id"),
-        ("PUT", "/api/audio/devices/some-id/state"),
+    // Well-formed bodies so a route's auth check (not body validation) is what
+    // rejects the request.
+    for (method, uri, body) in [
+        ("GET", "/api/audio/devices", "{}"),
+        ("GET", "/api/audio/devices/some-id", "{}"),
+        ("PUT", "/api/audio/devices/some-id/state", "{}"),
+        ("GET", "/api/audio/devices/some-id/favorites", "{}"),
+        (
+            "POST",
+            "/api/audio/devices/some-id/favorites/play",
+            r#"{"favorite_id":"x"}"#,
+        ),
     ] {
         let resp = app
             .clone()
@@ -2864,13 +3170,271 @@ async fn audio_routes_require_session() {
                     .method(method)
                     .uri(uri)
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from("{}"))
+                    .body(Body::from(body))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{method} {uri}");
     }
+}
+
+/// A wiremock Sonos household: one standalone player plus a Favorites list.
+/// Enough for discovery to create a device row and for the favorites endpoints
+/// to browse/play against.
+mod sonos_mock {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn esc(s: &str) -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    }
+
+    fn envelope(inner: &str) -> String {
+        format!(
+            r#"<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>{inner}</s:Body></s:Envelope>"#
+        )
+    }
+
+    pub async fn start() -> MockServer {
+        let server = MockServer::start().await;
+        let base = server.uri();
+
+        let topo = format!(
+            r#"<ZoneGroups><ZoneGroup Coordinator="RINCON_LIVING" ID="RINCON_LIVING:1"><ZoneGroupMember UUID="RINCON_LIVING" Location="{base}/xml/device_description.xml" ZoneName="Living Room"/></ZoneGroup></ZoneGroups>"#
+        );
+        Mock::given(method("POST"))
+            .and(path("/ZoneGroupTopology/Control"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(envelope(&format!(
+                    "<ZoneGroupState>{}</ZoneGroupState>",
+                    esc(&topo)
+                ))),
+            )
+            .mount(&server)
+            .await;
+
+        // One generic response per service path covers every action the
+        // provider sends (Get/Set volume+mute, transport reads, Play, enqueue).
+        Mock::given(method("POST"))
+            .and(path("/MediaRenderer/RenderingControl/Control"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(envelope(
+                "<CurrentVolume>30</CurrentVolume><CurrentMute>0</CurrentMute>",
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/MediaRenderer/AVTransport/Control"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(envelope(
+                "<CurrentTransportState>STOPPED</CurrentTransportState>",
+            )))
+            .mount(&server)
+            .await;
+
+        let didl = concat!(
+            r#"<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/">"#,
+            r#"<item id="FV:2/12" parentID="FV:2" restricted="true">"#,
+            r#"<dc:title>Jazz</dc:title><r:description>Spotify</r:description>"#,
+            r#"<res protocolInfo="x-rincon-cpcontainer:*:*:*">x-rincon-cpcontainer:1006206cspotify</res>"#,
+            r#"<r:resMD>&lt;DIDL-Lite&gt;&lt;/DIDL-Lite&gt;</r:resMD></item>"#,
+            r#"<item id="FV:2/3" parentID="FV:2" restricted="true">"#,
+            r#"<dc:title>BBC Radio 6</dc:title><r:description>TuneIn</r:description>"#,
+            r#"<res protocolInfo="x-sonosapi-stream:*:*:*">x-sonosapi-stream:s12345?sid=254</res>"#,
+            r#"<r:resMD>&lt;DIDL-Lite&gt;&lt;/DIDL-Lite&gt;</r:resMD></item></DIDL-Lite>"#,
+        );
+        Mock::given(method("POST"))
+            .and(path("/MediaServer/ContentDirectory/Control"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(envelope(&format!("<Result>{}</Result>", esc(didl)))),
+            )
+            .mount(&server)
+            .await;
+
+        server
+    }
+}
+
+/// Add a Sonos provider pointed at the wiremock household, discover it, and
+/// return the player's Bifrost device id.
+async fn setup_sonos(app: &Router, cookie: &str, base_uri: &str) -> String {
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/providers",
+            cookie,
+            &format!(
+                r#"{{"name":"Sonos","provider_type":"sonos","credentials":{{"host":"{base_uri}"}}}}"#
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let provider_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/providers/{provider_id}/discover"),
+            cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/audio/devices", cookie))
+        .await
+        .unwrap();
+    let devices = helpers::response_json(resp).await;
+    devices[0]["id"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn audio_favorites_lists_provider_favorites() {
+    let server = sonos_mock::start().await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let device_id = setup_sonos(&app, &cookie, &server.uri()).await;
+
+    let resp = app
+        .oneshot(helpers::authed_get(
+            &format!("/api/audio/devices/{device_id}/favorites"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let favs = helpers::response_json(resp).await;
+    let favs = favs.as_array().unwrap();
+    assert_eq!(favs.len(), 2);
+    assert_eq!(favs[0]["id"], "FV:2/12");
+    assert_eq!(favs[0]["title"], "Jazz");
+    assert_eq!(favs[0]["subtitle"], "Spotify");
+}
+
+#[tokio::test]
+async fn audio_play_favorite_starts_playback() {
+    let server = sonos_mock::start().await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let device_id = setup_sonos(&app, &cookie, &server.uri()).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "POST",
+            &format!("/api/audio/devices/{device_id}/favorites/play"),
+            &cookie,
+            r#"{"favorite_id":"FV:2/12"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // The container favorite is enqueued and the queue is played.
+    let actions: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|r| {
+            r.headers
+                .get("SOAPACTION")
+                .map(|v| v.to_str().unwrap_or("").to_string())
+        })
+        .collect();
+    assert!(
+        actions.iter().any(|a| a.contains("AddURIToQueue")),
+        "expected an enqueue: {actions:?}"
+    );
+    assert!(
+        actions.iter().any(|a| a.contains("#Play\"")),
+        "expected Play: {actions:?}"
+    );
+}
+
+#[tokio::test]
+async fn sync_wraps_sonos_rooms_into_bifrost_rooms() {
+    let server = sonos_mock::start().await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let device_id = setup_sonos(&app, &cookie, &server.uri()).await;
+
+    // The provider id for the sync URL.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/providers", &cookie))
+        .await
+        .unwrap();
+    let provs = helpers::response_json(resp).await;
+    let provider_id = provs[0]["id"].as_str().unwrap().to_string();
+
+    // Sync the Sonos rooms into Bifrost Rooms.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/providers/{provider_id}/sync-groups"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["synced"], 1);
+    assert_eq!(body["rooms_created"], 1);
+
+    // The audio mirror exists, tagged as the audio domain with the speaker.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/provider-groups", &cookie))
+        .await
+        .unwrap();
+    let mirrors = helpers::response_json(resp).await;
+    assert_eq!(mirrors[0]["name"], "Living Room");
+    assert_eq!(mirrors[0]["domain"], "audio");
+    assert_eq!(mirrors[0]["audio_device_ids"][0], device_id);
+    assert_eq!(mirrors[0]["light_ids"].as_array().unwrap().len(), 0);
+
+    // The room exists, links the audio mirror, and its audio device resolves
+    // through that link.
+    let resp = app
+        .oneshot(helpers::authed_get("/api/rooms", &cookie))
+        .await
+        .unwrap();
+    let rooms = helpers::response_json(resp).await;
+    assert_eq!(rooms[0]["name"], "Living Room");
+    assert_eq!(rooms[0]["audio_device_id"], device_id);
+    assert_eq!(rooms[0]["links"][0]["name"], "Living Room");
+    assert_eq!(rooms[0]["links"][0]["domain"], "audio");
+}
+
+#[tokio::test]
+async fn audio_play_favorite_unknown_id_returns_422() {
+    let server = sonos_mock::start().await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let device_id = setup_sonos(&app, &cookie, &server.uri()).await;
+
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "POST",
+            &format!("/api/audio/devices/{device_id}/favorites/play"),
+            &cookie,
+            r#"{"favorite_id":"FV:2/999"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[tokio::test]

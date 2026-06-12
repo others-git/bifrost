@@ -15,8 +15,8 @@
 //! assistants use.
 
 use crate::models::audio::{
-    AudioCapabilities, AudioCommand, AudioDevice, AudioDeviceKind, AudioState, NowPlaying,
-    PlayState, TransportCmd,
+    AudioCapabilities, AudioCommand, AudioDevice, AudioDeviceKind, AudioFavorite, AudioState,
+    NowPlaying, PlayState, TransportCmd,
 };
 use crate::providers::discovery::{DeviceDiscovery, SsdpDiscovery};
 use crate::providers::{AudioProvider, AudioProviderFactory, CredentialField, FieldKind};
@@ -34,6 +34,17 @@ fn xml_tag(body: &str, tag: &str) -> Option<String> {
     let start = body.find(&open)? + open.len();
     let end = body[start..].find(&close)? + start;
     Some(body[start..end].to_string())
+}
+
+/// Like `xml_tag`, but tolerates attributes on the opening tag — e.g. the
+/// `<res protocolInfo="…">URI</res>` element in DIDL-Lite.
+fn xml_el(body: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}");
+    let s0 = body.find(&open)?;
+    let content_start = body[s0..].find('>')? + s0 + 1;
+    let close = format!("</{tag}>");
+    let end = body[content_start..].find(&close)? + content_start;
+    Some(body[content_start..end].to_string())
 }
 
 /// Extract an attribute value from the tail of `haystack` starting at `from`.
@@ -70,6 +81,7 @@ const RENDERING: &str = "urn:schemas-upnp-org:service:RenderingControl:1";
 const GROUP_RENDERING: &str = "urn:schemas-upnp-org:service:GroupRenderingControl:1";
 const AV_TRANSPORT: &str = "urn:schemas-upnp-org:service:AVTransport:1";
 const TOPOLOGY: &str = "urn:schemas-upnp-org:service:ZoneGroupTopology:1";
+const CONTENT_DIRECTORY: &str = "urn:schemas-upnp-org:service:ContentDirectory:1";
 
 fn soap_envelope(service: &str, action: &str, args: &str) -> String {
     format!(
@@ -141,6 +153,45 @@ fn parse_topology(state_xml: &str) -> (Vec<Player>, Vec<Group>) {
         }
     }
     (players, groups)
+}
+
+// ── Favorites (the FV:2 container) ──────────────────────────────────────────
+
+/// Parse the (unescaped) DIDL-Lite from a `Browse FV:2` Result into favorites.
+/// Each `<item>` carries an `id` attribute, a `<dc:title>`, and an optional
+/// `<r:description>` (the service/source label).
+fn parse_favorites(didl: &str) -> Vec<AudioFavorite> {
+    let mut out = Vec::new();
+    for chunk in didl.split("<item ").skip(1) {
+        let open_el = chunk.split('>').next().unwrap_or("");
+        let Some(id) = xml_attr(open_el, "id") else {
+            continue;
+        };
+        let title = xml_tag(chunk, "dc:title")
+            .map(|t| xml_unescape(&t))
+            .unwrap_or_default();
+        if title.is_empty() {
+            continue;
+        }
+        let subtitle = xml_tag(chunk, "r:description")
+            .map(|d| xml_unescape(&d))
+            .filter(|s| !s.is_empty());
+        out.push(AudioFavorite {
+            id,
+            title,
+            subtitle,
+        });
+    }
+    out
+}
+
+/// Whether a favorite's resource URI is a browseable container (playlist,
+/// album, station list) that must be enqueued, versus a single stream that can
+/// be set directly as the transport URI.
+fn favorite_is_container(uri: &str) -> bool {
+    uri.starts_with("x-rincon-cpcontainer:")
+        || uri.starts_with("x-rinconplaylist:")
+        || uri.starts_with("file:")
 }
 
 // ── Provider ────────────────────────────────────────────────────────────────
@@ -361,6 +412,11 @@ impl SonosProvider {
         } else {
             "<InstanceID>0</InstanceID>".to_string()
         };
+        self.av(player, action, args).await.map(|_| ())
+    }
+
+    /// Send one AVTransport action to a player.
+    async fn av(&self, player: &Player, action: &str, args: String) -> Result<String> {
         self.soap(
             &player.base_url,
             SoapCall {
@@ -370,8 +426,28 @@ impl SonosProvider {
                 args,
             },
         )
-        .await?;
-        Ok(())
+        .await
+    }
+
+    /// Browse the household Favorites container (`FV:2`) on the seed player and
+    /// return the unescaped DIDL-Lite result. Favorites are household-wide, so
+    /// any player answers the same list.
+    async fn browse_favorites(&self) -> Result<String> {
+        let body = self
+            .soap(
+                &self.seed_url,
+                SoapCall {
+                    path: "/MediaServer/ContentDirectory/Control",
+                    service: CONTENT_DIRECTORY,
+                    action: "Browse",
+                    args: "<ObjectID>FV:2</ObjectID><BrowseFlag>BrowseDirectChildren</BrowseFlag>\
+                           <Filter>*</Filter><StartingIndex>0</StartingIndex>\
+                           <RequestedCount>200</RequestedCount><SortCriteria></SortCriteria>"
+                        .to_string(),
+                },
+            )
+            .await?;
+        Ok(xml_unescape(&xml_tag(&body, "Result").unwrap_or_default()))
     }
 }
 
@@ -403,6 +479,7 @@ impl AudioProvider for SonosProvider {
                     sources: false,
                     transport: true,
                     now_playing: true,
+                    favorites: true,
                 },
                 state,
             });
@@ -436,6 +513,7 @@ impl AudioProvider for SonosProvider {
                     sources: false,
                     transport: true,
                     now_playing: true,
+                    favorites: true,
                 },
                 state,
             });
@@ -551,6 +629,96 @@ impl AudioProvider for SonosProvider {
             self.transport(&player, action).await?;
         }
         Ok(())
+    }
+
+    async fn list_favorites(&self, _device_id: &str) -> Result<Vec<AudioFavorite>> {
+        Ok(parse_favorites(&self.browse_favorites().await?))
+    }
+
+    async fn play_favorite(&self, device_id: &str, favorite_id: &str) -> Result<()> {
+        let target = self.find_target(device_id).await?;
+        let didl = self.browse_favorites().await?;
+
+        // Find this favorite's <item> block, then its resource URI + metadata.
+        let item = didl
+            .split("<item ")
+            .skip(1)
+            .find(|chunk| {
+                let el = chunk.split('>').next().unwrap_or("");
+                xml_attr(el, "id").as_deref() == Some(favorite_id)
+            })
+            .ok_or_else(|| anyhow!("unknown Sonos favorite '{favorite_id}'"))?;
+        let uri = xml_el(item, "res")
+            .filter(|u| !u.is_empty())
+            .ok_or_else(|| anyhow!("Sonos favorite '{favorite_id}' has no playable resource"))?;
+        // resMD stays singly-escaped (as Sonos returns it) — that's the exact
+        // form the metadata argument expects, so it's passed through verbatim.
+        let meta = xml_tag(item, "r:resMD").unwrap_or_default();
+
+        if favorite_is_container(&uri) {
+            // Replace the queue with the favorite, then play the queue.
+            let _ = self
+                .av(
+                    &target,
+                    "RemoveAllTracksFromQueue",
+                    "<InstanceID>0</InstanceID>".into(),
+                )
+                .await; // best-effort: an empty queue is fine
+            self.av(
+                &target,
+                "AddURIToQueue",
+                format!(
+                    "<InstanceID>0</InstanceID><EnqueuedURI>{uri}</EnqueuedURI>\
+                     <EnqueuedURIMetaData>{meta}</EnqueuedURIMetaData>\
+                     <DesiredFirstTrackNumberEnqueued>0</DesiredFirstTrackNumberEnqueued>\
+                     <EnqueueAsNext>0</EnqueueAsNext>"
+                ),
+            )
+            .await?;
+            self.av(
+                &target,
+                "SetAVTransportURI",
+                format!(
+                    "<InstanceID>0</InstanceID>\
+                     <CurrentURI>x-rincon-queue:{}#0</CurrentURI>\
+                     <CurrentURIMetaData></CurrentURIMetaData>",
+                    target.uuid
+                ),
+            )
+            .await?;
+        } else {
+            // A single stream (radio, track) can be set as the transport URI.
+            self.av(
+                &target,
+                "SetAVTransportURI",
+                format!(
+                    "<InstanceID>0</InstanceID><CurrentURI>{uri}</CurrentURI>\
+                     <CurrentURIMetaData>{meta}</CurrentURIMetaData>"
+                ),
+            )
+            .await?;
+        }
+
+        self.transport(&target, "Play").await
+    }
+
+    async fn discover_groups(&self) -> Result<Vec<crate::providers::ProviderGroup>> {
+        use crate::providers::ProviderGroup;
+        // Each Sonos player carries its room name (ZoneName); the room *is* the
+        // player. Transient playback groups (the `group:` zone devices) are not
+        // rooms, so they're excluded here.
+        let (players, _groups) = self.topology().await?;
+        let mut seen = std::collections::HashSet::new();
+        Ok(players
+            .into_iter()
+            .filter(|p| seen.insert(p.uuid.clone()))
+            .map(|p| ProviderGroup {
+                provider_group_id: p.uuid.clone(),
+                name: p.name,
+                member_device_ids: vec![p.uuid],
+                grouped_ref: None,
+            })
+            .collect())
     }
 }
 
@@ -785,6 +953,10 @@ mod tests {
                 .all(|d| d.kind == AudioDeviceKind::Speaker),
             "players are speakers"
         );
+        assert!(
+            devices.iter().all(|d| d.capabilities.favorites),
+            "every Sonos device advertises favorites"
+        );
     }
 
     #[tokio::test]
@@ -1011,6 +1183,168 @@ mod tests {
 
         let p = SonosProvider::new_for_test(server.uri()).unwrap();
         assert!(p.discover().await.is_err());
+    }
+
+    // ── Favorites ────────────────────────────────────────────────────────────
+
+    /// Favorites DIDL with one container (Spotify playlist) and one stream
+    /// (radio), wrapped in a Browse SOAP response exactly as Sonos returns it:
+    /// the DIDL is escaped once inside `<Result>`, and each item's `<r:resMD>`
+    /// is itself escaped (so it survives one unescape singly-escaped).
+    fn favorites_result() -> String {
+        let raw_didl = concat!(
+            r#"<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/">"#,
+            r#"<item id="FV:2/12" parentID="FV:2" restricted="true">"#,
+            r#"<dc:title>Jazz</dc:title><r:description>Spotify</r:description>"#,
+            r#"<res protocolInfo="x-rincon-cpcontainer:*:*:*">x-rincon-cpcontainer:1006206cspotify%3aplaylist</res>"#,
+            r#"<r:resMD>&lt;DIDL-Lite&gt;&lt;item id=&quot;1&quot;&gt;&lt;dc:title&gt;Jazz&lt;/dc:title&gt;&lt;/item&gt;&lt;/DIDL-Lite&gt;</r:resMD>"#,
+            r#"</item>"#,
+            r#"<item id="FV:2/3" parentID="FV:2" restricted="true">"#,
+            r#"<dc:title>BBC Radio 6</dc:title><r:description>TuneIn</r:description>"#,
+            r#"<res protocolInfo="x-sonosapi-stream:*:*:*">x-sonosapi-stream:s12345?sid=254</res>"#,
+            r#"<r:resMD>&lt;DIDL-Lite&gt;radio&lt;/DIDL-Lite&gt;</r:resMD>"#,
+            r#"</item></DIDL-Lite>"#,
+        );
+        let escaped = raw_didl
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;");
+        soap_ok(
+            "Browse",
+            "ContentDirectory",
+            &format!("<Result>{escaped}</Result>"),
+        )
+    }
+
+    async fn mount_favorites(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/MediaServer/ContentDirectory/Control"))
+            .and(header(
+                "SOAPACTION",
+                format!("\"{CONTENT_DIRECTORY}#Browse\"").as_str(),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string(favorites_result()))
+            .mount(server)
+            .await;
+    }
+
+    async fn mount_av_action(server: &MockServer, action: &str, expect: Option<u64>) {
+        let m = Mock::given(method("POST"))
+            .and(path("/MediaRenderer/AVTransport/Control"))
+            .and(header(
+                "SOAPACTION",
+                format!("\"{AV_TRANSPORT}#{action}\"").as_str(),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string(soap_ok(
+                action,
+                "AVTransport",
+                "",
+            )));
+        match expect {
+            Some(n) => m.expect(n).mount(server).await,
+            None => m.mount(server).await,
+        }
+    }
+
+    #[test]
+    fn parse_favorites_extracts_id_title_and_subtitle() {
+        let didl = r#"<DIDL-Lite><item id="FV:2/12"><dc:title>Jazz</dc:title><r:description>Spotify</r:description></item><item id="FV:2/3"><dc:title>BBC Radio 6</dc:title></item></DIDL-Lite>"#;
+        let favs = parse_favorites(didl);
+        assert_eq!(favs.len(), 2);
+        assert_eq!(favs[0].id, "FV:2/12");
+        assert_eq!(favs[0].title, "Jazz");
+        assert_eq!(favs[0].subtitle.as_deref(), Some("Spotify"));
+        assert_eq!(favs[1].title, "BBC Radio 6");
+        assert_eq!(favs[1].subtitle, None);
+    }
+
+    #[test]
+    fn favorite_is_container_detects_playlists_vs_streams() {
+        assert!(favorite_is_container(
+            "x-rincon-cpcontainer:1006206cspotify"
+        ));
+        assert!(favorite_is_container("x-rinconplaylist:RINCON_x#0"));
+        assert!(favorite_is_container("file:///jffs/settings/savedqueues"));
+        assert!(!favorite_is_container("x-sonosapi-stream:s12345?sid=254"));
+        assert!(!favorite_is_container("x-sonosapi-radio:ST%3a..."));
+    }
+
+    #[tokio::test]
+    async fn list_favorites_browses_fv2_and_parses_items() {
+        let server = MockServer::start().await;
+        mount_favorites(&server).await;
+
+        let p = SonosProvider::new_for_test(server.uri()).unwrap();
+        let favs = p.list_favorites("RINCON_LIVING").await.unwrap();
+
+        assert_eq!(
+            favs.iter().map(|f| f.title.as_str()).collect::<Vec<_>>(),
+            vec!["Jazz", "BBC Radio 6"]
+        );
+        assert_eq!(favs[0].id, "FV:2/12");
+        assert_eq!(favs[1].subtitle.as_deref(), Some("TuneIn"));
+    }
+
+    #[tokio::test]
+    async fn play_favorite_container_enqueues_then_plays_the_queue() {
+        let server = MockServer::start().await;
+        mount_topology(&server).await;
+        mount_favorites(&server).await;
+        mount_av_action(&server, "RemoveAllTracksFromQueue", None).await;
+        mount_av_action(&server, "AddURIToQueue", Some(1)).await;
+        mount_av_action(&server, "SetAVTransportURI", Some(1)).await;
+        mount_av_action(&server, "Play", Some(1)).await;
+
+        let p = SonosProvider::new_for_test(server.uri()).unwrap();
+        p.play_favorite("RINCON_LIVING", "FV:2/12").await.unwrap();
+        // .expect(1) on each action verifies the enqueue-then-play sequence on drop.
+    }
+
+    #[tokio::test]
+    async fn play_favorite_stream_sets_transport_uri_directly() {
+        let server = MockServer::start().await;
+        mount_topology(&server).await;
+        mount_favorites(&server).await;
+        // No AddURIToQueue mounted: if the stream path wrongly enqueued, the
+        // unmatched request would 404 and fail the call.
+        mount_av_action(&server, "SetAVTransportURI", Some(1)).await;
+        mount_av_action(&server, "Play", Some(1)).await;
+
+        let p = SonosProvider::new_for_test(server.uri()).unwrap();
+        p.play_favorite("RINCON_KITCHEN", "FV:2/3").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn play_favorite_unknown_id_errors() {
+        let server = MockServer::start().await;
+        mount_topology(&server).await;
+        mount_favorites(&server).await;
+
+        let p = SonosProvider::new_for_test(server.uri()).unwrap();
+        let err = p
+            .play_favorite("RINCON_LIVING", "FV:2/999")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn discover_groups_returns_one_group_per_player() {
+        let server = MockServer::start().await;
+        mount_topology(&server).await;
+
+        let p = SonosProvider::new_for_test(server.uri()).unwrap();
+        let groups = p.discover_groups().await.unwrap();
+
+        // Each visible player is a room; the transient Living Room + Kitchen
+        // playback group is not.
+        let names: Vec<_> = groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, vec!["Living Room", "Kitchen", "Den"]);
+        let lr = groups.iter().find(|g| g.name == "Living Room").unwrap();
+        assert_eq!(lr.provider_group_id, "RINCON_LIVING");
+        assert_eq!(lr.member_device_ids, vec!["RINCON_LIVING".to_string()]);
+        assert!(lr.grouped_ref.is_none());
     }
 
     // SSDP parsing is covered in providers::discovery; here just confirm the
