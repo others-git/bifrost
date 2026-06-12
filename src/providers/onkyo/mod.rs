@@ -169,6 +169,58 @@ fn meta(value: Option<&String>) -> Option<String> {
     Some(v.to_string())
 }
 
+/// Fold one eISCP message into an accumulated state. Returns true when the
+/// message changed something a consumer cares about (drives push events).
+fn apply_message(state: &mut AudioState, code: &str, data: &str) -> bool {
+    let clean = |d: &str| {
+        let t = d.trim();
+        (!t.is_empty() && t != "N/A").then(|| t.to_string())
+    };
+    match code {
+        "PWR" => {
+            state.power = data == "01";
+            if !state.power {
+                state.now_playing = None;
+            }
+            true
+        }
+        "MVL" => match u8::from_str_radix(data, 16) {
+            Ok(v) => {
+                state.volume = v.min(100);
+                true
+            }
+            Err(_) => false,
+        },
+        "AMT" => {
+            state.mute = data == "01";
+            true
+        }
+        "SLI" => {
+            let name = source_name(data);
+            if name != "net" {
+                state.now_playing = None; // metadata belongs to the NET input
+            }
+            state.source = Some(name);
+            true
+        }
+        "NTI" | "NAT" | "NAL" => {
+            let np = state.now_playing.get_or_insert_with(Default::default);
+            match code {
+                "NTI" => np.title = clean(data),
+                "NAT" => np.artist = clean(data),
+                _ => np.album = clean(data),
+            }
+            true
+        }
+        "NST" => {
+            let np = state.now_playing.get_or_insert_with(Default::default);
+            np.play_state = parse_play_state(data);
+            true
+        }
+        _ => false,
+    }
+}
+
 // ── Provider ────────────────────────────────────────────────────────────────
 
 pub struct OnkyoProvider {
@@ -390,6 +442,62 @@ impl AudioProvider for OnkyoProvider {
         self.exchange(&commands, &[]).await?;
         Ok(())
     }
+
+    /// Persistent push channel. Connects, queries a full initial state, then
+    /// forwards every message (replies and unsolicited echoes alike) as
+    /// accumulated full-state events. The receiver closes when the socket
+    /// drops; the `AudioPushManager` reconnects.
+    async fn event_stream(
+        &self,
+    ) -> Result<tokio::sync::mpsc::Receiver<crate::models::audio::AudioEvent>> {
+        use crate::models::audio::AudioEvent;
+
+        let mut stream = self.connect().await?;
+        for q in [
+            "PWRQSTN", "MVLQSTN", "AMTQSTN", "SLIQSTN", "NSTQSTN", "NTIQSTN", "NATQSTN", "NALQSTN",
+        ] {
+            stream.write_all(&encode_packet(q)).await?;
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<AudioEvent>(64);
+        tokio::spawn(async move {
+            let mut state = AudioState {
+                reachable: Some(true),
+                ..Default::default()
+            };
+            let mut buf: Vec<u8> = Vec::with_capacity(1024);
+            let mut chunk = [0u8; 1024];
+            loop {
+                let n = match stream.read(&mut chunk).await {
+                    Ok(0) | Err(_) => return, // socket closed → manager reconnects
+                    Ok(n) => n,
+                };
+                buf.extend_from_slice(&chunk[..n]);
+                while let Some((msg, consumed)) = decode_packet(&buf) {
+                    buf.drain(..consumed);
+                    if msg.len() < 3 {
+                        continue;
+                    }
+                    let (code, data) = msg.split_at(3);
+                    if data == "QSTN" {
+                        continue; // another client's query echoed back
+                    }
+                    if apply_message(&mut state, code, data)
+                        && tx
+                            .send(AudioEvent {
+                                device_id: "main".to_string(),
+                                state: state.clone(),
+                            })
+                            .await
+                            .is_err()
+                    {
+                        return; // receiver dropped → stop reading
+                    }
+                }
+            }
+        });
+        Ok(rx)
+    }
 }
 
 // ── Factory ─────────────────────────────────────────────────────────────────
@@ -424,6 +532,11 @@ impl AudioProviderFactory for OnkyoProviderFactory {
                 hint: Some("eISCP port, default 60128"),
             },
         ]
+    }
+
+    fn connection_mode(&self) -> crate::providers::AudioConnectionMode {
+        // The receiver echoes every state change unsolicited on the open socket.
+        crate::providers::AudioConnectionMode::Push
     }
 }
 
@@ -523,6 +636,33 @@ mod tests {
         assert_eq!(parse_play_state("S--"), Some(PlayState::Stopped));
         assert_eq!(parse_play_state("E--"), Some(PlayState::Stopped));
         assert_eq!(parse_play_state(""), None);
+    }
+
+    #[test]
+    fn apply_message_folds_codes_into_state() {
+        let mut s = AudioState::default();
+        assert!(apply_message(&mut s, "PWR", "01"));
+        assert!(apply_message(&mut s, "MVL", "28"));
+        assert!(apply_message(&mut s, "AMT", "00"));
+        assert!(apply_message(&mut s, "SLI", "2B"));
+        assert!(apply_message(&mut s, "NTI", "Paranoid Android"));
+        assert!(apply_message(&mut s, "NST", "P--"));
+        assert!(!apply_message(&mut s, "XYZ", "whatever"));
+
+        assert!(s.power);
+        assert_eq!(s.volume, 40);
+        assert!(!s.mute);
+        assert_eq!(s.source.as_deref(), Some("net"));
+        let np = s.now_playing.as_ref().unwrap();
+        assert_eq!(np.title.as_deref(), Some("Paranoid Android"));
+        assert_eq!(np.play_state, Some(PlayState::Playing));
+
+        // Switching away from NET clears the metadata; power-off too.
+        assert!(apply_message(&mut s, "SLI", "12"));
+        assert!(s.now_playing.is_none());
+        assert!(apply_message(&mut s, "MVL", "ZZ") == false, "bad hex ignored");
+        assert!(apply_message(&mut s, "PWR", "00"));
+        assert!(!s.power);
     }
 
     // ── Mock receiver ────────────────────────────────────────────────────────
@@ -739,7 +879,55 @@ mod tests {
         );
     }
 
+    // ── Push channel ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn event_stream_emits_initial_state_then_unsolicited_updates() {
+        let (port, _) = spawn_mock_receiver(baseline_scripted()).await;
+        let p = OnkyoProvider::new_for_test("127.0.0.1", port);
+
+        let mut rx = p.event_stream().await.unwrap();
+
+        // The initial QSTN battery folds in reply by reply — drain until the
+        // channel goes quiet and inspect the final accumulated snapshot.
+        let mut latest = None;
+        while let Ok(Some(ev)) =
+            tokio::time::timeout(Duration::from_millis(300), rx.recv()).await
+        {
+            latest = Some(ev);
+        }
+        let ev = latest.expect("initial events");
+        assert_eq!(ev.device_id, "main");
+        assert!(ev.state.power);
+        assert_eq!(ev.state.volume, 30);
+        assert_eq!(ev.state.source.as_deref(), Some("tv"));
+
+        // The channel must stay open (idle ≠ closed); unsolicited-push
+        // forwarding is covered by the AudioPushManager scripted test.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), rx.recv())
+                .await
+                .is_err(),
+            "channel should be idle but open"
+        );
+    }
+
+    #[tokio::test]
+    async fn event_stream_against_dead_port_errors() {
+        let p = OnkyoProvider::new_for_test("127.0.0.1", 1);
+        assert!(p.event_stream().await.is_err());
+    }
+
     // ── Factory ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn factory_advertises_push_mode() {
+        use crate::providers::{AudioConnectionMode, AudioProviderFactory as _};
+        assert_eq!(
+            OnkyoProviderFactory.connection_mode(),
+            AudioConnectionMode::Push
+        );
+    }
 
     #[test]
     fn factory_builds_from_host_and_optional_port() {

@@ -29,7 +29,10 @@ async fn sse_events(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    let receivers = state.connections.lock().await.subscribe_all();
+    let (receivers, audio_receivers) = {
+        let connections = state.connections.lock().await;
+        (connections.subscribe_all(), connections.subscribe_all_audio())
+    };
 
     let mut streams: Vec<SseStream> = receivers
         .into_iter()
@@ -47,6 +50,25 @@ async fn sse_events(
                 .boxed()
         })
         .collect();
+
+    // Audio push events: full-state snapshots tagged with the provider row id
+    // so the frontend can match its audio_devices rows.
+    for (provider_id, rx) in audio_receivers {
+        streams.push(
+            BroadcastStream::new(rx)
+                .filter_map(|r| std::future::ready(r.ok()))
+                .map(move |event| {
+                    let data = serde_json::to_string(&serde_json::json!({
+                        "provider_id": provider_id,
+                        "device_id": event.device_id,
+                        "state": event.state,
+                    }))
+                    .unwrap_or_default();
+                    Ok::<Event, Infallible>(Event::default().event("audio_state").data(data))
+                })
+                .boxed(),
+        );
+    }
 
     // A pending stream prevents select_all from terminating when there are no providers.
     streams.push(stream::pending().boxed());

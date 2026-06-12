@@ -107,6 +107,16 @@ impl AudioCommand {
     }
 }
 
+/// A full-state update pushed by an audio device (e.g. Onkyo's unsolicited
+/// eISCP echoes). Push sources accumulate state internally and always emit
+/// complete snapshots, so consumers replace rather than merge.
+#[derive(Debug, Clone, Serialize)]
+pub struct AudioEvent {
+    /// Provider-native device id (e.g. `main`).
+    pub device_id: String,
+    pub state: AudioState,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TransportCmd {

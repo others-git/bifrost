@@ -4,9 +4,10 @@
 //! This module addresses that with an explicit state machine, exponential-backoff
 //! reconnect, polling fallback during outages, and periodic health checks.
 
+use crate::models::audio::AudioEvent;
 use crate::models::{LightCapabilities, LightState, LightStatePatch};
-use crate::providers::LightProvider;
 use crate::providers::hue::HueProvider;
+use crate::providers::{AudioProvider, LightProvider};
 use anyhow::Result;
 use serde::Serialize;
 use sqlx::SqlitePool;
@@ -377,13 +378,107 @@ impl PollingManager {
     }
 }
 
+// ── Audio push manager ───────────────────────────────────────────────────────
+
+/// Keeps a persistent push channel open to an audio device (Onkyo eISCP).
+/// The provider's `event_stream` yields full-state events until the socket
+/// drops; this manager owns reconnection with the shared backoff and is the
+/// only code that re-opens the stream.
+pub struct AudioPushManager {
+    provider: Box<dyn AudioProvider>,
+    pub state: Arc<RwLock<ConnectionState>>,
+    pub events: broadcast::Sender<AudioEvent>,
+}
+
+impl AudioPushManager {
+    pub fn new(provider: Box<dyn AudioProvider>) -> (Self, broadcast::Receiver<AudioEvent>) {
+        let (tx, rx) = broadcast::channel(256);
+        let mgr = Self {
+            provider,
+            state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
+            events: tx,
+        };
+        (mgr, rx)
+    }
+
+    pub async fn run(self: Arc<Self>) {
+        info!("audio push manager starting ({})", self.provider.name());
+        let mut attempt: u32 = 0;
+
+        loop {
+            *self.state.write().await = ConnectionState::Connecting;
+            match self.provider.event_stream().await {
+                Ok(mut rx) => {
+                    attempt = 0;
+                    let since = Instant::now();
+                    *self.state.write().await = ConnectionState::Connected {
+                        since,
+                        last_event: since,
+                    };
+                    info!("{}: push channel connected", self.provider.name());
+                    while let Some(event) = rx.recv().await {
+                        let _ = self.events.send(event);
+                        *self.state.write().await = ConnectionState::Connected {
+                            since,
+                            last_event: Instant::now(),
+                        };
+                    }
+                    warn!("{}: push channel closed", self.provider.name());
+                }
+                Err(e) => {
+                    warn!("{}: push connect failed: {e:#}", self.provider.name());
+                }
+            }
+
+            let delay = backoff_delay(attempt);
+            attempt += 1;
+            *self.state.write().await = ConnectionState::Reconnecting {
+                attempt,
+                retry_at: Instant::now() + delay,
+            };
+            tokio::time::sleep(delay).await;
+        }
+    }
+}
+
+/// Writes pushed audio events to `audio_devices.last_state`. Push events are
+/// full snapshots, so this replaces rather than merges.
+async fn audio_db_writer_task(
+    mut rx: broadcast::Receiver<AudioEvent>,
+    provider_row_id: String,
+    db: SqlitePool,
+) {
+    loop {
+        match rx.recv().await {
+            Ok(event) => {
+                let state_json = serde_json::to_string(&event.state).unwrap_or_default();
+                let _ = sqlx::query(
+                    "UPDATE audio_devices SET last_state = ?, last_seen = datetime('now')
+                     WHERE provider_id = ? AND device_id = ?",
+                )
+                .bind(&state_json)
+                .bind(&provider_row_id)
+                .bind(&event.device_id)
+                .execute(&db)
+                .await;
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                warn!("audio event db writer lagged by {n} events");
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
 // ── Connection registry ─────────────────────────────────────────────────────
 
-/// One managed connection (SSE or polling): its observable state, its event
-/// channel, and the background tasks that keep it alive.
+/// One managed connection (SSE, polling, or audio push): its observable state,
+/// its event channel(s), and the background tasks that keep it alive.
 struct ConnectionEntry {
     state: Arc<RwLock<ConnectionState>>,
     events: broadcast::Sender<LightEvent>,
+    /// Present only for audio push managers.
+    audio_events: Option<broadcast::Sender<AudioEvent>>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -420,6 +515,7 @@ impl ConnectionRegistry {
             ConnectionEntry {
                 state,
                 events,
+                audio_events: None,
                 tasks: vec![sse_task, db_task],
             },
         );
@@ -444,7 +540,35 @@ impl ConnectionRegistry {
             ConnectionEntry {
                 state,
                 events,
+                audio_events: None,
                 tasks: vec![poll_task, db_task],
+            },
+        );
+    }
+
+    /// Spawn an audio push loop (persistent device-initiated updates) and its
+    /// DB writer for the given provider.
+    pub fn start_audio_push(
+        &mut self,
+        provider_id: String,
+        provider: Box<dyn AudioProvider>,
+        db: SqlitePool,
+    ) {
+        let (mgr, rx) = AudioPushManager::new(provider);
+        let mgr = Arc::new(mgr);
+        let state = Arc::clone(&mgr.state);
+        let audio_events = mgr.events.clone();
+        let push_task = tokio::spawn(Arc::clone(&mgr).run());
+        let db_task = tokio::spawn(audio_db_writer_task(rx, provider_id.clone(), db));
+        // A dummy light channel keeps the entry shape uniform; nothing sends on it.
+        let (events, _) = broadcast::channel(1);
+        self.entries.insert(
+            provider_id,
+            ConnectionEntry {
+                state,
+                events,
+                audio_events: Some(audio_events),
+                tasks: vec![push_task, db_task],
             },
         );
     }
@@ -465,6 +589,19 @@ impl ConnectionRegistry {
         self.entries
             .values()
             .map(|e| e.events.subscribe())
+            .collect()
+    }
+
+    /// Subscribe to every audio push channel, tagged with its provider row id
+    /// (so SSE consumers can match `audio_devices` rows). Used by the SSE endpoint.
+    pub fn subscribe_all_audio(&self) -> Vec<(String, broadcast::Receiver<AudioEvent>)> {
+        self.entries
+            .iter()
+            .filter_map(|(id, e)| {
+                e.audio_events
+                    .as_ref()
+                    .map(|tx| (id.clone(), tx.subscribe()))
+            })
             .collect()
     }
 }
@@ -798,6 +935,143 @@ mod tests {
             serde_json::from_str(&row.get::<String, _>("capabilities")).unwrap();
         assert!(caps.color_rgb, "poll must refresh stale color_rgb to true");
         assert_eq!(caps.hue_gamut, Some(crate::models::HueGamut::C));
+    }
+
+    // ── Audio push manager ───────────────────────────────────────────────────
+
+    use crate::models::audio::{AudioCommand, AudioDevice, AudioState};
+
+    /// Scripted push provider: each `event_stream` call yields the scripted
+    /// events then closes (simulating a dropped socket). Connect fails when
+    /// `fail_connect` is set.
+    struct ScriptedAudioProvider {
+        events: Vec<AudioEvent>,
+        fail_connect: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl AudioProvider for ScriptedAudioProvider {
+        fn name(&self) -> &str {
+            "scripted-audio"
+        }
+        async fn discover(&self) -> Result<Vec<AudioDevice>> {
+            Ok(vec![])
+        }
+        async fn get_state(&self, _id: &str) -> Result<AudioState> {
+            Ok(AudioState::default())
+        }
+        async fn set_state(&self, _id: &str, _cmd: &AudioCommand) -> Result<()> {
+            Ok(())
+        }
+        async fn event_stream(&self) -> Result<tokio::sync::mpsc::Receiver<AudioEvent>> {
+            if self.fail_connect {
+                anyhow::bail!("scripted connect failure");
+            }
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            let events = self.events.clone();
+            tokio::spawn(async move {
+                for e in events {
+                    if tx.send(e).await.is_err() {
+                        return;
+                    }
+                }
+                // Hold the channel open briefly so the manager stays Connected.
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            });
+            Ok(rx)
+        }
+    }
+
+    fn audio_event(volume: u8) -> AudioEvent {
+        AudioEvent {
+            device_id: "main".into(),
+            state: AudioState {
+                power: true,
+                volume,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn audio_push_manager_broadcasts_events_and_marks_connected() {
+        let provider = ScriptedAudioProvider {
+            events: vec![audio_event(30), audio_event(45)],
+            fail_connect: false,
+        };
+        let (mgr, mut rx) = AudioPushManager::new(Box::new(provider));
+        let mgr = Arc::new(mgr);
+        let state = Arc::clone(&mgr.state);
+        let task = tokio::spawn(Arc::clone(&mgr).run());
+
+        let e1 = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("first event in time")
+            .unwrap();
+        assert_eq!(e1.state.volume, 30);
+        let e2 = rx.recv().await.unwrap();
+        assert_eq!(e2.state.volume, 45);
+        assert_eq!(state.read().await.label(), "connected");
+
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn audio_push_manager_backs_off_when_connect_fails() {
+        let provider = ScriptedAudioProvider {
+            events: vec![],
+            fail_connect: true,
+        };
+        let (mgr, _rx) = AudioPushManager::new(Box::new(provider));
+        let mgr = Arc::new(mgr);
+        let state = Arc::clone(&mgr.state);
+        let task = tokio::spawn(Arc::clone(&mgr).run());
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(state.read().await.label(), "reconnecting");
+
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn audio_db_writer_replaces_last_state() {
+        use sqlx::Row;
+        use sqlx::sqlite::SqliteConnectOptions;
+        use std::str::FromStr;
+
+        let opts = SqliteConnectOptions::from_str(":memory:")
+            .unwrap()
+            .foreign_keys(true);
+        let db = SqlitePool::connect_with(opts).await.unwrap();
+        sqlx::migrate!("./migrations").run(&db).await.unwrap();
+
+        sqlx::query("INSERT INTO providers (id, provider_type, name, credentials) VALUES ('p1','onkyo','AV','enc')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO audio_devices (id, provider_id, device_id, name, kind, capabilities, last_state)
+             VALUES ('a1','p1','main','Receiver','receiver','{}', ?)",
+        )
+        .bind(r#"{"power":false,"volume":0,"mute":false}"#)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let (tx, rx) = broadcast::channel(8);
+        let writer = tokio::spawn(audio_db_writer_task(rx, "p1".to_string(), db.clone()));
+        tx.send(audio_event(62)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let row = sqlx::query("SELECT last_state FROM audio_devices WHERE id = 'a1'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let state: AudioState = serde_json::from_str(&row.get::<String, _>("last_state")).unwrap();
+        assert!(state.power);
+        assert_eq!(state.volume, 62);
+
+        writer.abort();
     }
 
     // ── Backoff ──────────────────────────────────────────────────────────────

@@ -33,6 +33,8 @@ pub fn router() -> Router<Arc<AppState>> {
 pub(crate) struct AudioDeviceRow {
     pub id: String,
     pub provider_id: String,
+    /// Provider-native id (e.g. `main`) — matches `audio_state` push events.
+    pub device_id: String,
     pub name: String,
     pub kind: String,
     pub capabilities: AudioCapabilities,
@@ -44,6 +46,7 @@ fn row_to_device(r: sqlx::sqlite::SqliteRow) -> AudioDeviceRow {
     AudioDeviceRow {
         id: r.get("id"),
         provider_id: r.get("provider_id"),
+        device_id: r.get("device_id"),
         name: r.get("name"),
         kind: r.get("kind"),
         capabilities: serde_json::from_str(&r.get::<String, _>("capabilities"))

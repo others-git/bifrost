@@ -149,6 +149,8 @@ export interface AudioCapabilities {
 export interface AudioDevice {
   id: string;
   provider_id: string;
+  /** Provider-native id (e.g. "main") — matches audio_state push events. */
+  device_id: string;
   name: string;
   kind: "receiver" | "speaker" | "zone";
   capabilities: AudioCapabilities;

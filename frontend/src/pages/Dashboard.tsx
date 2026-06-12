@@ -171,8 +171,8 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
 // ── Audio devices ─────────────────────────────────────────────────────────────
 
 /** Receivers and speakers, in their own framed box below the rooms. Hidden
- *  when no audio providers are configured. Polls live state at a slow cadence
- *  so now-playing metadata stays current without hammering the LAN. */
+ *  when no audio providers are configured. Push-capable devices (Onkyo) update
+ *  instantly via the audio_state SSE stream; a slow poll keeps the rest fresh. */
 function AudioSection() {
   const [devices, setDevices] = useState<AudioDevice[]>([]);
 
@@ -191,7 +191,7 @@ function AudioSection() {
       } else {
         setDevices(list);
       }
-      timer = setTimeout(() => refresh(true), 15000);
+      timer = setTimeout(() => refresh(true), 30000);
     }
 
     refresh(true);
@@ -199,6 +199,28 @@ function AudioSection() {
       cancelled = true;
       clearTimeout(timer);
     };
+  }, []);
+
+  // Receiver-initiated updates (volume knob, track change) arrive as full
+  // state snapshots — replace, don't merge.
+  useEffect(() => {
+    const es = new EventSource("/api/events");
+    es.addEventListener("audio_state", (raw) => {
+      const ev = JSON.parse((raw as MessageEvent).data) as {
+        provider_id: string;
+        device_id: string;
+        state: AudioDevice["state"];
+      };
+      setDevices((prev) =>
+        prev.map((d) =>
+          d.provider_id === ev.provider_id && d.device_id === ev.device_id
+            ? { ...d, state: ev.state }
+            : d,
+        ),
+      );
+    });
+    es.onerror = () => {};
+    return () => es.close();
   }, []);
 
   function patchLocal(id: string, patch: Partial<AudioDevice["state"]>) {

@@ -160,13 +160,26 @@ pub fn start_manager_for(
                 Err(e) => tracing::error!("failed to build provider {provider_id}: {e:#}"),
             }
         }
-        None if state.registry.is_known_audio(provider_type) => {
-            // Audio providers are read on demand (LAN round trips are cheap);
-            // no background manager yet. A push subscription (Onkyo unsolicited
-            // eISCP events) is a planned follow-up.
-            tracing::info!("audio provider {provider_id} ({provider_type}) needs no manager");
-        }
-        None => tracing::warn!("provider {provider_id} has unknown type '{provider_type}'"),
+        None => match state.registry.audio_connection_mode(provider_type) {
+            Some(providers::AudioConnectionMode::Push) => {
+                match state.registry.build_audio(provider_type, creds_json) {
+                    Ok(provider) => {
+                        tracing::info!("starting audio push manager for provider {provider_id}");
+                        connections.start_audio_push(
+                            provider_id.to_string(),
+                            provider,
+                            state.db.clone(),
+                        );
+                    }
+                    Err(e) => tracing::error!("failed to build audio provider {provider_id}: {e:#}"),
+                }
+            }
+            Some(providers::AudioConnectionMode::OnDemand) => {
+                // State is read live per request; nothing to keep alive.
+                tracing::info!("audio provider {provider_id} ({provider_type}) reads on demand");
+            }
+            None => tracing::warn!("provider {provider_id} has unknown type '{provider_type}'"),
+        },
     }
 }
 

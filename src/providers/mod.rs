@@ -7,7 +7,7 @@ pub mod sonos;
 pub mod tasmota;
 pub mod wled;
 
-use crate::models::audio::{AudioCommand, AudioDevice, AudioState};
+use crate::models::audio::{AudioCommand, AudioDevice, AudioEvent, AudioState};
 use crate::models::{Light, LightState};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -64,6 +64,24 @@ pub trait AudioProvider: Send + Sync {
     async fn discover(&self) -> Result<Vec<AudioDevice>>;
     async fn get_state(&self, device_id: &str) -> Result<AudioState>;
     async fn set_state(&self, device_id: &str, cmd: &AudioCommand) -> Result<()>;
+
+    /// Open a persistent push channel: the device reports state changes as
+    /// they happen (volume knob, track changes, …). The returned receiver
+    /// closing means the connection dropped — the `AudioPushManager` owns
+    /// reconnection, never the provider. Only implemented by providers whose
+    /// factory advertises `AudioConnectionMode::Push`.
+    async fn event_stream(&self) -> Result<tokio::sync::mpsc::Receiver<AudioEvent>> {
+        Err(anyhow!("{} does not support push events", self.name()))
+    }
+}
+
+/// How the runtime keeps an audio provider's state fresh.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AudioConnectionMode {
+    /// Persistent connection with device-initiated updates (Onkyo eISCP).
+    Push,
+    /// No background channel; state is read on demand.
+    OnDemand,
 }
 
 /// Factory for one audio provider type. Registered in the same
@@ -76,6 +94,11 @@ pub trait AudioProviderFactory: Send + Sync {
     fn build(&self, credentials_json: &str) -> Result<Box<dyn AudioProvider>>;
 
     fn credentials_schema(&self) -> &'static [CredentialField];
+
+    /// Defaults to on-demand reads; push providers override.
+    fn connection_mode(&self) -> AudioConnectionMode {
+        AudioConnectionMode::OnDemand
+    }
 }
 
 // ── Credential schema (for the setup UI) ───────────────────────────────────
@@ -180,6 +203,13 @@ impl ProviderRegistry {
     /// Returns true if `provider_type` is a registered audio provider.
     pub fn is_known_audio(&self, provider_type: &str) -> bool {
         self.audio_factories.contains_key(provider_type)
+    }
+
+    /// How the runtime should keep this audio provider type's state fresh.
+    pub fn audio_connection_mode(&self, provider_type: &str) -> Option<AudioConnectionMode> {
+        self.audio_factories
+            .get(provider_type)
+            .map(|f| f.connection_mode())
     }
 
     /// Build a live provider from a type string + decrypted credentials JSON.
