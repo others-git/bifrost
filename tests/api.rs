@@ -1818,12 +1818,12 @@ async fn create_room_rejects_case_insensitive_duplicate_name() {
 }
 
 #[tokio::test]
-async fn merge_rooms_moves_members_scenes_and_deletes_source() {
+async fn merge_rooms_moves_members_and_deletes_source() {
     let server = wled_mock().await;
     let (app, light_id) = helpers::test_app_with_light(&server.uri()).await;
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
 
-    // Target (empty) and source (owns the light + a scene).
+    // Target (empty) and source (owns the light).
     let resp = app
         .clone()
         .oneshot(helpers::authed_post(
@@ -1852,16 +1852,6 @@ async fn merge_rooms_moves_members_scenes_and_deletes_source() {
         .unwrap()
         .to_string();
 
-    let _ = app
-        .clone()
-        .oneshot(helpers::authed_post(
-            &format!("/api/rooms/{source_id}/scenes"),
-            &cookie,
-            r##"{"name":"Relax","palette":["#ff7d33"]}"##,
-        ))
-        .await
-        .unwrap();
-
     // Merge source into target.
     let resp = app
         .clone()
@@ -1876,7 +1866,6 @@ async fn merge_rooms_moves_members_scenes_and_deletes_source() {
 
     // Source gone; target owns the light.
     let resp = app
-        .clone()
         .oneshot(helpers::authed_get("/api/rooms", &cookie))
         .await
         .unwrap();
@@ -1884,17 +1873,6 @@ async fn merge_rooms_moves_members_scenes_and_deletes_source() {
     assert_eq!(rooms.as_array().unwrap().len(), 1);
     assert_eq!(rooms[0]["id"], target_id.as_str());
     assert_eq!(rooms[0]["light_ids"][0], light_id);
-
-    // The scene followed.
-    let resp = app
-        .oneshot(helpers::authed_get(
-            &format!("/api/rooms/{target_id}/scenes"),
-            &cookie,
-        ))
-        .await
-        .unwrap();
-    let scenes = helpers::response_json(resp).await;
-    assert_eq!(scenes[0]["name"], "Relax");
 }
 
 #[tokio::test]
@@ -2024,7 +2002,7 @@ async fn single_color_scene_uses_native_group_control_when_fully_linked() {
     let resp = app
         .clone()
         .oneshot(helpers::authed_post(
-            &format!("/api/rooms/{room_id}/scenes"),
+            "/api/palette-scenes",
             &cookie,
             r##"{"name":"Warm","brightness":40,"palette":["#ff8800"]}"##,
         ))
@@ -2066,10 +2044,10 @@ async fn single_color_scene_uses_native_group_control_when_fully_linked() {
     );
 }
 
-// ── Room scenes ──────────────────────────────────────────────────────────────
+// ── Palette scenes (global) ──────────────────────────────────────────────────
 
 #[tokio::test]
-async fn room_scene_create_apply_distributes_palette() {
+async fn palette_scene_create_apply_distributes_palette() {
     let device = wled_mock().await;
     let (app, light_a, light_b) = helpers::test_app_with_two_lights(&device.uri()).await;
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
@@ -2085,10 +2063,11 @@ async fn room_scene_create_apply_distributes_palette() {
         .unwrap()
         .to_string();
 
+    // Scenes are global: created without a room, then applied to one.
     let resp = app
         .clone()
         .oneshot(helpers::authed_post(
-            &format!("/api/rooms/{room_id}/scenes"),
+            "/api/palette-scenes",
             &cookie,
             r##"{"name":"Duo","brightness":50,"palette":["#ff0000","#0000ff"]}"##,
         ))
@@ -2125,12 +2104,9 @@ async fn room_scene_create_apply_distributes_palette() {
         "palette was not distributed"
     );
 
-    // Listing returns the scene.
+    // The global scene list returns it.
     let resp = app
-        .oneshot(helpers::authed_get(
-            &format!("/api/rooms/{room_id}/scenes"),
-            &cookie,
-        ))
+        .oneshot(helpers::authed_get("/api/palette-scenes", &cookie))
         .await
         .unwrap();
     let scenes = helpers::response_json(resp).await;
@@ -2138,23 +2114,9 @@ async fn room_scene_create_apply_distributes_palette() {
 }
 
 #[tokio::test]
-async fn room_scene_rejects_bad_palette_and_brightness() {
+async fn palette_scene_rejects_bad_palette_and_brightness() {
     let app = helpers::test_app_with_password().await;
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
-
-    let resp = app
-        .clone()
-        .oneshot(helpers::authed_post(
-            "/api/rooms",
-            &cookie,
-            r#"{"name":"R"}"#,
-        ))
-        .await
-        .unwrap();
-    let room_id = helpers::response_json(resp).await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
 
     for bad in [
         r#"{"name":"X","palette":["red"]}"#,
@@ -2163,11 +2125,7 @@ async fn room_scene_rejects_bad_palette_and_brightness() {
     ] {
         let resp = app
             .clone()
-            .oneshot(helpers::authed_post(
-                &format!("/api/rooms/{room_id}/scenes"),
-                &cookie,
-                bad,
-            ))
+            .oneshot(helpers::authed_post("/api/palette-scenes", &cookie, bad))
             .await
             .unwrap();
         assert_eq!(
@@ -2179,17 +2137,15 @@ async fn room_scene_rejects_bad_palette_and_brightness() {
 }
 
 #[tokio::test]
-async fn room_scene_delete_removes_it() {
-    let app = helpers::test_app_with_password().await;
+async fn palette_scene_save_from_room_captures_lit_colors() {
+    let device = wled_mock().await;
+    let (app, light_a, light_b) = helpers::test_app_with_two_lights(&device.uri()).await;
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
 
+    let body = format!(r#"{{"name":"R","light_ids":["{light_a}","{light_b}"]}}"#);
     let resp = app
         .clone()
-        .oneshot(helpers::authed_post(
-            "/api/rooms",
-            &cookie,
-            r#"{"name":"R"}"#,
-        ))
+        .oneshot(helpers::authed_post("/api/rooms", &cookie, &body))
         .await
         .unwrap();
     let room_id = helpers::response_json(resp).await["id"]
@@ -2197,10 +2153,90 @@ async fn room_scene_delete_removes_it() {
         .unwrap()
         .to_string();
 
+    // Drive one light to a known color so the room has something to capture.
+    let _ = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/lights/{light_a}"),
+            &cookie,
+            r##"{"on":true,"brightness":60,"color":{"x":0.6,"y":0.35,"brightness":0.6}}"##,
+        ))
+        .await
+        .unwrap();
+
     let resp = app
         .clone()
         .oneshot(helpers::authed_post(
-            &format!("/api/rooms/{room_id}/scenes"),
+            &format!("/api/palette-scenes/from-room/{room_id}"),
+            &cookie,
+            r#"{"name":"Captured"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/palette-scenes", &cookie))
+        .await
+        .unwrap();
+    let scenes = helpers::response_json(resp).await;
+    assert_eq!(scenes[0]["name"], "Captured");
+    assert!(
+        scenes[0]["brightness"].as_f64().unwrap() > 0.0,
+        "captured scene should record a brightness"
+    );
+}
+
+#[tokio::test]
+async fn palette_scene_save_from_room_with_nothing_lit_is_422() {
+    let device = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&device.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let body = format!(r#"{{"name":"R","light_ids":["{light_id}"]}}"#);
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post("/api/rooms", &cookie, &body))
+        .await
+        .unwrap();
+    let room_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Ensure the room is fully dark before capturing.
+    let _ = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/lights/{light_id}"),
+            &cookie,
+            r#"{"on":false}"#,
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(helpers::authed_post(
+            &format!("/api/palette-scenes/from-room/{room_id}"),
+            &cookie,
+            r#"{"name":"Nope"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn palette_scene_delete_removes_it() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/palette-scenes",
             &cookie,
             r#"{"name":"Tmp","palette":[]}"#,
         ))
@@ -2214,7 +2250,7 @@ async fn room_scene_delete_removes_it() {
     let resp = app
         .clone()
         .oneshot(helpers::authed_delete(
-            &format!("/api/rooms/{room_id}/scenes/{scene_id}"),
+            &format!("/api/palette-scenes/{scene_id}"),
             &cookie,
         ))
         .await
@@ -2222,10 +2258,7 @@ async fn room_scene_delete_removes_it() {
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
     let resp = app
-        .oneshot(helpers::authed_get(
-            &format!("/api/rooms/{room_id}/scenes"),
-            &cookie,
-        ))
+        .oneshot(helpers::authed_get("/api/palette-scenes", &cookie))
         .await
         .unwrap();
     assert_eq!(helpers::response_json(resp).await, serde_json::json!([]));
@@ -2633,12 +2666,12 @@ async fn v1_rooms_state_and_scenes_full_flow() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(helpers::response_json(resp).await["applied"], 1);
 
-    // Public: create, list, apply, delete a scene.
+    // Public: create a global scene, list it, apply it to the room, delete it.
     let resp = app
         .clone()
         .oneshot(bearer_json(
             "POST",
-            &format!("/api/v1/rooms/{room_id}/scenes"),
+            "/api/v1/scenes",
             &key,
             r##"{"name":"Warm","brightness":40,"palette":["#ff8800"]}"##,
         ))
@@ -2652,7 +2685,7 @@ async fn v1_rooms_state_and_scenes_full_flow() {
 
     let resp = app
         .clone()
-        .oneshot(bearer_get(&format!("/api/v1/rooms/{room_id}/scenes"), &key))
+        .oneshot(bearer_get("/api/v1/scenes", &key))
         .await
         .unwrap();
     let scenes = helpers::response_json(resp).await;
@@ -2676,7 +2709,7 @@ async fn v1_rooms_state_and_scenes_full_flow() {
         .clone()
         .oneshot(bearer_json(
             "DELETE",
-            &format!("/api/v1/rooms/{room_id}/scenes/{scene_id}"),
+            &format!("/api/v1/scenes/{scene_id}"),
             &key,
             "",
         ))
@@ -2687,29 +2720,14 @@ async fn v1_rooms_state_and_scenes_full_flow() {
 
 #[tokio::test]
 async fn v1_scene_create_rejects_bad_color() {
-    let device = wled_mock().await;
-    let (app, light_id) = helpers::test_app_with_light(&device.uri()).await;
+    let app = helpers::test_app_with_password().await;
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
     let key = create_api_key(&app, &cookie, "app").await;
 
     let resp = app
-        .clone()
-        .oneshot(helpers::authed_post(
-            "/api/rooms",
-            &cookie,
-            &format!(r#"{{"name":"Den","light_ids":["{light_id}"]}}"#),
-        ))
-        .await
-        .unwrap();
-    let room_id = helpers::response_json(resp).await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    let resp = app
         .oneshot(bearer_json(
             "POST",
-            &format!("/api/v1/rooms/{room_id}/scenes"),
+            "/api/v1/scenes",
             &key,
             r#"{"name":"Bad","palette":["red"]}"#,
         ))

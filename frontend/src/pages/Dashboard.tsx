@@ -1,26 +1,26 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  activateScene,
-  createScene,
+  applySceneToRoom,
+  getPaletteScenes,
   getProviders,
   getRooms,
-  getScenes,
   mergePatch,
-  removeScene,
   rgbToHex,
   rgbToXy,
+  savePaletteSceneFromRoom,
   setLightState,
   setRoomState,
   xyToRgb,
   type Light,
   type LightState,
   type LightStatePatch,
+  type PaletteScene,
   type Provider,
   type Room,
-  type Scene,
 } from "../api";
 import { hexToRgb, LightEditor } from "../components/LightEditor";
-import { useDialogs } from "../components/dialogs";
+import { SceneSwatch } from "../components/scenes";
+import { Modal, useDialogs, type Dialogs } from "../components/dialogs";
 
 // ── Lamplight theme ──────────────────────────────────────────────────────────
 // Warm-tinted darks (charcoal with a candle cast) instead of neutral grays;
@@ -55,10 +55,17 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
   const [localLights, setLocalLights] = useState<Light[]>(lights);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
+  const [scenes, setScenes] = useState<PaletteScene[]>([]);
+  const dialogs = useDialogs();
+
+  function loadScenes() {
+    getPaletteScenes().then(setScenes);
+  }
 
   // Keep in sync when the parent does a full refresh (authoritative server state wins).
   useEffect(() => { setLocalLights(lights); }, [lights]);
   useEffect(() => { getProviders().then(setProviders); }, []);
+  useEffect(() => { loadScenes(); }, []);
   // Re-fetch rooms alongside light refreshes so membership stays current.
   useEffect(() => { getRooms().then(setRooms); }, [lights]);
 
@@ -117,8 +124,6 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
         />
       </header>
 
-      {localLights.length > 0 && <SceneBar onActivated={onRefresh} />}
-
       {localLights.length === 0 ? (
         <div style={{ textAlign: "center", padding: "4rem 0", color: T.faint }}>
           <p style={{ margin: "0 0 0.75rem" }}>No lights found.</p>
@@ -145,10 +150,14 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
           lights={localLights}
           rooms={rooms}
           providers={providers}
+          scenes={scenes}
+          dialogs={dialogs}
+          onScenesChanged={loadScenes}
           onLocalUpdate={handleLocalUpdate}
           onChanged={onRefresh}
         />
       )}
+      {dialogs.element}
     </div>
   );
 }
@@ -161,12 +170,18 @@ function RoomSections({
   lights,
   rooms,
   providers,
+  scenes,
+  dialogs,
+  onScenesChanged,
   onLocalUpdate,
   onChanged,
 }: {
   lights: Light[];
   rooms: Room[];
   providers: Provider[];
+  scenes: PaletteScene[];
+  dialogs: Dialogs;
+  onScenesChanged: () => void;
   onLocalUpdate: (id: string, state: LightState) => void;
   onChanged: () => void;
 }) {
@@ -202,6 +217,9 @@ function RoomSections({
           name={room.name}
           lights={members}
           roomId={room.id}
+          scenes={scenes}
+          dialogs={dialogs}
+          onScenesChanged={onScenesChanged}
           onLocalUpdate={onLocalUpdate}
           onChanged={onChanged}
         />
@@ -215,6 +233,9 @@ function RoomSections({
               : providerName.get(providerId) ?? "Other"
           }
           lights={sectionLights}
+          scenes={scenes}
+          dialogs={dialogs}
+          onScenesChanged={onScenesChanged}
           onLocalUpdate={onLocalUpdate}
           onChanged={onChanged}
         />
@@ -243,17 +264,24 @@ function RoomBox({
   name,
   lights,
   roomId,
+  scenes,
+  dialogs,
+  onScenesChanged,
   onLocalUpdate,
   onChanged,
 }: {
   name: string;
   lights: Light[];
   roomId?: string;
+  scenes: PaletteScene[];
+  dialogs: Dialogs;
+  onScenesChanged: () => void;
   onLocalUpdate: (id: string, state: LightState) => void;
   onChanged: () => void;
 }) {
-  const tuneRef = useRef<HTMLButtonElement>(null);
+  const tuneRef = useRef<HTMLDivElement>(null);
   const [editing, setEditing] = useState(false);
+  const [scenesOpen, setScenesOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const commitTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
@@ -313,6 +341,42 @@ function RoomBox({
     }
   }
 
+  async function applyScene(sceneId: string) {
+    if (!roomId || !sceneId) return;
+    setBusy(true);
+    try {
+      await applySceneToRoom(roomId, sceneId);
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Capture this room's current colors + brightness as a new global scene. */
+  async function saveAsScene() {
+    if (!roomId) return;
+    if (!anyOn) {
+      await dialogs.alert({
+        title: "Nothing to save",
+        message: "No lights in this room are on — turn some on first.",
+      });
+      return;
+    }
+    const name = await dialogs.prompt({
+      title: "Save room as scene",
+      message: "Saves this room's current colors and brightness as a reusable scene.",
+      placeholder: "Scene name",
+      confirmLabel: "Save",
+    });
+    if (!name?.trim()) return;
+    try {
+      await savePaletteSceneFromRoom(roomId, name.trim());
+      onScenesChanged();
+    } catch (e) {
+      await dialogs.alert({ title: "Couldn't save scene", message: String(e) });
+    }
+  }
+
   return (
     <section
       style={{
@@ -326,15 +390,39 @@ function RoomBox({
     >
       <div aria-hidden style={{ height: 2, background: ridge, opacity: anyOn ? 0.9 : 0.5 }} />
 
+      {/* The whole header is the room's color/brightness trigger. */}
       <header
+        ref={tuneRef}
+        onClick={() => { if (tunable) setEditing(true); }}
+        title={tunable ? "Set the whole room's color and brightness" : undefined}
         style={{
           display: "flex",
           alignItems: "center",
-          gap: "0.8rem",
+          gap: "0.7rem",
           padding: "0.75rem 1rem 0.7rem",
           borderBottom: `1px solid ${T.hairline}`,
+          cursor: tunable ? "pointer" : "default",
         }}
       >
+        {roomId && (
+          // A color dot echoing the room's light — purely indicative now; the
+          // whole header opens the palette.
+          <span
+            aria-hidden
+            style={{
+              width: 18,
+              height: 18,
+              flexShrink: 0,
+              borderRadius: "50%",
+              border: "1px solid rgba(255,255,255,0.22)",
+              background: anyOn
+                ? `radial-gradient(circle at 35% 30%, #ffffff44, transparent 45%), ${roomHex}`
+                : "#3a372e",
+              boxShadow: anyOn ? `0 0 12px -3px ${roomHex}` : "none",
+              transition: "box-shadow 0.2s, background 0.2s",
+            }}
+          />
+        )}
         <span
           style={{
             ...label,
@@ -354,27 +442,6 @@ function RoomBox({
 
         <span style={{ flex: 1 }} />
 
-        {tunable && (
-          <button
-            ref={tuneRef}
-            onClick={() => setEditing(true)}
-            title="Set the whole room's color and brightness"
-            aria-label={`Set color and brightness for ${name}`}
-            style={{
-              width: 26,
-              height: 26,
-              borderRadius: "50%",
-              padding: 0,
-              cursor: "pointer",
-              border: "1px solid rgba(255,255,255,0.22)",
-              background: anyOn
-                ? `radial-gradient(circle at 35% 30%, #ffffff44, transparent 45%), ${roomHex}`
-                : "#3a372e",
-              boxShadow: anyOn ? `0 0 14px -3px ${roomHex}` : "none",
-              transition: "box-shadow 0.2s, background 0.2s",
-            }}
-          />
-        )}
         {roomId && <VerticalToggle on={anyOn} onToggle={toggleAll} disabled={busy} />}
       </header>
 
@@ -408,96 +475,157 @@ function RoomBox({
           onToggle={toggleAll}
           onChange={cascade}
           onClose={() => setEditing(false)}
+        >
+          {/* Scene selector lives inside the room palette, not on individual lights. */}
+          <SceneButton
+            onClick={() => {
+              setEditing(false);
+              setScenesOpen(true);
+            }}
+          />
+        </LightEditor>
+      )}
+
+      {scenesOpen && (
+        <SceneModal
+          roomName={name}
+          scenes={scenes}
+          busy={busy}
+          onApply={async (id) => {
+            await applyScene(id);
+            setScenesOpen(false);
+          }}
+          onSave={saveAsScene}
+          onClose={() => setScenesOpen(false)}
         />
       )}
     </section>
   );
 }
 
-function SceneBar({ onActivated }: { onActivated: () => void }) {
-  const dialogs = useDialogs();
-  const [scenes, setScenes] = useState<Scene[]>([]);
-  const [busy, setBusy] = useState("");
-
-  async function load() {
-    setScenes(await getScenes());
-  }
-
-  useEffect(() => { load(); }, []);
-
-  async function handleActivate(id: string) {
-    setBusy(id);
-    try {
-      await activateScene(id);
-      onActivated(); // refresh light states from the server
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function handleSave() {
-    const name = await dialogs.prompt({
-      title: "Save scene",
-      message: "Saves the current state of all lights.",
-      placeholder: "Scene name",
-      confirmLabel: "Save",
-    });
-    if (!name?.trim()) return;
-    await createScene(name.trim());
-    await load();
-  }
-
-  async function handleRemove(id: string, name: string) {
-    const ok = await dialogs.confirm({
-      title: "Delete scene",
-      message: `Delete scene "${name}"?`,
-      confirmLabel: "Delete",
-      danger: true,
-    });
-    if (!ok) return;
-    await removeScene(id);
-    await load();
-  }
-
-  const chip: React.CSSProperties = {
-    background: "transparent",
-    border: `1px solid ${T.cardBorder}`,
-    color: "#cfc7b2",
-    cursor: "pointer",
-    fontSize: "0.78rem",
-    padding: "0.35rem 0.8rem",
-  };
-
+/** The pretty "open scenes" button shown inside a room's color editor. */
+function SceneButton({ onClick }: { onClick: () => void }) {
   return (
-    <div style={{ display: "flex", flexWrap: "wrap", gap: "0.45rem", alignItems: "center", marginBottom: "1.3rem" }}>
-      {scenes.map((s) => (
-        <span key={s.id} style={{ display: "inline-flex" }}>
-          <button
-            onClick={() => handleActivate(s.id)}
-            disabled={busy === s.id}
-            title={`Apply "${s.name}" (${s.lights} light${s.lights !== 1 ? "s" : ""})`}
-            style={{ ...chip, borderRadius: "999px 0 0 999px" }}
-          >
-            {busy === s.id ? "…" : s.name}
-          </button>
-          <button
-            onClick={() => handleRemove(s.id, s.name)}
-            title="Delete scene"
-            style={{ ...chip, borderRadius: "0 999px 999px 0", borderLeft: "none", padding: "0.35rem 0.6rem", color: "#8a6a55" }}
-          >
-            ×
-          </button>
-        </span>
-      ))}
+    <button
+      onClick={onClick}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: "0.5rem",
+        width: "100%",
+        marginTop: "0.1rem",
+        padding: "0.5rem",
+        borderRadius: 10,
+        border: "1px solid rgba(255,255,255,0.12)",
+        color: "#f4ecda",
+        cursor: "pointer",
+        fontSize: "0.82rem",
+        fontWeight: 600,
+        letterSpacing: "0.02em",
+        background:
+          "linear-gradient(90deg, rgba(255,153,0,0.22), rgba(255,94,156,0.18) 45%, rgba(34,211,238,0.16))",
+        boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
+      }}
+    >
+      <span aria-hidden style={{ fontSize: "0.9rem" }}>✦</span>
+      Scenes
+    </button>
+  );
+}
+
+/**
+ * Modal listing every global scene as a gradient tile; clicking one applies it
+ * to this room. Footer captures the room's current look as a new scene.
+ */
+function SceneModal({
+  roomName,
+  scenes,
+  busy,
+  onApply,
+  onSave,
+  onClose,
+}: {
+  roomName: string;
+  scenes: PaletteScene[];
+  busy: boolean;
+  onApply: (sceneId: string) => void;
+  onSave: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <Modal title={`Scenes · ${roomName}`} onClose={onClose} width={460}>
+      <p style={{ margin: "0.4rem 0 0.8rem", color: "#8c8676", fontSize: "0.82rem" }}>
+        Apply a saved look to this room. Lights stay individually adjustable.
+      </p>
+
+      {scenes.length === 0 ? (
+        <p style={{ color: "#777", fontSize: "0.85rem", margin: "0 0 0.8rem" }}>
+          No scenes yet — save this room's current colors below, or build one on the Scenes page.
+        </p>
+      ) : (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))",
+            gap: "0.55rem",
+            marginBottom: "0.9rem",
+          }}
+        >
+          {scenes.map((s) => (
+            <button
+              key={s.id}
+              onClick={() => onApply(s.id)}
+              disabled={busy}
+              title={s.palette.length > 0 ? s.palette.join(" ") : "brightness only"}
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: "0.4rem",
+                padding: "0.5rem",
+                borderRadius: 10,
+                border: "1px solid #2e2c26",
+                background: "#1b1a16",
+                color: "#e9e2d2",
+                cursor: busy ? "default" : "pointer",
+                textAlign: "left",
+              }}
+            >
+              <SceneSwatch palette={s.palette} width={116} height={34} radius={6} />
+              <span style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "0.4rem" }}>
+                <span style={{ fontSize: "0.82rem", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {s.name}
+                </span>
+                {s.brightness != null && (
+                  <span style={{ fontSize: "0.68rem", color: "#7e7866" }}>{Math.round(s.brightness)}%</span>
+                )}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+
       <button
-        onClick={handleSave}
-        title="Save the current light states as a scene"
-        style={{ ...chip, borderRadius: 999, borderStyle: "dashed", color: T.dim }}
+        onClick={onSave}
+        disabled={busy}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: "0.45rem",
+          width: "100%",
+          padding: "0.55rem",
+          borderRadius: 10,
+          border: "1px dashed #3a372e",
+          background: "transparent",
+          color: "#cfc7b2",
+          cursor: busy ? "default" : "pointer",
+          fontSize: "0.82rem",
+        }}
       >
-        + Save scene
+        + Save this room's look as a scene
       </button>
-      {dialogs.element}
-    </div>
+    </Modal>
   );
 }
 
@@ -589,7 +717,7 @@ function LightCard({
             {isOn && light.capabilities.color_rgb && (
               <span style={{ width: 9, height: 9, borderRadius: "50%", background: hex, boxShadow: `0 0 6px ${hex}`, display: "inline-block" }} />
             )}
-            {isOn ? (light.capabilities.dimmable ? `${brightness}%` : "on") : "off"}
+            {isOn ? (light.capabilities.dimmable ? `${+brightness.toFixed(2)}%` : "on") : "off"}
           </span>
         </div>
         {offline ? (

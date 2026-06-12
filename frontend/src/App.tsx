@@ -67,7 +67,7 @@ export function App() {
             onNavigate={(p) => setPage(p)}
           />
         )}
-        {page === "scenes" && <ScenesPage lights={lights} />}
+        {page === "scenes" && <ScenesPage />}
         {page === "plan" && <FloorPlanPage lights={lights} />}
         {page === "settings" && (
           <SettingsPage onNavigate={(p) => setPage(p)} />

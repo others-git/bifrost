@@ -304,27 +304,27 @@ export async function setRoomState(
   return res.json();
 }
 
-// ── Room scenes (palette scenes) ─────────────────────────────────────────────
+// ── Palette scenes (global presets, applied to any room) ─────────────────────
 
-export interface RoomScene {
+export interface PaletteScene {
   id: string;
-  room_id: string;
   name: string;
   brightness?: number;
   palette: string[];
 }
 
-export async function getRoomScenes(roomId: string): Promise<RoomScene[]> {
-  const res = await fetch(`/api/rooms/${roomId}/scenes`);
+export async function getPaletteScenes(): Promise<PaletteScene[]> {
+  const res = await fetch("/api/palette-scenes");
   if (!res.ok) return [];
   return res.json();
 }
 
-export async function createRoomScene(
-  roomId: string,
-  scene: { name: string; brightness?: number; palette: string[] },
-): Promise<{ id: string }> {
-  const res = await fetch(`/api/rooms/${roomId}/scenes`, {
+export async function createPaletteScene(scene: {
+  name: string;
+  brightness?: number;
+  palette: string[];
+}): Promise<{ id: string }> {
+  const res = await fetch("/api/palette-scenes", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(scene),
@@ -333,11 +333,26 @@ export async function createRoomScene(
   return res.json();
 }
 
-export async function deleteRoomScene(roomId: string, sceneId: string): Promise<void> {
-  await fetch(`/api/rooms/${roomId}/scenes/${sceneId}`, { method: "DELETE" });
+/** Capture a room's currently-lit colors and average brightness as a new scene. */
+export async function savePaletteSceneFromRoom(
+  roomId: string,
+  name: string,
+): Promise<{ id: string }> {
+  const res = await fetch(`/api/palette-scenes/from-room/${roomId}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+  return res.json();
 }
 
-export async function applyRoomScene(
+export async function deletePaletteScene(sceneId: string): Promise<void> {
+  await fetch(`/api/palette-scenes/${sceneId}`, { method: "DELETE" });
+}
+
+/** Apply a global scene to a specific room. */
+export async function applySceneToRoom(
   roomId: string,
   sceneId: string,
 ): Promise<{ applied: number; failed: number }> {

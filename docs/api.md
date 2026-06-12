@@ -86,16 +86,19 @@ curl -X PUT https://bifrost.local/api/v1/rooms/$ROOM/state \
 
 ## Scenes
 
-Scenes are palette presets attached to a room. A single-color (or
-brightness-only) scene drives the whole room uniformly; a multi-color palette is
-distributed round-robin across the room's lights in a stable order.
+Scenes are **global** palette presets — a name, an optional brightness, and a
+color palette — not tied to any room. You define a scene once and apply it to
+whichever room you like. A single-color (or brightness-only) scene drives the
+whole room uniformly; a multi-color palette is distributed round-robin across
+the room's lights in a stable order.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/rooms/{id}/scenes` | List the room's scenes. `404` if the room is unknown. |
-| `POST` | `/rooms/{id}/scenes` | Create a scene. |
-| `DELETE` | `/rooms/{id}/scenes/{scene_id}` | Delete a scene. |
-| `POST` | `/rooms/{id}/scenes/{scene_id}/apply` | Apply a scene. Returns `{applied, failed}`. |
+| `GET` | `/scenes` | List all scenes. |
+| `POST` | `/scenes` | Create a scene. |
+| `POST` | `/scenes/from-room/{room_id}` | Save a room's current colors as a new scene. Body: `{"name": "…"}`. |
+| `DELETE` | `/scenes/{id}` | Delete a scene. |
+| `POST` | `/rooms/{room_id}/scenes/{scene_id}/apply` | Apply a scene to a room. Returns `{applied, failed}`. `404` if the scene or room is unknown. |
 
 Create body:
 
@@ -108,12 +111,17 @@ Create body:
 ```
 
 Invalid palette colors or an out-of-range brightness return `422 Unprocessable
-Entity`.
+Entity`. `POST /scenes/from-room/{room_id}` returns `422` if no light in the room
+is currently on, and `404` if the room is unknown.
 
 ```bash
-curl -X POST https://bifrost.local/api/v1/rooms/$ROOM/scenes \
+# Define a scene, then apply it to a room.
+SCENE=$(curl -s -X POST https://bifrost.local/api/v1/scenes \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"name":"Sunset","brightness":75,"palette":["#ff7d33","#ff5e9c"]}'
+  -d '{"name":"Sunset","brightness":75,"palette":["#ff7d33","#ff5e9c"]}' | jq -r .id)
+
+curl -X POST https://bifrost.local/api/v1/rooms/$ROOM/scenes/$SCENE/apply \
+  -H "Authorization: Bearer $KEY"
 ```
 
 ## Not exposed

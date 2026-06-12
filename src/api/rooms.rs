@@ -11,7 +11,7 @@
 use crate::AppState;
 use crate::api::auth::require_session;
 use crate::api::lights::build_provider;
-use crate::models::{Color, LightState};
+use crate::models::LightState;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -33,8 +33,6 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{id}/lights", put(set_direct_lights))
         .route("/{id}/links", put(set_links))
         .route("/{id}/state", put(set_room_state))
-        .route("/{id}/scenes", get(list_scenes).post(create_scene))
-        .route("/{id}/scenes/{scene_id}", delete(remove_scene))
         .route("/{id}/scenes/{scene_id}/apply", post(apply_scene))
 }
 
@@ -74,10 +72,10 @@ struct ProviderGroupInfo {
 // ── Membership resolution ────────────────────────────────────────────────────
 
 pub(crate) struct MemberRow {
-    light_id: String,
-    device_id: String,
-    provider_type: String,
-    credentials: String,
+    pub(crate) light_id: String,
+    pub(crate) device_id: String,
+    pub(crate) provider_type: String,
+    pub(crate) credentials: String,
 }
 
 /// All effective members of a room (links ∪ direct), with provider info,
@@ -292,8 +290,8 @@ async fn remove_room(
 
 #[derive(Deserialize)]
 struct MergeRequest {
-    /// The room to absorb. Its links, direct lights, scenes, and plan-region
-    /// bindings move to `{id}` (the target), then it is deleted.
+    /// The room to absorb. Its links, direct lights, and plan-region bindings
+    /// move to `{id}` (the target), then it is deleted.
     source_room_id: String,
 }
 
@@ -339,12 +337,7 @@ async fn merge_rooms(
     .execute(&state.db)
     .await;
 
-    // Scenes and plan-region bindings move wholesale.
-    let _ = sqlx::query("UPDATE room_scenes SET room_id = ? WHERE room_id = ?")
-        .bind(&id)
-        .bind(&req.source_room_id)
-        .execute(&state.db)
-        .await;
+    // Plan-region bindings move wholesale. (Scenes are global, not room-bound.)
     let _ = sqlx::query("UPDATE plan_rooms SET room_id = ? WHERE room_id = ?")
         .bind(&id)
         .bind(&req.source_room_id)
@@ -631,274 +624,10 @@ async fn set_room_state(
     Json(serde_json::json!({ "applied": applied, "failed": failed })).into_response()
 }
 
-// ── Room scenes (Hue-like palette scenes) ───────────────────────────────────
-
-#[derive(Serialize)]
-pub(crate) struct RoomScene {
-    pub id: String,
-    pub room_id: String,
-    pub name: String,
-    pub brightness: Option<f32>,
-    pub palette: Vec<String>,
-}
-
-/// Validated input for creating a scene (shared by the UI and public APIs).
-pub(crate) struct NewScene {
-    pub name: String,
-    pub brightness: Option<f32>,
-    pub palette: Vec<String>,
-}
-
-/// Why a scene mutation failed, mapped to a status by each caller.
-pub(crate) enum SceneError {
-    Validation(String),
-    NotFound,
-    Db,
-}
-
-/// Parse "#rrggbb" (case-insensitive). None for anything else.
-fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
-    let hex = s.strip_prefix('#')?;
-    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    Some((
-        u8::from_str_radix(&hex[0..2], 16).ok()?,
-        u8::from_str_radix(&hex[2..4], 16).ok()?,
-        u8::from_str_radix(&hex[4..6], 16).ok()?,
-    ))
-}
-
-// ── Scene services (reused by the session UI API and the public /v1 API) ─────
-
-pub(crate) async fn list_room_scenes(
-    state: &AppState,
-    room_id: &str,
-) -> Result<Vec<RoomScene>, ()> {
-    sqlx::query(
-        "SELECT id, room_id, name, brightness, palette FROM room_scenes
-         WHERE room_id = ? ORDER BY created_at",
-    )
-    .bind(room_id)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| tracing::error!("db error listing room scenes: {e}"))
-    .map(|rows| {
-        rows.into_iter()
-            .map(|r| RoomScene {
-                id: r.get("id"),
-                room_id: r.get("room_id"),
-                name: r.get("name"),
-                brightness: r.get("brightness"),
-                palette: serde_json::from_str(&r.get::<String, _>("palette")).unwrap_or_default(),
-            })
-            .collect()
-    })
-}
-
-pub(crate) async fn create_room_scene(
-    state: &AppState,
-    room_id: &str,
-    req: NewScene,
-) -> Result<String, SceneError> {
-    if req.name.trim().is_empty() {
-        return Err(SceneError::Validation("scene name is required".into()));
-    }
-    if let Some(b) = req.brightness
-        && !(1.0..=100.0).contains(&b)
-    {
-        return Err(SceneError::Validation("brightness must be 1-100".into()));
-    }
-    for c in &req.palette {
-        if parse_hex_color(c).is_none() {
-            return Err(SceneError::Validation(format!(
-                "'{c}' is not a #rrggbb color"
-            )));
-        }
-    }
-    if !room_exists(state, room_id).await {
-        return Err(SceneError::NotFound);
-    }
-
-    let scene_id = Uuid::new_v4().to_string();
-    let palette_json = serde_json::to_string(&req.palette).unwrap_or_else(|_| "[]".into());
-    sqlx::query(
-        "INSERT INTO room_scenes (id, room_id, name, brightness, palette) VALUES (?, ?, ?, ?, ?)",
-    )
-    .bind(&scene_id)
-    .bind(room_id)
-    .bind(req.name.trim())
-    .bind(req.brightness)
-    .bind(&palette_json)
-    .execute(&state.db)
-    .await
-    .map_err(|e| {
-        tracing::error!("db error creating room scene: {e}");
-        SceneError::Db
-    })?;
-    Ok(scene_id)
-}
-
-pub(crate) async fn delete_room_scene(state: &AppState, room_id: &str, scene_id: &str) {
-    let _ = sqlx::query("DELETE FROM room_scenes WHERE id = ? AND room_id = ?")
-        .bind(scene_id)
-        .bind(room_id)
-        .execute(&state.db)
-        .await;
-}
-
-/// Apply a scene: members on, palette distributed round-robin in stable (name)
-/// order, brightness set. Single-color/empty palettes collapse to a native group
-/// call. `None` when the scene or room has no applicable members (→ 404).
-pub(crate) async fn apply_room_scene(
-    state: &AppState,
-    room_id: &str,
-    scene_id: &str,
-) -> Option<(usize, usize)> {
-    let scene =
-        sqlx::query("SELECT brightness, palette FROM room_scenes WHERE id = ? AND room_id = ?")
-            .bind(scene_id)
-            .bind(room_id)
-            .fetch_optional(&state.db)
-            .await
-            .ok()??;
-    let brightness: Option<f32> = scene.get("brightness");
-    let palette: Vec<String> =
-        serde_json::from_str(&scene.get::<String, _>("palette")).unwrap_or_default();
-    let colors: Vec<Color> = palette
-        .iter()
-        .filter_map(|s| parse_hex_color(s))
-        .map(|(r, g, b)| Color::from_rgb(r, g, b))
-        .collect();
-
-    let members = effective_members(state, room_id).await;
-    if members.is_empty() {
-        return None;
-    }
-
-    // A scene whose palette is empty (brightness-only) or a single color drives
-    // every member to the *same* state, so native group calls apply — one Hue
-    // grouped_light PUT instead of one PUT per light. Multi-color palettes give
-    // each light a distinct color and must fan out.
-    if colors.len() <= 1 {
-        let target = LightState {
-            on: true,
-            brightness,
-            color: colors.first().cloned(),
-            color_temp_mirek: None,
-            reachable: None,
-        };
-        return Some(apply_uniform_state(state, room_id, &target, members).await);
-    }
-
-    let mut jobs = Vec::new();
-    for (i, m) in members.into_iter().enumerate() {
-        let provider = match build_provider(state, &m.provider_type, &m.credentials) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::error!("scene apply: provider build failed: {e:#}");
-                continue;
-            }
-        };
-
-        let target = LightState {
-            on: true,
-            brightness,
-            color: Some(colors[i % colors.len()].clone()),
-            color_temp_mirek: None,
-            reachable: None,
-        };
-        let target_json = serde_json::to_string(&target).unwrap_or_default();
-
-        let db = state.db.clone();
-        jobs.push(async move {
-            match provider.set_state(&m.device_id, &target).await {
-                Ok(()) => {
-                    let _ = sqlx::query(
-                        "UPDATE lights SET last_state = ?, last_seen = datetime('now') WHERE id = ?",
-                    )
-                    .bind(&target_json)
-                    .bind(&m.light_id)
-                    .execute(&db)
-                    .await;
-                    true
-                }
-                Err(e) => {
-                    tracing::error!("scene apply: set_state failed for {}: {e:#}", m.device_id);
-                    false
-                }
-            }
-        });
-    }
-
-    let results = futures_util::future::join_all(jobs).await;
-    let applied = results.iter().filter(|ok| **ok).count();
-    let failed = results.len() - applied;
-    Some((applied, failed))
-}
-
-// ── Scene handlers (session-authenticated; thin wrappers over the services) ──
-
-async fn list_scenes(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    match list_room_scenes(&state, &id).await {
-        Ok(scenes) => Json(scenes).into_response(),
-        Err(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
-
-#[derive(Deserialize)]
-struct CreateSceneRequest {
-    name: String,
-    #[serde(default)]
-    brightness: Option<f32>,
-    #[serde(default)]
-    palette: Vec<String>,
-}
-
-async fn create_scene(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    Json(req): Json<CreateSceneRequest>,
-) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let input = NewScene {
-        name: req.name,
-        brightness: req.brightness,
-        palette: req.palette,
-    };
-    match create_room_scene(&state, &id, input).await {
-        Ok(scene_id) => (
-            StatusCode::CREATED,
-            Json(serde_json::json!({ "id": scene_id })),
-        )
-            .into_response(),
-        Err(SceneError::Validation(m)) => (StatusCode::UNPROCESSABLE_ENTITY, m).into_response(),
-        Err(SceneError::NotFound) => StatusCode::NOT_FOUND.into_response(),
-        Err(SceneError::Db) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
-
-async fn remove_scene(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path((room_id, scene_id)): Path<(String, String)>,
-) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    delete_room_scene(&state, &room_id, &scene_id).await;
-    StatusCode::NO_CONTENT.into_response()
-}
+// ── Scene apply (global palette scenes, applied to a room) ───────────────────
+//
+// Scene definitions live in `crate::api::palette_scenes` (global, not bound to a
+// room). Applying one to a room is the room's concern, so the route lives here.
 
 async fn apply_scene(
     State(state): State<Arc<AppState>>,
@@ -908,30 +637,10 @@ async fn apply_scene(
     if require_session(&state, &headers).await.is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    match apply_room_scene(&state, &room_id, &scene_id).await {
+    match crate::api::palette_scenes::apply_scene_to_room(&state, &scene_id, &room_id).await {
         Some((applied, failed)) => {
             Json(serde_json::json!({ "applied": applied, "failed": failed })).into_response()
         }
         None => StatusCode::NOT_FOUND.into_response(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_hex_color;
-
-    #[test]
-    fn parses_valid_hex_colors() {
-        assert_eq!(parse_hex_color("#ff8800"), Some((255, 136, 0)));
-        assert_eq!(parse_hex_color("#FFFFFF"), Some((255, 255, 255)));
-        assert_eq!(parse_hex_color("#000000"), Some((0, 0, 0)));
-    }
-
-    #[test]
-    fn rejects_malformed_hex_colors() {
-        assert_eq!(parse_hex_color("ff8800"), None); // missing #
-        assert_eq!(parse_hex_color("#fff"), None); // short form unsupported
-        assert_eq!(parse_hex_color("#gg0000"), None); // bad digits
-        assert_eq!(parse_hex_color("#ff88001"), None); // wrong length
     }
 }

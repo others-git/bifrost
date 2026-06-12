@@ -2,7 +2,7 @@
 // with a Hue-style hue/saturation color wheel and a vertical brightness bar.
 // Used for lights, rooms, scene palettes, and the planner paint brush.
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { rgbToHex } from "../api";
 
@@ -225,6 +225,7 @@ export function LightEditor({
   onToggle,
   onChange,
   onClose,
+  children,
 }: {
   /** Element or screen point the popover anchors next to. */
   anchor: HTMLElement | { x: number; y: number };
@@ -239,6 +240,8 @@ export function LightEditor({
   /** Fires live while dragging — callers debounce network sends. */
   onChange: (hex: string, brightness: number) => void;
   onClose: () => void;
+  /** Extra controls rendered at the bottom (e.g. a room's scene selector). */
+  children?: ReactNode;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
@@ -385,6 +388,8 @@ export function LightEditor({
           </button>
         </div>
       )}
+
+      {children}
     </div>,
     document.body,
   );

@@ -11,10 +11,12 @@
 use crate::AppState;
 use crate::api::apikeys::require_api_key;
 use crate::api::lights::{apply_light_state, get_light_by_id, list_all_lights, set_light_status};
-use crate::api::rooms::{
-    NewScene, SceneError, apply_room_scene, apply_uniform_state, create_room_scene,
-    delete_room_scene, effective_member_ids, effective_members, list_room_scenes, room_exists,
+use crate::api::palette_scenes::{
+    NewScene, SceneError, apply_scene_to_room, create_scene as create_palette_scene,
+    create_scene_from_room, delete_scene as delete_palette_scene,
+    list_scenes as list_palette_scenes,
 };
+use crate::api::rooms::{apply_uniform_state, effective_member_ids, effective_members};
 use crate::models::LightState;
 use axum::{
     Json, Router,
@@ -34,12 +36,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/lights/{id}/state", put(set_light_state))
         .route("/rooms", get(list_rooms))
         .route("/rooms/{id}/state", put(set_room_state))
-        .route("/rooms/{id}/scenes", get(list_scenes).post(create_scene))
-        .route(
-            "/rooms/{id}/scenes/{scene_id}",
-            axum::routing::delete(remove_scene),
-        )
         .route("/rooms/{id}/scenes/{scene_id}/apply", post(apply_scene))
+        .route("/scenes", get(list_scenes).post(create_scene))
+        .route("/scenes/from-room/{room_id}", post(create_scene_from))
+        .route("/scenes/{id}", axum::routing::delete(remove_scene))
 }
 
 /// Shared 401 guard. Returns `Err(401)` when the Bearer key is missing/invalid.
@@ -139,21 +139,13 @@ async fn set_room_state(
     Json(serde_json::json!({ "applied": applied, "failed": failed })).into_response()
 }
 
-// ── Room scenes ──────────────────────────────────────────────────────────────
+// ── Scenes (global palette presets, applied to rooms) ────────────────────────
 
-async fn list_scenes(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
+async fn list_scenes(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
     if let Err(s) = auth(&state, &headers).await {
         return s.into_response();
     }
-    // Distinguish a missing room (404) from a room with no scenes (empty list).
-    if !room_exists(&state, &id).await {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    match list_room_scenes(&state, &id).await {
+    match list_palette_scenes(&state).await {
         Ok(scenes) => Json(scenes).into_response(),
         Err(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
@@ -171,7 +163,6 @@ struct CreateSceneRequest {
 async fn create_scene(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path(id): Path<String>,
     Json(req): Json<CreateSceneRequest>,
 ) -> impl IntoResponse {
     if let Err(s) = auth(&state, &headers).await {
@@ -182,7 +173,28 @@ async fn create_scene(
         brightness: req.brightness,
         palette: req.palette,
     };
-    match create_room_scene(&state, &id, input).await {
+    scene_create_response(create_palette_scene(&state, input).await)
+}
+
+#[derive(Deserialize)]
+struct FromRoomRequest {
+    name: String,
+}
+
+async fn create_scene_from(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(room_id): Path<String>,
+    Json(req): Json<FromRoomRequest>,
+) -> impl IntoResponse {
+    if let Err(s) = auth(&state, &headers).await {
+        return s.into_response();
+    }
+    scene_create_response(create_scene_from_room(&state, &room_id, &req.name).await)
+}
+
+fn scene_create_response(result: Result<String, SceneError>) -> axum::response::Response {
+    match result {
         Ok(scene_id) => (
             StatusCode::CREATED,
             Json(serde_json::json!({ "id": scene_id })),
@@ -197,12 +209,12 @@ async fn create_scene(
 async fn remove_scene(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path((room_id, scene_id)): Path<(String, String)>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
     if let Err(s) = auth(&state, &headers).await {
         return s.into_response();
     }
-    delete_room_scene(&state, &room_id, &scene_id).await;
+    delete_palette_scene(&state, &id).await;
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -214,7 +226,7 @@ async fn apply_scene(
     if let Err(s) = auth(&state, &headers).await {
         return s.into_response();
     }
-    match apply_room_scene(&state, &room_id, &scene_id).await {
+    match apply_scene_to_room(&state, &scene_id, &room_id).await {
         Some((applied, failed)) => {
             Json(serde_json::json!({ "applied": applied, "failed": failed })).into_response()
         }

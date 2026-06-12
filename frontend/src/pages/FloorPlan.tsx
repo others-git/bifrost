@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  applyRoomScene,
+  applySceneToRoom,
+  createPaletteScene,
   createPlan,
-  createRoomScene,
-  deleteRoomScene,
+  deletePaletteScene,
+  getPaletteScenes,
   getPlan,
   getPlans,
-  getRoomScenes,
   getRooms,
   mergePatch,
   putPlanLayout,
@@ -23,11 +23,11 @@ import {
   type LightState,
   type LightStatePatch,
   type Mount,
+  type PaletteScene,
   type Placement,
   type PlanDetail,
   type PlanSummary,
   type Room,
-  type RoomScene,
 } from "../api";
 import { ColorWheel, hexToHs, hexToRgb, hsvToRgb, LightEditor } from "../components/LightEditor";
 import { SceneEditor, SceneSwatch } from "../components/scenes";
@@ -812,12 +812,12 @@ function RoomScenes({
   disabled: boolean;
 }) {
   const roomId = room.id;
-  const [scenes, setScenes] = useState<RoomScene[]>([]);
+  const [scenes, setScenes] = useState<PaletteScene[]>([]);
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState("");
 
   async function load() {
-    setScenes(await getRoomScenes(roomId));
+    setScenes(await getPaletteScenes());
   }
   useEffect(() => { load(); }, [roomId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -851,10 +851,12 @@ function RoomScenes({
       confirmLabel: "Save",
     });
     if (!name?.trim()) return;
-    await createRoomScene(roomId, {
+    // Dedupe colors so the saved palette matches the room's distinct hues.
+    const distinct = [...new Set(palette)];
+    await createPaletteScene({
       name: name.trim(),
       brightness: Math.round(brightnessSum / litCount),
-      palette,
+      palette: distinct,
     });
     await load();
   }
@@ -862,21 +864,21 @@ function RoomScenes({
   async function apply(sceneId: string) {
     setBusy(sceneId);
     try {
-      await applyRoomScene(roomId, sceneId);
+      await applySceneToRoom(roomId, sceneId);
     } finally {
       setBusy("");
     }
   }
 
-  async function remove(scene: RoomScene) {
+  async function remove(scene: PaletteScene) {
     const ok = await dialogs.confirm({
       title: "Delete scene",
-      message: `Delete scene "${scene.name}"?`,
+      message: `Delete scene "${scene.name}"? It will no longer be available to any room.`,
       confirmLabel: "Delete",
       danger: true,
     });
     if (!ok) return;
-    await deleteRoomScene(roomId, scene.id);
+    await deletePaletteScene(scene.id);
     await load();
   }
 
@@ -929,7 +931,7 @@ function RoomScenes({
       {editing && (
         <SceneEditor
           onSave={async (scene) => {
-            await createRoomScene(roomId, scene);
+            await createPaletteScene(scene);
             setEditing(false);
             await load();
           }}
