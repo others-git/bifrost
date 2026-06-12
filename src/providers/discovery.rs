@@ -14,8 +14,10 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use futures_util::{StreamExt, stream};
 use serde::Serialize;
-use std::net::SocketAddr;
+use std::collections::HashSet;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::net::UdpSocket;
 
@@ -76,10 +78,225 @@ pub async fn udp_probe(
     Ok(replies)
 }
 
+/// Credentials object pre-shaped for one host field, e.g. `{"device_ip": ip}`.
+fn host_credentials(field: &str, host: &str) -> serde_json::Value {
+    let mut m = serde_json::Map::new();
+    m.insert(field.to_string(), serde_json::Value::String(host.to_string()));
+    serde_json::Value::Object(m)
+}
+
+// ── SSDP (UPnP) discovery ─────────────────────────────────────────────────────
+
+const SSDP_TARGET: &str = "239.255.255.250:1900";
+/// SSDP/eISCP answers arrive within MX (1s); cap the listen window so the UI
+/// button returns promptly even when given a longer budget.
+const MULTICAST_WINDOW: Duration = Duration::from_secs(2);
+
+/// An SSDP `M-SEARCH` probe for search target `st`.
+pub fn msearch(st: &str) -> Vec<u8> {
+    format!(
+        "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 1\r\nST: {st}\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+/// Pull the host out of an SSDP reply's `LOCATION:` header
+/// (`http://192.168.1.50:1400/xml/...` → `192.168.1.50`).
+pub fn location_host(response: &str) -> Option<String> {
+    for line in response.lines() {
+        let lower = line.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("location:") {
+            let after = rest.trim().strip_prefix("http://")?;
+            let host = after.split([':', '/']).next()?;
+            if !host.is_empty() {
+                return Some(host.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Discovery via SSDP: multicast an `M-SEARCH`, keep replies that carry the
+/// expected `signature` (a lowercase substring, `""` = accept any), and read
+/// each device's IP from its `LOCATION` header. Shared by Sonos (ZonePlayer)
+/// and Hue (IpBridge).
+pub struct SsdpDiscovery {
+    st: &'static str,
+    signature: &'static str,
+    label: &'static str,
+    cred_field: &'static str,
+    target: SocketAddr,
+}
+
+impl SsdpDiscovery {
+    pub fn new(
+        st: &'static str,
+        signature: &'static str,
+        label: &'static str,
+        cred_field: &'static str,
+    ) -> Self {
+        Self {
+            st,
+            signature,
+            label,
+            cred_field,
+            target: SSDP_TARGET.parse().unwrap(),
+        }
+    }
+
+    #[cfg(test)]
+    fn to(mut self, target: SocketAddr) -> Self {
+        self.target = target;
+        self
+    }
+}
+
+#[async_trait]
+impl DeviceDiscovery for SsdpDiscovery {
+    async fn scan(&self, timeout: Duration) -> Result<Vec<DiscoveredDevice>> {
+        let replies = udp_probe(self.target, &msearch(self.st), timeout.min(MULTICAST_WINDOW)).await?;
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for (_, bytes) in replies {
+            let text = String::from_utf8_lossy(&bytes);
+            if !self.signature.is_empty() && !text.to_ascii_lowercase().contains(self.signature) {
+                continue;
+            }
+            let Some(host) = location_host(&text) else {
+                continue;
+            };
+            if !seen.insert(host.clone()) {
+                continue;
+            }
+            out.push(DiscoveredDevice {
+                label: Some(self.label.to_string()),
+                credentials: host_credentials(self.cred_field, &host),
+                host,
+            });
+        }
+        Ok(out)
+    }
+}
+
+// ── HTTP signature sweep ──────────────────────────────────────────────────────
+
+/// The primary local IPv4, found by asking the kernel which source address it
+/// would use to reach the internet (no packets are sent). `None` when offline
+/// or only loopback is available.
+fn local_ipv4() -> Option<Ipv4Addr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("8.8.8.8:80").ok()?;
+    match sock.local_addr().ok()?.ip() {
+        IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_unspecified() => Some(v4),
+        _ => None,
+    }
+}
+
+/// Every `http://host` in the local /24 except our own address.
+fn subnet_bases(ip: Ipv4Addr) -> Vec<String> {
+    let o = ip.octets();
+    (1u8..=254)
+        .filter(|&h| h != o[3])
+        .map(|h| format!("http://{}.{}.{}.{}", o[0], o[1], o[2], h))
+        .collect()
+}
+
+/// GET `{base}{path}` for every base in parallel (capped), returning the bases
+/// whose response body satisfies `matches`.
+async fn http_probe(
+    bases: Vec<String>,
+    path: &str,
+    per_host_timeout: Duration,
+    matches: fn(&str) -> bool,
+) -> Vec<String> {
+    let Ok(client) = reqwest::Client::builder().timeout(per_host_timeout).build() else {
+        return Vec::new();
+    };
+    let path = path.to_string();
+    stream::iter(bases)
+        .map(|base| {
+            let client = client.clone();
+            let url = format!("{base}{path}");
+            async move {
+                let body = client.get(&url).send().await.ok()?.text().await.ok()?;
+                matches(&body).then_some(base)
+            }
+        })
+        .buffer_unordered(64)
+        .filter_map(|x| async move { x })
+        .collect()
+        .await
+}
+
+/// Discovery for HTTP-only LAN devices that don't broadcast (WLED, Tasmota,
+/// Shelly): sweep the local /24, hitting each provider's own signature endpoint
+/// and matching the response body. The match is authoritative — it's the same
+/// response the provider uses to talk to the device.
+pub struct HttpSweepDiscovery {
+    path: &'static str,
+    label: &'static str,
+    cred_field: &'static str,
+    signature: fn(&str) -> bool,
+    /// Injected in tests; `None` = derive the local /24 at runtime.
+    bases: Option<Vec<String>>,
+}
+
+impl HttpSweepDiscovery {
+    pub fn new(
+        path: &'static str,
+        label: &'static str,
+        cred_field: &'static str,
+        signature: fn(&str) -> bool,
+    ) -> Self {
+        Self {
+            path,
+            label,
+            cred_field,
+            signature,
+            bases: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_bases(mut self, bases: Vec<String>) -> Self {
+        self.bases = Some(bases);
+        self
+    }
+}
+
+#[async_trait]
+impl DeviceDiscovery for HttpSweepDiscovery {
+    async fn scan(&self, timeout: Duration) -> Result<Vec<DiscoveredDevice>> {
+        let bases = match &self.bases {
+            Some(b) => b.clone(),
+            None => match local_ipv4() {
+                Some(ip) => subnet_bases(ip),
+                None => return Ok(Vec::new()),
+            },
+        };
+        // Cap per-host wait so a full sweep fits the budget (unused IPs hang to
+        // this limit; live ones answer in milliseconds).
+        let per_host = timeout.min(Duration::from_millis(600));
+        let hosts = http_probe(bases, self.path, per_host, self.signature).await;
+        Ok(hosts
+            .into_iter()
+            .map(|base| {
+                let host = base.trim_start_matches("http://").to_string();
+                DiscoveredDevice {
+                    label: Some(self.label.to_string()),
+                    credentials: host_credentials(self.cred_field, &host),
+                    host,
+                }
+            })
+            .collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
     async fn udp_probe_collects_replies_until_timeout() {
@@ -109,5 +326,101 @@ mod tests {
             .await
             .unwrap();
         assert!(replies.is_empty());
+    }
+
+    #[test]
+    fn location_host_extracts_ip_and_ignores_other_lines() {
+        let reply = "HTTP/1.1 200 OK\r\nLOCATION: http://192.168.7.21:1400/xml/device_description.xml\r\nSERVER: Linux UPnP/1.0\r\n\r\n";
+        assert_eq!(location_host(reply).as_deref(), Some("192.168.7.21"));
+        assert_eq!(location_host("nothing here"), None);
+    }
+
+    #[tokio::test]
+    async fn ssdp_discovery_matches_signature_and_reads_location() {
+        // Loopback responder answers the M-SEARCH with an IpBridge-flavoured
+        // reply whose LOCATION carries the device IP.
+        let sock = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = sock.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            if let Ok((_, from)) = sock.recv_from(&mut buf).await {
+                let reply = "HTTP/1.1 200 OK\r\nLOCATION: http://192.168.7.9:80/description.xml\r\nSERVER: FreeRTOS/7.4.2 UPnP/1.0 IpBridge/1.50.0\r\n\r\n";
+                let _ = sock.send_to(reply.as_bytes(), from).await;
+            }
+        });
+
+        let found = SsdpDiscovery::new("upnp:rootdevice", "ipbridge", "Hue bridge", "bridge_ip")
+            .to(addr)
+            .scan(Duration::from_millis(300))
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].host, "192.168.7.9");
+        assert_eq!(found[0].label.as_deref(), Some("Hue bridge"));
+        assert_eq!(
+            found[0].credentials,
+            serde_json::json!({ "bridge_ip": "192.168.7.9" })
+        );
+    }
+
+    #[tokio::test]
+    async fn ssdp_discovery_drops_replies_without_the_signature() {
+        let sock = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = sock.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            if let Ok((_, from)) = sock.recv_from(&mut buf).await {
+                // A non-Hue UPnP device: valid LOCATION, wrong signature.
+                let reply = "HTTP/1.1 200 OK\r\nLOCATION: http://192.168.7.5:80/x.xml\r\nSERVER: SomeOtherDevice/1.0\r\n\r\n";
+                let _ = sock.send_to(reply.as_bytes(), from).await;
+            }
+        });
+
+        let found = SsdpDiscovery::new("upnp:rootdevice", "ipbridge", "Hue bridge", "bridge_ip")
+            .to(addr)
+            .scan(Duration::from_millis(300))
+            .await
+            .unwrap();
+        assert!(found.is_empty());
+    }
+
+    #[tokio::test]
+    async fn http_sweep_returns_hosts_whose_body_matches_the_signature() {
+        // One server looks like WLED, one doesn't; the sweep keeps only the match.
+        let wled = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/json/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"ver":"0.14","brand":"WLED","leds":{}}"#))
+            .mount(&wled)
+            .await;
+        let other = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/json/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"hello":"world"}"#))
+            .mount(&other)
+            .await;
+
+        let found = HttpSweepDiscovery::new("/json/info", "WLED", "device_ip", |b| b.contains("WLED"))
+            .with_bases(vec![wled.uri(), other.uri()])
+            .scan(Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        assert_eq!(found.len(), 1);
+        // wiremock.uri() is http://127.0.0.1:PORT → host keeps the port here.
+        assert!(found[0].host.starts_with("127.0.0.1:"));
+        assert_eq!(found[0].label.as_deref(), Some("WLED"));
+        assert!(found[0].credentials.get("device_ip").is_some());
+    }
+
+    #[tokio::test]
+    async fn http_sweep_with_no_local_network_returns_empty() {
+        // No injected bases and (in CI) no routable IPv4 → empty, never an error.
+        let found = HttpSweepDiscovery::new("/json/info", "WLED", "device_ip", |b| b.contains("WLED"))
+            .with_bases(vec![])
+            .scan(Duration::from_millis(200))
+            .await
+            .unwrap();
+        assert!(found.is_empty());
     }
 }

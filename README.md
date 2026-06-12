@@ -33,6 +33,13 @@ docker compose up -d
 
 Then open `http://<host>:3000`.
 
+The bundled compose file uses `network_mode: host` so device auto-detect can
+reach the LAN (SSDP/eISCP broadcast, multicast, and the subnet sweep don't
+cross a bridged container's NAT; Govee LAN control needs it too). To run
+bridged instead, swap `network_mode: host` for the `ports:` mapping — runtime
+control of already-added devices still works, but the "Scan network" button
+and Govee LAN won't find anything.
+
 ### Upgrading
 
 ```sh
@@ -53,7 +60,9 @@ A Community Applications template lives at
 Until it's published in CA: **Docker → Add Container → Template** and paste the
 raw URL of that file, or drop it into
 `/boot/config/plugins/dockerMan/templates-user/`. Fill in the Secret Key
-(`openssl rand -hex 32`) — everything else has sane defaults.
+(`openssl rand -hex 32`) — everything else has sane defaults. The template uses
+host networking (required for device auto-detect); the web UI is at
+`http://<server-ip>:3000`.
 
 ### Bare binary
 
@@ -75,7 +84,9 @@ BIFROST_SECRET=$(openssl rand -hex 32) cargo run --release
      app key is fetched and filled in automatically.
    - **Govee**: API key from the Govee Home app (Profile → About Us → Apply
      for API Key).
-   - **WLED / Tasmota / Shelly**: just the device IP.
+   - **WLED / Tasmota / Shelly**: just the device IP — or click **Scan network
+     for devices** to auto-detect it.
+   - **Sonos / Onkyo**: the device IP, or **Scan network** to find it.
 3. **Discover** — runs automatically after adding; lights appear on the
    dashboard with live on/off, brightness, and full-RGB color controls.
 4. **Tune a light** — click any light card to open the editor: a Hue-style
@@ -135,7 +146,7 @@ Volume-knob turns and track changes on an Onkyo push to the UI instantly.
 Rooms can link an audio device (♪ on the Floor Plan room card) for in-room
 volume/mute.
 
-Providers with a LAN discovery protocol support **auto-detect**: a "Scan network for devices" button in the add-provider form finds them and fills in the IP (Onkyo via eISCP broadcast, Sonos via SSDP today). A provider opts in by returning a `DeviceDiscovery` object from its factory; the shared `udp_probe` engine owns the socket work.
+Every IP-addressable provider supports **auto-detect**: a "Scan network for devices" button in the add-provider form finds devices on the LAN and fills in the IP. Hue and Sonos answer SSDP, Onkyo answers an eISCP broadcast, and WLED/Tasmota/Shelly are found by an HTTP signature sweep of the local /24. Cloud providers (Govee, LIFX) take an account token, not an IP, so they have no scan. A provider opts in by returning a `DeviceDiscovery` object from its factory (`SsdpDiscovery`, `HttpSweepDiscovery`, or a custom one); the shared engine in `src/providers/discovery.rs` owns the socket work. **Auto-detect needs host networking** (see the Docker note below) — broadcast, multicast, and subnet sweeps don't cross a bridged container's NAT.
 
 Adding a provider type is intentionally mechanical: implement two traits, register one factory line, write wiremock tests. See `src/providers/wled/mod.rs` for the template (lights), `src/providers/sonos/mod.rs` (audio), `src/providers/discovery.rs` for auto-detect, and `CLAUDE.md` for the rules.
 

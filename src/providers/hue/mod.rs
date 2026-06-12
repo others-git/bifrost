@@ -482,6 +482,7 @@ impl HueProvider {
 
 // ── Factory ─────────────────────────────────────────────────────────────────
 
+use crate::providers::discovery::{DeviceDiscovery, SsdpDiscovery};
 use crate::providers::{CredentialField, FieldKind, ProviderFactory};
 
 pub struct HueProviderFactory;
@@ -489,6 +490,17 @@ pub struct HueProviderFactory;
 impl ProviderFactory for HueProviderFactory {
     fn provider_type(&self) -> &'static str {
         "hue"
+    }
+
+    fn discoverer(&self) -> Option<Box<dyn DeviceDiscovery>> {
+        // Hue bridges answer SSDP and tag themselves "IpBridge" in the SERVER
+        // header; the LOCATION carries the bridge IP for the bridge_ip field.
+        Some(Box::new(SsdpDiscovery::new(
+            "upnp:rootdevice",
+            "ipbridge",
+            "Hue bridge",
+            "bridge_ip",
+        )))
     }
 
     fn build(&self, credentials_json: &str) -> Result<Box<dyn crate::providers::LightProvider>> {

@@ -3178,9 +3178,9 @@ async fn provider_scan_unsupported_type_returns_404() {
     let app = helpers::test_app_with_password().await;
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
 
-    // Hue has no auto-detect object (yet) → 404.
+    // Govee is cloud (API key, no LAN IP) → no discoverer → 404.
     let resp = app
-        .oneshot(helpers::authed_post("/api/providers/scan/hue", &cookie, ""))
+        .oneshot(helpers::authed_post("/api/providers/scan/govee", &cookie, ""))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -3221,7 +3221,10 @@ async fn provider_types_flag_discovery_support() {
             .as_bool()
             .unwrap()
     };
-    assert!(flag("onkyo"), "onkyo advertises auto-detect");
-    assert!(flag("sonos"), "sonos advertises auto-detect");
-    assert!(!flag("hue"), "hue has no auto-detect yet");
+    // Every IP-addressable provider supports auto-detect.
+    for t in ["onkyo", "sonos", "hue", "wled", "tasmota", "shelly"] {
+        assert!(flag(t), "{t} should advertise auto-detect");
+    }
+    // Cloud providers (token, no LAN IP) do not.
+    assert!(!flag("govee"), "govee is cloud — no auto-detect");
 }

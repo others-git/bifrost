@@ -12,6 +12,7 @@
 //! Auth: optional HTTP basic auth via an `auth` credential field.
 
 use crate::models::{Light, LightCapabilities, LightState, Provider};
+use crate::providers::discovery::{DeviceDiscovery, HttpSweepDiscovery};
 use crate::providers::{CredentialField, FieldKind, LightProvider, ProviderFactory};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -189,6 +190,16 @@ impl ProviderFactory for ShellyProviderFactory {
         Ok(Box::new(ShellyProvider::from_credentials(
             credentials_json,
         )?))
+    }
+
+    fn discoverer(&self) -> Option<Box<dyn DeviceDiscovery>> {
+        // Shelly Gen1's /shelly identity endpoint returns its type, mac and fw.
+        Some(Box::new(HttpSweepDiscovery::new(
+            "/shelly",
+            "Shelly",
+            "device_ip",
+            |body| body.contains("\"mac\"") && body.contains("\"fw\""),
+        )))
     }
 
     fn credentials_schema(&self) -> &'static [CredentialField] {

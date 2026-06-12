@@ -18,13 +18,11 @@ use crate::models::audio::{
     AudioCapabilities, AudioCommand, AudioDevice, AudioDeviceKind, AudioState, NowPlaying,
     PlayState, TransportCmd,
 };
-use crate::providers::discovery::{DeviceDiscovery, DiscoveredDevice, udp_probe};
+use crate::providers::discovery::{DeviceDiscovery, SsdpDiscovery};
 use crate::providers::{AudioProvider, AudioProviderFactory, CredentialField, FieldKind};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use reqwest::Client;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::time::Duration;
 use uuid::Uuid;
 
 // ── XML helpers (targeted extraction; full XML parsing is overkill here) ────
@@ -537,85 +535,6 @@ impl AudioProvider for SonosProvider {
     }
 }
 
-// ── Network discovery ─────────────────────────────────────────────────────────
-
-const SSDP_ADDR: Ipv4Addr = Ipv4Addr::new(239, 255, 255, 250);
-const SSDP_PORT: u16 = 1900;
-
-/// The SSDP M-SEARCH probe, targeting Sonos ZonePlayers specifically.
-fn msearch() -> Vec<u8> {
-    concat!(
-        "M-SEARCH * HTTP/1.1\r\n",
-        "HOST: 239.255.255.250:1900\r\n",
-        "MAN: \"ssdp:discover\"\r\n",
-        "MX: 1\r\n",
-        "ST: urn:schemas-upnp-org:device:ZonePlayer:1\r\n",
-        "\r\n",
-    )
-    .as_bytes()
-    .to_vec()
-}
-
-/// Pull the host out of an SSDP reply's `LOCATION:` header
-/// (`http://192.168.1.50:1400/xml/device_description.xml` → `192.168.1.50`).
-fn location_host(response: &str) -> Option<String> {
-    for line in response.lines() {
-        let lower = line.to_ascii_lowercase();
-        if let Some(rest) = lower.strip_prefix("location:") {
-            let after = rest.trim().strip_prefix("http://")?;
-            let host = after.split([':', '/']).next()?;
-            if !host.is_empty() {
-                return Some(host.to_string());
-            }
-        }
-    }
-    None
-}
-
-/// SSDP auto-detect: multicast an M-SEARCH for ZonePlayers; each player answers
-/// with a `LOCATION` URL carrying its IP. One found player is enough to add the
-/// provider — the rest of the household is discovered from it at runtime.
-pub struct SonosDiscovery {
-    target: SocketAddr,
-}
-
-impl SonosDiscovery {
-    pub fn multicast() -> Self {
-        Self {
-            target: SocketAddr::new(IpAddr::V4(SSDP_ADDR), SSDP_PORT),
-        }
-    }
-
-    #[cfg(test)]
-    fn to(target: SocketAddr) -> Self {
-        Self { target }
-    }
-}
-
-#[async_trait]
-impl DeviceDiscovery for SonosDiscovery {
-    async fn scan(&self, timeout: Duration) -> Result<Vec<DiscoveredDevice>> {
-        let replies = udp_probe(self.target, &msearch(), timeout).await?;
-        let mut seen = std::collections::HashSet::new();
-        let mut out = Vec::new();
-        for (_, bytes) in replies {
-            let text = String::from_utf8_lossy(&bytes);
-            let Some(host) = location_host(&text) else {
-                continue;
-            };
-            if !seen.insert(host.clone()) {
-                continue;
-            }
-            out.push(DiscoveredDevice {
-                label: Some("Sonos".to_string()),
-                credentials: serde_json::json!({ "host": host }),
-                host,
-            });
-        }
-        Ok(out)
-    }
-}
-
 // ── Factory ─────────────────────────────────────────────────────────────────
 
 pub struct SonosProviderFactory;
@@ -640,7 +559,14 @@ impl AudioProviderFactory for SonosProviderFactory {
     }
 
     fn discoverer(&self) -> Option<Box<dyn DeviceDiscovery>> {
-        Some(Box::new(SonosDiscovery::multicast()))
+        // Any LOCATION-bearing ZonePlayer reply is enough; the household is
+        // discovered from that one player at runtime.
+        Some(Box::new(SsdpDiscovery::new(
+            "urn:schemas-upnp-org:device:ZonePlayer:1",
+            "",
+            "Sonos",
+            "host",
+        )))
     }
 }
 
@@ -1062,45 +988,8 @@ mod tests {
         assert!(p.discover().await.is_err());
     }
 
-    // ── Network discovery ────────────────────────────────────────────────────
-
-    #[test]
-    fn location_host_extracts_ip_from_ssdp_reply() {
-        let reply = "HTTP/1.1 200 OK\r\nLOCATION: http://192.168.7.21:1400/xml/device_description.xml\r\nST: urn:schemas-upnp-org:device:ZonePlayer:1\r\n\r\n";
-        assert_eq!(location_host(reply).as_deref(), Some("192.168.7.21"));
-        assert_eq!(location_host("no location here"), None);
-    }
-
-    #[tokio::test]
-    async fn discovery_parses_ssdp_location_into_host() {
-        // A loopback responder that answers the M-SEARCH with an SSDP reply
-        // whose LOCATION carries the (arbitrary) device IP — exactly how a real
-        // player advertises itself independent of the reply's source address.
-        let sock = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .unwrap();
-        let addr = sock.local_addr().unwrap();
-        tokio::spawn(async move {
-            let mut buf = [0u8; 512];
-            if let Ok((_, from)) = sock.recv_from(&mut buf).await {
-                let reply = "HTTP/1.1 200 OK\r\nLOCATION: http://192.168.7.21:1400/xml/device_description.xml\r\n\r\n";
-                let _ = sock.send_to(reply.as_bytes(), from).await;
-            }
-        });
-
-        let found = SonosDiscovery::to(addr)
-            .scan(Duration::from_millis(300))
-            .await
-            .unwrap();
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].host, "192.168.7.21");
-        assert_eq!(found[0].label.as_deref(), Some("Sonos"));
-        assert_eq!(
-            found[0].credentials,
-            serde_json::json!({ "host": "192.168.7.21" })
-        );
-    }
-
+    // SSDP parsing is covered in providers::discovery; here just confirm the
+    // factory wires a discoverer for Sonos.
     #[test]
     fn factory_exposes_a_discoverer() {
         use crate::providers::AudioProviderFactory as _;

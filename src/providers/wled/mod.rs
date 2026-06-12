@@ -11,6 +11,7 @@
 //! - `POST /json/state` — update state
 
 use crate::models::{Color, Light, LightCapabilities, LightState, Provider};
+use crate::providers::discovery::{DeviceDiscovery, HttpSweepDiscovery};
 use crate::providers::{CredentialField, FieldKind, LightProvider, ProviderFactory};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -203,6 +204,16 @@ impl ProviderFactory for WledProviderFactory {
 
     fn build(&self, credentials_json: &str) -> Result<Box<dyn LightProvider>> {
         Ok(Box::new(WledProvider::from_credentials(credentials_json)?))
+    }
+
+    fn discoverer(&self) -> Option<Box<dyn DeviceDiscovery>> {
+        // WLED's /json/info reports `"brand":"WLED"`.
+        Some(Box::new(HttpSweepDiscovery::new(
+            "/json/info",
+            "WLED",
+            "device_ip",
+            |body| body.contains("WLED"),
+        )))
     }
 
     fn credentials_schema(&self) -> &'static [CredentialField] {

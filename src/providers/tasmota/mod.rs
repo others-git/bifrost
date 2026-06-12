@@ -12,6 +12,7 @@
 //! - `Backlog …`  — execute multiple `;`-separated commands atomically
 
 use crate::models::{Color, Light, LightCapabilities, LightState, Provider};
+use crate::providers::discovery::{DeviceDiscovery, HttpSweepDiscovery};
 use crate::providers::{CredentialField, FieldKind, LightProvider, ProviderFactory};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -228,6 +229,16 @@ impl ProviderFactory for TasmotaProviderFactory {
         Ok(Box::new(TasmotaProvider::from_credentials(
             credentials_json,
         )?))
+    }
+
+    fn discoverer(&self) -> Option<Box<dyn DeviceDiscovery>> {
+        // `Status 0` returns a status blob; `StatusFWR` is a Tasmota-specific key.
+        Some(Box::new(HttpSweepDiscovery::new(
+            "/cm?cmnd=Status%200",
+            "Tasmota",
+            "device_ip",
+            |body| body.contains("StatusFWR"),
+        )))
     }
 
     fn credentials_schema(&self) -> &'static [CredentialField] {
