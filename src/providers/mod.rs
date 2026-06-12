@@ -1,4 +1,5 @@
 pub mod govee;
+pub mod govee_lan;
 pub mod hue;
 pub mod shelly;
 pub mod tasmota;
@@ -186,6 +187,7 @@ pub fn default_registry() -> ProviderRegistry {
     let mut r = ProviderRegistry::new();
     r.register(hue::HueProviderFactory);
     r.register(govee::GoveeProviderFactory);
+    r.register(govee_lan::GoveeLanProviderFactory);
     r.register(shelly::ShellyProviderFactory);
     r.register(tasmota::TasmotaProviderFactory);
     r.register(wled::WledProviderFactory);
@@ -285,6 +287,14 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn default_registry_contains_govee_lan() {
+        let reg = default_registry();
+        assert!(reg.is_known("govee-lan"));
+        // Builds from a bind address without touching the network.
+        assert!(reg.build("govee-lan", r#"{"bind_addr":"0.0.0.0"}"#).is_ok());
+    }
+
+    #[test]
     fn default_registry_contains_wled() {
         let reg = default_registry();
         assert!(reg.is_known("wled"));
@@ -301,7 +311,7 @@ pub(crate) mod tests {
     fn hue_uses_sse_mode_all_others_poll() {
         let reg = default_registry();
         assert_eq!(reg.connection_mode("hue"), Some(ConnectionMode::Sse));
-        for t in ["govee", "wled", "tasmota", "shelly"] {
+        for t in ["govee", "govee-lan", "wled", "tasmota", "shelly"] {
             match reg.connection_mode(t) {
                 Some(ConnectionMode::Poll { interval_secs }) => {
                     assert!(interval_secs > 0, "{t}: zero poll interval")

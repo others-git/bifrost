@@ -5,6 +5,8 @@
 import { useState } from "react";
 import { S } from "../styles";
 import { LightEditor } from "./LightEditor";
+import { Modal } from "./dialogs";
+import type { PaletteScene } from "../api";
 
 export type ScenePreset = { name: string; brightness: number; palette: string[] };
 
@@ -66,6 +68,134 @@ export function SceneSwatch({
         flexShrink: 0,
       }}
     />
+  );
+}
+
+/** The pretty "open scenes" button shown inside a room's color editor. */
+export function SceneButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: "0.5rem",
+        width: "100%",
+        marginTop: "0.1rem",
+        padding: "0.5rem",
+        borderRadius: 10,
+        border: "1px solid rgba(255,255,255,0.12)",
+        color: "#f4ecda",
+        cursor: "pointer",
+        fontSize: "0.82rem",
+        fontWeight: 600,
+        letterSpacing: "0.02em",
+        background:
+          "linear-gradient(90deg, rgba(255,153,0,0.22), rgba(255,94,156,0.18) 45%, rgba(34,211,238,0.16))",
+        boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
+      }}
+    >
+      <span aria-hidden style={{ fontSize: "0.9rem" }}>✦</span>
+      Scenes
+    </button>
+  );
+}
+
+/**
+ * Modal listing every global scene as a gradient tile; clicking one applies it
+ * to a room. The footer captures the room's current look as a new scene.
+ * `onApply`/`onSave` are supplied by the caller so each page keeps its own
+ * apply/capture behaviour.
+ */
+export function SceneModal({
+  roomName,
+  scenes,
+  busy,
+  onApply,
+  onSave,
+  onClose,
+}: {
+  roomName: string;
+  scenes: PaletteScene[];
+  busy: boolean;
+  onApply: (sceneId: string) => void;
+  onSave: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <Modal title={`Scenes · ${roomName}`} onClose={onClose} width={460}>
+      <p style={{ margin: "0.4rem 0 0.8rem", color: "#8c8676", fontSize: "0.82rem" }}>
+        Apply a saved look to this room. Lights stay individually adjustable.
+      </p>
+
+      {scenes.length === 0 ? (
+        <p style={{ color: "#777", fontSize: "0.85rem", margin: "0 0 0.8rem" }}>
+          No scenes yet — save this room's current colors below, or build one on the Scenes page.
+        </p>
+      ) : (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))",
+            gap: "0.55rem",
+            marginBottom: "0.9rem",
+          }}
+        >
+          {scenes.map((s) => (
+            <button
+              key={s.id}
+              onClick={() => onApply(s.id)}
+              disabled={busy}
+              title={s.palette.length > 0 ? s.palette.join(" ") : "brightness only"}
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: "0.4rem",
+                padding: "0.5rem",
+                borderRadius: 10,
+                border: "1px solid #2e2c26",
+                background: "#1b1a16",
+                color: "#e9e2d2",
+                cursor: busy ? "default" : "pointer",
+                textAlign: "left",
+              }}
+            >
+              <SceneSwatch palette={s.palette} width={116} height={34} radius={6} />
+              <span style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "0.4rem" }}>
+                <span style={{ fontSize: "0.82rem", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {s.name}
+                </span>
+                {s.brightness != null && (
+                  <span style={{ fontSize: "0.68rem", color: "#7e7866" }}>{Math.round(s.brightness)}%</span>
+                )}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      <button
+        onClick={onSave}
+        disabled={busy}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: "0.45rem",
+          width: "100%",
+          padding: "0.55rem",
+          borderRadius: 10,
+          border: "1px dashed #3a372e",
+          background: "transparent",
+          color: "#cfc7b2",
+          cursor: busy ? "default" : "pointer",
+          fontSize: "0.82rem",
+        }}
+      >
+        + Save this room's look as a scene
+      </button>
+    </Modal>
   );
 }
 

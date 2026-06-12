@@ -3,7 +3,6 @@ import {
   applySceneToRoom,
   createPaletteScene,
   createPlan,
-  deletePaletteScene,
   getPaletteScenes,
   getPlan,
   getPlans,
@@ -30,8 +29,8 @@ import {
   type Room,
 } from "../api";
 import { ColorWheel, hexToHs, hexToRgb, hsvToRgb, LightEditor } from "../components/LightEditor";
-import { SceneEditor, SceneSwatch } from "../components/scenes";
-import { Modal, useDialogs, type Dialogs } from "../components/dialogs";
+import { SceneButton, SceneModal } from "../components/scenes";
+import { Modal, useDialogs } from "../components/dialogs";
 import { S } from "../styles";
 
 type Tool = "view" | "floor" | "wall" | "erase" | "place" | "room" | "paint";
@@ -154,6 +153,10 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
   const [toast, setToast] = useState("");
 
   const [allRooms, setAllRooms] = useState<Room[]>([]);
+  const [scenes, setScenes] = useState<PaletteScene[]>([]);
+  // The room whose scene modal is open (opened from its color editor).
+  const [scenesRoom, setScenesRoom] = useState<Room | null>(null);
+  const [sceneBusy, setSceneBusy] = useState(false);
 
   // Live light states: start from the lights prop, patched by SSE + optimistic toggles.
   const [statesById, setStatesById] = useState<Map<string, LightState>>(new Map());
@@ -211,6 +214,9 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
   useEffect(() => { loadPlans(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     getRooms().then(setAllRooms);
+  }, []);
+  useEffect(() => {
+    getPaletteScenes().then(setScenes);
   }, []);
 
   useEffect(() => {
@@ -315,6 +321,49 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
       return next;
     });
     await setRoomState(room.id, { on });
+  }
+
+  async function applyScene(room: Room, sceneId: string) {
+    setSceneBusy(true);
+    try {
+      await applySceneToRoom(room.id, sceneId);
+    } finally {
+      setSceneBusy(false);
+    }
+  }
+
+  /** Capture a room's current colors (as painted/lit now) into a new global scene. */
+  async function saveRoomLook(room: Room) {
+    const palette: string[] = [];
+    let brightnessSum = 0;
+    let litCount = 0;
+    for (const id of room.light_ids) {
+      const st = statesById.get(id);
+      if (!st?.on) continue;
+      litCount++;
+      brightnessSum += st.brightness ?? 100;
+      if (st.color) palette.push(rgbToHex(...xyToRgb(st.color.x, st.color.y, st.color.brightness)));
+    }
+    if (litCount === 0) {
+      await dialogs.alert({
+        title: "Nothing to save",
+        message: "No lights in this room are on — turn on or paint some first.",
+      });
+      return;
+    }
+    const name = await dialogs.prompt({
+      title: "Save room as scene",
+      message: "Saves this room's current colors and brightness as a reusable scene.",
+      placeholder: "Scene name",
+      confirmLabel: "Save",
+    });
+    if (!name?.trim()) return;
+    await createPaletteScene({
+      name: name.trim(),
+      brightness: Math.round(brightnessSum / litCount),
+      palette: [...new Set(palette)],
+    });
+    setScenes(await getPaletteScenes());
   }
 
   /** Live edits from the shared editor — optimistic locally, debounced to the API. */
@@ -459,7 +508,6 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                 plan={plan}
                 rooms={allRooms}
                 statesById={statesById}
-                dialogs={dialogs}
                 onSetRoom={setRoom}
                 onEditRoom={(room, anchor) => setEditor({ kind: "room", roomId: room.id, anchor })}
               />
@@ -651,9 +699,30 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
             onToggle={() => setRoom(room, !anyOn)}
             onChange={(h, b) => editorChange(editor, h, b)}
             onClose={() => setEditor(null)}
-          />
+          >
+            <SceneButton
+              onClick={() => {
+                setEditor(null);
+                setScenesRoom(room);
+              }}
+            />
+          </LightEditor>
         );
       })()}
+
+      {scenesRoom && (
+        <SceneModal
+          roomName={scenesRoom.name}
+          scenes={scenes}
+          busy={sceneBusy}
+          onApply={async (id) => {
+            await applyScene(scenesRoom, id);
+            setScenesRoom(null);
+          }}
+          onSave={() => saveRoomLook(scenesRoom)}
+          onClose={() => setScenesRoom(null)}
+        />
+      )}
 
       {showNewPlan && <NewPlanDialog onCreate={handleCreate} onClose={() => setShowNewPlan(false)} />}
       {dialogs.element}
@@ -729,14 +798,12 @@ function RoomController({
   plan,
   rooms,
   statesById,
-  dialogs,
   onSetRoom,
   onEditRoom,
 }: {
   plan: PlanDetail;
   rooms: Room[];
   statesById: Map<string, LightState>;
-  dialogs: Dialogs;
   onSetRoom: (room: Room, on: boolean) => Promise<void>;
   onEditRoom: (room: Room, anchor: HTMLElement) => void;
 }) {
@@ -754,44 +821,68 @@ function RoomController({
   if (bound.length === 0) return null;
 
   return (
-    <div style={{ width: 250, flexShrink: 0, display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+    <div style={{ width: 250, flexShrink: 0, display: "flex", flexDirection: "column", gap: "0.5rem" }}>
       <h3 style={{ margin: 0, fontSize: "0.9rem", color: "#aaa" }}>Rooms</h3>
+      <span style={{ color: "#666", fontSize: "0.72rem", marginTop: "-0.2rem" }}>
+        Click a room to set its color, brightness &amp; scenes.
+      </span>
 
       {bound.map(({ room, color }) => {
         const count = room.light_ids.length;
+        const anyOn = room.light_ids.some((id) => statesById.get(id)?.on);
+        const litColor = room.light_ids
+          .map((id) => statesById.get(id))
+          .find((st) => st?.on && st.color)?.color;
+        const dotHex = litColor
+          ? rgbToHex(...xyToRgb(litColor.x, litColor.y, litColor.brightness))
+          : color;
+        const tunable = count > 0;
         return (
-          <div key={room.id} style={{ ...S.card, gap: "0.5rem", borderLeft: `3px solid ${color}` }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-              <span style={{ fontWeight: 600, fontSize: "0.9rem" }}>{room.name}</span>
-              <span style={{ color: "#666", fontSize: "0.75rem" }}>
+          <div
+            key={room.id}
+            style={{ ...S.card, padding: 0, overflow: "hidden", borderLeft: `3px solid ${color}` }}
+          >
+            {/* The whole header opens the room's color/brightness/scene editor. */}
+            <div
+              onClick={(e) => { if (tunable) onEditRoom(room, e.currentTarget); }}
+              title={tunable ? "Set this room's color, brightness, and scenes" : undefined}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.55rem",
+                padding: "0.6rem 0.7rem",
+                cursor: tunable ? "pointer" : "default",
+              }}
+            >
+              <span
+                aria-hidden
+                style={{
+                  width: 16,
+                  height: 16,
+                  flexShrink: 0,
+                  borderRadius: "50%",
+                  border: "1px solid rgba(255,255,255,0.22)",
+                  background: anyOn
+                    ? `radial-gradient(circle at 35% 30%, #ffffff44, transparent 45%), ${dotHex}`
+                    : "#3a372e",
+                  boxShadow: anyOn ? `0 0 10px -3px ${dotHex}` : "none",
+                }}
+              />
+              <span style={{ fontWeight: 600, fontSize: "0.88rem", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {room.name}
+              </span>
+              <span style={{ color: "#666", fontSize: "0.72rem", whiteSpace: "nowrap" }}>
                 {count} light{count !== 1 ? "s" : ""}
               </span>
-            </div>
-            <div style={{ display: "flex", gap: "0.4rem" }}>
-              <button
-                onClick={async () => { setBusy(room.id); try { await onSetRoom(room, true); } finally { setBusy(""); } }}
+              <Switch
+                on={anyOn}
                 disabled={busy === room.id || count === 0}
-                style={{ ...S.buttonGhost, padding: "0.3rem 0.6rem", fontSize: "0.78rem" }}
-              >
-                On
-              </button>
-              <button
-                onClick={async () => { setBusy(room.id); try { await onSetRoom(room, false); } finally { setBusy(""); } }}
-                disabled={busy === room.id || count === 0}
-                style={{ ...S.buttonGhost, padding: "0.3rem 0.6rem", fontSize: "0.78rem" }}
-              >
-                Off
-              </button>
-              <button
-                onClick={(e) => onEditRoom(room, e.currentTarget)}
-                disabled={count === 0}
-                title="Set the whole room's color and brightness"
-                style={{ ...S.buttonGhost, padding: "0.3rem 0.6rem", fontSize: "0.78rem", marginLeft: "auto" }}
-              >
-                Color…
-              </button>
+                onToggle={async () => {
+                  setBusy(room.id);
+                  try { await onSetRoom(room, !anyOn); } finally { setBusy(""); }
+                }}
+              />
             </div>
-            <RoomScenes room={room} statesById={statesById} dialogs={dialogs} disabled={count === 0} />
           </div>
         );
       })}
@@ -799,145 +890,48 @@ function RoomController({
   );
 }
 
-/** Palette scene chips + inline editor for one room. */
-function RoomScenes({
-  room,
-  statesById,
-  dialogs,
+/** A compact horizontal on/off switch. Stops propagation so it doesn't open the editor. */
+function Switch({
+  on,
+  onToggle,
   disabled,
 }: {
-  room: Room;
-  statesById: Map<string, LightState>;
-  dialogs: Dialogs;
-  disabled: boolean;
+  on: boolean;
+  onToggle: () => void;
+  disabled?: boolean;
 }) {
-  const roomId = room.id;
-  const [scenes, setScenes] = useState<PaletteScene[]>([]);
-  const [editing, setEditing] = useState(false);
-  const [busy, setBusy] = useState("");
-
-  async function load() {
-    setScenes(await getPaletteScenes());
-  }
-  useEffect(() => { load(); }, [roomId]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  /** Capture the lights as they are now (e.g. after painting) into a scene. */
-  async function saveCurrent() {
-    // light_ids come name-ordered — the same order apply uses to spread the
-    // palette round-robin — so one entry per lit light replays faithfully.
-    const palette: string[] = [];
-    let brightnessSum = 0;
-    let litCount = 0;
-    for (const id of room.light_ids) {
-      const st = statesById.get(id);
-      if (!st?.on) continue;
-      litCount++;
-      brightnessSum += st.brightness ?? 100;
-      if (st.color) {
-        palette.push(rgbToHex(...xyToRgb(st.color.x, st.color.y, st.color.brightness)));
-      }
-    }
-    if (litCount === 0) {
-      await dialogs.alert({
-        title: "Nothing to save",
-        message: "No lights in this room are on — turn on or paint some first.",
-      });
-      return;
-    }
-    const name = await dialogs.prompt({
-      title: "Save current as scene",
-      message: "Saves the room's current colors and brightness.",
-      placeholder: "Scene name",
-      confirmLabel: "Save",
-    });
-    if (!name?.trim()) return;
-    // Dedupe colors so the saved palette matches the room's distinct hues.
-    const distinct = [...new Set(palette)];
-    await createPaletteScene({
-      name: name.trim(),
-      brightness: Math.round(brightnessSum / litCount),
-      palette: distinct,
-    });
-    await load();
-  }
-
-  async function apply(sceneId: string) {
-    setBusy(sceneId);
-    try {
-      await applySceneToRoom(roomId, sceneId);
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function remove(scene: PaletteScene) {
-    const ok = await dialogs.confirm({
-      title: "Delete scene",
-      message: `Delete scene "${scene.name}"? It will no longer be available to any room.`,
-      confirmLabel: "Delete",
-      danger: true,
-    });
-    if (!ok) return;
-    await deletePaletteScene(scene.id);
-    await load();
-  }
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.3rem" }}>
-        {scenes.map((s) => (
-          <span key={s.id} style={{ display: "inline-flex" }}>
-            <button
-              onClick={() => apply(s.id)}
-              disabled={disabled || busy === s.id}
-              title={s.palette.length > 0 ? s.palette.join(" ") : "brightness only"}
-              style={{
-                ...S.buttonGhost,
-                padding: "0.25rem 0.5rem",
-                fontSize: "0.75rem",
-                borderRadius: "6px 0 0 6px",
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "0.3rem",
-              }}
-            >
-              <SceneSwatch palette={s.palette} width={20} height={11} />
-              {busy === s.id ? "…" : s.name}
-            </button>
-            <button
-              onClick={() => remove(s)}
-              title="Delete scene"
-              style={{ ...S.buttonGhost, padding: "0.25rem 0.4rem", fontSize: "0.75rem", borderRadius: "0 6px 6px 0", borderLeft: "none", color: "#866" }}
-            >
-              ×
-            </button>
-          </span>
-        ))}
-        <button
-          onClick={() => setEditing((v) => !v)}
-          style={{ ...S.buttonGhost, padding: "0.25rem 0.5rem", fontSize: "0.75rem" }}
-        >
-          {editing ? "Close" : "+ Scene"}
-        </button>
-        <button
-          onClick={saveCurrent}
-          disabled={disabled}
-          title="Save the room's current light colors and brightness as a scene"
-          style={{ ...S.buttonGhost, padding: "0.25rem 0.5rem", fontSize: "0.75rem" }}
-        >
-          Save current
-        </button>
-      </div>
-      {editing && (
-        <SceneEditor
-          onSave={async (scene) => {
-            await createPaletteScene(scene);
-            setEditing(false);
-            await load();
-          }}
-        />
-      )}
-    </div>
+    <button
+      onClick={(e) => { e.stopPropagation(); if (!disabled) onToggle(); }}
+      disabled={disabled}
+      aria-label={on ? "Turn off" : "Turn on"}
+      style={{
+        flexShrink: 0,
+        width: 40,
+        height: 22,
+        borderRadius: 11,
+        border: "none",
+        cursor: disabled ? "default" : "pointer",
+        background: on ? "linear-gradient(90deg, #ffb340, #f90)" : "#3a372f",
+        boxShadow: on ? "0 0 10px -2px rgba(255,153,0,0.7)" : "none",
+        position: "relative",
+        opacity: disabled ? 0.5 : 1,
+        transition: "background 0.2s, box-shadow 0.2s",
+      }}
+    >
+      <span
+        style={{
+          position: "absolute",
+          top: 2,
+          left: on ? 20 : 2,
+          width: 18,
+          height: 18,
+          borderRadius: "50%",
+          background: on ? "#fff8ec" : "#bdb6a6",
+          transition: "left 0.2s, background 0.2s",
+        }}
+      />
+    </button>
   );
 }
 
