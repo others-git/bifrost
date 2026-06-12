@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import {
   applySceneToRoom,
+  getAudioDevice,
+  getAudioDevices,
   getPaletteScenes,
   getProviders,
   getRooms,
@@ -8,9 +10,12 @@ import {
   rgbToHex,
   rgbToXy,
   savePaletteSceneFromRoom,
+  setAudioState,
   setLightState,
   setRoomState,
   xyToRgb,
+  type AudioCommand,
+  type AudioDevice,
   type Light,
   type LightState,
   type LightStatePatch,
@@ -157,7 +162,257 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
           onChanged={onRefresh}
         />
       )}
+      <AudioSection />
       {dialogs.element}
+    </div>
+  );
+}
+
+// ── Audio devices ─────────────────────────────────────────────────────────────
+
+/** Receivers and speakers, in their own framed box below the rooms. Hidden
+ *  when no audio providers are configured. Polls live state at a slow cadence
+ *  so now-playing metadata stays current without hammering the LAN. */
+function AudioSection() {
+  const [devices, setDevices] = useState<AudioDevice[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+
+    async function refresh(live: boolean) {
+      const list = await getAudioDevices();
+      if (cancelled) return;
+      if (live && list.length > 0) {
+        // Live round-trip per device (cheap on the LAN, refreshes the cache).
+        const fresh = await Promise.all(list.map((d) => getAudioDevice(d.id)));
+        if (cancelled) return;
+        setDevices(fresh.flatMap((d, i) => (d ? [d] : [list[i]])));
+      } else {
+        setDevices(list);
+      }
+      timer = setTimeout(() => refresh(true), 15000);
+    }
+
+    refresh(true);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, []);
+
+  function patchLocal(id: string, patch: Partial<AudioDevice["state"]>) {
+    setDevices((prev) =>
+      prev.map((d) => (d.id === id ? { ...d, state: { ...d.state, ...patch } } : d)),
+    );
+  }
+
+  if (devices.length === 0) return null;
+
+  const onCount = devices.filter((d) => d.state.power).length;
+
+  return (
+    <section
+      style={{
+        marginTop: "1.1rem",
+        background: T.panel,
+        border: `1px solid ${T.panelBorder}`,
+        borderRadius: 16,
+        overflow: "hidden",
+        boxShadow: "inset 0 1px 0 rgba(255,255,255,0.035)",
+      }}
+    >
+      <div
+        aria-hidden
+        style={{
+          height: 2,
+          background: "linear-gradient(90deg, rgba(167,139,250,0.6), rgba(56,189,248,0.25) 60%, transparent)",
+          opacity: onCount > 0 ? 0.9 : 0.5,
+        }}
+      />
+      <header
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "0.7rem",
+          padding: "0.75rem 1rem 0.7rem",
+          borderBottom: `1px solid ${T.hairline}`,
+        }}
+      >
+        <span style={{ ...label, fontSize: "0.82rem", color: "#d8cfba" }}>Audio</span>
+        <span style={{ fontSize: "0.72rem", color: T.faint }}>
+          {devices.length} device{devices.length !== 1 ? "s" : ""}
+          {onCount > 0 ? ` · ${onCount} on` : " · off"}
+        </span>
+      </header>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
+          gap: "0.7rem",
+          padding: "0.85rem 1rem 1rem",
+        }}
+      >
+        {devices.map((d) => (
+          <AudioCard key={d.id} device={d} onLocalPatch={patchLocal} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AudioCard({
+  device,
+  onLocalPatch,
+}: {
+  device: AudioDevice;
+  onLocalPatch: (id: string, patch: Partial<AudioDevice["state"]>) => void;
+}) {
+  const volumeTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const s = device.state;
+  const offline = s.reachable === false;
+  const np = s.now_playing;
+  const trackLine = np?.title ? (np.artist ? `${np.title} — ${np.artist}` : np.title) : null;
+
+  async function send(cmd: AudioCommand) {
+    const err = await setAudioState(device.id, cmd);
+    if (err) console.warn("audio command failed:", err);
+  }
+
+  function setVolume(v: number) {
+    onLocalPatch(device.id, { volume: v });
+    clearTimeout(volumeTimer.current);
+    volumeTimer.current = setTimeout(() => send({ volume: v }), 250);
+  }
+
+  function togglePower() {
+    onLocalPatch(device.id, { power: !s.power });
+    send({ power: !s.power });
+  }
+
+  function toggleMute() {
+    onLocalPatch(device.id, { mute: !s.mute });
+    send({ mute: !s.mute });
+  }
+
+  const accent = "#a78bfa"; // violet — audio's counterpart to the lights' warm glow
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: "0.55rem",
+        padding: "0.8rem 0.95rem",
+        borderRadius: 12,
+        background: s.power
+          ? `radial-gradient(130% 130% at 88% 0%, ${accent}1a, transparent 55%), ${T.card}`
+          : T.cardOff,
+        border: `1px solid ${s.power ? `${accent}40` : T.cardBorder}`,
+        boxShadow: s.power
+          ? `0 0 24px -10px ${accent}aa, inset 0 1px 0 rgba(255,255,255,0.04)`
+          : "inset 0 1px 0 rgba(255,255,255,0.02)",
+        opacity: offline ? 0.45 : 1,
+        transition: "background 0.25s, border-color 0.25s, box-shadow 0.25s",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem" }}>
+        <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+          <span
+            style={{
+              fontWeight: 600,
+              fontSize: "0.92rem",
+              color: s.power ? T.text : T.dim,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {device.name}
+          </span>
+          <span style={{ fontSize: "0.72rem", color: T.faint, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {offline
+              ? "offline"
+              : s.power
+                ? trackLine ?? (s.source ? `source · ${s.source}` : "on")
+                : "standby"}
+          </span>
+        </div>
+        {offline ? (
+          <span
+            title="The device didn't answer"
+            style={{ flexShrink: 0, fontSize: "0.7rem", color: "#c66", border: "1px solid #533", borderRadius: 4, padding: "0.1rem 0.4rem" }}
+          >
+            offline
+          </span>
+        ) : (
+          <VerticalToggle on={s.power} onToggle={togglePower} />
+        )}
+      </div>
+
+      {!offline && s.power && (
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.55rem" }}>
+            <button
+              onClick={toggleMute}
+              title={s.mute ? "Unmute" : "Mute"}
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                fontSize: "0.95rem",
+                padding: 0,
+                opacity: s.mute ? 1 : 0.55,
+                filter: s.mute ? "none" : "grayscale(60%)",
+              }}
+            >
+              {s.mute ? "🔇" : "🔊"}
+            </button>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={s.volume}
+              onChange={(e) => setVolume(Number(e.target.value))}
+              style={{ flex: 1, accentColor: accent }}
+            />
+            <span style={{ fontSize: "0.72rem", color: T.dim, width: 28, textAlign: "right" }}>
+              {s.volume}
+            </span>
+          </div>
+
+          {device.capabilities.transport && (
+            <div style={{ display: "flex", gap: "0.4rem", justifyContent: "center" }}>
+              {(
+                [
+                  ["⏮", "previous", "Previous track"],
+                  [np?.play_state === "playing" ? "⏸" : "▶", "toggle", "Play / pause"],
+                  ["⏭", "next", "Next track"],
+                ] as const
+              ).map(([icon, transport, title]) => (
+                <button
+                  key={transport}
+                  onClick={() => send({ transport })}
+                  title={title}
+                  style={{
+                    flex: 1,
+                    maxWidth: 72,
+                    padding: "0.25rem 0",
+                    borderRadius: 8,
+                    border: `1px solid ${T.cardBorder}`,
+                    background: "rgba(255,255,255,0.04)",
+                    color: T.dim,
+                    cursor: "pointer",
+                    fontSize: "0.8rem",
+                  }}
+                >
+                  {icon}
+                </button>
+              ))}
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

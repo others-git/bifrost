@@ -72,16 +72,16 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
   async function handleDiscover(id: string) {
     const result = await discoverLights(id);
     await loadProviders();
-    showToast(`Discovered ${result.discovered} light${result.discovered !== 1 ? "s" : ""}.`);
+    showToast(`Discovered ${result.discovered} device${result.discovered !== 1 ? "s" : ""}.`);
   }
 
   async function handleAdded(id: string) {
     setShowAdd(false);
     await loadProviders();
-    // Run discovery right away so lights appear without an extra click.
+    // Run discovery right away so devices appear without an extra click.
     try {
       const result = await discoverLights(id);
-      showToast(`Provider added — found ${result.discovered} light${result.discovered !== 1 ? "s" : ""}.`);
+      showToast(`Provider added — found ${result.discovered} device${result.discovered !== 1 ? "s" : ""}.`);
     } catch {
       showToast("Provider added. Discovery failed — check the connection and try Discover.");
     }
@@ -891,6 +891,7 @@ function AddProviderForm({
           {types.map((t) => (
             <option key={t.provider_type} value={t.provider_type}>
               {t.provider_type}
+              {t.kind === "audio" ? " (audio)" : ""}
             </option>
           ))}
         </select>

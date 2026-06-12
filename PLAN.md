@@ -41,11 +41,26 @@ A self-hosted Rust smart home hub that is:
 
 ---
 
-## Milestone 10 — Audio device support
+## Milestone 10 — Audio device support ✅ CORE DONE
 
-Bring audio devices into Bifrost as first-class citizens alongside lights, using the same
-provider/registry pattern and a clean REST API. The API surface is what the companion MCP
-project calls to let an AI assistant control the whole home.
+Shipped: `AudioProvider` trait + parallel audio factory map in `ProviderRegistry`
+(`models/audio.rs`, `providers/mod.rs`); Onkyo eISCP provider (codec, PWR/MVL/AMT/SLI,
+NTC transport, NSV service selection incl. Spotify, NTI/NAT/NAL/NST metadata, loopback
+mock tests); Sonos UPnP provider (seed-host topology fan-out, RenderingControl volume/mute,
+AVTransport transport + DIDL metadata, wiremock tests); migration 0012 `audio_devices`;
+`/api/audio/*` + `/api/v1/audio/*` routes (session + Bearer, documented in API.md);
+shared `/api/providers/{id}/discover` routes audio types; Settings add-provider form
+handles audio types via the existing schema flow; Dashboard Audio section (power toggle,
+volume, mute, transport, now-playing, 15 s live poll). 133 lib + 88 integration tests.
+
+**Remaining (follow-ups):**
+- [ ] Onkyo persistent connection + unsolicited-push subscription → `/api/events`
+  (`audio_state` SSE frames) instead of the 15 s dashboard poll
+- [ ] Floor Plan: link a room to an audio zone (volume/mute in the room popover)
+- [ ] Sonos SSDP discovery without a seed IP; Sonos groups as `zone` devices
+- [ ] Onkyo multi-zone (zone2/zone3 as additional devices)
+
+### Original design notes (kept for the follow-ups)
 
 ### 10.1 AudioProvider trait
 

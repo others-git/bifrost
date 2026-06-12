@@ -62,6 +62,7 @@ export interface CredentialField {
 
 export interface ProviderType {
   provider_type: string;
+  kind: "light" | "audio";
   schema: CredentialField[];
 }
 
@@ -119,6 +120,72 @@ export async function setLightState(id: string, state: LightState): Promise<void
     headers: { "content-type": "application/json" },
     body: JSON.stringify(state),
   });
+}
+
+// ── Audio devices ────────────────────────────────────────────────────────────
+
+export interface NowPlaying {
+  title?: string;
+  artist?: string;
+  album?: string;
+  play_state?: "playing" | "paused" | "stopped";
+}
+
+export interface AudioState {
+  power: boolean;
+  volume: number;
+  mute: boolean;
+  source?: string;
+  now_playing?: NowPlaying;
+  reachable?: boolean;
+}
+
+export interface AudioCapabilities {
+  sources: boolean;
+  transport: boolean;
+  now_playing: boolean;
+}
+
+export interface AudioDevice {
+  id: string;
+  provider_id: string;
+  name: string;
+  kind: "receiver" | "speaker" | "zone";
+  capabilities: AudioCapabilities;
+  state: AudioState;
+  last_seen?: string;
+}
+
+/** Sparse command — only the fields present are applied. */
+export interface AudioCommand {
+  power?: boolean;
+  volume?: number;
+  mute?: boolean;
+  source?: string;
+  transport?: "play" | "pause" | "stop" | "next" | "previous" | "toggle";
+}
+
+export async function getAudioDevices(): Promise<AudioDevice[]> {
+  const res = await fetch("/api/audio/devices");
+  if (!res.ok) return [];
+  return res.json();
+}
+
+/** Live read — round-trips to the device and refreshes the cache. */
+export async function getAudioDevice(id: string): Promise<AudioDevice | null> {
+  const res = await fetch(`/api/audio/devices/${id}`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function setAudioState(id: string, cmd: AudioCommand): Promise<string | null> {
+  const res = await fetch(`/api/audio/devices/${id}/state`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(cmd),
+  });
+  if (res.ok) return null;
+  return (await res.text()) || `HTTP ${res.status}`;
 }
 
 export async function getProviders(): Promise<Provider[]> {

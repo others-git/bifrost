@@ -10,3 +10,6 @@ bifrost.db
 
 # Node dependencies
 /frontend/node_modules/
+
+# Local dev runtime data
+/data/

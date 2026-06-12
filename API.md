@@ -126,6 +126,62 @@ results, since a room can span providers and some members may be offline.
 entries must be `#rrggbb`, max 6 colors → `422` with a message on violation.
 `from-room` returns `422` if nothing in the room is currently lit.
 
+### Audio devices
+
+Receivers and networked speakers (Onkyo via eISCP, Sonos via local UPnP).
+
+```json
+{
+  "id": "c41a…",
+  "provider_id": "9b2e…",
+  "name": "Onkyo receiver (192.168.1.40)",
+  "kind": "receiver",              // receiver | speaker | zone
+  "capabilities": { "sources": true, "transport": true, "now_playing": true },
+  "state": {
+    "power": true,
+    "volume": 35,                  // 0–100
+    "mute": false,
+    "source": "net",               // receivers only
+    "now_playing": {               // when available
+      "title": "Karma Police",
+      "artist": "Radiohead",
+      "album": "OK Computer",
+      "play_state": "playing"      // playing | paused | stopped
+    },
+    "reachable": true
+  },
+  "last_seen": "2026-06-12 05:30:00"
+}
+```
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/audio/devices` | All audio devices (cached state) |
+| `GET` | `/api/v1/audio/devices/{id}` | One device — live read, refreshes the cache |
+| `PUT` | `/api/v1/audio/devices/{id}/state` | Send a command (body below) |
+
+`PUT …/state` takes a **sparse command** — only the fields present are applied:
+
+```json
+{
+  "power": true,
+  "volume": 40,
+  "mute": false,
+  "source": "spotify",
+  "transport": "play"    // play | pause | stop | next | previous | toggle
+}
+```
+
+Source names: receiver inputs (`net`, `tv`, `bd`, `cbl`, `bluetooth`, …), raw
+Onkyo SLI hex (`"2B"`), or a streaming service (`spotify`, `tunein`, `deezer`,
+`tidal`, `airplay`, `internet-radio`) — service names switch the receiver to
+NET and select the service in one call. Sonos does not accept `source` (start
+playback from a Sonos app, then control transport here); on Sonos, `power`
+maps to play/pause.
+
+Responses: `204` success, `404` unknown device, `422` invalid command (e.g.
+unknown source — message in body), `502` device unreachable.
+
 ## Status codes
 
 | Code | Meaning |
