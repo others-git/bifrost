@@ -41,7 +41,7 @@ A self-hosted Rust smart home hub that is:
 
 ---
 
-## Milestone 10 — Audio device support ✅ CORE DONE
+## Milestone 10 — Audio device support ✅ DONE
 
 Shipped: `AudioProvider` trait + parallel audio factory map in `ProviderRegistry`
 (`models/audio.rs`, `providers/mod.rs`); Onkyo eISCP provider (codec, PWR/MVL/AMT/SLI,
@@ -53,13 +53,20 @@ shared `/api/providers/{id}/discover` routes audio types; Settings add-provider 
 handles audio types via the existing schema flow; Dashboard Audio section (power toggle,
 volume, mute, transport, now-playing, 15 s live poll). 133 lib + 88 integration tests.
 
-**Remaining (follow-ups):**
+**Follow-ups (all shipped in v0.7.0):**
 - [x] Onkyo persistent connection + unsolicited-push subscription → `/api/events`
   `audio_state` frames (`AudioPushManager`, `AudioConnectionMode::Push`,
   `event_stream` on the trait; dashboard updates instantly, 30 s fallback poll)
-- [ ] Floor Plan: link a room to an audio zone (volume/mute in the room popover)
-- [ ] Sonos SSDP discovery without a seed IP; Sonos groups as `zone` devices
-- [ ] Onkyo multi-zone (zone2/zone3 as additional devices)
+- [x] Floor Plan room ↔ audio link: migration 0013 `room_audio`,
+  `PUT /api/rooms/{id}/audio`, ♪ volume/mute strip on each room card,
+  `audio_device_id` in room listings (session + v1 + MCP `get_home_state`)
+- [x] Onkyo zone 2: `ZoneCodes` family (ZPW/ZVL/ZMT/SLZ, NTZ transport),
+  ZPW probe in discovery, per-zone push-event routing
+- [x] Sonos groups as `zone` devices: `parse_topology` extracts multi-member
+  groups; `group:<coordinator>` devices control GroupRenderingControl volume
+  and group-wide transport
+- [ ] Sonos SSDP discovery without a seed IP (deferred — seed-host fan-out
+  covers whole households already)
 
 ### Original design notes (kept for the follow-ups)
 
