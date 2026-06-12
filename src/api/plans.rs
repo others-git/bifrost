@@ -362,13 +362,23 @@ async fn set_layout(
             .into_response();
     }
 
+    // One transaction for the whole replace: the deletes + every tile/wall
+    // insert commit together with a single fsync, instead of one fsync per row.
+    let mut tx = match state.db.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::error!("set_layout: begin failed: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
     let _ = sqlx::query("DELETE FROM plan_tiles WHERE plan_id = ?")
         .bind(&id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await;
     let _ = sqlx::query("DELETE FROM plan_walls WHERE plan_id = ?")
         .bind(&id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await;
 
     for [x, y] in &req.tiles {
@@ -376,7 +386,7 @@ async fn set_layout(
             .bind(&id)
             .bind(x)
             .bind(y)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await;
     }
     for w in &req.walls {
@@ -387,8 +397,13 @@ async fn set_layout(
         .bind(w.x)
         .bind(w.y)
         .bind(w.dir.as_str())
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await;
+    }
+
+    if let Err(e) = tx.commit().await {
+        tracing::error!("set_layout: commit failed: {e}");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
     StatusCode::NO_CONTENT.into_response()
@@ -556,9 +571,17 @@ async fn set_lights(
         }
     }
 
+    let mut tx = match state.db.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::error!("set_lights: begin failed: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
     let _ = sqlx::query("DELETE FROM plan_lights WHERE plan_id = ?")
         .bind(&id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await;
 
     for p in &req.placements {
@@ -576,8 +599,13 @@ async fn set_lights(
         .bind(p.y)
         .bind(p.mount.as_str())
         .bind(points_json)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await;
+    }
+
+    if let Err(e) = tx.commit().await {
+        tracing::error!("set_lights: commit failed: {e}");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
     // Add-on-save: newly placed lights join their region's Room.
@@ -635,9 +663,17 @@ async fn set_rooms(
         .map(|r| (r.id.clone(), (r.name, r.room_id)))
         .collect();
 
+    let mut tx = match state.db.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::error!("set_rooms: begin failed: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
     let _ = sqlx::query("DELETE FROM plan_rooms WHERE plan_id = ?")
         .bind(&id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await;
 
     for room in &req.rooms {
@@ -656,7 +692,7 @@ async fn set_rooms(
                     )
                     .bind(room.name.trim())
                     .bind(rid)
-                    .execute(&state.db)
+                    .execute(&mut *tx)
                     .await;
                 }
                 Some(rid.clone())
@@ -668,7 +704,7 @@ async fn set_rooms(
                 let existing_room =
                     sqlx::query("SELECT id FROM rooms WHERE name = ? COLLATE NOCASE")
                         .bind(room.name.trim())
-                        .fetch_optional(&state.db)
+                        .fetch_optional(&mut *tx)
                         .await
                         .ok()
                         .flatten()
@@ -680,7 +716,7 @@ async fn set_rooms(
                         let _ = sqlx::query("INSERT INTO rooms (id, name) VALUES (?, ?)")
                             .bind(&rid)
                             .bind(room.name.trim())
-                            .execute(&state.db)
+                            .execute(&mut *tx)
                             .await;
                         Some(rid)
                     }
@@ -694,7 +730,7 @@ async fn set_rooms(
                 .bind(&id)
                 .bind(room.name.trim())
                 .bind(&room_id)
-                .execute(&state.db)
+                .execute(&mut *tx)
                 .await;
         for &[x, y] in &room.tiles {
             let _ = sqlx::query(
@@ -703,9 +739,14 @@ async fn set_rooms(
             .bind(&plan_room_id)
             .bind(x)
             .bind(y)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await;
         }
+    }
+
+    if let Err(e) = tx.commit().await {
+        tracing::error!("set_rooms: commit failed: {e}");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
     add_placed_lights_to_rooms(&state, &id).await;
