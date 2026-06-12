@@ -6,477 +6,272 @@ A self-hosted Rust smart home hub that is:
 - **More reliable than Home Assistant** for Hue — explicit SSE reconnect, polling fallback, no silent drop
 - **Minimal surface area** — one binary, one SQLite file, one Docker image
 - **Extensible without code surgery** — new providers plug in via `ProviderFactory` only
+- **Full home control via API** — the foundation for the companion `bifrost-mcp` project
 
 ---
 
-## Milestone 0 — Foundation ✅ DONE
+## Shipped (Milestones 0–8) ✅
 
-All tests green (43/43).
-
-### Backend
-- [x] Rust lib + bin crate split (`bifrost` lib, `bifrost` bin)
-- [x] SQLite via sqlx (runtime queries, in-memory for tests, file for prod)
-- [x] Migrations (`migrations/0001_init.sql`) — config, providers, lights, sessions tables
-- [x] AES-256-GCM credential encryption (`src/crypto.rs`)
-- [x] Argon2id password hashing
-- [x] Session management — HttpOnly + SameSite=Strict cookie, 7-day TTL, `sessions` table
-- [x] `ProviderFactory` + `ProviderRegistry` — zero match arms outside the registry
-- [x] Philips Hue CLIP v2 provider — REST + SSE event stream (`src/providers/hue/`)
-- [x] Govee cloud API v2 provider (`src/providers/govee/`)
-- [x] `HueConnectionManager` state machine — Disconnected / Connecting / Connected / Reconnecting / Failed
-- [x] Exponential backoff (base 1s, cap 60s, ±20% jitter) + polling fallback
-- [x] Axum 0.8 REST API — auth, lights, providers
-- [x] rust-embed bakes `frontend/dist/` into the binary
-- [x] Alpine Docker multi-stage build
-
-### Tests
-- [x] `src/crypto.rs` — roundtrip, empty, unique ciphertext, wrong key, tampered, too-short, short secret
-- [x] `src/models/mod.rs` — rgb roundtrip, gamut clamp
-- [x] `src/providers/mod.rs` — 6 registry unit tests (mock factory)
-- [x] `src/providers/hue/mod.rs` — 7 wiremock tests
-- [x] `src/providers/govee/mod.rs` — 5 wiremock tests
-- [x] `src/connection/mod.rs` — 4 backoff unit tests
-- [x] `tests/api.rs` — 12 integration tests (health, auth, lights auth guard, providers)
+| Milestone | What shipped |
+|---|---|
+| 0 — Foundation | Rust crate, SQLite/sqlx, AES-256-GCM creds, ProviderRegistry, Hue + Govee providers, Alpine Docker |
+| 1 — Server completeness | First-run setup, HueConnectionManager wired, SSE→DB state sync, health endpoint |
+| 2 — Frontend | React/Vite SPA, Setup/Login/Dashboard/Settings pages |
+| 3 — Real-time push | `/api/events` SSE, frontend live state updates |
+| 4 — More providers | WLED, Tasmota, Shelly Gen1; schema migration removes type constraint |
+| 4.5 — Functional Hue + Govee | Link-button pairing UI, PollingManager, color picker, auto-discovery |
+| 5 — Production readiness | Global palette scenes, rooms/groups, Docker Compose, health v2 |
+| 6 — LIFX | Cloud REST provider (LAN/UDP deferred) |
+| 7 — Floor Plan | Tile editor, wall/room painting, light placement, live glow from SSE |
+| 8 — UI overhaul | Shared LightEditor popover, in-app dialogs, Lights page, strip corners |
+| 8.x — Polish | Global scenes, Govee LAN (UDP), floor-plan save perf (WAL + transactions), RoomPicker, aurora navbar, electric toggles |
 
 ---
 
-## Milestone 1 — Server Completeness ✅ DONE
+## Milestone 9 — Public API for other apps
 
-50 tests green.
+> Required before the companion MCP can be built — the MCP calls these endpoints.
 
-### 1.1 First-run setup endpoint
-
-`POST /api/setup` — sets the password when no config row exists.
-
-```
-POST /api/setup
-{ "password": "..." }
-→ 200 on first call; 409 Conflict thereafter
-```
-
-- Insert into `config (id=1, password_hash, setup_complete=1)`
-- Return 409 if `setup_complete = 1` already
-- Tests: happy path, duplicate call returns 409, weak password rejected (min length)
-
-`GET /api/setup/status` — lets the frontend know whether to show the setup page.
-
-```
-GET /api/setup/status
-→ { "setup_complete": false }
-```
-
-### 1.2 Wire HueConnectionManager into the runtime
-
-`HueConnectionManager` exists but is never started. On app startup, for each enabled Hue provider row, spawn a connection manager task.
-
-- `lib.rs::run()` — after building app state, query `providers WHERE provider_type = 'hue' AND enabled = 1`, build each `HueProvider`, spawn `HueConnectionManager::run()` as a tokio task
-- Store `Arc<HueConnectionManager>` per provider ID in `AppState` (or a new `ConnectionRegistry`)
-- Managers must be stopped when a provider is deleted via `DELETE /api/providers/{id}`
-
-### 1.3 Persist SSE state to the database
-
-Light-state updates from the SSE stream should be written to `lights.last_state` / `lights.last_seen` so the REST API returns fresh state without requiring manual discovery.
-
-- Subscribe to `HueConnectionManager.events` broadcast channel in a DB writer task
-- Match `LightEvent.device_id` against `lights.device_id` and upsert
-- This is the core reliability win over Home Assistant
-
-### 1.4 Connection-status API
-
-```
-GET /api/providers/{id}/status
-→ { "state": "connected", "since_secs": 1240, "last_event_secs": 4 }
-```
-
-Exposes `ConnectionState` from each manager so the UI can show a live indicator.
-
-### 1.5 Enhanced health endpoint
-
-```
-GET /api/health
-→ { "ok": true, "providers": [{ "id": "...", "name": "...", "state": "connected" }] }
-```
+- [ ] **API keys** — generate client keys in Settings; accept via `Authorization: Bearer <key>` header
+  as an alternative to the session cookie. Stored hashed (SHA-256), listable and revocable.
+  Show full key exactly once at creation — never recoverable.
+- [ ] **Documented surface** — `API.md` or OpenAPI doc covering every endpoint, kept in step with code.
+- [ ] **Parity with the UI** — everything doable in the UI reachable via the API, including scenes.
+- [ ] **Scope** — expose Bifrost-abstracted rooms and individual lights. Floor Plan is out of the
+  public API for now.
+- [ ] Standard test rules: happy path + unauthenticated-returns-401 per route; key generation +
+  verification gets crypto roundtrip + failure-mode coverage.
 
 ---
 
-## Milestone 2 — Frontend (React/Vite SPA) ✅ DONE
+## Milestone 10 — Audio device support
 
-`tsc && vite build` clean. 50 Rust tests still green.
+Bring audio devices into Bifrost as first-class citizens alongside lights, using the same
+provider/registry pattern and a clean REST API. The API surface is what the companion MCP
+project calls to let an AI assistant control the whole home.
 
-### 2.1 Project scaffold
+### 10.1 AudioProvider trait
+
+Define a trait analogous to `LightProvider`:
+
+```rust
+trait AudioProvider: Send + Sync {
+    async fn discover(&self) -> Result<Vec<AudioDevice>>;
+    async fn get_state(&self, device_id: &str) -> Result<AudioState>;
+    async fn set_state(&self, device_id: &str, cmd: AudioCommand) -> Result<()>;
+    // Optional: for receivers that push unsolicited updates
+    fn subscribe(&self) -> Option<broadcast::Receiver<AudioEvent>> { None }
+}
+
+struct AudioDevice { id, name, provider_id, kind: AudioDeviceKind }
+enum AudioDeviceKind { Receiver, Speaker, Zone }
+
+struct AudioState {
+    power: bool,
+    volume: u8,       // 0–100
+    mute: bool,
+    source: Option<String>,
+    now_playing: Option<NowPlaying>,
+}
+
+struct NowPlaying { title, artist, album, elapsed_secs, total_secs, play_state: PlayState }
+enum PlayState { Playing, Paused, Stopped }
+
+struct AudioCommand {
+    power: Option<bool>,
+    volume: Option<u8>,
+    mute: Option<bool>,
+    source: Option<String>,
+    transport: Option<TransportCmd>,
+}
+enum TransportCmd { Play, Pause, Stop, Next, Prev, Toggle }
+```
+
+Add `AudioProviderFactory` and a separate `AudioProviderRegistry` (same pattern as lights).
+Persist credentials encrypted (AES-256-GCM).
+
+### 10.2 Onkyo / Integra provider
+
+**Protocol:** eISCP (Ethernet Integra Serial Control Protocol) over TCP port 60128.
+
+#### eISCP framing (exact)
+
+Every message is a 16-byte header + UTF-8 ISCP payload:
 
 ```
-frontend/
-  src/
-    api.ts          # typed fetch wrappers for all REST endpoints
-    main.tsx
-    App.tsx         # route guard: redirect to /setup or /login if needed
-    pages/
-      Setup.tsx     # first-run password form
-      Login.tsx
-      Dashboard.tsx # light list + controls
-      Settings.tsx  # providers: list, add, delete, discover
-    components/
-      LightCard.tsx        # on/off toggle, brightness slider, color picker
-      ProviderStatus.tsx   # connection state badge
-      AddProviderForm.tsx  # dynamic form from /api/providers/types schema
+Bytes   Value           Meaning
+0–3     b"ISCP"         magic
+4–7     16 (u32 BE)     header size (always 16)
+8–11    N (u32 BE)      data size (byte length of payload)
+12      0x01            version
+13–15   0x00 0x00 0x00  reserved
+16+     !1<CMD><DATA>\r ISCP payload
 ```
 
-### 2.2 Setup page (`/setup`)
+Payload format: `!` start, `1` unit type (receiver), 3-char command code, variable data, `\r` terminator.
+Receiving: strip trailing `\x1a` (EOF marker) and any `\r` / `\n`.
+Query any command by appending `QSTN` as the data (e.g. `!1MVLQSTN\r`).
 
-- Rendered when `GET /api/setup/status` returns `{ "setup_complete": false }`
-- Single password + confirm form → `POST /api/setup`
-- Redirects to login on success
+#### Bi-directional (critical design note)
 
-### 2.3 Login page (`/login`)
+The receiver **pushes unsolicited updates** on the same persistent TCP connection whenever state
+changes — physical remote, track transitions, volume knob, input switching. There is no subscribe
+mechanism; there is also **no way to distinguish a response from an unsolicited push** — both are
+identical packets. Implementation must maintain a background reader task draining the socket
+continuously. A single `Arc<Mutex<TcpStream>>` does not work; use separate read/write halves
+(`split()`) with the reader on a dedicated task forwarding events to a `broadcast::Sender<AudioEvent>`.
 
-- Password form → `POST /api/auth/login`
-- On success the browser receives the `bifrost_session` cookie; redirect to `/`
+#### Core audio commands
 
-### 2.4 Dashboard (`/`)
+| Code | Data | Meaning |
+|------|------|---------|
+| `PWR` | `01` / `00` / `QSTN` | Power on/standby/query |
+| `MVL` | `00`–`64` hex / `UP` / `DOWN` / `QSTN` | Master volume (hex, 0x00–0x64 = 0–100) |
+| `AMT` | `00` / `01` / `TG` / `QSTN` | Mute off/on/toggle/query |
+| `SLI` | `2B` / `29` / `2A` + others | Input selector; `2B` = NET (network services) |
 
-- `GET /api/lights` → grid of `LightCard`s
-- Each card: name, on/off toggle, brightness slider (if dimmable), color picker (if color_rgb)
-- Toggle/slider commits `PUT /api/lights/{id}` with debounce (~200ms for sliders)
-- Empty state with call-to-action to add a provider
+#### NET / streaming transport
 
-### 2.5 Settings (`/settings`)
+Use `NTZ` for modern receivers (Spotify built-in); `NTC` for older Net-Tune models. Commands identical:
 
-- **Providers tab**
-  - List from `GET /api/providers`
-  - Connection status badge per provider from `GET /api/providers/{id}/status`
-  - "Discover lights" button → `POST /api/providers/{id}/discover`
-  - "Remove" → `DELETE /api/providers/{id}` with confirmation dialog
-  - "Add provider" → drawer with provider-type picker + dynamic form from `/api/providers/types` schema
-- **Security tab** (future: change password)
+| Data | Action |
+|------|--------|
+| `PLAY` / `STOP` / `PAUSE` / `P/P` | Playback control / toggle |
+| `TRUP` / `TRDN` | Next / previous track |
+| `CHUP` / `CHDN` | Channel up/down (internet radio) |
+| `REPEAT` / `RANDOM` / `REP/SHF` | Repeat / shuffle |
+| `UP` / `DOWN` / `LEFT` / `RIGHT` / `SELECT` / `RETURN` | Menu navigation |
 
-### 2.6 Build integration
+#### Service selection (NSV)
 
-- `npm run build` outputs to `frontend/dist/`
-- `Dockerfile` already runs this before `cargo build`
-- Dev: `VITE_API_BASE=http://localhost:3000` proxy in `vite.config.ts`
+`NSV` + 2-char hex service code selects a streaming service:
+
+| Code | Service |
+|------|---------|
+| `00` | Music Server (DLNA) |
+| `0A` | **Spotify** |
+| `0E` | TuneIn Radio |
+| `12` | Deezer |
+| `13` | iHeartRadio |
+| `18` | AirPlay |
+| `19` | TIDAL |
+| `F2` | Internet Radio |
+
+To activate Spotify: send `SLI2B` (select NET input), then `NSV0A0` (select Spotify, no account prompt).
+
+#### Metadata (read-only, support QSTN; also pushed unsolicited on track change)
+
+| Code | Returns |
+|------|---------|
+| `NTI` | Track title (UTF-8, 64 chars max) |
+| `NAT` | Artist name |
+| `NAL` | Album name |
+| `NTM` | Elapsed/total time `mm:ss/mm:ss` |
+| `NTR` | Current track / total tracks `cccc/tttt` |
+| `NST` | 3-char play state `prs`: `p`=play state (S/P/p/F/R/E), `r`=repeat, `s`=shuffle |
+| `NRI` | XML blob of receiver capabilities (model, firmware, supported services) — query once on connect |
+
+#### Implementation notes
+
+- One persistent TCP connection per receiver; reconnect with backoff on drop.
+- On connect: send `NRIQSTN` to learn capabilities; send `PWRQSTN`, `MVLQSTN`, `AMTQSTN`,
+  `SLIQSTN`, `NSTQSTN`, `NTIQSTN`, `NATQSTN`, `NALQSTN` to seed initial state.
+- Credentials: `host` (required), `port` (default 60128).
+- Provider type string: `"onkyo"`.
+- Discovery: UDP broadcast on port 60128, ISCP discovery packet `!xECNQSTN\r`
+  (header with unit type `x` for broadcast), parse `ECN` response for IP + model.
+
+#### Tests
+
+Loopback TCP listener in the test that speaks eISCP framing, records received commands,
+and sends scripted responses including unsolicited pushes. Mirror the govee-lan pattern
+(tokio task as mock device).
+
+### 10.3 Sonos provider
+
+**Protocol:** Sonos S2 local HTTP API (REST/JSON, no cloud required).
+
+- **Discovery:** SSDP multicast on `239.255.255.250:1900`,
+  filter `ST: urn:schemas-upnp-org:device:ZonePlayer:1`, parse `LOCATION` header for player IP.
+- **Household / group model:** `GET http://<ip>:1400/api/v1/households` → groups → players.
+  Expose groups as "zones" (the unit users control); players are members.
+- **State:** `GET /api/v1/players/{id}/playerVolume`, `/api/v1/players/{id}/playbackStatus`
+- **Control:** `POST /api/v1/players/{id}/playerVolume` `{volume, muted}`;
+  `POST /api/v1/players/{id}/playback/play|pause|skip{Next,Previous}|togglePlayPause`
+- **Now playing:** `GET /api/v1/players/{id}/playbackMetadata` → title, artist, album, service
+- **Group volume:** `GET/POST /api/v1/groups/{id}/groupVolume`
+- Credentials: none required (pure LAN); optional `bind_addr`. Provider type: `"sonos"`.
+- Tests: wiremock against the JSON endpoints; mock SSDP via loopback UDP.
+
+### 10.4 Audio API routes
+
+Mirror the lights API shape so the MCP layer treats audio and lights uniformly:
+
+```
+GET    /api/audio/devices              list all audio devices with current state
+GET    /api/audio/devices/:id          single device state
+PUT    /api/audio/devices/:id/state    set power / volume / mute / source / transport
+GET    /api/audio/zones                list zones (Sonos groups, Onkyo zones)
+PUT    /api/audio/zones/:id/state      zone-level volume / mute / transport
+```
+
+Auth: session cookie or API key (same as all other routes). All routes return 401 if unauthenticated.
+
+### 10.5 Audio on the Dashboard / Floor Plan
+
+- **Dashboard:** audio zone cards alongside room (light) cards — power toggle, volume slider,
+  now-playing metadata line, source indicator.
+- **Floor Plan:** room controller optionally linked to an audio zone (volume knob + mute toggle
+  in the room popover).
+- **Settings:** add/remove audio providers, trigger discovery, show connection state.
 
 ---
 
-## Milestone 3 — Real-Time Push ✅ DONE
+## Milestone 11 — Companion MCP server (`bifrost-mcp`, separate repo)
 
-53 Rust tests green. Frontend TypeScript build clean.
+A Model Context Protocol server wrapping the Bifrost REST API as MCP tools, so an AI assistant
+(Claude, Whisperr + LLM pipeline, etc.) can control the whole home through natural language.
+Requires Milestone 9 (API keys) to be complete first.
 
-The dashboard currently needs a page refresh to see state changes. Fix with a push channel.
+**Planned tools:**
 
-### 3.1 Server-Sent Events endpoint for the frontend
+| Tool | Description |
+|------|-------------|
+| `get_home_state` | Snapshot of all rooms + audio zones (single call for context) |
+| `list_rooms` | Rooms with current on/off, scene, linked audio zone |
+| `list_lights` | All lights with state |
+| `list_audio_devices` | All audio devices/zones with state + now-playing |
+| `set_light` | `{ light_id, on?, brightness?, color? }` |
+| `set_room_scene` | `{ room_id, scene_name_or_id }` |
+| `set_room_lights` | `{ room_id, on?, brightness?, color? }` — whole-room control |
+| `set_audio` | `{ device_or_zone_id, power?, volume?, mute?, source?, transport? }` |
+| `apply_scene_all` | Apply a named scene to all rooms simultaneously |
 
-```
-GET /api/events          (requires session cookie)
-Content-Type: text/event-stream
+**Auth:** Bifrost API key in the MCP server config (env var), sent as `Authorization: Bearer`.
+Never stored in Bifrost DB in plaintext; the key hash lives in Bifrost, the key itself lives only
+in the MCP config.
 
-data: {"type":"light_state","device_id":"abc","state":{...}}
-data: {"type":"provider_status","provider_id":"xyz","state":"reconnecting"}
-```
+**Transport:** stdio MCP (compatible with Claude Desktop, `claude --mcp`, Whisperr, etc.)
 
-- Subscribe to the `HueConnectionManager` broadcast channel(s)
-- Write each `LightEvent` as an SSE frame
-- Keep-alive ping every 15s
-- Session auth same as REST endpoints
-
-### 3.2 Frontend event consumer
-
-- `useEffect` opens `EventSource('/api/events')` on Dashboard mount
-- On `light_state` event: update the matching card's state in React state
-- On `provider_status` event: update the badge in Settings
-
----
-
-## Milestone 4 — Additional Providers ✅ WLED DONE
-
-61 tests green.
-
-The registry pattern makes this mechanical. Each new provider is:
-1. New directory `src/providers/<name>/mod.rs`
-2. Implement `LightProvider` (discover, get_state, set_state)
-3. Implement `ProviderFactory` (provider_type, build, credentials_schema)
-4. One line in `default_registry()`: `r.register(NameFactory);`
-5. wiremock tests for all three trait methods
-
-### Completed
-
-- [x] **WLED** — `src/providers/wled/mod.rs`. `GET /json/info` + `GET /json/state` for discovery; `POST /json/state` for control. bri 0–255 ↔ brightness 0–100. Segment colour via `seg[0].col[0]` [R,G,B]. 8 wiremock tests.
-- [x] `migrations/0002_drop_provider_type_constraint.sql` — removes hard-coded `CHECK (provider_type IN ('hue','govee'))` by recreating the table. No further schema migrations needed for new providers.
-
-- [x] **Tasmota** — `src/providers/tasmota/mod.rs`. `GET /cm?cmnd=Status 0` for discovery; `GET /cm?cmnd=State` for state; `GET /cm?cmnd=Backlog Power {ON|OFF}[; Dimmer {0-100}][; Color {RRGGBB}]` for control. Dimmer 0–100 maps directly to brightness. 8 wiremock tests.
-- [x] **Shelly Gen1** — `src/providers/shelly/mod.rs`. `GET /settings` for name; `GET /light/0` for state; `GET /light/0?turn={on|off}&brightness={0-100}` for control. 8 wiremock tests.
-
-### Remaining candidates (priority order)
-
-| Provider | Protocol | Notes |
-|---|---|---|
-| LIFX | UDP LAN + HTTPS cloud | LAN preferred; UDP makes this significantly more complex than REST providers |
-
----
-
-## Milestone 4.5 — Functional Hue + Govee ✅ DONE
-
-93 tests green. Closes the gaps between "compiles and passes tests" and "usable":
-
-- [x] **Hue link-button pairing** — `src/providers/hue/pairing.rs` + `POST /api/providers/hue/pair`. User enters the bridge IP, presses the link button, clicks Pair; the server POSTs `{"devicetype":"bifrost#server","generateclientkey":true}` and returns the app key (409 if the button wasn't pressed, 502 if unreachable). No more manual curl. 5 wiremock + 4 API tests.
-- [x] **`ConnectionMode` on `ProviderFactory`** — `Sse` (Hue) or `Poll{interval_secs}` (default 120s, everything else). Startup and `POST /api/providers` dispatch via `start_manager_for()`; the `provider_type == "hue"` string match in the API layer is gone.
-- [x] **`PollingManager`** — keeps Govee/WLED/Tasmota/Shelly state fresh without a push channel: discover → per-device `get_state` → broadcast on the same `LightEvent` pipeline as Hue SSE, so `/api/events` and the DB writer work identically. Connected/Reconnecting state machine with the shared backoff. 4 unit tests with a scripted provider.
-- [x] **Frontend: Hue pair flow** — Add-provider form grows a Pair button on the app-key field (hue only), with link-button guidance and auto-fill on success.
-- [x] **Frontend: auto-discovery** — adding a provider immediately runs discovery; lights appear without a second click.
-- [x] **Frontend: color picker** — `LightCard` shows a color input for `color_rgb` lights; hex → CIE xy via the same Wide RGB D65 matrix as the server (`rgbToXy` in `api.ts`), 200ms debounce.
-
----
-
-## Milestone 5 — Production Readiness
-
-### 5.1 Scenes ✅ DONE
-
-`migrations/0003_scenes_and_groups.sql` + `src/api/scenes.rs`. 106 tests green.
-
-- [x] `GET /api/scenes` — list with per-scene light counts
-- [x] `POST /api/scenes {name}` — snapshot `last_state` of every light
-- [x] `POST /api/scenes/{id}/activate` — apply all entries in parallel via providers; returns `{applied, failed}`
-- [x] `DELETE /api/scenes/{id}`
-- [x] Dashboard scene bar: activate / save / delete
-- [x] FK enforcement enabled on the SQLite pool (`foreign_keys(true)`) — the schema's `ON DELETE CASCADE` clauses were inert before this
-- [x] Tests: 401, snapshot, empty-name 422, activate-via-wiremock-device, 404, delete
-
-### 5.2 Light groups / rooms ✅ DONE (API)
-
-`src/api/groups.rs`:
-
-- [x] `GET /api/groups` — list with member light IDs
-- [x] `POST /api/groups {name, light_ids}` / `DELETE /api/groups/{id}`
-- [x] `PUT /api/groups/{id}/lights` — replace membership
-- [x] `PUT /api/groups/{id}/state` — broadcast a state to all members in parallel; `{applied, failed}`
-- [x] Tests: 401, create+list, empty-name 422, group state via wiremock device, 404, membership replace, delete
-- [x] Groups UI — Settings: create groups with light checkboxes, edit membership, delete; Dashboard: per-group On/Off chips
-
-### 5.3 Schedules / automations
-
-Stretch goal. Cron-style triggers stored in SQLite, executed by a tokio interval task.
-
-### 5.4 Docker Compose reference ✅ DONE
-
-`docker-compose.yml` at the repo root (BIFROST_SECRET required via `.env`), plus
-`README.md` with quickstarts (Docker + bare binary), an env-var table, provider
-setup notes, API overview, and `LICENSE` (MIT).
-
-### 5.5 Observability ✅ PARTIAL
-
-- [x] `RUST_LOG` documented in README and set in compose (`bifrost=info`)
-- [x] `GET /api/health` now reports `version` + `uptime_secs` alongside per-provider connection state
-- [ ] Optional: Prometheus metrics endpoint (`/metrics`) — reconnect counts, event rates
+**Language:** TypeScript with the `@modelcontextprotocol/sdk` package (separate git repo).
 
 ---
 
 ## Out of scope (for now)
 
-- Multi-user / RBAC — single shared password is the design
+- Multi-user / RBAC — single shared password + API keys is the design
 - MQTT broker — would enable many devices but adds operational complexity
 - Mobile app — the SPA is responsive; native apps are not planned
 - Cloud relay / remote access — use Tailscale/VPN at the network layer
+- Schedules / automations — stretch goal, cron-style SQLite triggers
 
 ---
 
 ## Key invariants (enforced by CLAUDE.md)
 
 - Every public function and non-trivial helper has test coverage. `cargo test` must be green.
-- New provider: wiremock tests before the code is considered done.
+- New provider: wiremock/loopback tests before the code is considered done.
 - New API route: happy path + unauthenticated-returns-401.
 - Credentials encrypted with AES-256-GCM. Never stored in plaintext.
 - `HueConnectionManager` is the only code that opens the bridge SSE stream.
 - `ProviderRegistry` is the only place provider types are registered.
-
-------
-
-## Milestone 6 — LIFX Provider
-
-LIFX is the one major light ecosystem still missing. Two transports, two phases:
-
-### 6.1 Phase 1: Cloud API (HTTPS REST)
-
-Matches the existing provider pattern exactly — testable with wiremock, no new
-infrastructure.
-
-- Base URL `https://api.lifx.com/v1`, auth via `Authorization: Bearer <token>`
-  (token from cloud.lifx.com → Personal Access Tokens)
-- `GET /lights/all` — discovery + state (power, brightness 0–1, color as HSBK)
-- `PUT /lights/id:<id>/state` — `{ power, brightness, color: "hue:120 saturation:1.0" }`
-- HSBK ↔ internal model: hue 0–360 + sat → RGB → CIE xy via existing `Color`;
-  kelvin → mirek (1_000_000 / K)
-- `ConnectionMode::Poll` (default 120 s)
-- Credentials schema: `[{ name: "token", kind: Password, required: true }]`
-- Standard wiremock suite: discover, get_state, set_state, error propagation,
-  factory build/missing-token
-
-### 6.2 Phase 2: LAN protocol (UDP) — the reason LIFX was deferred
-
-Binary UDP on port 56700; no cloud dependency, much lower latency.
-
-- Discovery: broadcast `GetService` (pkt 2) → `StateService` (pkt 3) replies
-- State: `LightGet` (101) → `LightState` (107) — HSBK + power + label
-- Control: `LightSetColor` (102), `SetLightPower` (117)
-- Needs: packet codec (header Frame / FrameAddress / ProtocolHeader — pure
-  functions, unit-testable byte-for-byte), `tokio::net::UdpSocket` transport
-- Tests: codec round-trips against known byte fixtures; transport against a
-  scripted fake bulb (local UDP socket in the test) — consistent with the
-  "real behaviour over mocks" rule
-- Caveat to document: UDP broadcast requires host-network mode in Docker;
-  cloud (6.1) remains the fallback for bridged containers
-- Same `LightProvider` impl surface; the registry entry stays one line
-
----
-
-## Milestone 7 — Floor Plan ("DIY" grid)
-
-> Feature request: a "DIY" grid feature where a house can be represented by
-> building a floor plan using 1×1 "square foot" tiles (think Sims 4 houses,
-> but 2D) and lights can be placed. The placed lights correspond to the
-> actual lights.
-
-A tile-based floor-plan editor that doubles as a live spatial dashboard:
-paint your house layout, drop your real lights onto it, then watch them glow
-with their actual state and click them to control.
-
-### Design decisions (agreed 2026-06-11)
-
-- **Walls are edges, not tiles** — thin segments on tile boundaries, true
-  Sims style. No floor space lost; doors are gaps in a wall run.
-- **Lights attach to mount points** — each tile has 5: `center` (ceiling /
-  floor lamps) + `n/s/e/w` edges (wall-mounted, naturally aligned with edge
-  walls). Multiple lights on the same mount render as one dot with a count
-  badge (e.g. a 3-bulb fixture); clicking expands a per-light popover.
-- **Modest-house sizing** — dimensions up to 128×128 tiles (a 50×40 plan ≈
-  2 000 sq ft floor). Multiple floors = multiple plans with a switcher.
-
-### 7.1 Data model
-
-```sql
--- migrations/0004_floor_plans.sql
--- floor_plans:  id, name, width, height (1–128), created_at
--- plan_tiles:   plan_id, x, y                  -- sparse; a row = floor tile
--- plan_walls:   plan_id, x, y, dir ('h'|'v')   -- 'h' = top edge of tile (x,y),
---                                              -- 'v' = left edge of tile (x,y);
---                                              -- x ≤ width / y ≤ height so the
---                                              -- far boundary edges exist too
--- plan_lights:  plan_id, light_id, x, y, mount ('c'|'n'|'s'|'e'|'w')
---               PK (plan_id, light_id) — one placement per light per plan;
---               several lights MAY share (x, y, mount) → cluster
-```
-
-All children CASCADE on plan delete; placements vanish when a light is deleted.
-
-### 7.2 API
-
-```
-GET    /api/plans                     list (id, name, dimensions, light count)
-POST   /api/plans                     { name, width, height }       422 on bad dims
-GET    /api/plans/{id}                { ..., tiles, walls, lights }
-PUT    /api/plans/{id}/layout         { tiles, walls } bulk replace (editor save)
-PUT    /api/plans/{id}/lights         { placements } replace        422 unknown light
-DELETE /api/plans/{id}
-```
-
-Standard rules: session auth, 401 tests, happy-path tests against in-memory
-SQLite, out-of-bounds coordinates rejected with 422.
-
-### 7.3 Editor (frontend) ✅ DONE
-
-`frontend/src/pages/FloorPlan.tsx`, "Plan" tab in the nav.
-
-- [x] Canvas-rendered grid with drag-pan and wheel-zoom (cursor-anchored)
-- [x] Tools: View / Floor (drag-paint) / Wall (snaps to nearest tile edge) /
-  Erase (nearest wall within 0.2 tiles, else tile) / Lights
-- [x] Light palette: click to select, click a tile to place — near an edge
-  wall-mounts (n/s/e/w), middle = `center`; click a placed light to remove
-- [x] Plan switcher (one plan per floor), create via prompt, delete, dirty
-  tracking with explicit Save (`PUT /layout` + `PUT /lights`)
-
-### 7.4 Live view (the payoff) ✅ DONE
-
-- [x] Placed lights render as glowing dots — color from live state via
-  `xyToRgb` (inverse Wide RGB D65, added to `api.ts`), glow intensity from
-  brightness, grey when off
-- [x] Subscribes to `GET /api/events` SSE — physical switch flips show on
-  the plan in real time, zero new backend work
-- [x] Click a light: toggle (optimistic). Clusters (several lights on one
-  mount) draw one dot with a ×N badge; click opens a popover with per-light
-  toggles
-- [x] Stretch realized as **planner rooms**: paint named tile regions with the
-  Rooms tool (tinted overlays + labels); each room auto-maintains a group
-  whose membership mirrors the lights placed on its tiles (synced on room and
-  placement saves; group deleted with the room). Room controller panel beside
-  the canvas in view mode (right side as of Milestone 8): per-room On/Off and
-  scene apply scoped to the room via `POST /api/scenes/{id}/activate {light_ids}`.
-- [x] Stretch realized as the **shared light editor** (Milestone 8.1) — clicking
-  a placed light (or room) opens the anchored color-wheel editor.
-
----
-
-## Milestone 8 — UI overhaul + shared light editor ✅ DONE
-
-154 tests green (`cargo test`), frontend `tsc && vite build` clean. The planner
-and dashboard grew a consistent, app-quality control surface.
-
-- [x] **LED strip cornering** — strips are polylines, not single end-tiles.
-  `migrations/0009_strip_corners.sql` replaces the `x2/y2` end tile with a JSON
-  `points` vertex list (existing straight strips migrate automatically). Drag
-  while placing to lay the run; straight motion stretches a segment, turning
-  adds a corner, backtracking removes one. Server validates every vertex and
-  prunes them on resize via `json_each`.
-- [x] **Anchored light editor** (`frontend/src/components/LightEditor.tsx`) — a
-  popover that docks beside whatever opened it (never floats centre-screen),
-  with a Hue-style hue/saturation color wheel, a vertical brightness bar, quick
-  swatches, and a power switch. Reused for dashboard lights, planner lights,
-  whole rooms, scene-palette colors, and the paint brush.
-- [x] **In-app dialogs** (`frontend/src/components/dialogs.tsx`) — promise-based
-  `confirm` / `prompt` / `alert` modals replace every `window.*` popup across
-  the dashboard, settings, and planner. New floor plan uses a proper form.
-- [x] **Planner sidebars normalized to the right**; the room controller moved
-  off the left and rooms gained the shared editor (a "Color…" action).
-- [x] **Lights page** — each card is a button opening the editor (only the
-  controls the light supports), with a compact status line and a **vertical**
-  sliding on/off switch.
-- [x] **"Plan" renamed "Floor Plan"** across the nav and page copy.
-
-### Remaining UI feedback (next)
-
-- [ ] **Scenes as a first-class object** — a dedicated **Scenes** page in the
-  nav (below Lights, above Floor Plan) aggregating room palette scenes and
-  global snapshots, with a cleaner creator and more Hue-like preset defaults.
-- [ ] **Hue color wheel missing** — some Hue lights don't expose `color_rgb`;
-  verify capability detection against the CLIP v2 reference
-  (`references/hue_api_reference.pdf`) — a light reporting a `color` object is
-  full-RGB, but discovery vs. SSE-refresh paths must agree.
-- [ ] **Strips should hug the mounted wall around corners** — today a cornered
-  run bends at tile centres and visually crosses walls when it turns. Render
-  wall-mounted strips along the mounted edge with corners at tile corners, so a
-  strip can follow the inner trim of a hallway.
-- [ ] **Rooms as buttons with toggle switches** — render rooms like lights
-  (click opens the editor) with a sliding on/off toggle instead of On/Off
-  buttons; tidy the scene creator further.
-
----
-
-## Milestone 9 — Public API for other apps
-
-> From the TODO: a documented, key-authenticated API so external apps can drive
-> Bifrost. Full access, no RBAC — this is a single-tenant LAN hub.
-
-- [ ] **API keys** — generate client keys (Settings); accept them via an
-  `Authorization` header as an alternative to the session cookie. Stored
-  hashed, listable and revocable. Full access to lights and rooms.
-- [ ] **Documented surface** — a reference in the repo (e.g. `API.md` or an
-  OpenAPI doc) covering every endpoint, kept in step with the code.
-- [ ] **Parity with the UI** — everything doable in the UI is reachable via the
-  API, **including scenes** (snapshot + room palette scenes).
-- [ ] **Scope** — expose Bifrost-abstracted **rooms** (not raw provider groups)
-  and individual lights. The Floor Plan is explicitly **out** of the public API
-  for now.
-- [ ] Standard rules apply: each new route gets a happy-path test and a
-  no-credentials-returns-401 test; key generation/verification gets crypto
-  roundtrip + failure-mode coverage.
-
----
-
