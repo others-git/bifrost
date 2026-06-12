@@ -54,8 +54,9 @@ handles audio types via the existing schema flow; Dashboard Audio section (power
 volume, mute, transport, now-playing, 15 s live poll). 133 lib + 88 integration tests.
 
 **Remaining (follow-ups):**
-- [ ] Onkyo persistent connection + unsolicited-push subscription → `/api/events`
-  (`audio_state` SSE frames) instead of the 15 s dashboard poll
+- [x] Onkyo persistent connection + unsolicited-push subscription → `/api/events`
+  `audio_state` frames (`AudioPushManager`, `AudioConnectionMode::Push`,
+  `event_stream` on the trait; dashboard updates instantly, 30 s fallback poll)
 - [ ] Floor Plan: link a room to an audio zone (volume/mute in the room popover)
 - [ ] Sonos SSDP discovery without a seed IP; Sonos groups as `zone` devices
 - [ ] Onkyo multi-zone (zone2/zone3 as additional devices)
@@ -239,11 +240,15 @@ Auth: session cookie or API key (same as all other routes). All routes return 40
 
 ---
 
-## Milestone 11 — Companion MCP server (`bifrost-mcp`, separate repo)
+## Milestone 11 — Companion MCP server (`bifrost-mcp`, separate repo) ✅ v0.1.0
 
-A Model Context Protocol server wrapping the Bifrost REST API as MCP tools, so an AI assistant
-(Claude, Whisperr + LLM pipeline, etc.) can control the whole home through natural language.
-Requires Milestone 9 (API keys) to be complete first.
+Built at `/mnt/d/REPOS/bifrost-mcp` (local git repo — **no GitHub remote yet**; create one
+and push when ready). TypeScript stdio MCP server (`@modelcontextprotocol/sdk` 1.29), verified
+end-to-end against a live hub. Tools: `get_home_state`, `list_lights`, `set_light`, `set_room`,
+`apply_scene`, `apply_scene_all`, `save_scene_from_room`, `set_audio`, `get_audio_state`.
+Rooms/scenes resolvable by name (LLM ergonomics); hex → CIE xy uses Bifrost's own matrix.
+
+### Original design notes
 
 **Planned tools:**
 
