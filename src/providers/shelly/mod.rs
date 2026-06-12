@@ -186,6 +186,10 @@ impl ProviderFactory for ShellyProviderFactory {
         "shelly"
     }
 
+    fn display_name(&self) -> &'static str {
+        "Shelly"
+    }
+
     fn build(&self, credentials_json: &str) -> Result<Box<dyn LightProvider>> {
         Ok(Box::new(ShellyProvider::from_credentials(
             credentials_json,

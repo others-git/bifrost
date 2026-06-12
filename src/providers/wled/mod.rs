@@ -202,6 +202,10 @@ impl ProviderFactory for WledProviderFactory {
         "wled"
     }
 
+    fn display_name(&self) -> &'static str {
+        "WLED"
+    }
+
     fn build(&self, credentials_json: &str) -> Result<Box<dyn LightProvider>> {
         Ok(Box::new(WledProvider::from_credentials(credentials_json)?))
     }

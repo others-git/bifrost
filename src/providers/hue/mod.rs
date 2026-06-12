@@ -492,6 +492,10 @@ impl ProviderFactory for HueProviderFactory {
         "hue"
     }
 
+    fn display_name(&self) -> &'static str {
+        "Philips Hue"
+    }
+
     fn discoverer(&self) -> Option<Box<dyn DeviceDiscovery>> {
         // Hue bridges answer SSDP and tag themselves "IpBridge" in the SERVER
         // header; the LOCATION carries the bridge IP for the bridge_ip field.

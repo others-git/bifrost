@@ -764,7 +764,10 @@ function ProviderCard({
         <div style={{ minWidth: 0 }}>
           <div style={{ fontWeight: 600 }}>{provider.name}</div>
           <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.25rem" }}>
-            <span style={{ color: "#888", fontSize: "0.8rem" }}>{provider.provider_type}</span>
+            <span style={{ color: "#888", fontSize: "0.8rem" }}>
+              {provider.type_name}
+              {provider.domain === "audio" ? " · Audio" : ""}
+            </span>
             {status && <StatusBadge state={status.state} />}
           </div>
         </div>
@@ -903,15 +906,18 @@ function EditCredentialsForm({
 }
 
 function StatusBadge({ state }: { state: string }) {
+  // "ready" = an on-demand provider (e.g. Sonos) with no persistent connection
+  // but fully operational — green, like connected.
   const color =
-    state === "connected" || state === "ok" ? "#4d4"
+    state === "connected" || state === "ok" || state === "ready" ? "#4d4"
     : state === "connecting" || state === "reconnecting" ? "#fa0"
     : state === "failed" ? "#f44"
     : "#666";
+  const label = state === "ready" ? "ready" : state;
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem", fontSize: "0.75rem", color }}>
       <span style={{ width: 7, height: 7, borderRadius: "50%", background: color, display: "inline-block" }} />
-      {state}
+      {label}
     </span>
   );
 }
@@ -1020,12 +1026,24 @@ function AddProviderForm({
           onChange={(e) => setSelectedType(e.target.value)}
           style={{ ...S.input, cursor: "pointer" }}
         >
-          {types.map((t) => (
-            <option key={t.provider_type} value={t.provider_type}>
-              {t.provider_type}
-              {t.kind === "audio" ? " (audio)" : ""}
-            </option>
-          ))}
+          <optgroup label="Lights">
+            {types
+              .filter((t) => t.kind === "light")
+              .map((t) => (
+                <option key={t.provider_type} value={t.provider_type}>
+                  {t.display_name}
+                </option>
+              ))}
+          </optgroup>
+          <optgroup label="Audio">
+            {types
+              .filter((t) => t.kind === "audio")
+              .map((t) => (
+                <option key={t.provider_type} value={t.provider_type}>
+                  {t.display_name}
+                </option>
+              ))}
+          </optgroup>
         </select>
       </label>
 

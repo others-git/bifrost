@@ -225,6 +225,10 @@ impl ProviderFactory for TasmotaProviderFactory {
         "tasmota"
     }
 
+    fn display_name(&self) -> &'static str {
+        "Tasmota"
+    }
+
     fn build(&self, credentials_json: &str) -> Result<Box<dyn LightProvider>> {
         Ok(Box::new(TasmotaProvider::from_credentials(
             credentials_json,

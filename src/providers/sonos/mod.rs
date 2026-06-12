@@ -563,6 +563,10 @@ impl AudioProviderFactory for SonosProviderFactory {
         "sonos"
     }
 
+    fn display_name(&self) -> &'static str {
+        "Sonos"
+    }
+
     fn build(&self, credentials_json: &str) -> Result<Box<dyn AudioProvider>> {
         Ok(Box::new(SonosProvider::from_credentials(credentials_json)?))
     }

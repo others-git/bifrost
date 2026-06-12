@@ -88,6 +88,10 @@ async fn list_types(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
 struct ProviderRow {
     id: String,
     provider_type: String,
+    /// Human-facing type name (e.g. "Sonos"); falls back to the type key.
+    type_name: String,
+    /// "light" or "audio".
+    domain: String,
     name: String,
     enabled: bool,
     created_at: String,
@@ -109,12 +113,28 @@ async fn list_providers(
     {
         Ok(rows) => Json(
             rows.into_iter()
-                .map(|r: sqlx::sqlite::SqliteRow| ProviderRow {
-                    id: r.get("id"),
-                    provider_type: r.get("provider_type"),
-                    name: r.get("name"),
-                    enabled: r.get::<i64, _>("enabled") != 0,
-                    created_at: r.get("created_at"),
+                .map(|r: sqlx::sqlite::SqliteRow| {
+                    let provider_type: String = r.get("provider_type");
+                    let type_name = state
+                        .registry
+                        .display_name(&provider_type)
+                        .unwrap_or(provider_type.as_str())
+                        .to_string();
+                    let domain = if state.registry.is_known_audio(&provider_type) {
+                        "audio"
+                    } else {
+                        "light"
+                    }
+                    .to_string();
+                    ProviderRow {
+                        type_name,
+                        domain,
+                        provider_type,
+                        id: r.get("id"),
+                        name: r.get("name"),
+                        enabled: r.get::<i64, _>("enabled") != 0,
+                        created_at: r.get("created_at"),
+                    }
                 })
                 .collect::<Vec<_>>(),
         )
@@ -322,13 +342,27 @@ async fn provider_status(
 
     let state_lock = state.connections.lock().await.get_state_lock(&id);
 
-    match state_lock {
-        None => Json(serde_json::json!({ "state": "not_managed" })).into_response(),
-        Some(lock) => {
-            let cs = lock.read().await;
-            Json(ConnectionStatus::from_state(&cs)).into_response()
-        }
+    if let Some(lock) = state_lock {
+        let cs = lock.read().await;
+        return Json(ConnectionStatus::from_state(&cs)).into_response();
     }
+
+    // No background manager. On-demand audio providers (e.g. Sonos) are read
+    // live per request, so they're operational, not broken — report "ready".
+    let provider_type: Option<String> =
+        sqlx::query("SELECT provider_type FROM providers WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.get("provider_type"));
+
+    let label = match provider_type {
+        Some(t) if state.registry.is_known_audio(&t) => "ready",
+        _ => "not_managed",
+    };
+    Json(serde_json::json!({ "state": label })).into_response()
 }
 
 // ── Sync provider groups (rooms/zones mirrors) ─────────────────────────────

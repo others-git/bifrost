@@ -362,6 +362,10 @@ impl ProviderFactory for GoveeProviderFactory {
         "govee"
     }
 
+    fn display_name(&self) -> &'static str {
+        "Govee (Cloud)"
+    }
+
     fn build(&self, credentials_json: &str) -> Result<Box<dyn crate::providers::LightProvider>> {
         let creds: serde_json::Value = serde_json::from_str(credentials_json)?;
         let api_key = creds["api_key"]

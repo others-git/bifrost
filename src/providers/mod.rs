@@ -94,6 +94,11 @@ pub trait AudioProviderFactory: Send + Sync {
     /// The stable string key stored in `providers.provider_type` (e.g. `"onkyo"`).
     fn provider_type(&self) -> &'static str;
 
+    /// Human-facing name for the UI (e.g. `"Sonos"`). Defaults to the type key.
+    fn display_name(&self) -> &'static str {
+        self.provider_type()
+    }
+
     fn build(&self, credentials_json: &str) -> Result<Box<dyn AudioProvider>>;
 
     fn credentials_schema(&self) -> &'static [CredentialField];
@@ -153,6 +158,11 @@ pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 120;
 pub trait ProviderFactory: Send + Sync {
     /// The stable string key stored in the database (e.g. `"hue"`, `"govee"`).
     fn provider_type(&self) -> &'static str;
+
+    /// Human-facing name for the UI (e.g. `"Philips Hue"`). Defaults to the type key.
+    fn display_name(&self) -> &'static str {
+        self.provider_type()
+    }
 
     /// Build a live provider from already-decrypted credentials JSON.
     fn build(&self, credentials_json: &str) -> Result<Box<dyn LightProvider>>;
@@ -220,6 +230,16 @@ impl ProviderRegistry {
         self.audio_factories.contains_key(provider_type)
     }
 
+    /// Human-facing name for a provider type (light or audio), if registered.
+    pub fn display_name(&self, provider_type: &str) -> Option<&'static str> {
+        if let Some(f) = self.factories.get(provider_type) {
+            return Some(f.display_name());
+        }
+        self.audio_factories
+            .get(provider_type)
+            .map(|f| f.display_name())
+    }
+
     /// The network auto-detect object for a provider type, if it has one.
     /// Looks in both the light and audio factory maps.
     pub fn discoverer(&self, provider_type: &str) -> Option<Box<dyn DeviceDiscovery>> {
@@ -270,12 +290,14 @@ impl ProviderRegistry {
             .values()
             .map(|f| ProviderTypeInfo {
                 provider_type: f.provider_type(),
+                display_name: f.display_name(),
                 kind: ProviderDomain::Light,
                 supports_discovery: f.discoverer().is_some(),
                 schema: f.credentials_schema().to_vec(),
             })
             .chain(self.audio_factories.values().map(|f| ProviderTypeInfo {
                 provider_type: f.provider_type(),
+                display_name: f.display_name(),
                 kind: ProviderDomain::Audio,
                 supports_discovery: f.discoverer().is_some(),
                 schema: f.credentials_schema().to_vec(),
@@ -303,6 +325,8 @@ impl Default for ProviderRegistry {
 #[derive(Debug, Serialize)]
 pub struct ProviderTypeInfo {
     pub provider_type: &'static str,
+    /// Human-facing name for the UI.
+    pub display_name: &'static str,
     pub kind: ProviderDomain,
     /// Whether the UI should offer a "scan network" button for this type.
     pub supports_discovery: bool,

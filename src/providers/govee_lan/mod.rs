@@ -339,6 +339,10 @@ impl ProviderFactory for GoveeLanProviderFactory {
         "govee-lan"
     }
 
+    fn display_name(&self) -> &'static str {
+        "Govee (LAN)"
+    }
+
     fn build(&self, credentials_json: &str) -> Result<Box<dyn LightProvider>> {
         let creds: serde_json::Value = serde_json::from_str(credentials_json)?;
         let bind = creds["bind_addr"].as_str().unwrap_or("0.0.0.0");

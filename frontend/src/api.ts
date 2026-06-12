@@ -47,6 +47,10 @@ export interface Light {
 export interface Provider {
   id: string;
   provider_type: string;
+  /** Human-facing type name, e.g. "Sonos". */
+  type_name: string;
+  /** Which kind of devices this provider manages. */
+  domain: "light" | "audio";
   name: string;
   enabled: boolean;
   created_at: string;
@@ -62,6 +66,8 @@ export interface CredentialField {
 
 export interface ProviderType {
   provider_type: string;
+  /** Human-facing name, e.g. "Philips Hue". */
+  display_name: string;
   kind: "light" | "audio";
   /** Whether the UI should offer a "Scan network" button for this type. */
   supports_discovery: boolean;

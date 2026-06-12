@@ -66,10 +66,14 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     for row in &rows {
         let id: String = row.get("id");
         let name: String = row.get("name");
+        let provider_type: String = row.get("provider_type");
 
-        // Every enabled provider has a manager (SSE or polling) with a state lock.
+        // Light providers run an SSE/polling manager. On-demand audio providers
+        // (Sonos) have none — they're read live per request, so report "ready".
         let conn_state = if let Some(lock) = connections.get_state_lock(&id) {
             lock.read().await.label().to_string()
+        } else if state.registry.is_known_audio(&provider_type) {
+            "ready".to_string()
         } else {
             "not_started".to_string()
         };

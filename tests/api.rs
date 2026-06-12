@@ -3320,3 +3320,88 @@ async fn settings_reject_public_subnet() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
+
+// ── Provider display names + audio domain in listings ─────────────────────────
+
+#[tokio::test]
+async fn provider_types_carry_display_names() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/providers/types", &cookie))
+        .await
+        .unwrap();
+    let types = helpers::response_json(resp).await;
+    let name_of = |t: &str| {
+        types
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["provider_type"] == t)
+            .unwrap()["display_name"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(name_of("hue"), "Philips Hue");
+    assert_eq!(name_of("sonos"), "Sonos");
+    assert_eq!(name_of("onkyo"), "Onkyo / Integra");
+}
+
+#[tokio::test]
+async fn audio_provider_lists_with_name_domain_and_ready_status() {
+    let (port, _) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    setup_onkyo(&app, &cookie, port).await;
+
+    // The provider listing carries the friendly name + audio domain.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/providers", &cookie))
+        .await
+        .unwrap();
+    let providers = helpers::response_json(resp).await;
+    let onkyo = providers
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["provider_type"] == "onkyo")
+        .expect("onkyo provider present");
+    assert_eq!(onkyo["type_name"], "Onkyo / Integra");
+    assert_eq!(onkyo["domain"], "audio");
+}
+
+#[tokio::test]
+async fn sonos_provider_reports_ready_status_not_unmanaged() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Add a Sonos provider (on-demand audio, no connection manager).
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/providers",
+            &cookie,
+            r#"{"name":"Sonos","provider_type":"sonos","credentials":{"host":"192.168.1.50"}}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Its status must read "ready" (operational), not "not_managed".
+    let resp = app
+        .oneshot(helpers::authed_get(
+            &format!("/api/providers/{id}/status"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(helpers::response_json(resp).await["state"], "ready");
+}

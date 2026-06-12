@@ -664,6 +664,10 @@ impl AudioProviderFactory for OnkyoProviderFactory {
         "onkyo"
     }
 
+    fn display_name(&self) -> &'static str {
+        "Onkyo / Integra"
+    }
+
     fn build(&self, credentials_json: &str) -> Result<Box<dyn AudioProvider>> {
         Ok(Box::new(OnkyoProvider::from_credentials(credentials_json)?))
     }

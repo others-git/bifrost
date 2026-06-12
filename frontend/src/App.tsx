@@ -3,12 +3,15 @@ import { getHealth, getLights, logout, getSetupStatus, type Light } from "./api"
 import { SetupPage } from "./pages/Setup";
 import { LoginPage } from "./pages/Login";
 import { DashboardPage } from "./pages/Dashboard";
+import { AudioPage } from "./pages/Audio";
 import { ScenesPage } from "./pages/Scenes";
 import { FloorPlanPage } from "./pages/FloorPlan";
 import { SettingsPage } from "./pages/Settings";
 import { S } from "./styles";
 
-type Page = "loading" | "setup" | "login" | "dashboard" | "scenes" | "plan" | "settings";
+/** Pages reachable from the nav tray. */
+type NavPage = "dashboard" | "audio" | "scenes" | "plan" | "settings";
+type Page = "loading" | "setup" | "login" | NavPage;
 
 export function App() {
   const [page, setPage] = useState<Page>("loading");
@@ -67,6 +70,7 @@ export function App() {
             onNavigate={(p) => setPage(p)}
           />
         )}
+        {page === "audio" && <AudioPage />}
         {page === "scenes" && <ScenesPage />}
         {page === "plan" && <FloorPlanPage lights={lights} />}
         {page === "settings" && (
@@ -87,7 +91,7 @@ function NavTray({
 }: {
   version: string;
   page: Page;
-  onNavigate: (p: "dashboard" | "scenes" | "plan" | "settings") => void;
+  onNavigate: (p: NavPage) => void;
   onLogout: () => void;
 }) {
   const [collapsed, setCollapsed] = useState(
@@ -101,8 +105,9 @@ function NavTray({
     });
   }
 
-  const items: { id: "dashboard" | "scenes" | "plan" | "settings"; glyph: string; label: string }[] = [
+  const items: { id: NavPage; glyph: string; label: string }[] = [
     { id: "dashboard", glyph: "◉", label: "Lights" },
+    { id: "audio", glyph: "♪", label: "Audio" },
     { id: "scenes", glyph: "✦", label: "Scenes" },
     { id: "plan", glyph: "▦", label: "Floor Plan" },
     { id: "settings", glyph: "⚙", label: "Settings" },
