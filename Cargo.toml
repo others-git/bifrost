@@ -1,6 +1,6 @@
 [package]
 name = "bifrost"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 
 [lib]
@@ -64,6 +64,8 @@ rust-embed = { version = "8", features = ["mime-guess"] }
 # random bytes (nonce generation)
 rand = "0.8"
 hex = "0.4"
+# deterministic hashing for API key lookup (keys are high-entropy)
+sha2 = "0.10"
 futures-util = "0.3"
 
 [dev-dependencies]

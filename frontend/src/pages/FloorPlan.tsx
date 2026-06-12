@@ -30,6 +30,7 @@ import {
   type RoomScene,
 } from "../api";
 import { ColorWheel, hexToHs, hexToRgb, hsvToRgb, LightEditor } from "../components/LightEditor";
+import { SceneEditor, SceneSwatch } from "../components/scenes";
 import { Modal, useDialogs, type Dialogs } from "../components/dialogs";
 import { S } from "../styles";
 
@@ -49,6 +50,67 @@ const ROOM_COLORS = ["#8b5cf6", "#3b82f6", "#22d3ee", "#4ade80", "#facc15", "#fb
 
 const tileKey = (x: number, y: number) => `${x},${y}`;
 const wallKey = (x: number, y: number, dir: "h" | "v") => `${x},${y},${dir}`;
+
+/** How far (in tile units) an edge-mounted strip sits from a tile's centerline.
+ *  0.42 puts it ~0.08 from the wall, matching the old fixed edge mount. */
+const STRIP_INSET = 0.42;
+
+/**
+ * The on-canvas polyline for an LED strip, in tile coordinates.
+ *
+ * The naive approach — offset every vertex by one fixed mount point — makes the
+ * strip bend through the middle of corner tiles and keep the wrong offset after
+ * a turn (so a strip that should follow trim around a corner "jumps through the
+ * wall"). Instead we treat the run as a centerline and offset it to one wall
+ * side, mitering the 90° corners so the line bends at the true tile corner and
+ * each leg hugs its own wall — like trim running around the inside of a hallway.
+ *
+ * The hand (which side) is taken from the start tile's mount; `c` (ceiling)
+ * keeps the strip on the centerline. The path's turns are always right angles
+ * (collinear moves are merged while drawing), which makes the miter exact.
+ */
+function stripPath(p: Placement): [number, number][] {
+  const verts: [number, number][] = [[p.x, p.y], ...(p.points ?? [])];
+  const centers = verts.map(([x, y]) => [x + 0.5, y + 0.5] as [number, number]);
+  if (p.mount === "c" || verts.length < 2) return centers;
+
+  const dir = (a: [number, number], b: [number, number]): [number, number] => [
+    Math.sign(b[0] - a[0]),
+    Math.sign(b[1] - a[1]),
+  ];
+  // Right-hand normal of a unit direction.
+  const rightNormal = (d: [number, number]): [number, number] => [d[1], -d[0]];
+  const mountDir: Record<string, [number, number]> = {
+    n: [0, -1],
+    s: [0, 1],
+    e: [1, 0],
+    w: [-1, 0],
+    c: [0, 0],
+  };
+
+  // Pick the hand so the first leg hugs the mounted edge.
+  const rn0 = rightNormal(dir(verts[0], verts[1]));
+  const md = mountDir[p.mount] ?? [0, 0];
+  const hand = md[0] * rn0[0] + md[1] * rn0[1] < 0 ? -1 : 1;
+  const sideOf = (d: [number, number]): [number, number] => {
+    const rn = rightNormal(d);
+    return [rn[0] * hand, rn[1] * hand];
+  };
+
+  // Per-leg side normals; vertex i sits between leg i-1 and leg i.
+  const sides: [number, number][] = [];
+  for (let i = 1; i < verts.length; i++) sides.push(sideOf(dir(verts[i - 1], verts[i])));
+
+  return centers.map(([cx, cy], i) => {
+    const sIn = i > 0 ? sides[i - 1] : null;
+    const sOut = i < sides.length ? sides[i] : null;
+    // Endpoints offset by their one leg; corners by the sum of both legs, which
+    // for perpendicular legs lands exactly on the mitered corner point.
+    const dx = (sIn?.[0] ?? 0) + (sOut?.[0] ?? 0);
+    const dy = (sIn?.[1] ?? 0) + (sOut?.[1] ?? 0);
+    return [cx + STRIP_INSET * dx, cy + STRIP_INSET * dy] as [number, number];
+  });
+}
 
 interface EditRoom {
   id: string;
@@ -663,15 +725,6 @@ function NewPlanDialog({
 
 // ── Room controller (right of canvas, view mode) ────────────────────────────
 
-const SCENE_PRESETS: { name: string; brightness: number; palette: string[] }[] = [
-  { name: "Relax", brightness: 55, palette: ["#ffb46b"] },
-  { name: "Energize", brightness: 100, palette: ["#d6e8ff"] },
-  { name: "Read", brightness: 100, palette: ["#ffe4b3"] },
-  { name: "Nightlight", brightness: 5, palette: ["#ff9b3d"] },
-  { name: "Sunset", brightness: 75, palette: ["#ff7d33", "#ff5e9c", "#ffb04d"] },
-  { name: "Aurora", brightness: 65, palette: ["#22d3ee", "#4ade80", "#8b5cf6"] },
-];
-
 function RoomController({
   plan,
   rooms,
@@ -846,7 +899,7 @@ function RoomScenes({
                 gap: "0.3rem",
               }}
             >
-              <PaletteDots palette={s.palette} />
+              <SceneSwatch palette={s.palette} width={20} height={11} />
               {busy === s.id ? "…" : s.name}
             </button>
             <button
@@ -880,130 +933,6 @@ function RoomScenes({
             setEditing(false);
             await load();
           }}
-        />
-      )}
-    </div>
-  );
-}
-
-function PaletteDots({ palette }: { palette: string[] }) {
-  if (palette.length === 0) return null;
-  return (
-    <span style={{ display: "inline-flex", gap: 2 }}>
-      {palette.slice(0, 4).map((c, i) => (
-        <span key={i} style={{ width: 8, height: 8, borderRadius: "50%", background: c, display: "inline-block" }} />
-      ))}
-    </span>
-  );
-}
-
-/** Inline editor: name, brightness, palette swatches, Hue-like presets. */
-function SceneEditor({
-  onSave,
-}: {
-  onSave: (scene: { name: string; brightness?: number; palette: string[] }) => Promise<void>;
-}) {
-  const [name, setName] = useState("");
-  const [brightness, setBrightness] = useState(80);
-  const [palette, setPalette] = useState<string[]>(["#ff9900"]);
-  const [saving, setSaving] = useState(false);
-  const [colorEdit, setColorEdit] = useState<{ index: number; anchor: HTMLElement } | null>(null);
-
-  function setColor(i: number, value: string) {
-    setPalette((prev) => prev.map((c, j) => (j === i ? value : c)));
-  }
-
-  async function save() {
-    if (!name.trim()) return;
-    setSaving(true);
-    try {
-      await onSave({ name: name.trim(), brightness, palette });
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem", borderTop: "1px solid #2a2a2a", paddingTop: "0.5rem" }}>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.25rem" }}>
-        {SCENE_PRESETS.map((p) => (
-          <button
-            key={p.name}
-            onClick={() => { setName(p.name); setBrightness(p.brightness); setPalette([...p.palette]); }}
-            title={`Preset: ${p.palette.join(" ")} @ ${p.brightness}%`}
-            style={{ ...S.buttonGhost, padding: "0.2rem 0.45rem", fontSize: "0.72rem", display: "inline-flex", alignItems: "center", gap: "0.3rem" }}
-          >
-            <PaletteDots palette={p.palette} />
-            {p.name}
-          </button>
-        ))}
-      </div>
-
-      <input
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        placeholder="Scene name"
-        style={{ ...S.input, fontSize: "0.8rem" }}
-      />
-
-      <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.75rem", color: "#888" }}>
-        Brightness
-        <input
-          type="range"
-          min={1}
-          max={100}
-          value={brightness}
-          onChange={(e) => setBrightness(Number(e.target.value))}
-          style={{ flex: 1, accentColor: "#f90" }}
-        />
-        <span style={{ width: 32, textAlign: "right" }}>{brightness}%</span>
-      </label>
-
-      <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", flexWrap: "wrap" }}>
-        <span style={{ fontSize: "0.75rem", color: "#888" }}>Palette</span>
-        {palette.map((c, i) => (
-          <span key={i} style={{ display: "inline-flex", alignItems: "center" }}>
-            <button
-              onClick={(e) => setColorEdit({ index: i, anchor: e.currentTarget })}
-              title="Edit color"
-              style={{ width: 26, height: 22, padding: 0, border: "1px solid #444", borderRadius: 4, background: c, cursor: "pointer" }}
-            />
-            {palette.length > 1 && (
-              <button
-                onClick={() => setPalette((prev) => prev.filter((_, j) => j !== i))}
-                title="Remove color"
-                style={{ background: "none", border: "none", color: "#866", cursor: "pointer", fontSize: "0.7rem", padding: "0 0.15rem" }}
-              >
-                ×
-              </button>
-            )}
-          </span>
-        ))}
-        {palette.length < 6 && (
-          <button
-            onClick={() => setPalette((prev) => [...prev, "#ffffff"])}
-            style={{ ...S.buttonGhost, padding: "0.15rem 0.45rem", fontSize: "0.75rem" }}
-          >
-            +
-          </button>
-        )}
-      </div>
-      <span style={{ fontSize: "0.68rem", color: "#555" }}>
-        Colors are spread across the room's lights in turn.
-      </span>
-
-      <button onClick={save} disabled={saving || !name.trim()} style={{ ...S.button, padding: "0.35rem 0.7rem", fontSize: "0.78rem" }}>
-        {saving ? "Saving…" : "Save scene"}
-      </button>
-
-      {colorEdit && (
-        <LightEditor
-          anchor={colorEdit.anchor}
-          title="Palette color"
-          initialHex={palette[colorEdit.index]}
-          showBrightness={false}
-          onChange={(hex) => setColor(colorEdit.index, hex)}
-          onClose={() => setColorEdit(null)}
         />
       )}
     </div>
@@ -1235,14 +1164,14 @@ function PlanCanvas({
       });
     }
 
-    // LED strips: a polyline through the mount points of every vertex.
+    // LED strips: a wall-hugging polyline (see stripPath) through the run.
     for (const p of placements) {
       if (!p.points || p.points.length === 0) continue;
-      const [mx, my] = mountOffset(p.mount);
+      const pts = stripPath(p);
       const run = new Path2D();
-      run.moveTo(ox + (p.x + mx) * cell, oy + (p.y + my) * cell);
-      for (const [vx, vy] of p.points) {
-        run.lineTo(ox + (vx + mx) * cell, oy + (vy + my) * cell);
+      run.moveTo(ox + pts[0][0] * cell, oy + pts[0][1] * cell);
+      for (let i = 1; i < pts.length; i++) {
+        run.lineTo(ox + pts[i][0] * cell, oy + pts[i][1] * cell);
       }
       const st = statesById.get(p.light_id);
       let color = "#3a3d45";
@@ -1466,15 +1395,15 @@ function PlanCanvas({
 
   function hitPlacement(gx: number, gy: number): Placement | null {
     for (const p of placements) {
-      const [mx, my] = mountOffset(p.mount);
       if (p.points && p.points.length > 0) {
-        const verts: [number, number][] = [[p.x, p.y], ...p.points];
-        for (let i = 1; i < verts.length; i++) {
-          const [ax, ay] = verts[i - 1];
-          const [bx, by] = verts[i];
-          if (distToSegment(gx, gy, ax + mx, ay + my, bx + mx, by + my) < 0.3) return p;
+        const pts = stripPath(p);
+        for (let i = 1; i < pts.length; i++) {
+          const [ax, ay] = pts[i - 1];
+          const [bx, by] = pts[i];
+          if (distToSegment(gx, gy, ax, ay, bx, by) < 0.3) return p;
         }
       } else {
+        const [mx, my] = mountOffset(p.mount);
         const dx = gx - (p.x + mx), dy = gy - (p.y + my);
         if (Math.hypot(dx, dy) < 0.3) return p;
       }

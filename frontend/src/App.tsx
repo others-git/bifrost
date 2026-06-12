@@ -3,11 +3,12 @@ import { getHealth, getLights, logout, getSetupStatus, type Light } from "./api"
 import { SetupPage } from "./pages/Setup";
 import { LoginPage } from "./pages/Login";
 import { DashboardPage } from "./pages/Dashboard";
+import { ScenesPage } from "./pages/Scenes";
 import { FloorPlanPage } from "./pages/FloorPlan";
 import { SettingsPage } from "./pages/Settings";
 import { S } from "./styles";
 
-type Page = "loading" | "setup" | "login" | "dashboard" | "plan" | "settings";
+type Page = "loading" | "setup" | "login" | "dashboard" | "scenes" | "plan" | "settings";
 
 export function App() {
   const [page, setPage] = useState<Page>("loading");
@@ -49,7 +50,8 @@ export function App() {
         version={version}
         page={page}
         onNavigate={(p) => {
-          if (p === "dashboard" || p === "plan") refreshLights().then(() => setPage(p));
+          if (p === "dashboard" || p === "scenes" || p === "plan")
+            refreshLights().then(() => setPage(p));
           else setPage(p);
         }}
         onLogout={async () => {
@@ -65,6 +67,7 @@ export function App() {
             onNavigate={(p) => setPage(p)}
           />
         )}
+        {page === "scenes" && <ScenesPage lights={lights} />}
         {page === "plan" && <FloorPlanPage lights={lights} />}
         {page === "settings" && (
           <SettingsPage onNavigate={(p) => setPage(p)} />
@@ -84,7 +87,7 @@ function NavTray({
 }: {
   version: string;
   page: Page;
-  onNavigate: (p: "dashboard" | "plan" | "settings") => void;
+  onNavigate: (p: "dashboard" | "scenes" | "plan" | "settings") => void;
   onLogout: () => void;
 }) {
   const [collapsed, setCollapsed] = useState(
@@ -98,8 +101,9 @@ function NavTray({
     });
   }
 
-  const items: { id: "dashboard" | "plan" | "settings"; glyph: string; label: string }[] = [
+  const items: { id: "dashboard" | "scenes" | "plan" | "settings"; glyph: string; label: string }[] = [
     { id: "dashboard", glyph: "◉", label: "Lights" },
+    { id: "scenes", glyph: "✦", label: "Scenes" },
     { id: "plan", glyph: "▦", label: "Floor Plan" },
     { id: "settings", glyph: "⚙", label: "Settings" },
   ];

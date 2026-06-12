@@ -1,16 +1,26 @@
-Make Scenes a higher class object, add a Scenes page, below Lights and above Floor Plan. Add some more defaults, like Hue.
+[DONE] Make Scenes a higher class object, add a Scenes page, below Lights and above Floor Plan. Add some more defaults, like Hue. Make it look better, with a color gradient, rather than individual blocks.
+  Added a Scenes nav page (between Lights and Floor Plan) listing each room's palette scenes as gradient tiles you click to apply. Extracted presets + editor + gradient rendering into components/scenes.tsx (shared with the Floor Plan room controller, which now uses gradients too). Replaced the per-color dots (PaletteDots) with a SceneSwatch gradient bar. Expanded presets to 14 Hue-style defaults (Relax, Read, Concentrate, Energize, Bright, Dimmed, Nightlight, Sunset, Tropical Twilight, Savanna Sunset, Spring Blossom, Aurora, Ocean, Forest). Frontend-only — the room-scenes API already existed. (Note: scenes remain room-scoped; did not migrate the separate global snapshot /api/scenes system.)
 
-Hue lights are not getting a color wheel. Lets make sure we're polling the Hue API correctly, `references/hue_api_reference.pdf` is a downloaded pdf of the login-locked hue API reference.
+[DONE] Hue lights are not getting a color wheel. Lets make sure we're polling the Hue API correctly, `references/hue_api_reference.pdf` is a downloaded pdf of the login-locked hue API reference. It looks like in `capabilities` they're showing up as `color_rbg: false` - even though that is not true and on the floor planner they're showing up their true rgb.
+  Root cause: capabilities were only written on the initial provider sync; SSE/poll updates rewrote last_state (color) but never capabilities, so a stale `color_rgb:false` persisted. Fix: poll/discovery LightEvents now carry full capabilities and refresh the stored row, so the flag self-heals on the next poll. (Floor plan defaulted showColor to true, which masked the bug there.)
 
-LED corning seems to only bend on the center of a tile. when it then transitions to another "wall", it appears on the "far" side of the wall. (like went through the wall ) if that makes sense. I'd like for it to be able to visually represent, for example, the strip running along the inner trim of a hallway.
+[DONE] LED corning seems to only bend on the center of a tile. when it then transitions to another "wall", it appears on the "far" side of the wall. (like went through the wall ) if that makes sense. I'd like for it to be able to visually represent, for example, the strip running along the inner trim of a hallway.
+  Root cause: the strip polyline offset every vertex by one fixed mount point, so corners bent through tile centers and a turn kept the wrong offset (the "through the wall" jump). Added a pure stripPath() helper that treats the run as a centerline and offsets it to one wall side, mitering the 90° corners so the line bends at the true tile corner and each leg hugs its own wall — like trim around a hallway. The hand (which wall) comes from the start tile's mount (n/s/e/w); ceiling-mount 'c' stays centered. Used by both rendering and hit-testing. (Verified geometry across straight/L/U/vertical/ceiling cases.)
 
-Rooms should be buttons (much like lights), with an on/off toggle (not buttons). Lets also make the scene creator a lot cleaner.
+[DONE] Rooms should be buttons (much like lights), with an on/off toggle (not buttons). Lets also make the scene creator a lot cleaner.
+  Rooms: superseded by the later Lights-page redesign — each room is now a RoomBox container (framed box holding its light cards) whose header has a single VerticalToggle for the whole room plus a room-level color/brightness widget (same LightEditor as lights) that cascades to all members via the room call; lights stay individually editable. "On" = any member on; toggling/cascading is optimistic then confirmed.
+  Scene creator: reworked as part of the Scenes page (components/scenes.tsx) — gradient live preview, preset swatches, explicit Save/Cancel, shared between the Scenes page and Floor Plan. (FloorPlan's room controller still has its own On/Off/Color buttons — left as-is since it's a richer per-region control; say the word to give it the toggle treatment too.)
 
 ---
 
-### 8 API for other apps
+[DONE] To help minimize API calls, for Hue use group API calls when applicable. (reference references/Hue - Groups and Scenes)
+  Room on/off/brightness already used native grouped_light calls. Extended it to scene apply: a scene with an empty palette (brightness-only) or a single color drives every member to the same state, so it now collapses to one grouped_light PUT per linked group instead of fanning out per light. Multi-color palettes still fan out (each light needs a distinct color).
 
-- API should be documented properly in the repo. 
+---
+
+### 8 API for other apps  [DONE]
+
+- API should be documented properly in the repo.
  - we generate client API keys, no rbac just full access to lights and rooms.
 
 We expose Bifrost-abstracted "rooms" only (not provider groups), and individual lights.
@@ -19,4 +29,14 @@ Everything we can do in the UI should be available through the API - including s
 
 The Floor Plan is not available through API.
 
+  Implemented the public /api/v1 surface (Bearer-token auth, decided with you):
+  - Auth: Authorization: Bearer <key>. Keys are bfr_<64 hex>, SHA-256 hashed at rest, shown once on creation. New migration 0010_api_keys.sql; sha2 dep added.
+  - Management (session-authed): GET/POST /api/api-keys, DELETE /api/api-keys/{id}. UI: Settings → "API keys" section (create with one-time reveal + copy, list with prefix/last-used, revoke).
+  - Public (Bearer): GET /v1/lights, GET /v1/lights/{id}, PUT /v1/lights/{id}/state; GET /v1/rooms, PUT /v1/rooms/{id}/state; GET/POST /v1/rooms/{id}/scenes, DELETE .../{sid}, POST .../{sid}/apply. Rooms expose Bifrost rooms only (not provider groups); no floor plan.
+  - No logic duplication: refactored lights.rs and rooms.rs to share pub(crate) service fns between the session UI API and /v1 (the native-group room control and scene logic are reused, not copied).
+  - Docs: docs/api.md (auth, endpoints, examples, status codes). Tests: 9 new integration tests (happy paths + 401 for missing/invalid/revoked keys) + 4 apikeys unit tests.
 
+
+---
+
+scenes should:  not be room specific, they are "global" and can be applied to rooms. the lights used in a room can be saved as a scene.

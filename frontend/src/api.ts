@@ -346,6 +346,39 @@ export async function applyRoomScene(
   return res.json();
 }
 
+// ── Client API keys (public /api/v1 access) ──────────────────────────────────
+
+export interface ApiKey {
+  id: string;
+  name: string;
+  prefix: string;
+  created_at: string;
+  last_used?: string;
+}
+
+export async function getApiKeys(): Promise<ApiKey[]> {
+  const res = await fetch("/api/api-keys");
+  if (!res.ok) return [];
+  return res.json();
+}
+
+/** Create a key. The full `key` is returned exactly once — show it immediately. */
+export async function createApiKey(
+  name: string,
+): Promise<{ id: string; name: string; key: string; prefix: string }> {
+  const res = await fetch("/api/api-keys", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function revokeApiKey(id: string): Promise<void> {
+  await fetch(`/api/api-keys/${id}`, { method: "DELETE" });
+}
+
 // ── Floor plans ──────────────────────────────────────────────────────────────
 
 export type WallDir = "h" | "v";

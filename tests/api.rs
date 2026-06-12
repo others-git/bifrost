@@ -1,5 +1,6 @@
 mod helpers;
 
+use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use tower::ServiceExt;
@@ -1985,6 +1986,86 @@ async fn room_state_uses_native_group_control_when_fully_linked() {
     assert_eq!(per_light_puts, 0, "native path must not fan out per light");
 }
 
+#[tokio::test]
+async fn single_color_scene_uses_native_group_control_when_fully_linked() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let bridge = hue_bridge_with_room("Living Room").await;
+    Mock::given(method("PUT"))
+        .and(path("/clip/v2/resource/grouped_light/gl-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+        .mount(&bridge)
+        .await;
+
+    let (app, _light_id) = helpers::test_app_with_hue_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let _ = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/providers/prov-hue-1/sync-groups",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/rooms", &cookie))
+        .await
+        .unwrap();
+    let rooms = helpers::response_json(resp).await;
+    let room_id = rooms[0]["id"].as_str().unwrap().to_string();
+
+    // A single-color palette drives every member to the same state, so the
+    // scene apply must collapse to one grouped_light call, not per-light PUTs.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/rooms/{room_id}/scenes"),
+            &cookie,
+            r##"{"name":"Warm","brightness":40,"palette":["#ff8800"]}"##,
+        ))
+        .await
+        .unwrap();
+    let scene_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .oneshot(helpers::authed_post(
+            &format!("/api/rooms/{room_id}/scenes/{scene_id}/apply"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let result = helpers::response_json(resp).await;
+    assert_eq!(result["applied"], 1);
+
+    let requests = bridge.received_requests().await.unwrap();
+    let grouped_puts = requests
+        .iter()
+        .filter(|r| r.url.path() == "/clip/v2/resource/grouped_light/gl-1")
+        .count();
+    let per_light_puts = requests
+        .iter()
+        .filter(|r| r.url.path().starts_with("/clip/v2/resource/light/"))
+        .count();
+    assert_eq!(
+        grouped_puts, 1,
+        "single-color scene must use one group call"
+    );
+    assert_eq!(
+        per_light_puts, 0,
+        "uniform scene must not fan out per light"
+    );
+}
+
 // ── Room scenes ──────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -2280,4 +2361,359 @@ async fn planner_region_rename_renames_bound_room() {
         "rename must not duplicate"
     );
     assert_eq!(rooms[0]["name"], "Study");
+}
+
+// ── Public API (/api/v1) + API keys ──────────────────────────────────────────
+
+/// Mint an API key via the session-authenticated management endpoint and
+/// return the one-time plaintext key.
+async fn create_api_key(app: &Router, cookie: &str, name: &str) -> String {
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/api-keys",
+            cookie,
+            &format!(r#"{{"name":"{name}"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = helpers::response_json(resp).await;
+    body["key"].as_str().unwrap().to_string()
+}
+
+fn bearer_get(uri: &str, key: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {key}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn bearer_json(method: &str, uri: &str, key: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {key}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn api_keys_management_requires_session() {
+    let app = helpers::test_app_with_password().await;
+    for (method, uri) in [("GET", "/api/api-keys"), ("POST", "/api/api-keys")] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"name":"x"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{method} {uri}");
+    }
+}
+
+#[tokio::test]
+async fn create_api_key_returns_key_once_and_lists_with_prefix() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/api-keys",
+            &cookie,
+            r#"{"name":"Home Assistant"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = helpers::response_json(resp).await;
+    let key = body["key"].as_str().unwrap();
+    assert!(key.starts_with("bfr_"));
+    assert_eq!(body["prefix"].as_str().unwrap(), &key[..12]);
+
+    // The list shows the prefix but never the full key.
+    let resp = app
+        .oneshot(helpers::authed_get("/api/api-keys", &cookie))
+        .await
+        .unwrap();
+    let list = helpers::response_json(resp).await;
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["name"], "Home Assistant");
+    assert_eq!(list[0]["prefix"], &key[..12]);
+    assert!(list[0].get("key").is_none(), "list must not leak the key");
+}
+
+#[tokio::test]
+async fn create_api_key_rejects_empty_name() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .oneshot(helpers::authed_post(
+            "/api/api-keys",
+            &cookie,
+            r#"{"name":"  "}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn revoke_api_key_invalidates_public_access() {
+    let device = wled_mock().await;
+    let (app, _light_id) = helpers::test_app_with_light(&device.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "temp").await;
+
+    // Works before revocation.
+    let resp = app
+        .clone()
+        .oneshot(bearer_get("/api/v1/lights", &key))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Find the key id and revoke it.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/api-keys", &cookie))
+        .await
+        .unwrap();
+    let list = helpers::response_json(resp).await;
+    let id = list[0]["id"].as_str().unwrap().to_string();
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_delete(
+            &format!("/api/api-keys/{id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Now rejected.
+    let resp = app
+        .oneshot(bearer_get("/api/v1/lights", &key))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn v1_lights_without_key_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/lights")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // A well-formed but unknown key is also rejected.
+    let resp = app
+        .oneshot(bearer_get("/api/v1/lights", "bfr_deadbeef"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn v1_lists_and_gets_lights_with_valid_key() {
+    let device = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&device.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "reader").await;
+
+    let resp = app
+        .clone()
+        .oneshot(bearer_get("/api/v1/lights", &key))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let lights = helpers::response_json(resp).await;
+    assert_eq!(lights.as_array().unwrap().len(), 1);
+    assert_eq!(lights[0]["id"], light_id);
+
+    let resp = app
+        .clone()
+        .oneshot(bearer_get(&format!("/api/v1/lights/{light_id}"), &key))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(helpers::response_json(resp).await["name"], "Test Light");
+
+    let resp = app
+        .oneshot(bearer_get("/api/v1/lights/nope", &key))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn v1_set_light_state_drives_provider() {
+    let device = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&device.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "writer").await;
+
+    let resp = app
+        .oneshot(bearer_json(
+            "PUT",
+            &format!("/api/v1/lights/{light_id}/state"),
+            &key,
+            r#"{"on":true,"brightness":42.0}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let requests = device.received_requests().await.unwrap();
+    assert!(requests.iter().any(|r| r.url.path() == "/json/state"));
+}
+
+#[tokio::test]
+async fn v1_rooms_state_and_scenes_full_flow() {
+    let device = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&device.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "app").await;
+
+    // Create a room (with the light) via the session API.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/rooms",
+            &cookie,
+            &format!(r#"{{"name":"Den","light_ids":["{light_id}"]}}"#),
+        ))
+        .await
+        .unwrap();
+    let room_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Public: the room appears with its member.
+    let resp = app
+        .clone()
+        .oneshot(bearer_get("/api/v1/rooms", &key))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let rooms = helpers::response_json(resp).await;
+    assert_eq!(rooms[0]["name"], "Den");
+    assert_eq!(rooms[0]["light_ids"][0], light_id);
+
+    // Public: set room state.
+    let resp = app
+        .clone()
+        .oneshot(bearer_json(
+            "PUT",
+            &format!("/api/v1/rooms/{room_id}/state"),
+            &key,
+            r#"{"on":true}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(helpers::response_json(resp).await["applied"], 1);
+
+    // Public: create, list, apply, delete a scene.
+    let resp = app
+        .clone()
+        .oneshot(bearer_json(
+            "POST",
+            &format!("/api/v1/rooms/{room_id}/scenes"),
+            &key,
+            r##"{"name":"Warm","brightness":40,"palette":["#ff8800"]}"##,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let scene_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(bearer_get(&format!("/api/v1/rooms/{room_id}/scenes"), &key))
+        .await
+        .unwrap();
+    let scenes = helpers::response_json(resp).await;
+    assert_eq!(scenes.as_array().unwrap().len(), 1);
+    assert_eq!(scenes[0]["name"], "Warm");
+
+    let resp = app
+        .clone()
+        .oneshot(bearer_json(
+            "POST",
+            &format!("/api/v1/rooms/{room_id}/scenes/{scene_id}/apply"),
+            &key,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(helpers::response_json(resp).await["applied"], 1);
+
+    let resp = app
+        .clone()
+        .oneshot(bearer_json(
+            "DELETE",
+            &format!("/api/v1/rooms/{room_id}/scenes/{scene_id}"),
+            &key,
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn v1_scene_create_rejects_bad_color() {
+    let device = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&device.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "app").await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/rooms",
+            &cookie,
+            &format!(r#"{{"name":"Den","light_ids":["{light_id}"]}}"#),
+        ))
+        .await
+        .unwrap();
+    let room_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .oneshot(bearer_json(
+            "POST",
+            &format!("/api/v1/rooms/{room_id}/scenes"),
+            &key,
+            r#"{"name":"Bad","palette":["red"]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }

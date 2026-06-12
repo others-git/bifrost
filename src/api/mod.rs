@@ -1,3 +1,4 @@
+pub mod apikeys;
 pub mod auth;
 pub mod events;
 pub mod lights;
@@ -6,6 +7,7 @@ pub mod providers;
 pub mod rooms;
 pub mod scenes;
 pub mod setup;
+pub mod v1;
 
 use crate::AppState;
 use axum::{Json, Router, extract::State, response::IntoResponse, routing::get};
@@ -15,6 +17,7 @@ use std::sync::Arc;
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
+        .nest("/api-keys", apikeys::router())
         .nest("/auth", auth::router())
         .nest("/events", events::router())
         .nest("/lights", lights::router())
@@ -24,6 +27,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .nest("/rooms", rooms::router())
         .nest("/scenes", scenes::router())
         .nest("/setup", setup::router())
+        .nest("/v1", v1::router())
         .route("/health", get(health))
 }
 

@@ -73,7 +73,7 @@ struct ProviderGroupInfo {
 
 // ── Membership resolution ────────────────────────────────────────────────────
 
-struct MemberRow {
+pub(crate) struct MemberRow {
     light_id: String,
     device_id: String,
     provider_type: String,
@@ -82,7 +82,7 @@ struct MemberRow {
 
 /// All effective members of a room (links ∪ direct), with provider info,
 /// deduplicated, ordered by light name for stable palette distribution.
-async fn effective_members(state: &AppState, room_id: &str) -> Vec<MemberRow> {
+pub(crate) async fn effective_members(state: &AppState, room_id: &str) -> Vec<MemberRow> {
     sqlx::query(
         "SELECT DISTINCT l.id AS light_id, l.device_id, l.provider_id,
                 p.provider_type, p.credentials, l.name
@@ -112,7 +112,7 @@ async fn effective_members(state: &AppState, room_id: &str) -> Vec<MemberRow> {
     .collect()
 }
 
-async fn effective_member_ids(state: &AppState, room_id: &str) -> Vec<String> {
+pub(crate) async fn effective_member_ids(state: &AppState, room_id: &str) -> Vec<String> {
     effective_members(state, room_id)
         .await
         .into_iter()
@@ -429,7 +429,7 @@ async fn set_links(
     StatusCode::NO_CONTENT.into_response()
 }
 
-async fn room_exists(state: &AppState, id: &str) -> bool {
+pub(crate) async fn room_exists(state: &AppState, id: &str) -> bool {
     sqlx::query("SELECT 1 FROM rooms WHERE id = ?")
         .bind(id)
         .fetch_optional(&state.db)
@@ -522,34 +522,31 @@ async fn native_chunks(state: &AppState, room_id: &str) -> Vec<NativeChunk> {
     chunks
 }
 
-async fn set_room_state(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    Json(new_state): Json<LightState>,
-) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
-    let members = effective_members(&state, &id).await;
-    if members.is_empty() {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-
+/// Drive every effective member of a room to one **uniform** state, preferring
+/// native group calls (one request per linked provider group) and fanning out
+/// per-light only for members no group call covered. Returns (applied, failed).
+///
+/// `members` is passed in so callers that already resolved membership (e.g. to
+/// check emptiness) don't query twice.
+pub(crate) async fn apply_uniform_state(
+    state: &AppState,
+    room_id: &str,
+    new_state: &LightState,
+    members: Vec<MemberRow>,
+) -> (usize, usize) {
     let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut applied = 0usize;
     let mut failed = 0usize;
-    let state_json = serde_json::to_string(&new_state).unwrap_or_default();
+    let state_json = serde_json::to_string(new_state).unwrap_or_default();
 
-    // Native group calls first.
-    for chunk in native_chunks(&state, &id).await {
-        let provider = match build_provider(&state, &chunk.provider_type, &chunk.credentials) {
+    // Native group calls first — one Hue grouped_light PUT replaces N per-light PUTs.
+    for chunk in native_chunks(state, room_id).await {
+        let provider = match build_provider(state, &chunk.provider_type, &chunk.credentials) {
             Ok(p) => p,
             Err(_) => continue,
         };
         match provider
-            .set_group_state(&chunk.grouped_ref, &new_state)
+            .set_group_state(&chunk.grouped_ref, new_state)
             .await
         {
             Ok(true) => {
@@ -578,7 +575,7 @@ async fn set_room_state(
         if covered.contains(&m.light_id) {
             continue;
         }
-        let provider = match build_provider(&state, &m.provider_type, &m.credentials) {
+        let provider = match build_provider(state, &m.provider_type, &m.credentials) {
             Ok(p) => p,
             Err(e) => {
                 tracing::error!("room state: provider build failed: {e:#}");
@@ -612,18 +609,51 @@ async fn set_room_state(
     applied += results.iter().filter(|ok| **ok).count();
     failed += results.iter().filter(|ok| !**ok).count();
 
+    (applied, failed)
+}
+
+async fn set_room_state(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(new_state): Json<LightState>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let members = effective_members(&state, &id).await;
+    if members.is_empty() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let (applied, failed) = apply_uniform_state(&state, &id, &new_state, members).await;
     Json(serde_json::json!({ "applied": applied, "failed": failed })).into_response()
 }
 
 // ── Room scenes (Hue-like palette scenes) ───────────────────────────────────
 
 #[derive(Serialize)]
-struct RoomScene {
-    id: String,
-    room_id: String,
-    name: String,
-    brightness: Option<f32>,
-    palette: Vec<String>,
+pub(crate) struct RoomScene {
+    pub id: String,
+    pub room_id: String,
+    pub name: String,
+    pub brightness: Option<f32>,
+    pub palette: Vec<String>,
+}
+
+/// Validated input for creating a scene (shared by the UI and public APIs).
+pub(crate) struct NewScene {
+    pub name: String,
+    pub brightness: Option<f32>,
+    pub palette: Vec<String>,
+}
+
+/// Why a scene mutation failed, mapped to a status by each caller.
+pub(crate) enum SceneError {
+    Validation(String),
+    NotFound,
+    Db,
 }
 
 /// Parse "#rrggbb" (case-insensitive). None for anything else.
@@ -639,151 +669,99 @@ fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
     ))
 }
 
-async fn list_scenes(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+// ── Scene services (reused by the session UI API and the public /v1 API) ─────
 
-    match sqlx::query(
+pub(crate) async fn list_room_scenes(
+    state: &AppState,
+    room_id: &str,
+) -> Result<Vec<RoomScene>, ()> {
+    sqlx::query(
         "SELECT id, room_id, name, brightness, palette FROM room_scenes
          WHERE room_id = ? ORDER BY created_at",
     )
-    .bind(&id)
+    .bind(room_id)
     .fetch_all(&state.db)
     .await
-    {
-        Ok(rows) => Json(
-            rows.into_iter()
-                .map(|r| RoomScene {
-                    id: r.get("id"),
-                    room_id: r.get("room_id"),
-                    name: r.get("name"),
-                    brightness: r.get("brightness"),
-                    palette: serde_json::from_str(&r.get::<String, _>("palette"))
-                        .unwrap_or_default(),
-                })
-                .collect::<Vec<_>>(),
-        )
-        .into_response(),
-        Err(e) => {
-            tracing::error!("db error listing room scenes: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
+    .map_err(|e| tracing::error!("db error listing room scenes: {e}"))
+    .map(|rows| {
+        rows.into_iter()
+            .map(|r| RoomScene {
+                id: r.get("id"),
+                room_id: r.get("room_id"),
+                name: r.get("name"),
+                brightness: r.get("brightness"),
+                palette: serde_json::from_str(&r.get::<String, _>("palette")).unwrap_or_default(),
+            })
+            .collect()
+    })
 }
 
-#[derive(Deserialize)]
-struct CreateSceneRequest {
-    name: String,
-    #[serde(default)]
-    brightness: Option<f32>,
-    #[serde(default)]
-    palette: Vec<String>,
-}
-
-async fn create_scene(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    Json(req): Json<CreateSceneRequest>,
-) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+pub(crate) async fn create_room_scene(
+    state: &AppState,
+    room_id: &str,
+    req: NewScene,
+) -> Result<String, SceneError> {
     if req.name.trim().is_empty() {
-        return (StatusCode::UNPROCESSABLE_ENTITY, "scene name is required").into_response();
+        return Err(SceneError::Validation("scene name is required".into()));
     }
     if let Some(b) = req.brightness
         && !(1.0..=100.0).contains(&b)
     {
-        return (StatusCode::UNPROCESSABLE_ENTITY, "brightness must be 1-100").into_response();
+        return Err(SceneError::Validation("brightness must be 1-100".into()));
     }
     for c in &req.palette {
         if parse_hex_color(c).is_none() {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("'{c}' is not a #rrggbb color"),
-            )
-                .into_response();
+            return Err(SceneError::Validation(format!(
+                "'{c}' is not a #rrggbb color"
+            )));
         }
     }
-    if !room_exists(&state, &id).await {
-        return StatusCode::NOT_FOUND.into_response();
+    if !room_exists(state, room_id).await {
+        return Err(SceneError::NotFound);
     }
 
     let scene_id = Uuid::new_v4().to_string();
     let palette_json = serde_json::to_string(&req.palette).unwrap_or_else(|_| "[]".into());
-    match sqlx::query(
+    sqlx::query(
         "INSERT INTO room_scenes (id, room_id, name, brightness, palette) VALUES (?, ?, ?, ?, ?)",
     )
     .bind(&scene_id)
-    .bind(&id)
+    .bind(room_id)
     .bind(req.name.trim())
     .bind(req.brightness)
     .bind(&palette_json)
     .execute(&state.db)
     .await
-    {
-        Ok(_) => (
-            StatusCode::CREATED,
-            Json(serde_json::json!({ "id": scene_id })),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("db error: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
+    .map_err(|e| {
+        tracing::error!("db error creating room scene: {e}");
+        SceneError::Db
+    })?;
+    Ok(scene_id)
 }
 
-async fn remove_scene(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path((room_id, scene_id)): Path<(String, String)>,
-) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
+pub(crate) async fn delete_room_scene(state: &AppState, room_id: &str, scene_id: &str) {
     let _ = sqlx::query("DELETE FROM room_scenes WHERE id = ? AND room_id = ?")
-        .bind(&scene_id)
-        .bind(&room_id)
+        .bind(scene_id)
+        .bind(room_id)
         .execute(&state.db)
         .await;
-
-    StatusCode::NO_CONTENT.into_response()
 }
 
-/// Apply the scene: members on, palette distributed round-robin in stable
-/// (name) order, brightness set.
-async fn apply_scene(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path((room_id, scene_id)): Path<(String, String)>,
-) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
-    let scene = match sqlx::query(
-        "SELECT brightness, palette FROM room_scenes WHERE id = ? AND room_id = ?",
-    )
-    .bind(&scene_id)
-    .bind(&room_id)
-    .fetch_optional(&state.db)
-    .await
-    {
-        Ok(Some(r)) => r,
-        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
-        Err(e) => {
-            tracing::error!("db error: {e}");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
+/// Apply a scene: members on, palette distributed round-robin in stable (name)
+/// order, brightness set. Single-color/empty palettes collapse to a native group
+/// call. `None` when the scene or room has no applicable members (→ 404).
+pub(crate) async fn apply_room_scene(
+    state: &AppState,
+    room_id: &str,
+    scene_id: &str,
+) -> Option<(usize, usize)> {
+    let scene =
+        sqlx::query("SELECT brightness, palette FROM room_scenes WHERE id = ? AND room_id = ?")
+            .bind(scene_id)
+            .bind(room_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()??;
     let brightness: Option<f32> = scene.get("brightness");
     let palette: Vec<String> =
         serde_json::from_str(&scene.get::<String, _>("palette")).unwrap_or_default();
@@ -793,14 +771,29 @@ async fn apply_scene(
         .map(|(r, g, b)| Color::from_rgb(r, g, b))
         .collect();
 
-    let members = effective_members(&state, &room_id).await;
+    let members = effective_members(state, room_id).await;
     if members.is_empty() {
-        return StatusCode::NOT_FOUND.into_response();
+        return None;
+    }
+
+    // A scene whose palette is empty (brightness-only) or a single color drives
+    // every member to the *same* state, so native group calls apply — one Hue
+    // grouped_light PUT instead of one PUT per light. Multi-color palettes give
+    // each light a distinct color and must fan out.
+    if colors.len() <= 1 {
+        let target = LightState {
+            on: true,
+            brightness,
+            color: colors.first().cloned(),
+            color_temp_mirek: None,
+            reachable: None,
+        };
+        return Some(apply_uniform_state(state, room_id, &target, members).await);
     }
 
     let mut jobs = Vec::new();
     for (i, m) in members.into_iter().enumerate() {
-        let provider = match build_provider(&state, &m.provider_type, &m.credentials) {
+        let provider = match build_provider(state, &m.provider_type, &m.credentials) {
             Ok(p) => p,
             Err(e) => {
                 tracing::error!("scene apply: provider build failed: {e:#}");
@@ -811,11 +804,7 @@ async fn apply_scene(
         let target = LightState {
             on: true,
             brightness,
-            color: if colors.is_empty() {
-                None
-            } else {
-                Some(colors[i % colors.len()].clone())
-            },
+            color: Some(colors[i % colors.len()].clone()),
             color_temp_mirek: None,
             reachable: None,
         };
@@ -845,8 +834,86 @@ async fn apply_scene(
     let results = futures_util::future::join_all(jobs).await;
     let applied = results.iter().filter(|ok| **ok).count();
     let failed = results.len() - applied;
+    Some((applied, failed))
+}
 
-    Json(serde_json::json!({ "applied": applied, "failed": failed })).into_response()
+// ── Scene handlers (session-authenticated; thin wrappers over the services) ──
+
+async fn list_scenes(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match list_room_scenes(&state, &id).await {
+        Ok(scenes) => Json(scenes).into_response(),
+        Err(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateSceneRequest {
+    name: String,
+    #[serde(default)]
+    brightness: Option<f32>,
+    #[serde(default)]
+    palette: Vec<String>,
+}
+
+async fn create_scene(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<CreateSceneRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let input = NewScene {
+        name: req.name,
+        brightness: req.brightness,
+        palette: req.palette,
+    };
+    match create_room_scene(&state, &id, input).await {
+        Ok(scene_id) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "id": scene_id })),
+        )
+            .into_response(),
+        Err(SceneError::Validation(m)) => (StatusCode::UNPROCESSABLE_ENTITY, m).into_response(),
+        Err(SceneError::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        Err(SceneError::Db) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn remove_scene(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((room_id, scene_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    delete_room_scene(&state, &room_id, &scene_id).await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn apply_scene(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((room_id, scene_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match apply_room_scene(&state, &room_id, &scene_id).await {
+        Some((applied, failed)) => {
+            Json(serde_json::json!({ "applied": applied, "failed": failed })).into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 #[cfg(test)]

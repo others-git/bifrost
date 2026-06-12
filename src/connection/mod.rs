@@ -4,7 +4,7 @@
 //! This module addresses that with an explicit state machine, exponential-backoff
 //! reconnect, polling fallback during outages, and periodic health checks.
 
-use crate::models::{LightState, LightStatePatch};
+use crate::models::{LightCapabilities, LightState, LightStatePatch};
 use crate::providers::LightProvider;
 use crate::providers::hue::HueProvider;
 use anyhow::Result;
@@ -60,6 +60,11 @@ impl ConnectionState {
 pub struct LightEvent {
     pub device_id: String,
     pub patch: LightStatePatch,
+    /// Full capabilities, present only on authoritative poll/discovery events.
+    /// SSE partial events leave this `None` so stored capabilities are untouched.
+    /// Lets stale capability flags (e.g. Hue `color_rgb`) self-heal on the next poll.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<LightCapabilities>,
 }
 
 pub struct HueConnectionManager {
@@ -202,6 +207,7 @@ impl HueConnectionManager {
                 let _ = self.events.send(LightEvent {
                     device_id: id.to_string(),
                     patch,
+                    capabilities: None,
                 });
             }
         }
@@ -216,8 +222,9 @@ impl HueConnectionManager {
         let lights = self.provider.discover().await?;
         for light in lights {
             let _ = self.events.send(LightEvent {
-                device_id: light.provider_id,
                 patch: LightStatePatch::from_full(&light.state),
+                capabilities: Some(light.capabilities),
+                device_id: light.provider_id,
             });
         }
         Ok(())
@@ -360,8 +367,9 @@ impl PollingManager {
                 }
             };
             let _ = self.events.send(LightEvent {
-                device_id: light.provider_id,
                 patch: LightStatePatch::from_full(&state),
+                capabilities: Some(light.capabilities),
+                device_id: light.provider_id,
             });
             count += 1;
         }
@@ -499,13 +507,29 @@ async fn apply_event_to_db(event: &LightEvent, db: &SqlitePool) {
     event.patch.apply_to(&mut state);
 
     let state_json = serde_json::to_string(&state).unwrap_or_default();
-    let _ = sqlx::query(
-        "UPDATE lights SET last_state = ?, last_seen = datetime('now') WHERE device_id = ?",
-    )
-    .bind(&state_json)
-    .bind(&event.device_id)
-    .execute(db)
-    .await;
+
+    // Authoritative poll/discovery events carry full capabilities; refresh them so
+    // capability flags (e.g. Hue `color_rgb`) self-heal. SSE patches carry no
+    // capabilities, so the stored value is left untouched.
+    if let Some(caps) = &event.capabilities {
+        let caps_json = serde_json::to_string(caps).unwrap_or_default();
+        let _ = sqlx::query(
+            "UPDATE lights SET last_state = ?, capabilities = ?, last_seen = datetime('now') WHERE device_id = ?",
+        )
+        .bind(&state_json)
+        .bind(&caps_json)
+        .bind(&event.device_id)
+        .execute(db)
+        .await;
+    } else {
+        let _ = sqlx::query(
+            "UPDATE lights SET last_state = ?, last_seen = datetime('now') WHERE device_id = ?",
+        )
+        .bind(&state_json)
+        .bind(&event.device_id)
+        .execute(db)
+        .await;
+    }
 }
 
 // ── Backoff ─────────────────────────────────────────────────────────────────
@@ -706,16 +730,74 @@ mod tests {
                 brightness: Some(42.0),
                 ..Default::default()
             },
+            capabilities: None,
         };
         apply_event_to_db(&event, &db).await;
 
-        let row = sqlx::query("SELECT last_state FROM lights WHERE device_id = 'dev-1'")
-            .fetch_one(&db)
-            .await
-            .unwrap();
+        let row =
+            sqlx::query("SELECT last_state, capabilities FROM lights WHERE device_id = 'dev-1'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
         let state: LightState = serde_json::from_str(&row.get::<String, _>("last_state")).unwrap();
         assert!(state.on, "brightness event must not flip the light off");
         assert_eq!(state.brightness, Some(42.0));
+        // SSE patch carries no capabilities: the stored value is left untouched.
+        assert_eq!(row.get::<String, _>("capabilities"), "{}");
+    }
+
+    #[tokio::test]
+    async fn poll_event_refreshes_stale_capabilities() {
+        // Regression: a Hue color bulb discovered before the color_rgb fix had a
+        // stale `color_rgb: false` capability that never self-healed, because only
+        // the initial provider sync wrote capabilities. Authoritative poll events
+        // now carry full capabilities and refresh the stored row.
+        use sqlx::Row;
+        use sqlx::sqlite::SqliteConnectOptions;
+        use std::str::FromStr;
+
+        let opts = SqliteConnectOptions::from_str(":memory:")
+            .unwrap()
+            .foreign_keys(true);
+        let db = SqlitePool::connect_with(opts).await.unwrap();
+        sqlx::migrate!("./migrations").run(&db).await.unwrap();
+
+        sqlx::query("INSERT INTO providers (id, provider_type, name, credentials) VALUES ('p1','hue','H','enc')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO lights (id, provider_id, device_id, name, capabilities, last_state)
+             VALUES ('l1','p1','dev-1','L', ?, '{}')",
+        )
+        .bind(r#"{"dimmable":true,"color_rgb":false,"color_temperature":true,"hue_gamut":null}"#)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let event = LightEvent {
+            device_id: "dev-1".into(),
+            patch: LightStatePatch {
+                on: Some(true),
+                ..Default::default()
+            },
+            capabilities: Some(LightCapabilities {
+                dimmable: true,
+                color_rgb: true,
+                color_temperature: true,
+                hue_gamut: Some(crate::models::HueGamut::C),
+            }),
+        };
+        apply_event_to_db(&event, &db).await;
+
+        let row = sqlx::query("SELECT capabilities FROM lights WHERE device_id = 'dev-1'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let caps: LightCapabilities =
+            serde_json::from_str(&row.get::<String, _>("capabilities")).unwrap();
+        assert!(caps.color_rgb, "poll must refresh stale color_rgb to true");
+        assert_eq!(caps.hue_gamut, Some(crate::models::HueGamut::C));
     }
 
     // ── Backoff ──────────────────────────────────────────────────────────────

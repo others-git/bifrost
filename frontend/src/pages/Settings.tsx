@@ -17,6 +17,10 @@ import {
   setRoomDirectLights,
   setRoomLinks,
   updateProviderCredentials,
+  getApiKeys,
+  createApiKey,
+  revokeApiKey,
+  type ApiKey,
   type ConnectionStatus,
   type CredentialField,
   type ProviderGroupInfo,
@@ -25,7 +29,7 @@ import {
   type Provider,
   type ProviderType,
 } from "../api";
-import { useDialogs } from "../components/dialogs";
+import { useDialogs, type Dialogs } from "../components/dialogs";
 import { S } from "../styles";
 
 interface Props {
@@ -135,8 +139,148 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
       )}
 
       <RoomsSection />
+      <ApiKeysSection dialogs={dialogs} />
       {dialogs.element}
     </div>
+  );
+}
+
+// ── API keys ─────────────────────────────────────────────────────────────────
+
+function ApiKeysSection({ dialogs }: { dialogs: Dialogs }) {
+  const [keys, setKeys] = useState<ApiKey[]>([]);
+  const [name, setName] = useState("");
+  const [creating, setCreating] = useState(false);
+  // The plaintext of a just-created key, shown once until dismissed.
+  const [fresh, setFresh] = useState<{ name: string; key: string } | null>(null);
+
+  async function load() {
+    setKeys(await getApiKeys());
+  }
+  useEffect(() => {
+    load();
+  }, []);
+
+  async function create() {
+    if (!name.trim()) return;
+    setCreating(true);
+    try {
+      const created = await createApiKey(name.trim());
+      setFresh({ name: created.name, key: created.key });
+      setName("");
+      await load();
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function revoke(k: ApiKey) {
+    const ok = await dialogs.confirm({
+      title: "Revoke API key",
+      message: `Revoke "${k.name}"? Apps using it will immediately lose access.`,
+      confirmLabel: "Revoke",
+      danger: true,
+    });
+    if (!ok) return;
+    await revokeApiKey(k.id);
+    await load();
+  }
+
+  return (
+    <section style={{ marginTop: "2.5rem" }}>
+      <h2 style={{ margin: "0 0 0.4rem", fontSize: "1.2rem", color: "#ccc" }}>API keys</h2>
+      <p style={{ margin: "0 0 1rem", color: "#777", fontSize: "0.85rem" }}>
+        Grant other apps full access to your lights and rooms via the public{" "}
+        <code style={{ color: "#9ab" }}>/api/v1</code> API. Send the key as{" "}
+        <code style={{ color: "#9ab" }}>Authorization: Bearer &lt;key&gt;</code>.
+      </p>
+
+      {fresh && (
+        <div
+          style={{
+            background: "#1e2a1e",
+            border: "1px solid #2a5a2a",
+            borderRadius: 8,
+            padding: "0.8rem 1rem",
+            marginBottom: "1rem",
+          }}
+        >
+          <div style={{ fontSize: "0.8rem", color: "#8f8", marginBottom: "0.4rem" }}>
+            Copy “{fresh.name}” now — it won't be shown again.
+          </div>
+          <code
+            style={{
+              display: "block",
+              wordBreak: "break-all",
+              fontSize: "0.8rem",
+              color: "#dfe",
+              background: "#0d140d",
+              borderRadius: 6,
+              padding: "0.5rem 0.6rem",
+            }}
+          >
+            {fresh.key}
+          </code>
+          <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
+            <button
+              onClick={() => navigator.clipboard?.writeText(fresh.key)}
+              style={{ ...S.buttonGhost, padding: "0.3rem 0.6rem", fontSize: "0.78rem" }}
+            >
+              Copy
+            </button>
+            <button
+              onClick={() => setFresh(null)}
+              style={{ ...S.buttonGhost, padding: "0.3rem 0.6rem", fontSize: "0.78rem" }}
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", marginBottom: "1rem" }}>
+        {keys.length === 0 && <p style={{ color: "#666", margin: 0, fontSize: "0.85rem" }}>No keys yet.</p>}
+        {keys.map((k) => (
+          <div
+            key={k.id}
+            style={{
+              ...S.card,
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "space-between",
+              padding: "0.7rem 1rem",
+            }}
+          >
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontWeight: 600, fontSize: "0.9rem" }}>{k.name}</div>
+              <div style={{ color: "#777", fontSize: "0.74rem" }}>
+                <code>{k.prefix}…</code>
+                {k.last_used ? ` · last used ${k.last_used}` : " · never used"}
+              </div>
+            </div>
+            <button
+              onClick={() => revoke(k)}
+              style={{ ...S.buttonDanger, padding: "0.3rem 0.7rem", fontSize: "0.78rem" }}
+            >
+              Revoke
+            </button>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: "flex", gap: "0.5rem" }}>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && create()}
+          placeholder="New key name (e.g. Home Assistant)"
+          style={{ ...S.input, flex: 1 }}
+        />
+        <button onClick={create} disabled={creating || !name.trim()} style={S.button}>
+          {creating ? "Creating…" : "Create key"}
+        </button>
+      </div>
+    </section>
   );
 }
 

@@ -21,7 +21,28 @@ import {
 } from "../api";
 import { hexToRgb, LightEditor } from "../components/LightEditor";
 import { useDialogs } from "../components/dialogs";
-import { S } from "../styles";
+
+// ── Lamplight theme ──────────────────────────────────────────────────────────
+// Warm-tinted darks (charcoal with a candle cast) instead of neutral grays;
+// lit cards glow in their actual color. Deliberately not a stock component look.
+const T = {
+  text: "#eae4d6",
+  dim: "#97907e",
+  faint: "#6b6557",
+  amber: "#f90",
+  panel: "linear-gradient(176deg, #1a1916 0%, #141311 100%)",
+  panelBorder: "#2b2822",
+  card: "#1d1c18",
+  cardOff: "#171613",
+  cardBorder: "#2c2922",
+  hairline: "#242118",
+};
+
+const label: React.CSSProperties = {
+  textTransform: "uppercase",
+  letterSpacing: "0.14em",
+  fontWeight: 700,
+};
 
 interface Props {
   lights: Light[];
@@ -69,11 +90,37 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
     );
   }
 
+  const onCount = localLights.filter((l) => l.last_state?.on).length;
+
   return (
-    <div style={{ padding: "2rem", maxWidth: 960, margin: "0 auto" }}>
+    <div style={{ padding: "2rem", maxWidth: 1020, margin: "0 auto", color: T.text }}>
+      <header style={{ marginBottom: "1.4rem" }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: "0.9rem" }}>
+          <h1 style={{ ...label, margin: 0, fontSize: "1rem", letterSpacing: "0.22em", color: T.text }}>
+            Lights
+          </h1>
+          {localLights.length > 0 && (
+            <span style={{ fontSize: "0.78rem", color: T.dim }}>
+              {onCount} of {localLights.length} on
+            </span>
+          )}
+        </div>
+        {/* A faint bifrost rule under the page title. */}
+        <div
+          aria-hidden
+          style={{
+            marginTop: "0.7rem",
+            height: 1,
+            background:
+              "linear-gradient(90deg, rgba(255,153,0,0.55), rgba(255,94,156,0.25) 35%, rgba(34,211,238,0.15) 70%, transparent)",
+          }}
+        />
+      </header>
+
       {localLights.length > 0 && <SceneBar onActivated={onRefresh} />}
+
       {localLights.length === 0 ? (
-        <div style={{ textAlign: "center", padding: "4rem 0", color: "#666" }}>
+        <div style={{ textAlign: "center", padding: "4rem 0", color: T.faint }}>
           <p style={{ margin: "0 0 0.75rem" }}>No lights found.</p>
           <p style={{ margin: 0, fontSize: "0.875rem" }}>
             Add a provider in{" "}
@@ -82,7 +129,7 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
               style={{
                 background: "none",
                 border: "none",
-                color: "#f90",
+                color: T.amber,
                 cursor: "pointer",
                 fontSize: "0.875rem",
                 padding: 0,
@@ -107,8 +154,8 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
 }
 
 /**
- * Lights grouped under one section per room, with all-on/all-off in the
- * header. Lights that belong to no room fall back to per-provider sections.
+ * Lights grouped into one framed box per room; the box header carries the
+ * room-wide controls. Lights in no room land in muted per-provider boxes.
  */
 function RoomSections({
   lights,
@@ -148,11 +195,11 @@ function RoomSections({
   );
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: "1.1rem" }}>
       {roomSections.map(({ room, members }) => (
-        <LightSection
+        <RoomBox
           key={room.id}
-          title={room.name}
+          name={room.name}
           lights={members}
           roomId={room.id}
           onLocalUpdate={onLocalUpdate}
@@ -160,11 +207,13 @@ function RoomSections({
         />
       ))}
       {leftoverSections.map(([providerId, sectionLights]) => (
-        <LightSection
+        <RoomBox
           key={providerId}
-          title={roomSections.length > 0
-            ? `${providerName.get(providerId) ?? "Other"} — no room`
-            : providerName.get(providerId) ?? "Other"}
+          name={
+            roomSections.length > 0
+              ? `${providerName.get(providerId) ?? "Other"} · no room`
+              : providerName.get(providerId) ?? "Other"
+          }
           lights={sectionLights}
           onLocalUpdate={onLocalUpdate}
           onChanged={onChanged}
@@ -174,27 +223,90 @@ function RoomSections({
   );
 }
 
-function LightSection({
-  title,
+/** Hex colors of the lit members (name order) for the room's gradient ridge. */
+function litHexes(lights: Light[]): string[] {
+  return lights
+    .filter((l) => l.last_state?.on && l.last_state.color)
+    .map((l) => {
+      const c = l.last_state!.color!;
+      return rgbToHex(...xyToRgb(c.x, c.y, c.brightness));
+    });
+}
+
+/**
+ * A room as a container: framed box, gradient ridge echoing the lit members'
+ * colors, header with the room's own color/brightness widget (cascades to all
+ * members) and a single on/off toggle. Lights stay individually editable inside.
+ * Without `roomId` (unassigned lights) the frame is muted and uncontrolled.
+ */
+function RoomBox({
+  name,
   lights,
   roomId,
   onLocalUpdate,
   onChanged,
 }: {
-  title: string;
+  name: string;
   lights: Light[];
-  /** When set, the header gets room-wide On/Off buttons. */
   roomId?: string;
   onLocalUpdate: (id: string, state: LightState) => void;
   onChanged: () => void;
 }) {
+  const tuneRef = useRef<HTMLButtonElement>(null);
+  const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
+  const commitTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
-  async function setAll(on: boolean) {
+  const lit = lights.filter((l) => l.last_state?.on);
+  const anyOn = lit.length > 0;
+  const showColor = lights.some((l) => l.capabilities.color_rgb);
+  const showBrightness = lights.some((l) => l.capabilities.dimmable);
+  const tunable = !!roomId && (showColor || showBrightness);
+
+  const hexes = litHexes(lights);
+  const roomHex = hexes[0] ?? "#ffb84d";
+  const avgBrightness = lit.length
+    ? Math.round(lit.reduce((sum, l) => sum + (l.last_state?.brightness ?? 100), 0) / lit.length)
+    : 100;
+
+  // The ridge along the top of the box: lit members' colors as a gradient,
+  // a faint ember when the room is dark.
+  const ridge =
+    hexes.length > 1
+      ? `linear-gradient(90deg, ${hexes
+          .map((h, i) => `${h} ${Math.round((i / (hexes.length - 1)) * 100)}%`)
+          .join(", ")})`
+      : hexes.length === 1
+        ? `linear-gradient(90deg, ${hexes[0]}, ${hexes[0]}33)`
+        : "linear-gradient(90deg, rgba(255,153,0,0.35), transparent 70%)";
+
+  /** Drive every member from the room widget; members keep their own editors. */
+  function cascade(nextHex: string, nextBrightness: number) {
     if (!roomId) return;
+    const color = showColor ? rgbToXy(...hexToRgb(nextHex)) : undefined;
+    for (const l of lights) {
+      onLocalUpdate(l.id, {
+        ...(l.last_state ?? { on: true }),
+        on: true,
+        brightness: l.capabilities.dimmable ? nextBrightness : l.last_state?.brightness,
+        color: l.capabilities.color_rgb && color ? color : l.last_state?.color,
+      });
+    }
+    clearTimeout(commitTimer.current);
+    commitTimer.current = setTimeout(() => {
+      setRoomState(roomId, { on: true, brightness: nextBrightness, color });
+    }, 200);
+  }
+
+  async function toggleAll() {
+    if (!roomId) return;
+    const next = !anyOn;
     setBusy(true);
+    for (const l of lights) {
+      onLocalUpdate(l.id, { ...(l.last_state ?? { on: false }), on: next });
+    }
     try {
-      await setRoomState(roomId, { on });
+      await setRoomState(roomId, { on: next });
       onChanged();
     } finally {
       setBusy(false);
@@ -202,48 +314,76 @@ function LightSection({
   }
 
   return (
-    <section>
-      <h2
+    <section
+      style={{
+        background: roomId ? T.panel : "transparent",
+        border: `1px solid ${roomId ? T.panelBorder : T.hairline}`,
+        borderStyle: roomId ? "solid" : "dashed",
+        borderRadius: 16,
+        overflow: "hidden",
+        boxShadow: roomId ? "inset 0 1px 0 rgba(255,255,255,0.035)" : "none",
+      }}
+    >
+      <div aria-hidden style={{ height: 2, background: ridge, opacity: anyOn ? 0.9 : 0.5 }} />
+
+      <header
         style={{
-          margin: "0 0 0.6rem",
-          fontSize: "0.8rem",
-          fontWeight: 600,
-          color: "#777",
-          textTransform: "uppercase",
-          letterSpacing: "0.08em",
           display: "flex",
           alignItems: "center",
-          gap: "0.5rem",
+          gap: "0.8rem",
+          padding: "0.75rem 1rem 0.7rem",
+          borderBottom: `1px solid ${T.hairline}`,
         }}
       >
-        {title}
-        <span style={{ color: "#555", textTransform: "none", letterSpacing: 0 }}>
-          {lights.length} light{lights.length !== 1 ? "s" : ""}
+        <span
+          style={{
+            ...label,
+            fontSize: "0.82rem",
+            color: roomId ? "#d8cfba" : T.faint,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {name}
         </span>
-        {roomId && (
-          <span style={{ display: "inline-flex", gap: "0.35rem", marginLeft: "auto" }}>
-            <button
-              onClick={() => setAll(true)}
-              disabled={busy}
-              style={{ ...S.buttonGhost, padding: "0.2rem 0.55rem", fontSize: "0.72rem" }}
-            >
-              On
-            </button>
-            <button
-              onClick={() => setAll(false)}
-              disabled={busy}
-              style={{ ...S.buttonGhost, padding: "0.2rem 0.55rem", fontSize: "0.72rem" }}
-            >
-              Off
-            </button>
-          </span>
+        <span style={{ fontSize: "0.72rem", color: T.faint, whiteSpace: "nowrap" }}>
+          {lights.length} light{lights.length !== 1 ? "s" : ""}
+          {roomId ? (anyOn ? ` · ${lit.length} on` : " · off") : ""}
+        </span>
+
+        <span style={{ flex: 1 }} />
+
+        {tunable && (
+          <button
+            ref={tuneRef}
+            onClick={() => setEditing(true)}
+            title="Set the whole room's color and brightness"
+            aria-label={`Set color and brightness for ${name}`}
+            style={{
+              width: 26,
+              height: 26,
+              borderRadius: "50%",
+              padding: 0,
+              cursor: "pointer",
+              border: "1px solid rgba(255,255,255,0.22)",
+              background: anyOn
+                ? `radial-gradient(circle at 35% 30%, #ffffff44, transparent 45%), ${roomHex}`
+                : "#3a372e",
+              boxShadow: anyOn ? `0 0 14px -3px ${roomHex}` : "none",
+              transition: "box-shadow 0.2s, background 0.2s",
+            }}
+          />
         )}
-      </h2>
+        {roomId && <VerticalToggle on={anyOn} onToggle={toggleAll} disabled={busy} />}
+      </header>
+
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
-          gap: "1rem",
+          gridTemplateColumns: "repeat(auto-fill, minmax(215px, 1fr))",
+          gap: "0.7rem",
+          padding: "0.85rem 1rem 1rem",
         }}
       >
         {lights.map((light) => (
@@ -255,6 +395,21 @@ function LightSection({
           />
         ))}
       </div>
+
+      {editing && tuneRef.current && (
+        <LightEditor
+          anchor={tuneRef.current}
+          title={name}
+          initialHex={roomHex}
+          initialBrightness={avgBrightness}
+          showColor={showColor}
+          showBrightness={showBrightness}
+          on={anyOn}
+          onToggle={toggleAll}
+          onChange={cascade}
+          onClose={() => setEditing(false)}
+        />
+      )}
     </section>
   );
 }
@@ -304,28 +459,41 @@ function SceneBar({ onActivated }: { onActivated: () => void }) {
     await load();
   }
 
+  const chip: React.CSSProperties = {
+    background: "transparent",
+    border: `1px solid ${T.cardBorder}`,
+    color: "#cfc7b2",
+    cursor: "pointer",
+    fontSize: "0.78rem",
+    padding: "0.35rem 0.8rem",
+  };
+
   return (
-    <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center", marginBottom: "1.25rem" }}>
+    <div style={{ display: "flex", flexWrap: "wrap", gap: "0.45rem", alignItems: "center", marginBottom: "1.3rem" }}>
       {scenes.map((s) => (
         <span key={s.id} style={{ display: "inline-flex" }}>
           <button
             onClick={() => handleActivate(s.id)}
             disabled={busy === s.id}
             title={`Apply "${s.name}" (${s.lights} light${s.lights !== 1 ? "s" : ""})`}
-            style={{ ...S.buttonGhost, borderRadius: "6px 0 0 6px" }}
+            style={{ ...chip, borderRadius: "999px 0 0 999px" }}
           >
             {busy === s.id ? "…" : s.name}
           </button>
           <button
             onClick={() => handleRemove(s.id, s.name)}
             title="Delete scene"
-            style={{ ...S.buttonGhost, borderRadius: "0 6px 6px 0", borderLeft: "none", padding: "0.45rem 0.55rem", color: "#866" }}
+            style={{ ...chip, borderRadius: "0 999px 999px 0", borderLeft: "none", padding: "0.35rem 0.6rem", color: "#8a6a55" }}
           >
             ×
           </button>
         </span>
       ))}
-      <button onClick={handleSave} style={S.buttonGhost} title="Save the current light states as a scene">
+      <button
+        onClick={handleSave}
+        title="Save the current light states as a scene"
+        style={{ ...chip, borderRadius: 999, borderStyle: "dashed", color: T.dim }}
+      >
         + Save scene
       </button>
       {dialogs.element}
@@ -381,32 +549,45 @@ function LightCard({
         onClick={() => { if (editable) setEditing(true); }}
         title={editable ? "Open the light editor" : undefined}
         style={{
-          ...S.card,
+          display: "flex",
           flexDirection: "row",
           alignItems: "center",
           justifyContent: "space-between",
           gap: "0.75rem",
+          padding: "0.8rem 0.95rem",
+          borderRadius: 12,
+          // Lit cards carry a wash of their own color in the corner and a soft
+          // glow; off cards sink into the room box.
+          background: isOn
+            ? `radial-gradient(130% 130% at 88% 0%, ${hex}1f, transparent 55%), ${T.card}`
+            : T.cardOff,
+          border: `1px solid ${isOn ? `${hex}40` : T.cardBorder}`,
+          boxShadow: isOn
+            ? `0 0 24px -10px ${hex}cc, inset 0 1px 0 rgba(255,255,255,0.04)`
+            : "inset 0 1px 0 rgba(255,255,255,0.02)",
           cursor: editable ? "pointer" : "default",
-          opacity: offline ? 0.45 : isOn ? 1 : 0.6,
-          transition: "opacity 0.2s",
-          ...(editing ? { outline: "1px solid #f90" } : {}),
+          opacity: offline ? 0.45 : 1,
+          transition: "background 0.25s, border-color 0.25s, box-shadow 0.25s",
+          ...(editing ? { outline: `1px solid ${T.amber}` } : {}),
         }}
       >
         <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: "0.3rem" }}>
           <span
             style={{
               fontWeight: 600,
-              fontSize: "0.95rem",
+              fontSize: "0.92rem",
+              color: isOn ? T.text : T.dim,
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
+              transition: "color 0.25s",
             }}
           >
             {light.name}
           </span>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem", fontSize: "0.75rem", color: "#888" }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem", fontSize: "0.72rem", color: T.faint }}>
             {isOn && light.capabilities.color_rgb && (
-              <span style={{ width: 10, height: 10, borderRadius: "50%", background: hex, border: "1px solid rgba(255,255,255,0.25)", display: "inline-block" }} />
+              <span style={{ width: 9, height: 9, borderRadius: "50%", background: hex, boxShadow: `0 0 6px ${hex}`, display: "inline-block" }} />
             )}
             {isOn ? (light.capabilities.dimmable ? `${brightness}%` : "on") : "off"}
           </span>
@@ -448,33 +629,43 @@ function LightCard({
 }
 
 /** On/off as a vertical sliding switch — up is on. */
-function VerticalToggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
+function VerticalToggle({
+  on,
+  onToggle,
+  disabled,
+}: {
+  on: boolean;
+  onToggle: () => void;
+  disabled?: boolean;
+}) {
   return (
     <button
       onClick={(e) => { e.stopPropagation(); onToggle(); }}
+      disabled={disabled}
       aria-label={on ? "Turn off" : "Turn on"}
       style={{
         flexShrink: 0,
         width: 24,
         height: 44,
         borderRadius: 12,
-        border: "none",
-        cursor: "pointer",
-        background: on ? "#f90" : "#444",
+        border: "1px solid rgba(255,255,255,0.08)",
+        cursor: disabled ? "default" : "pointer",
+        background: on ? "linear-gradient(180deg, #ffb340, #f90)" : "#3a372f",
+        boxShadow: on ? "0 0 12px -2px rgba(255,153,0,0.7)" : "none",
         position: "relative",
-        transition: "background 0.2s",
+        transition: "background 0.2s, box-shadow 0.2s",
       }}
     >
       <span
         style={{
           position: "absolute",
-          left: 3,
-          top: on ? 3 : 23,
+          left: 2,
+          top: on ? 2 : 22,
           width: 18,
           height: 18,
           borderRadius: "50%",
-          background: "#fff",
-          transition: "top 0.2s",
+          background: on ? "#fff8ec" : "#bdb6a6",
+          transition: "top 0.2s, background 0.2s",
         }}
       />
     </button>
