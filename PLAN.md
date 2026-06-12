@@ -28,19 +28,16 @@ A self-hosted Rust smart home hub that is:
 
 ---
 
-## Milestone 9 — Public API for other apps
+## Milestone 9 — Public API for other apps ✅ DONE
 
-> Required before the companion MCP can be built — the MCP calls these endpoints.
-
-- [ ] **API keys** — generate client keys in Settings; accept via `Authorization: Bearer <key>` header
-  as an alternative to the session cookie. Stored hashed (SHA-256), listable and revocable.
-  Show full key exactly once at creation — never recoverable.
-- [ ] **Documented surface** — `API.md` or OpenAPI doc covering every endpoint, kept in step with code.
-- [ ] **Parity with the UI** — everything doable in the UI reachable via the API, including scenes.
-- [ ] **Scope** — expose Bifrost-abstracted rooms and individual lights. Floor Plan is out of the
-  public API for now.
-- [ ] Standard test rules: happy path + unauthenticated-returns-401 per route; key generation +
-  verification gets crypto roundtrip + failure-mode coverage.
+- [x] **API keys** — minted in Settings (`bfr_` + 64 hex), SHA-256 hash stored, full key shown
+  once, listable/revocable, `Authorization: Bearer` auth (`src/api/apikeys.rs`).
+- [x] **`/api/v1` surface** — lights (list/get/set), rooms (list/state/apply-scene), scenes
+  (list/create/from-room/delete); thin handlers delegating to the session API's service fns
+  (`src/api/v1.rs`).
+- [x] **Documented surface** — `API.md`: auth, data shapes, every endpoint, status codes.
+- [x] Tests: key management 401s, mint-once + prefix listing, revocation kills access,
+  v1 401 (missing + bogus key), light read/write, rooms + scenes full flow.
 
 ---
 
