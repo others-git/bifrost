@@ -4,6 +4,7 @@ import { SetupPage } from "./pages/Setup";
 import { LoginPage } from "./pages/Login";
 import { DashboardPage } from "./pages/Dashboard";
 import { AudioPage } from "./pages/Audio";
+import { DevicesPage } from "./pages/Devices";
 import { ScenesPage } from "./pages/Scenes";
 import { RoomsPage } from "./pages/Rooms";
 import { FloorPlanPage } from "./pages/FloorPlan";
@@ -12,7 +13,7 @@ import { S } from "./styles";
 import { useViewport } from "./useViewport";
 
 /** Pages reachable from the nav tray. */
-type NavPage = "dashboard" | "audio" | "scenes" | "rooms" | "plan" | "settings";
+type NavPage = "dashboard" | "audio" | "devices" | "scenes" | "rooms" | "plan" | "settings";
 type Page = "loading" | "setup" | "login" | NavPage;
 
 /** "BIFROST" in Elder Futhark — ᛒ(B) ᛁ(I) ᚠ(F) ᚱ(R) ᛟ(O) ᛋ(S) ᛏ(T). */
@@ -49,6 +50,7 @@ function Brand({ compact = false, fontSize }: { compact?: boolean; fontSize: str
 const NAV_ITEMS: { id: NavPage; glyph: string; label: string }[] = [
   { id: "dashboard", glyph: "◉", label: "Lights" },
   { id: "audio", glyph: "♪", label: "Audio" },
+  { id: "devices", glyph: "▤", label: "Devices" },
   { id: "scenes", glyph: "✦", label: "Scenes" },
   { id: "rooms", glyph: "⌂", label: "Rooms" },
   { id: "plan", glyph: "▦", label: "Floor Plan" },
@@ -128,6 +130,7 @@ export function App() {
           <DashboardPage lights={lights} onRefresh={refreshLights} onNavigate={(p) => setPage(p)} />
         )}
         {page === "audio" && <AudioPage />}
+        {page === "devices" && <DevicesPage />}
         {page === "scenes" && <ScenesPage />}
         {page === "rooms" && <RoomsPage />}
         {page === "plan" &&

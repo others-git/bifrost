@@ -53,6 +53,9 @@ struct FrontendAssets;
 pub fn build_app(state: Arc<AppState>) -> Router {
     Router::new()
         .nest("/api", api::router())
+        // MCP (Streamable HTTP, Bearer-gated) — the third surface over the
+        // shared service layer, alongside /api (session) and /api/v1 (Bearer).
+        .nest_service("/mcp", api::mcp::service(Arc::clone(&state)))
         .fallback(serve_frontend)
         .with_state(state)
         .layer(TraceLayer::new_for_http())

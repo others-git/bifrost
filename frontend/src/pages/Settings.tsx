@@ -742,6 +742,15 @@ function AddProviderForm({
                 </option>
               ))}
           </optgroup>
+          <optgroup label="Integrations">
+            {types
+              .filter((t) => t.kind === "integration")
+              .map((t) => (
+                <option key={t.provider_type} value={t.provider_type}>
+                  {t.display_name}
+                </option>
+              ))}
+          </optgroup>
         </select>
       </label>
 

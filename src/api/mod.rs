@@ -3,8 +3,10 @@ pub mod audio;
 pub mod auth;
 pub mod events;
 pub mod lights;
+pub mod mcp;
 pub mod palette_scenes;
 pub mod plans;
+pub mod power;
 pub mod providers;
 pub mod rooms;
 pub mod scenes;
@@ -27,6 +29,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .nest("/lights", lights::router())
         .nest("/palette-scenes", palette_scenes::router())
         .nest("/plans", plans::router())
+        .nest("/power", power::router())
         .nest("/provider-groups", rooms::provider_groups_router())
         .nest("/providers", providers::router())
         .nest("/rooms", rooms::router())

@@ -86,6 +86,9 @@ BIFROST_SECRET=$(openssl rand -hex 32) cargo run --release
      for API Key).
    - **WLED / Tasmota / Shelly**: just the device IP — or click **Scan network
      for devices** to auto-detect it.
+   - **Home Assistant**: the HA URL (e.g. `http://homeassistant.local:8123`) and
+     a long-lived access token (HA → Profile → Security → Long-Lived Access
+     Tokens). After adding, click **Sync** to import HA Areas as Bifrost Rooms.
    - **Sonos / Onkyo**: the device IP, or **Scan network** to find it.
 3. **Discover** — runs automatically after adding; lights appear on the
    dashboard with live on/off, brightness, and full-RGB color controls.
@@ -130,6 +133,13 @@ Everything is configured via environment variables (a `.env` file works too):
 | WLED | LAN REST | Polling | Device IP |
 | Tasmota | LAN REST | Polling | Device IP |
 | Shelly (Gen1) | LAN REST | Polling | Device IP |
+| Home Assistant | LAN REST | Polling (WS push planned) | HA URL + long-lived access token |
+
+**Home Assistant is a "high-class" provider:** rather than one device protocol, it
+adapts the whole HA platform — any `light.*` entity (across HA's ~1000
+integrations) becomes a Bifrost light, and HA **Areas import as Bifrost Rooms**
+via the Sync button. Lights are live today; HA's `media_player` (audio) side is
+built but not yet enabled.
 
 ### Audio
 
@@ -156,8 +166,10 @@ Adding a provider type is intentionally mechanical: implement two traits, regist
 
 **Public API for external apps:** `/api/v1` is key-authenticated (mint keys in
 Settings → API keys) and documented in [API.md](API.md) — lights, rooms, scenes,
-and audio devices. The companion **[bifrost-mcp](../bifrost-mcp)** project wraps
-it as Model Context Protocol tools so an AI assistant can drive the whole home.
+and audio devices. The same key also unlocks the **embedded MCP server** at
+`/mcp` (Streamable HTTP) — a first-class Bifrost surface that exposes the home as
+Model Context Protocol tools so an AI assistant can drive it in natural language.
+Tools and rationale are in [MCP.md](MCP.md).
 
 All endpoints below are under `/api` and (except setup/login/health) require the session cookie.
 

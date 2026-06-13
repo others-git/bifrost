@@ -1,9 +1,10 @@
 # Bifrost Public API (`/api/v1`)
 
-A key-authenticated REST API for external applications (automation scripts, the
-`bifrost-mcp` companion, etc.). A valid key grants full access to lights, rooms,
-and scenes — there is no RBAC. The floor plan and provider management are not
-exposed; use the web UI for those.
+A key-authenticated REST API for external applications (automation scripts,
+assistants, etc.). A valid key grants full access to lights, rooms, and scenes —
+there is no RBAC. The floor plan and provider management are not exposed; use the
+web UI for those. The same key also unlocks the embedded **MCP** server at
+[`/mcp`](#mcp-endpoint-mcp) for natural-language control.
 
 ## Authentication
 
@@ -105,7 +106,7 @@ provider group plus any directly assigned.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/v1/rooms` | All rooms: `[{ id, name, light_ids, audio_device_id }]` — `audio_device_id` is the room's linked audio device (or null); control it via the audio endpoints |
+| `GET` | `/api/v1/rooms` | All enabled rooms: `[{ id, name, light_ids, audio_device_ids, power_device_ids }]` — `audio_device_ids` / `power_device_ids` are the room's audio/power members; control each via the audio/power endpoints |
 | `PUT` | `/api/v1/rooms/{id}/state` | Apply a `LightState` to every member |
 | `POST` | `/api/v1/rooms/{id}/scenes/{scene_id}/apply` | Apply a scene to the room |
 
@@ -155,7 +156,9 @@ Receivers and networked speakers (Onkyo via eISCP, Sonos via local UPnP).
 ```
 
 A device's `capabilities` may also include `"favorites": true` (Sonos) — the
-device exposes saved favorites you can start playing (see below).
+device exposes saved favorites you can start playing (see below) — and
+`"grouping": true` (Sonos speakers) — the speaker can be joined into/out of a
+provider-native synced playback group (see below).
 
 | Method | Path | Description |
 |---|---|---|
@@ -164,6 +167,8 @@ device exposes saved favorites you can start playing (see below).
 | `PUT` | `/api/v1/audio/devices/{id}/state` | Send a command (body below) |
 | `GET` | `/api/v1/audio/devices/{id}/favorites` | List saved favorites (live read) |
 | `POST` | `/api/v1/audio/devices/{id}/favorites/play` | Start a favorite (body below) |
+| `POST` | `/api/v1/audio/devices/{id}/group` | Join this speaker into a group (body below) |
+| `POST` | `/api/v1/audio/devices/{id}/ungroup` | Remove this speaker from its group |
 
 `PUT …/state` takes a **sparse command** — only the fields present are applied:
 
@@ -211,6 +216,53 @@ Responses: list → `200` with the array (empty for providers without favorites,
 such as Onkyo); play → `204` success, `404` unknown device, `422` unknown
 favorite, `502` device unreachable.
 
+#### Grouping (provider-native)
+
+Speakers with `"grouping": true` (Sonos) can be joined into a synced playback
+group that plays in sync, controlled through a coordinator — the provider's own
+grouping, **independent of Bifrost Rooms**. `POST …/{id}/group` joins the
+speaker `{id}` into the group coordinated by another speaker:
+
+```json
+{ "coordinator_id": "<another audio device id>" }
+```
+
+`POST …/{id}/ungroup` removes the speaker from any group (returns it to
+standalone playback; idempotent). Both speakers must belong to the same
+provider. After a change, the household topology shifts — re-run discovery
+(`POST /api/providers/{id}/discover`) to surface the synced-group zone device.
+
+Responses: `204` success, `404` unknown device, `422` invalid (different
+providers, or grouping a speaker with itself), `502` device unreachable.
+
+### Power devices
+
+Strictly on/off endpoints — switches, smart plugs, fans, boolean helpers —
+surfaced by integration providers (Home Assistant today). A power device has no
+capability set; its whole state is `on`. `kind` is presentational (drives the UI
+glyph) and is one of `switch | outlet | fan | toggle | generic`.
+
+```json
+{
+  "id": "5d2f…",
+  "provider_id": "c09e…",
+  "device_id": "switch.porch",   // provider-native id (HA entity_id)
+  "name": "Porch",
+  "kind": "switch",
+  "state": { "on": true, "reachable": true },
+  "last_seen": "2026-06-13 04:39:28"
+}
+```
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/power/devices` | All power devices (cached state) |
+| `GET` | `/api/v1/power/devices/{id}` | One device — live read, refreshes the cache |
+| `PUT` | `/api/v1/power/devices/{id}/state` | Set power: body `{ "on": true|false }` |
+
+`PUT …/state` responds `204` on success, `404` unknown device, `502` if the
+device could not be reached.
+
 ## Status codes
 
 | Code | Meaning |
@@ -225,6 +277,26 @@ favorite, `502` device unreachable.
 
 Keys are managed with a browser session, not with another key — a leaked key
 cannot mint more keys: `GET/POST /api/api-keys`, `DELETE /api/api-keys/{id}`.
+
+## MCP endpoint (`/mcp`)
+
+Bifrost embeds a [Model Context Protocol](https://modelcontextprotocol.io)
+server so an AI assistant can control the home in natural language. It is served
+at **`POST /mcp`** as a **Streamable HTTP** endpoint (stateless, JSON responses)
+and gated by the **same Bearer API keys** as `/api/v1`:
+
+```
+Authorization: Bearer bfr_<your-key>
+Content-Type: application/json
+Accept: application/json, text/event-stream
+```
+
+A missing or invalid key returns `401` before any MCP processing. The MCP tools
+call the same shared service layer as the routes above, so behaviour can't drift
+from the REST surface. Tools resolve lights, rooms, scenes, and audio devices by
+**id or case-insensitive name/substring**. The tool catalogue and mapping live
+in [MCP.md](MCP.md). stdio-only clients can bridge to this endpoint with the
+standard `mcp-remote` shim — there is no separate stdio server.
 
 ## Versioning
 

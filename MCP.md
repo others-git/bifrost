@@ -1,83 +1,116 @@
-# Bifrost MCP — goals, tools & targets
+# Bifrost MCP — embedded tool surface
 
-The **companion MCP server (`bifrost-mcp`)** wraps Bifrost's public `/api/v1`
-surface as [Model Context Protocol](https://modelcontextprotocol.io) tools, so
-an AI assistant can control the whole home in natural language. It is a
-**separate repository** (local at `/mnt/d/REPOS/bifrost-mcp`, TypeScript stdio
-server; no GitHub remote yet) and is **not** modified from this repo.
+Bifrost embeds a [Model Context Protocol](https://modelcontextprotocol.io)
+server **inside the Bifrost binary** so an AI assistant can control the whole
+home in natural language. It is the **third surface over the shared service
+layer**, alongside the session API (`/api/*`) and the public API (`/api/v1/*`) —
+the tools call the same `api::{lights,audio,rooms,palette_scenes}` service
+functions directly (no HTTP hop, no Bearer round-trip), so they can't drift from
+the REST surface and reuse the real color math (`models::Color`).
 
-This file is the **source of truth for what that server should expose** — kept
-here, alongside the API it wraps, so tool targets can't drift from the
-endpoints. When you add or change a `/api/v1` route, update the mapping below
-and mark any new tool as a target; implement it in `bifrost-mcp` when that
-project is next touched.
+- **Where:** `src/api/mcp.rs`, mounted at `/mcp` in `build_app` (`src/lib.rs`).
+- **Transport:** **Streamable HTTP only** (stateless, JSON responses). There is
+  no stdio server; stdio-only clients bridge to `/mcp` with the standard
+  `mcp-remote` shim. See [MCP-Add rationale](#why-embedded) below.
+- **This file is the source of truth for what the server exposes** — kept here,
+  alongside the API it shares, so tool targets can't drift from the endpoints.
+  When you add or change a service function an assistant should reach, update the
+  mapping below.
 
 Ultimate goal: AI-driven whole-home control. Target client: **Whisperr** (the
-voice/LLM pipeline). Design for natural-language ergonomics — resolve rooms,
-scenes, and favorites by **name**, not just id.
+voice/LLM pipeline). Tools are designed for natural-language ergonomics — resolve
+rooms, scenes, devices, and favorites by **name**, not just id.
 
 ## Conventions
 
-- **Auth:** Bifrost API key (`bfr_…`, minted in Settings) in the server's
-  `BIFROST_API_KEY` env var, sent as `Authorization: Bearer`. The key itself
-  never touches Bifrost's DB — only its SHA-256 hash is stored.
-- **Transport:** stdio MCP (Claude Desktop, `claude --mcp`, Whisperr, …).
+- **Auth:** a Bifrost API key (`bfr_…`, minted in Settings), sent as
+  `Authorization: Bearer`. Identical to `/api/v1`: only the SHA-256 hash is
+  stored, revocation is immediate, a missing/invalid key returns `401` before any
+  MCP processing.
 - **Name resolution:** tools accept an id **or** a case-insensitive name/
-  substring; on no match, the error lists the valid options.
-- **Sparse writes:** mirror the API — only the fields the user named are sent.
+  substring. Resolution order is exact id → exact name → name substring; on no
+  match (or an ambiguous substring) the tool returns an error that **lists the
+  valid options** so the assistant can self-correct. Implemented once in
+  `mcp::resolve`.
+- **Sparse writes:** mirror the service layer — only the fields the user named
+  are sent. `set_light`/`set_room` default `on` to true (asking for color or
+  brightness implies the light should be lit).
+- **Error shape:** recoverable problems (wrong name, unreachable device, bad
+  argument) come back as a **tool result with `isError: true`** and a readable
+  message; only infrastructure failures (DB errors) are protocol-level errors.
 
-## Current tools — shipped (`bifrost-mcp` v0.1.0)
+## Tools — shipped (embedded)
 
-| Tool | Maps to | Notes |
+All tools below are served natively from `src/api/mcp.rs`.
+
+| Tool | Shared service fn(s) | Notes |
 |---|---|---|
-| `get_home_state` | `GET /rooms` + `/lights` + `/scenes` + `/audio/devices` | One-call context snapshot |
-| `list_lights` | `GET /lights` | |
-| `set_light` | `PUT /lights/{id}/state` | hex → CIE xy with Bifrost's matrix |
-| `set_room` | `PUT /rooms/{id}/state` | room by id **or name** |
-| `apply_scene` | `POST /rooms/{id}/scenes/{scene_id}/apply` | scene by id **or name** |
-| `apply_scene_all` | fan-out `apply_scene` over all rooms | whole-home look |
-| `save_scene_from_room` | `POST /scenes/from-room/{room_id}` | |
-| `set_audio` | `PUT /audio/devices/{id}/state` | power/volume/mute/source/transport |
-| `get_audio_state` | `GET /audio/devices/{id}` | live read incl. now-playing |
+| `get_home_state` | `list_public_rooms` + `list_all_lights` + `list_scenes` + `list_all_devices` + `list_all_power_devices` | One-call context snapshot (rooms with member ids, lights, scenes, audio devices, power devices) |
+| `list_lights` | `list_all_lights` | |
+| `set_light` | `apply_light_state` | light by id/name; hex → CIE xy via `Color::from_rgb` |
+| `set_room` | `effective_members` + `apply_uniform_state` | room by id/name; fan-out to member lights |
+| `apply_scene` | `apply_scene_to_room` | room + scene by id/name |
+| `apply_scene_all` | fan-out `apply_scene_to_room` over all enabled rooms | whole-home look |
+| `save_scene_from_room` | `create_scene_from_room` | snapshot the room's lit colors |
+| `set_audio` | `apply_audio_command` | device by id/name; power/volume/mute/source/transport |
+| `get_audio_state` | `get_device_live` | live read incl. now-playing |
+| `list_audio_favorites` | `list_device_favorites` | Sonos Favorites; empty for Onkyo |
+| `play_audio_favorite` | `list_device_favorites` + `play_device_favorite` | resolve `favorite` (id/title/substring) then play. *"play my jazz favorite in the office."* |
+| `group_speakers` | `group_devices` (per member) | join speakers under a coordinator. *"play the kitchen and living room together."* |
+| `ungroup_speaker` | `ungroup_device` | remove a speaker from its synced group |
+| `list_power_devices` | `list_all_power_devices` | switches / plugs / fans / toggles with on/off state + kind |
+| `set_power` | `apply_power_state` | turn a power device on/off, by id or name. *"turn off the porch switch."* |
 
 ## Target tools — not yet built
 
-### Audio favorites (endpoints exist — see [API.md](API.md))
-
-| Tool | Maps to | Behaviour |
-|---|---|---|
-| `list_audio_favorites` | `GET /audio/devices/{id}/favorites` | List a device's saved favorites (Sonos Favorites; empty for Onkyo). |
-| `play_audio_favorite` | `GET …/favorites` then `POST …/favorites/play` | Resolve `favorite` (id, exact name, or substring) against the list, then play `{ "favorite_id": <id> }`. Headline use case: *"play my jazz favorite in the office."* |
-
-Reference shape for `play_audio_favorite` (matches the reverted draft, kept here
-so it can be rebuilt verbatim in `bifrost-mcp`):
-
-```ts
-// inputSchema: { device_id: string, favorite: string }
-const favs = await api("GET", `/audio/devices/${device_id}/favorites`);
-const q = favorite.trim().toLowerCase();
-const match =
-  favs.find((f) => f.id === favorite) ??
-  favs.find((f) => f.title.toLowerCase() === q) ??
-  favs.find((f) => f.title.toLowerCase().includes(q));
-// no match → error listing available titles
-await api("POST", `/audio/devices/${device_id}/favorites/play`, { favorite_id: match.id });
-```
-
-### Other candidates (open)
-
 | Tool | Maps to | When |
 |---|---|---|
-| `list_audio_devices` | `GET /audio/devices` | If a standalone audio list is wanted beyond `get_home_state`. |
-| Tier-2 music search/play | a future music-service API | After PLAN.md Milestone 12 Tier 2 (Spotify OAuth + Connect) lands. |
+| `list_audio_devices` | `list_all_devices` | If a standalone audio list is wanted beyond `get_home_state`. |
+| Tier-2 music search/play | a future music-service API | After PLAN.md Milestone 12.2 (Spotify OAuth + Connect) lands. |
+| Audio-in-scenes awareness | scene snapshot incl. audio source/volume | After PLAN.md Milestone 15. |
 
 ## Maintenance checklist
 
-When `/api/v1` changes:
+When the service layer (or `/api/v1`) changes:
 
-1. Update the **mapping tables** above (current vs target).
-2. New capability an assistant should reach? Add a **target tool** row with its
-   endpoint and resolution behaviour.
-3. Cross-link from [PLAN.md](PLAN.md) if it's part of a milestone.
-4. Implement in `bifrost-mcp` (separate repo) and move the row from *target* to
-   *current*, noting the `bifrost-mcp` version.
+1. Add/adjust the tool in `src/api/mcp.rs` (tool fn + `schemars` param struct),
+   backed by the shared service fn — never a forked control path.
+2. Update the **mapping tables** above (shipped vs target).
+3. Cover it per CLAUDE.md: a tool-level test in `tests/api.rs` driving `/mcp`
+   (the service fns themselves are already covered), plus unit tests for any new
+   resolution/parsing helper.
+4. Cross-link from [PLAN.md](PLAN.md) if it's part of a milestone, and note the
+   endpoint in [API.md](API.md) if a new REST route backs it.
+
+## Why embedded
+
+Bifrost's founding ethos is **one binary, one SQLite file, one Docker image**. An
+embedded MCP server keeps that: no separate repo, no Node runtime, no parallel
+deploy. CLAUDE.md already mandates that the session and public APIs delegate to
+the **same shared service functions** so they can't drift; the MCP surface is
+just a third caller of those functions, which is why it reuses the real Rust
+color math instead of re-implementing hex→CIE xy.
+
+**Transport choice — Streamable HTTP only.** MCP has two transports. *stdio* has
+the client spawn a subprocess over stdin/stdout — a long-running daemon can't own
+per-client stdin/stdout, so "embedding" stdio just means shipping a second
+process. *Streamable HTTP* is a single endpoint (one path, POST + optional SSE
+upgrade) that mounts as just another Axum route — one server, many clients, no
+subprocess. A network-reachable `/mcp` (behind Tailscale/VPN, per Bifrost's
+access model) needs no per-machine install. So Bifrost serves **only** Streamable
+HTTP; the rare stdio-only client uses the off-the-shelf `mcp-remote` bridge
+rather than us maintaining a stdio artifact.
+
+**Tooling.** Built on **`rmcp`** (the official `modelcontextprotocol/rust-sdk`),
+which provides the Axum-mountable `StreamableHttpService`. Run in stateless +
+JSON-response mode: every tool call is an independent request/response, so there
+is no `Mcp-Session-Id` bookkeeping. The endpoint is Bearer-gated (not protected
+by `rmcp`'s default localhost Host-allowlist, which is disabled since Bifrost is
+reached by LAN/Tailscale IP); the API key is the security boundary.
+
+### Fate of the old `bifrost-mcp` TS repo
+
+Superseded. The earlier plan was a separate TypeScript stdio server wrapping
+`/api/v1` over the network (re-implementing the color math in TS). That
+separate-repo framing of Milestone 11 is **retired** — MCP is now a first-class
+Bifrost surface, not a parallel client.

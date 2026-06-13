@@ -8,19 +8,20 @@ import {
   createRoom,
   getAudioDevices,
   getLights,
+  getPowerDevices,
   getProviderGroups,
   getRooms,
   mergeRooms,
   removeRoom,
-  setRoomDirectLights,
   setRoomEnabled,
-  setRoomLinks,
   type AudioDevice,
   type Light,
+  type PowerDevice,
   type ProviderGroupInfo,
   type Room,
 } from "../api";
-import { RoomAudioEditor, RoomVolumeStrip } from "../components/RoomAudio";
+import { RoomVolumeStrip } from "../components/RoomAudio";
+import { RoomDevicesPanel } from "../components/RoomDevices";
 import { SelectRow } from "../components/SelectRow";
 import { useDialogs } from "../components/dialogs";
 import { useViewport } from "../useViewport";
@@ -33,12 +34,14 @@ export function RoomsPage() {
   const [providerGroups, setProviderGroups] = useState<ProviderGroupInfo[]>([]);
   const [lights, setLights] = useState<Light[]>([]);
   const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
+  const [powerDevices, setPowerDevices] = useState<PowerDevice[]>([]);
   const [showAdd, setShowAdd] = useState(false);
 
   async function load() {
     setRooms(await getRooms());
     setProviderGroups(await getProviderGroups());
     setAudioDevices(await getAudioDevices());
+    setPowerDevices(await getPowerDevices());
     const l = await getLights();
     if (l !== "unauthorized") setLights(l);
   }
@@ -63,8 +66,9 @@ export function RoomsPage() {
     <div style={{ padding: isMobile ? "1rem 0.85rem" : "2rem", maxWidth: 760, margin: "0 auto" }}>
       <h2 style={{ margin: "0 0 0.4rem", fontSize: "1.2rem", color: "#ccc" }}>Rooms</h2>
       <p style={{ color: "#666", fontSize: "0.8rem", margin: "0 0 1rem", maxWidth: 560 }}>
-        A room combines synced provider rooms/zones (links) with directly assigned lights, plus the
-        audio devices it controls. Use <strong>Sync</strong> on a provider (Settings) to refresh links.
+        A room combines synced provider rooms/zones (links) with the devices it controls —
+        lights, speakers, and power devices. Use the <strong>Devices</strong> button to configure
+        membership, or <strong>Sync</strong> on a provider (Settings) to refresh links.
       </p>
 
       <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
@@ -81,6 +85,7 @@ export function RoomsPage() {
             lights={lights}
             providerGroups={providerGroups}
             audioDevices={audioDevices}
+            powerDevices={powerDevices}
             onChanged={load}
             onRemove={() => handleRemove(room.id, room.name)}
           />
@@ -129,6 +134,7 @@ function RoomCard({
   lights,
   providerGroups,
   audioDevices,
+  powerDevices,
   onChanged,
   onRemove,
 }: {
@@ -137,16 +143,17 @@ function RoomCard({
   lights: Light[];
   providerGroups: ProviderGroupInfo[];
   audioDevices: AudioDevice[];
+  powerDevices: PowerDevice[];
   onChanged: () => Promise<void>;
   onRemove: () => void;
 }) {
   const dialogs = useDialogs();
   const { isMobile } = useViewport();
-  const [editingLights, setEditingLights] = useState(false);
-  const [editingAudio, setEditingAudio] = useState(false);
+  const [editingDevices, setEditingDevices] = useState(false);
   const [merging, setMerging] = useState(false);
   const mergeCandidates = allRooms.filter((r) => r.id !== room.id);
   const speakers = room.audio_devices.length;
+  const powerCount = room.power_device_ids.length;
 
   async function handleMerge(sourceId: string) {
     const source = mergeCandidates.find((r) => r.id === sourceId);
@@ -197,6 +204,7 @@ function RoomCard({
       <div style={{ color: "#888", fontSize: "0.8rem", marginTop: "0.25rem", display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
         <span>{room.light_ids.length} light{room.light_ids.length !== 1 ? "s" : ""}</span>
         {speakers > 0 && <span>· {speakers} speaker{speakers !== 1 ? "s" : ""}</span>}
+        {powerCount > 0 && <span>· {powerCount} power</span>}
         {room.links.map((l) => (
           <span
             key={l.provider_group_id}
@@ -234,16 +242,10 @@ function RoomCard({
         <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
           {!isMobile && mergeSelect}
           <button
-            onClick={() => setEditingLights((v) => !v)}
-            style={{ ...S.buttonGhost, ...(editingLights ? { borderColor: ACCENT, color: ACCENT } : {}) }}
+            onClick={() => setEditingDevices((v) => !v)}
+            style={{ ...S.buttonGhost, ...(editingDevices ? { borderColor: ACCENT, color: ACCENT } : {}) }}
           >
-            Lights
-          </button>
-          <button
-            onClick={() => setEditingAudio((v) => !v)}
-            style={{ ...S.buttonGhost, ...(editingAudio ? { borderColor: ACCENT, color: ACCENT } : {}) }}
-          >
-            Audio
+            Devices
           </button>
           <button
             onClick={async () => { await setRoomEnabled(room.id, !room.enabled); await onChanged(); }}
@@ -259,41 +261,16 @@ function RoomCard({
       {/* Live room volume (fans out to all members). */}
       <RoomVolumeStrip room={room} devices={audioDevices} />
 
-      {editingLights && (
-        <div style={{ borderTop: "1px solid #2a2a2a", paddingTop: "0.6rem", display: "flex", flexDirection: "column", gap: "0.4rem" }}>
-          <span style={{ fontSize: "0.8rem", color: "#aaa" }}>
-            Lights <span style={{ color: "#666" }}>(membership + synced links)</span>
-          </span>
-          <RoomEditForm
-            lights={lights}
-            providerGroups={providerGroups}
-            initialName={room.name}
-            initialDirect={room.direct_light_ids}
-            initialLinks={room.links.map((l) => l.provider_group_id)}
-            submitLabel="Save"
-            nameLocked
-            onSubmit={async (_name, directIds, linkIds) => {
-              await setRoomDirectLights(room.id, directIds);
-              await setRoomLinks(room.id, linkIds);
-              setEditingLights(false);
-              await onChanged();
-            }}
-            onCancel={() => setEditingLights(false)}
-          />
-        </div>
-      )}
-
-      {editingAudio && (
-        <div style={{ borderTop: "1px solid #2a2a2a", paddingTop: "0.6rem", display: "flex", flexDirection: "column", gap: "0.4rem" }}>
-          <span style={{ fontSize: "0.8rem", color: "#aaa" }}>
-            Speakers <span style={{ color: "#666" }}>(membership + per-room volume offset)</span>
-          </span>
-          <RoomAudioEditor
-            room={room}
-            devices={audioDevices}
-            onChanged={() => { setEditingAudio(false); onChanged(); }}
-          />
-        </div>
+      {editingDevices && (
+        <RoomDevicesPanel
+          room={room}
+          lights={lights}
+          audioDevices={audioDevices}
+          powerDevices={powerDevices}
+          providerGroups={providerGroups}
+          onSaved={() => { setEditingDevices(false); onChanged(); }}
+          onCancel={() => setEditingDevices(false)}
+        />
       )}
     </div>
   );

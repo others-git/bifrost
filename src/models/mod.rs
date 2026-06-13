@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod power;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,9 @@ pub enum Provider {
     Wled,
     Tasmota,
     Shelly,
+    /// Home Assistant — a "high-class" adapter that surfaces any of HA's
+    /// integrations (and its Areas as Bifrost Rooms) through one provider.
+    Ha,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

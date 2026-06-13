@@ -36,6 +36,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{id}/audio/state", put(set_room_audio_state))
         .route("/{id}/enabled", put(set_room_enabled))
         .route("/{id}/lights", put(set_direct_lights))
+        .route("/{id}/power", put(set_room_power_devices))
         .route("/{id}/links", put(set_links))
         .route("/{id}/state", put(set_room_state))
         .route("/{id}/scenes/{scene_id}/apply", post(apply_scene))
@@ -68,6 +69,8 @@ struct RoomInfo {
     /// Audio devices this room controls (volume/mute fans out to all), each
     /// with its per-room volume offset.
     audio_devices: Vec<RoomAudioMember>,
+    /// Power devices (switches/plugs/fans) the room contains.
+    power_device_ids: Vec<String>,
     /// Disabled rooms are hidden from the Dashboard/Floor Plan and the public
     /// API, but still listed in Settings so they can be re-enabled.
     enabled: bool,
@@ -79,12 +82,15 @@ struct ProviderGroupInfo {
     provider_id: String,
     provider_group_id: String,
     name: String,
-    /// "light" or "audio" — which domain's devices this group mirrors.
+    /// The group's primary domain label (from the provider type). An area can
+    /// still carry members across domains — see the `*_ids` lists below.
     domain: String,
-    /// Member lights (light groups) — empty for audio groups.
+    /// Member lights.
     light_ids: Vec<String>,
-    /// Member audio devices (audio groups) — empty for light groups.
+    /// Member audio devices.
     audio_device_ids: Vec<String>,
+    /// Member power devices (switches/plugs/fans).
+    power_device_ids: Vec<String>,
 }
 
 /// "audio" if the provider type is a registered audio provider, else "light".
@@ -137,12 +143,62 @@ pub(crate) async fn effective_members(state: &AppState, room_id: &str) -> Vec<Me
     .collect()
 }
 
+/// Just the effective member light ids — the shape the room listings (session,
+/// `/api/v1`, MCP) need. A dedicated lean query so the per-room listing path
+/// doesn't fetch and decrypt-bearing columns (`provider_type`, `credentials`)
+/// only to discard them; mirrors `effective_members`' filter/union/order.
 pub(crate) async fn effective_member_ids(state: &AppState, room_id: &str) -> Vec<String> {
-    effective_members(state, room_id)
-        .await
-        .into_iter()
-        .map(|m| m.light_id)
-        .collect()
+    sqlx::query(
+        "SELECT DISTINCT l.id AS light_id, l.name
+         FROM lights l
+         JOIN providers p ON p.id = l.provider_id
+         WHERE p.enabled = 1 AND l.id IN (
+             SELECT light_id FROM room_lights WHERE room_id = ?1
+             UNION
+             SELECT pgl.light_id
+             FROM room_links rl
+             JOIN provider_group_lights pgl ON pgl.provider_group_id = rl.provider_group_id
+             WHERE rl.room_id = ?1
+         )
+         ORDER BY l.name",
+    )
+    .bind(room_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| r.get("light_id"))
+    .collect()
+}
+
+/// The room's effective power-device members (switches/plugs/fans), enabled
+/// providers only: explicit membership (`room_power_devices`) ∪ devices from
+/// linked provider-groups (a synced HA Area). Shared by the session and public
+/// room listings.
+pub(crate) async fn effective_power_member_ids(state: &AppState, room_id: &str) -> Vec<String> {
+    sqlx::query(
+        "SELECT pd.id AS power_device_id
+         FROM power_devices pd
+         JOIN providers p ON p.id = pd.provider_id
+         WHERE p.enabled = 1
+           AND pd.id IN (
+               SELECT power_device_id FROM room_power_devices WHERE room_id = ?1
+               UNION
+               SELECT pgp.power_device_id
+               FROM room_links rl
+               JOIN provider_group_power_devices pgp
+                 ON pgp.provider_group_id = rl.provider_group_id
+               WHERE rl.room_id = ?1
+           )
+         ORDER BY pd.name",
+    )
+    .bind(room_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| r.get("power_device_id"))
+    .collect()
 }
 
 /// One audio device's membership in a room, with its per-room volume offset.
@@ -187,6 +243,49 @@ pub(crate) async fn effective_audio_members(
         volume_offset: r.get("volume_offset"),
     })
     .collect()
+}
+
+/// A room as exposed to third parties (the public `/api/v1` API and the MCP
+/// surface): enabled rooms only, with effective light and audio membership.
+/// Shared so the two surfaces can't drift.
+#[derive(Serialize)]
+pub(crate) struct PublicRoom {
+    pub id: String,
+    pub name: String,
+    /// Effective members (linked provider-group lights ∪ direct lights).
+    pub light_ids: Vec<String>,
+    /// Audio devices the room controls — drive each via /audio/devices/{id}/state.
+    pub audio_device_ids: Vec<String>,
+    /// Power devices the room contains — drive each via /power/devices/{id}/state.
+    pub power_device_ids: Vec<String>,
+}
+
+pub(crate) async fn list_public_rooms(state: &AppState) -> Vec<PublicRoom> {
+    // Disabled rooms are hidden from the public surfaces too.
+    let rows = sqlx::query("SELECT id, name FROM rooms WHERE enabled = 1 ORDER BY created_at")
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id: String = row.get("id");
+        let light_ids = effective_member_ids(state, &id).await;
+        let audio_device_ids = effective_audio_members(state, &id)
+            .await
+            .into_iter()
+            .map(|m| m.audio_device_id)
+            .collect();
+        let power_device_ids = effective_power_member_ids(state, &id).await;
+        out.push(PublicRoom {
+            name: row.get("name"),
+            light_ids,
+            audio_device_ids,
+            power_device_ids,
+            id,
+        });
+    }
+    out
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────
@@ -244,12 +343,14 @@ async fn list_rooms(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
         .collect();
 
         let audio_devices = effective_audio_members(&state, &id).await;
+        let power_device_ids = effective_power_member_ids(&state, &id).await;
 
         out.push(RoomInfo {
             light_ids: effective_member_ids(&state, &id).await,
             direct_light_ids: direct,
             links,
             audio_devices,
+            power_device_ids,
             enabled: room.get::<i64, _>("enabled") != 0,
             id,
             name: room.get("name"),
@@ -377,9 +478,10 @@ async fn set_room_audio_state(
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    let mut applied = 0usize;
-    let mut failed = 0usize;
-    for m in &members {
+    // Fan out to every audio member concurrently — a room's speakers are
+    // distinct devices (Sonos units on their own IPs), so a room volume change
+    // should hit them in parallel rather than serially round-tripping each.
+    let jobs = members.iter().filter_map(|m| {
         let volume = req
             .volume
             .map(|v| (v as i64 + m.volume_offset).clamp(0, 100) as u8);
@@ -389,14 +491,35 @@ async fn set_room_audio_state(
             ..Default::default()
         };
         if cmd.is_empty() {
-            continue;
+            return None;
         }
-        match apply_audio_command(&state, &m.audio_device_id, &cmd).await {
-            crate::api::audio::SetAudioOutcome::Ok => applied += 1,
-            _ => failed += 1,
-        }
-    }
+        let state = &state;
+        Some(async move {
+            matches!(
+                apply_audio_command(state, &m.audio_device_id, &cmd).await,
+                crate::api::audio::SetAudioOutcome::Ok
+            )
+        })
+    });
+    let results = futures_util::future::join_all(jobs).await;
+    let applied = results.iter().filter(|ok| **ok).count();
+    let failed = results.len() - applied;
     Json(serde_json::json!({ "applied": applied, "failed": failed })).into_response()
+}
+
+/// Read a provider group's member device ids from one `provider_group_*` table.
+/// Table/column are fixed identifiers, so the formatted SQL is injection-free.
+async fn group_member_ids(state: &AppState, group_id: &str, table: &str, col: &str) -> Vec<String> {
+    sqlx::query(&format!(
+        "SELECT {col} AS m FROM {table} WHERE provider_group_id = ?"
+    ))
+    .bind(group_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|row| row.get::<String, _>("m"))
+    .collect()
 }
 
 async fn list_provider_groups(
@@ -421,31 +544,23 @@ async fn list_provider_groups(
         let id: String = r.get("id");
         let provider_type: String = r.get("provider_type");
         let domain = domain_label(&state, &provider_type);
-        let (light_ids, audio_device_ids): (Vec<String>, Vec<String>) = if domain == "audio" {
-            let audio = sqlx::query(
-                "SELECT audio_device_id FROM provider_group_audio_devices WHERE provider_group_id = ?",
-            )
-            .bind(&id)
-            .fetch_all(&state.db)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|a| a.get("audio_device_id"))
-            .collect();
-            (Vec::new(), audio)
-        } else {
-            let lights = sqlx::query(
-                "SELECT light_id FROM provider_group_lights WHERE provider_group_id = ?",
-            )
-            .bind(&id)
-            .fetch_all(&state.db)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|l| l.get("light_id"))
-            .collect();
-            (lights, Vec::new())
-        };
+        // Query every member table — an area (HA) can mix domains, so the label
+        // alone can't tell us which members it has.
+        let light_ids = group_member_ids(&state, &id, "provider_group_lights", "light_id").await;
+        let audio_device_ids = group_member_ids(
+            &state,
+            &id,
+            "provider_group_audio_devices",
+            "audio_device_id",
+        )
+        .await;
+        let power_device_ids = group_member_ids(
+            &state,
+            &id,
+            "provider_group_power_devices",
+            "power_device_id",
+        )
+        .await;
         out.push(ProviderGroupInfo {
             provider_id: r.get("provider_id"),
             provider_group_id: r.get("provider_group_id"),
@@ -453,6 +568,7 @@ async fn list_provider_groups(
             domain: domain.to_string(),
             light_ids,
             audio_device_ids,
+            power_device_ids,
             id,
         });
     }
@@ -579,6 +695,24 @@ async fn merge_rooms(
     .bind(&req.source_room_id)
     .execute(&state.db)
     .await;
+    // Audio + power membership move the same way (keep the target's offset for
+    // any audio device already shared, via OR IGNORE on the PK).
+    let _ = sqlx::query(
+        "INSERT OR IGNORE INTO room_audio_devices (room_id, audio_device_id, volume_offset)
+         SELECT ?, audio_device_id, volume_offset FROM room_audio_devices WHERE room_id = ?",
+    )
+    .bind(&id)
+    .bind(&req.source_room_id)
+    .execute(&state.db)
+    .await;
+    let _ = sqlx::query(
+        "INSERT OR IGNORE INTO room_power_devices (room_id, power_device_id)
+         SELECT ?, power_device_id FROM room_power_devices WHERE room_id = ?",
+    )
+    .bind(&id)
+    .bind(&req.source_room_id)
+    .execute(&state.db)
+    .await;
 
     // Plan-region bindings move wholesale. (Scenes are global, not room-bound.)
     let _ = sqlx::query("UPDATE plan_rooms SET room_id = ? WHERE room_id = ?")
@@ -624,6 +758,59 @@ async fn set_direct_lights(
             .bind(light_id)
             .execute(&state.db)
             .await;
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct SetRoomPowerRequest {
+    power_device_ids: Vec<String>,
+}
+
+/// Replace the room's power-device membership.
+async fn set_room_power_devices(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<SetRoomPowerRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !room_exists(&state, &id).await {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    for pid in &req.power_device_ids {
+        let known = sqlx::query("SELECT 1 FROM power_devices WHERE id = ?")
+            .bind(pid)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        if !known {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("unknown power device '{pid}'"),
+            )
+                .into_response();
+        }
+    }
+
+    let _ = sqlx::query("DELETE FROM room_power_devices WHERE room_id = ?")
+        .bind(&id)
+        .execute(&state.db)
+        .await;
+    for pid in &req.power_device_ids {
+        let _ = sqlx::query(
+            "INSERT OR IGNORE INTO room_power_devices (room_id, power_device_id) VALUES (?, ?)",
+        )
+        .bind(&id)
+        .bind(pid)
+        .execute(&state.db)
+        .await;
     }
 
     StatusCode::NO_CONTENT.into_response()
@@ -805,19 +992,34 @@ pub(crate) async fn apply_uniform_state(
         }
     }
 
-    // Per-light fan-out for everything not covered natively.
+    // Per-light fan-out for everything not covered natively. Build one provider
+    // per distinct credential set so same-provider lights share a single HTTP
+    // client (and its keep-alive connection pool) across the concurrent fan-out,
+    // rather than rebuilding a client — and reopening a connection — per light.
+    let mut providers: std::collections::HashMap<
+        String,
+        Option<Arc<dyn crate::providers::LightProvider>>,
+    > = std::collections::HashMap::new();
     let mut jobs = Vec::new();
     for m in members {
         if covered.contains(&m.light_id) {
             continue;
         }
-        let provider = match build_provider(state, &m.provider_type, &m.credentials) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::error!("room state: provider build failed: {e:#}");
-                failed += 1;
-                continue;
-            }
+        let provider = providers
+            .entry(m.credentials.clone())
+            .or_insert_with(
+                || match build_provider(state, &m.provider_type, &m.credentials) {
+                    Ok(p) => Some(Arc::from(p)),
+                    Err(e) => {
+                        tracing::error!("room state: provider build failed: {e:#}");
+                        None
+                    }
+                },
+            )
+            .clone();
+        let Some(provider) = provider else {
+            failed += 1;
+            continue;
         };
         let db = state.db.clone();
         let target = new_state.clone();

@@ -68,7 +68,12 @@ export interface ProviderType {
   provider_type: string;
   /** Human-facing name, e.g. "Philips Hue". */
   display_name: string;
-  kind: "light" | "audio";
+  /**
+   * UI grouping in the Add-provider menu. "light"/"audio" are single-domain
+   * device providers; "integration" is a higher-level platform adapter (e.g.
+   * Home Assistant) that can surface many device kinds.
+   */
+  kind: "light" | "audio" | "integration";
   /** Whether the UI should offer a "Scan network" button for this type. */
   supports_discovery: boolean;
   schema: CredentialField[];
@@ -294,6 +299,52 @@ export async function ungroupAudioDevice(id: string): Promise<string | null> {
   return (await res.text()) || `HTTP ${res.status}`;
 }
 
+// ── Power devices ─────────────────────────────────────────────────────────────
+
+/** Glyph-bearing flavour of a strictly-on/off device. */
+export type PowerKind = "switch" | "outlet" | "fan" | "toggle" | "generic";
+
+export interface PowerState {
+  on: boolean;
+  reachable?: boolean;
+}
+
+/** A strictly on/off device (switch, plug, fan, boolean helper). Its only state
+ * is `on`; `kind` drives the glyph, not behaviour. */
+export interface PowerDevice {
+  id: string;
+  provider_id: string;
+  /** Provider-native id (e.g. an HA entity_id). */
+  device_id: string;
+  name: string;
+  kind: PowerKind;
+  state: PowerState;
+  last_seen?: string;
+}
+
+export async function getPowerDevices(): Promise<PowerDevice[]> {
+  const res = await fetch("/api/power/devices");
+  if (!res.ok) return [];
+  return res.json();
+}
+
+/** Live read — round-trips to the device and refreshes the cache. */
+export async function getPowerDevice(id: string): Promise<PowerDevice | null> {
+  const res = await fetch(`/api/power/devices/${id}`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function setPowerState(id: string, on: boolean): Promise<string | null> {
+  const res = await fetch(`/api/power/devices/${id}/state`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ on }),
+  });
+  if (res.ok) return null;
+  return (await res.text()) || `HTTP ${res.status}`;
+}
+
 /** Re-run a provider's device discovery (lights or audio). */
 export async function discoverProvider(id: string): Promise<{ discovered: number }> {
   const res = await fetch(`/api/providers/${id}/discover`, { method: "POST" });
@@ -432,6 +483,8 @@ export interface Room {
   /** Audio devices this room controls (volume/mute fans out to all), each with
    * its per-room volume offset. */
   audio_devices: RoomAudioMember[];
+  /** Power devices (switches/plugs/fans) the room contains. */
+  power_device_ids: string[];
   /** Disabled rooms are hidden from the Dashboard/Floor Plan; managed in Settings. */
   enabled: boolean;
 }
@@ -471,11 +524,13 @@ export interface ProviderGroupInfo {
   provider_id: string;
   provider_group_id: string;
   name: string;
-  /** Which domain's devices this mirror groups. */
+  /** The group's primary domain label; an area can still mix domains (see the
+   * `*_ids` lists). */
   domain: "light" | "audio";
   light_ids: string[];
-  /** Member audio devices (audio groups); empty for light groups. */
   audio_device_ids: string[];
+  /** Member power devices (switches/plugs/fans). */
+  power_device_ids: string[];
 }
 
 export async function getRooms(): Promise<Room[]> {
@@ -537,6 +592,15 @@ export async function setRoomLinks(id: string, provider_group_ids: string[]): Pr
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ provider_group_ids }),
+  });
+}
+
+/** Replace the room's power-device membership (switches/plugs/fans). */
+export async function setRoomPowerDevices(id: string, power_device_ids: string[]): Promise<void> {
+  await fetch(`/api/rooms/${id}/power`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ power_device_ids }),
   });
 }
 

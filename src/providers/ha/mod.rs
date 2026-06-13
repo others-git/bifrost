@@ -1,48 +1,50 @@
-//! Home Assistant integration — **DRAFT for review, not yet wired in**.
+//! Home Assistant integration — a **"high-class" provider**: one adapter that
+//! surfaces *any* of HA's ~1000 integrations as Bifrost devices, plus HA Areas
+//! as `ProviderGroup`s that wrap into Bifrost Rooms via the shared Sync flow.
+//! Where the other providers each speak one device protocol, HA inherits the
+//! whole HA platform through a single credential — while native Hue stays
+//! direct for reliability. See `references/ha_*.md` for the API specs.
 //!
-//! Adapts a Home Assistant instance into Bifrost as a single provider that
-//! surfaces both lights (`light.*` entities → `Light`) and audio
-//! (`media_player.*` entities → `AudioDevice`), plus HA Areas as
-//! `ProviderGroup`s that wrap into Bifrost Rooms. The point is to inherit HA's
-//! ~1000 integrations (incl. its own Sonos/Onkyo) through one adapter instead
-//! of hand-writing each provider — while native Hue stays direct for
-//! reliability. See `references/ha_*.md` for the API specs this is built from.
+//! ## What's wired today
+//! - **Lights:** `light.*` entities → `Light` (the `LightProvider` impl), so any
+//!   light HA controls (Zigbee, Z-Wave, Wi-Fi, …) becomes a Bifrost light.
+//! - **Areas → Rooms:** `discover_groups` maps HA Areas to `ProviderGroup`s, so
+//!   the provider's **Sync** button mirrors HA's room structure into Bifrost
+//!   Rooms, exactly like Hue rooms/zones.
+//! - Registered as a **light-domain** factory in `default_registry()`.
 //!
-//! ## Transport choice: REST, not WebSocket (for now)
-//! This draft talks to the REST API (`GET /api/states`, `POST /api/services/*`,
-//! `POST /api/template`). That slots straight into the existing **poll**
-//! connection model with zero new connection-manager machinery, and
-//! `/api/template` covers Area→entity mapping without needing the WebSocket
-//! registry. A later iteration can add a WS `subscribe_events` push manager
-//! (mirroring Onkyo's `AudioConnectionMode::Push`) for instant updates.
+//! ## On hold (implemented, not registered)
+//! - **Audio:** the `AudioProvider` impl + `HaAudioFactory` (`media_player.*` →
+//!   `AudioDevice`, grouping, transport) are kept and tested, but **not**
+//!   registered while audio work is paused. Registering `HaAudioFactory`
+//!   alongside the light factory is the only step to bring HA audio online — at
+//!   which point the registry's light-XOR-audio assumption for one
+//!   `provider_type` (the `is_known` / `is_known_audio` branch in the Sync and
+//!   startup paths) needs auditing so one HA row can own both `lights` and
+//!   `audio_devices`.
 //!
-//! ## Decisions to resolve before wiring in (why this file isn't `mod`-declared)
-//! 1. **One type, two domains.** `ProviderRegistry` assumes a `provider_type`
-//!    belongs to *either* the light map *or* the audio map (`is_known` xor
-//!    `is_known_audio`). HA is both. Cleanest fix: allow a type in both maps
-//!    and register an `Ha*Factory` in each (done below); audit the handful of
-//!    call sites that branch on `is_known_audio` so one HA provider row can own
-//!    rows in both `lights` and `audio_devices`.
-//! 2. **`Provider` enum.** `models::Provider` is a closed enum; add `Ha` and
-//!    handle the new arm wherever it's matched.
-//! 3. **De-dup.** If a user has Hue both natively *and* via HA, devices double
-//!    up. Decide on a guard (e.g. warn, or let Rooms membership de-dupe).
+//! ## Transport: REST poll now, WebSocket push later
+//! Talks to the REST API (`GET /api/states`, `POST /api/services/*`,
+//! `POST /api/template`) under the existing **poll** model — no new
+//! connection-manager machinery, and `/api/template` covers Area→entity mapping
+//! without the WebSocket registry. The next increment is a WS `subscribe_events`
+//! push manager (mirroring Onkyo's `AudioConnectionMode::Push`) for instant
+//! state — see `references/ha_websocket_api.md`.
 //!
-//! ## Wiring checklist (once the above are decided)
-//! - add `pub mod ha;` to `src/providers/mod.rs`
-//! - add `Provider::Ha` to `src/models/mod.rs` (+ match arms)
-//! - register `HaLightFactory` and `HaAudioFactory` in `default_registry()`
-//! - add the row to the Current providers table in `CLAUDE.md`
-//! - the wiremock tests at the bottom run as soon as the module is declared
+//! ## Known limitation
+//! - **De-dup:** a device exposed *both* natively (e.g. Hue) *and* via HA shows
+//!   up twice. For now, leave it to Rooms membership to de-dupe; a provider-level
+//!   guard can come later.
 
 use crate::models::audio::{
     AudioCapabilities, AudioCommand, AudioDevice, AudioDeviceKind, AudioState, NowPlaying,
     PlayState, TransportCmd,
 };
+use crate::models::power::{PowerDevice, PowerKind, PowerState};
 use crate::models::{Color, Light, LightCapabilities, LightState, Provider};
 use crate::providers::{
-    AudioProvider, AudioProviderFactory, CredentialField, FieldKind, LightProvider, ProviderFactory,
-    ProviderGroup,
+    AudioProvider, AudioProviderFactory, CredentialField, FieldKind, LightProvider, PowerProvider,
+    PowerProviderFactory, ProviderFactory, ProviderGroup,
 };
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -55,6 +57,9 @@ use uuid::Uuid;
 
 const LIGHT_PREFIX: &str = "light.";
 const MEDIA_PREFIX: &str = "media_player.";
+/// HA entity domains that map onto Bifrost's strictly-on/off `PowerDevice`.
+/// `homeassistant.turn_on`/`turn_off` works uniformly across all of them.
+const POWER_PREFIXES: &[&str] = &["switch.", "fan.", "input_boolean."];
 
 // `MediaPlayerEntityFeature` bits we care about (see ha_media_player_entity.md).
 const FEAT_PREVIOUS_TRACK: u64 = 16;
@@ -179,9 +184,10 @@ impl HaProvider {
         Ok(text)
     }
 
-    /// Areas containing entities with `prefix`, as `ProviderGroup`s. Shared by
-    /// both the light and audio `discover_groups` impls.
-    async fn discover_groups_for(&self, prefix: &str) -> Result<Vec<ProviderGroup>> {
+    /// Areas containing entities whose id starts with any of `prefixes`, as
+    /// `ProviderGroup`s. Shared by the light, audio, and power `discover_groups`
+    /// impls (each passes the entity domains it owns).
+    async fn discover_groups_for(&self, prefixes: &[&str]) -> Result<Vec<ProviderGroup>> {
         // Render the area→entities map as JSON in one round-trip; `/api/states`
         // doesn't carry area_id, but templates expose the registry.
         let template = "\
@@ -200,7 +206,7 @@ impl HaProvider {
                 let members: Vec<String> = a
                     .entities
                     .into_iter()
-                    .filter(|e| e.starts_with(prefix))
+                    .filter(|e| prefixes.iter().any(|p| e.starts_with(p)))
                     .collect();
                 if members.is_empty() {
                     return None; // areas with no devices of this domain are noise
@@ -252,7 +258,12 @@ fn attr_str_vec(attrs: &Value, key: &str) -> Vec<String> {
     attrs
         .get(key)
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -366,7 +377,10 @@ fn audio_capabilities(attrs: &Value) -> AudioCapabilities {
     let has = |bit: u64| feat & bit != 0;
     AudioCapabilities {
         sources: has(FEAT_SELECT_SOURCE),
-        transport: has(FEAT_PLAY) || has(FEAT_PAUSE) || has(FEAT_NEXT_TRACK) || has(FEAT_PREVIOUS_TRACK),
+        transport: has(FEAT_PLAY)
+            || has(FEAT_PAUSE)
+            || has(FEAT_NEXT_TRACK)
+            || has(FEAT_PREVIOUS_TRACK),
         now_playing: attrs.get("media_title").is_some(),
         // browse_media exists but is richer than Bifrost "favorites"; map later.
         favorites: false,
@@ -407,6 +421,44 @@ fn transport_service(cmd: TransportCmd) -> &'static str {
     }
 }
 
+// ── Power mapping ──────────────────────────────────────────────────────────────
+
+/// Classify a power entity into a glyph-bearing `PowerKind` from its domain
+/// (the `entity_id` prefix) and, for switches, HA's `device_class`.
+fn power_kind(entity_id: &str, attrs: &Value) -> PowerKind {
+    if entity_id.starts_with("fan.") {
+        PowerKind::Fan
+    } else if entity_id.starts_with("input_boolean.") {
+        PowerKind::Toggle
+    } else if entity_id.starts_with("switch.") {
+        match attr_str(attrs, "device_class").as_deref() {
+            Some("outlet") => PowerKind::Outlet,
+            _ => PowerKind::Switch,
+        }
+    } else {
+        PowerKind::Generic
+    }
+}
+
+fn parse_power_state(e: &HaEntity) -> PowerState {
+    PowerState {
+        on: e.state == "on",
+        reachable: Some(e.state != "unavailable"),
+    }
+}
+
+fn entity_to_power(e: HaEntity) -> PowerDevice {
+    let state = parse_power_state(&e);
+    let kind = power_kind(&e.entity_id, &e.attributes);
+    PowerDevice {
+        id: Uuid::new_v4(),
+        kind,
+        name: friendly_name(&e.entity_id, &e.attributes),
+        provider_id: e.entity_id.clone(),
+        state,
+    }
+}
+
 // ── LightProvider impl ────────────────────────────────────────────────────────
 
 #[async_trait]
@@ -431,7 +483,9 @@ impl LightProvider for HaProvider {
 
     async fn set_state(&self, device_id: &str, state: &LightState) -> Result<()> {
         if !state.on {
-            return self.call_service("light", "turn_off", device_id, json!({})).await;
+            return self
+                .call_service("light", "turn_off", device_id, json!({}))
+                .await;
         }
         let mut data = json!({});
         if let Some(b) = state.brightness {
@@ -448,7 +502,7 @@ impl LightProvider for HaProvider {
     }
 
     async fn discover_groups(&self) -> Result<Vec<ProviderGroup>> {
-        self.discover_groups_for(LIGHT_PREFIX).await
+        self.discover_groups_for(&[LIGHT_PREFIX]).await
     }
 }
 
@@ -478,7 +532,8 @@ impl AudioProvider for HaProvider {
         // Power first, so "power on + volume" works from standby (matches Onkyo).
         if let Some(power) = cmd.power {
             let svc = if power { "turn_on" } else { "turn_off" };
-            self.call_service("media_player", svc, device_id, json!({})).await?;
+            self.call_service("media_player", svc, device_id, json!({}))
+                .await?;
         }
         if let Some(v) = cmd.volume {
             self.call_service(
@@ -529,11 +584,48 @@ impl AudioProvider for HaProvider {
     }
 
     async fn ungroup(&self, device_id: &str) -> Result<()> {
-        self.call_service("media_player", "unjoin", device_id, json!({})).await
+        self.call_service("media_player", "unjoin", device_id, json!({}))
+            .await
     }
 
     async fn discover_groups(&self) -> Result<Vec<ProviderGroup>> {
-        self.discover_groups_for(MEDIA_PREFIX).await
+        self.discover_groups_for(&[MEDIA_PREFIX]).await
+    }
+}
+
+// ── PowerProvider impl ─────────────────────────────────────────────────────────
+
+#[async_trait]
+impl PowerProvider for HaProvider {
+    fn name(&self) -> &str {
+        "homeassistant"
+    }
+
+    async fn discover(&self) -> Result<Vec<PowerDevice>> {
+        Ok(self
+            .get_states()
+            .await?
+            .into_iter()
+            .filter(|e| POWER_PREFIXES.iter().any(|p| e.entity_id.starts_with(p)))
+            .map(entity_to_power)
+            .collect())
+    }
+
+    async fn get_state(&self, device_id: &str) -> Result<PowerState> {
+        Ok(parse_power_state(&self.get_entity(device_id).await?))
+    }
+
+    async fn set_state(&self, device_id: &str, on: bool) -> Result<()> {
+        // The domain-agnostic `homeassistant.turn_on`/`turn_off` services route
+        // to the entity's own domain, so one call path covers switches, fans,
+        // and boolean helpers alike.
+        let service = if on { "turn_on" } else { "turn_off" };
+        self.call_service("homeassistant", service, device_id, json!({}))
+            .await
+    }
+
+    async fn discover_groups(&self) -> Result<Vec<ProviderGroup>> {
+        self.discover_groups_for(POWER_PREFIXES).await
     }
 }
 
@@ -583,6 +675,17 @@ impl ProviderFactory for HaLightFactory {
     fn credentials_schema(&self) -> &'static [CredentialField] {
         HA_CREDENTIALS
     }
+    /// HA is a local instance with no cloud rate limit, so poll faster than the
+    /// cloud-conservative default for a more responsive feel (until WS push lands).
+    fn connection_mode(&self) -> crate::providers::ConnectionMode {
+        crate::providers::ConnectionMode::Poll { interval_secs: 30 }
+    }
+    /// HA isn't a single-device-domain provider — it's a platform adapter that
+    /// can surface many device kinds — so it's filed under "Integrations" in the
+    /// add-provider UI rather than under "Lights".
+    fn domain(&self) -> crate::providers::ProviderDomain {
+        crate::providers::ProviderDomain::Integration
+    }
 }
 
 /// Audio side of the same HA adapter. Registered with `register_audio(...)`.
@@ -598,6 +701,27 @@ impl AudioProviderFactory for HaAudioFactory {
         "Home Assistant"
     }
     fn build(&self, credentials_json: &str) -> Result<Box<dyn AudioProvider>> {
+        Ok(Box::new(HaProvider::from_credentials(credentials_json)?))
+    }
+    fn credentials_schema(&self) -> &'static [CredentialField] {
+        HA_CREDENTIALS
+    }
+}
+
+/// Power side of the HA adapter (`switch.*` / `fan.*` / `input_boolean.*`).
+/// Registered with `register_power(...)` **alongside** `HaLightFactory` — the
+/// same `"ha"` provider row serves both domains. This is wired in
+/// `default_registry()` (unlike `HaAudioFactory`, which stays on hold).
+pub struct HaPowerFactory;
+
+impl PowerProviderFactory for HaPowerFactory {
+    fn provider_type(&self) -> &'static str {
+        "ha"
+    }
+    fn display_name(&self) -> &'static str {
+        "Home Assistant"
+    }
+    fn build(&self, credentials_json: &str) -> Result<Box<dyn PowerProvider>> {
         Ok(Box::new(HaProvider::from_credentials(credentials_json)?))
     }
     fn credentials_schema(&self) -> &'static [CredentialField] {
@@ -644,6 +768,22 @@ mod tests {
                 "supported_features": FEAT_PLAY | FEAT_GROUPING | FEAT_SELECT_SOURCE
             }
         })
+    }
+
+    /// A mix of power-domain entities (and one light, to prove it's excluded).
+    fn power_entities() -> Value {
+        json!([
+            { "entity_id": "switch.porch", "state": "on",
+              "attributes": { "friendly_name": "Porch" } },
+            { "entity_id": "switch.desk_plug", "state": "off",
+              "attributes": { "friendly_name": "Desk Plug", "device_class": "outlet" } },
+            { "entity_id": "fan.bedroom", "state": "on",
+              "attributes": { "friendly_name": "Bedroom Fan" } },
+            { "entity_id": "input_boolean.guest_mode", "state": "off",
+              "attributes": { "friendly_name": "Guest Mode" } },
+            // Not a power device — must be ignored by the power discover.
+            light_entity(),
+        ])
     }
 
     async fn mount_states(server: &MockServer, entities: Value) {
@@ -775,7 +915,10 @@ mod tests {
     async fn group_rejects_self() {
         let server = MockServer::start().await;
         let p = HaProvider::new_for_test(server.uri()).unwrap();
-        let err = p.group("media_player.x", "media_player.x").await.unwrap_err();
+        let err = p
+            .group("media_player.x", "media_player.x")
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("itself"), "{err}");
     }
 
@@ -801,13 +944,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discover_power_maps_switch_fan_and_boolean_with_kinds() {
+        let server = MockServer::start().await;
+        mount_states(&server, power_entities()).await;
+
+        let p = HaProvider::new_for_test(server.uri()).unwrap();
+        let devices = PowerProvider::discover(&p).await.unwrap();
+
+        // The light entity is excluded; the four power entities map through.
+        assert_eq!(devices.len(), 4);
+        let by_id = |id: &str| {
+            devices
+                .iter()
+                .find(|d| d.provider_id == id)
+                .unwrap_or_else(|| panic!("missing {id}"))
+        };
+        assert_eq!(by_id("switch.porch").kind, PowerKind::Switch);
+        assert!(by_id("switch.porch").state.on);
+        // device_class "outlet" upgrades a switch to the plug glyph.
+        assert_eq!(by_id("switch.desk_plug").kind, PowerKind::Outlet);
+        assert!(!by_id("switch.desk_plug").state.on);
+        assert_eq!(by_id("fan.bedroom").kind, PowerKind::Fan);
+        assert_eq!(by_id("input_boolean.guest_mode").kind, PowerKind::Toggle);
+        assert_eq!(by_id("fan.bedroom").name, "Bedroom Fan");
+    }
+
+    #[tokio::test]
+    async fn set_power_uses_domain_agnostic_homeassistant_service() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/services/homeassistant/turn_off"))
+            .and(body_string_contains("fan.bedroom"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let p = HaProvider::new_for_test(server.uri()).unwrap();
+        PowerProvider::set_state(&p, "fan.bedroom", false)
+            .await
+            .unwrap();
+
+        let reqs = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["entity_id"], "fan.bedroom");
+    }
+
+    #[tokio::test]
+    async fn discover_groups_power_maps_areas_with_power_members() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/template"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"[{"area_id":"garage","name":"Garage","entities":["switch.opener","fan.vent","light.x","sensor.y"]}]"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let p = HaProvider::new_for_test(server.uri()).unwrap();
+        let groups = PowerProvider::discover_groups(&p).await.unwrap();
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].name, "Garage");
+        // Only the power-domain entities are members; light/sensor are excluded.
+        assert_eq!(
+            groups[0].member_device_ids,
+            vec!["switch.opener", "fan.vent"]
+        );
+    }
+
+    #[tokio::test]
     async fn factory_build_ok_and_missing_token_errors() {
         assert!(
             HaLightFactory
                 .build(r#"{"base_url":"http://ha.local:8123","token":"abc"}"#)
                 .is_ok()
         );
-        let err = HaAudioFactory.build(r#"{"base_url":"http://ha.local:8123"}"#).unwrap_err();
+        assert!(
+            HaPowerFactory
+                .build(r#"{"base_url":"http://ha.local:8123","token":"abc"}"#)
+                .is_ok()
+        );
+        // `.err()` drops the Ok value (a `Box<dyn AudioProvider>`, which isn't
+        // `Debug`) so the error can be unwrapped.
+        let err = HaAudioFactory
+            .build(r#"{"base_url":"http://ha.local:8123"}"#)
+            .err()
+            .expect("missing token should fail to build");
         assert!(err.to_string().contains("base_url") || err.to_string().contains("token"));
     }
 }

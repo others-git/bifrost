@@ -4239,3 +4239,491 @@ async fn sonos_provider_reports_ready_status_not_unmanaged() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(helpers::response_json(resp).await["state"], "ready");
 }
+
+// ── Embedded MCP surface (/mcp) ──────────────────────────────────────────────
+
+/// POST a JSON-RPC message to the Streamable HTTP MCP endpoint with a Bearer
+/// key. The endpoint runs stateless + json-response, so each call is a plain
+/// request/response with an `application/json` body.
+fn mcp_request(key: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        // rmcp's Streamable HTTP transport requires a parseable Host header
+        // (DNS-rebinding guard); real HTTP clients always send one.
+        .header(header::HOST, "localhost")
+        .header(header::AUTHORIZATION, format!("Bearer {key}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn mcp_tool_call(key: &str, tool: &str, args: serde_json::Value) -> Request<Body> {
+    mcp_request(
+        key,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": tool, "arguments": args },
+        }),
+    )
+}
+
+/// Pull the first text content block out of a `tools/call` JSON-RPC response.
+fn mcp_result_text(body: &serde_json::Value) -> String {
+    body["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[tokio::test]
+async fn mcp_without_bearer_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::ACCEPT, "application/json, text/event-stream")
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn mcp_with_invalid_key_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(mcp_tool_call(
+            "bfr_not_a_real_key",
+            "get_home_state",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn mcp_tools_list_exposes_the_tool_set() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "mcp").await;
+
+    let resp = app
+        .oneshot(mcp_request(
+            &key,
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    let names: Vec<&str> = body["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    for expected in [
+        "get_home_state",
+        "set_light",
+        "set_room",
+        "apply_scene",
+        "set_audio",
+        "play_audio_favorite",
+        "group_speakers",
+    ] {
+        assert!(
+            names.contains(&expected),
+            "missing tool {expected} in {names:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn mcp_get_home_state_returns_snapshot() {
+    let bridge = wled_mock().await;
+    let (app, _light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "mcp").await;
+
+    let resp = app
+        .oneshot(mcp_tool_call(&key, "get_home_state", serde_json::json!({})))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&mcp_result_text(&body)).expect("tool returns JSON text");
+    // The seeded "Test Light" shows up in the lights array.
+    let light_names: Vec<&str> = snapshot["lights"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["name"].as_str().unwrap())
+        .collect();
+    assert!(light_names.contains(&"Test Light"), "{light_names:?}");
+    assert!(snapshot["rooms"].is_array());
+    assert!(snapshot["scenes"].is_array());
+    assert!(snapshot["audio_devices"].is_array());
+}
+
+#[tokio::test]
+async fn mcp_set_light_resolves_by_name_and_drives_provider() {
+    let bridge = wled_mock().await;
+    let (app, _light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "mcp").await;
+
+    // Resolve the light by a case-insensitive substring of its name.
+    let resp = app
+        .oneshot(mcp_tool_call(
+            &key,
+            "set_light",
+            serde_json::json!({ "light": "test", "brightness": 40.0, "color": "#ff8800" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["result"]["isError"], false, "tool errored: {body}");
+
+    // The provider actually received the state write.
+    let requests = bridge.received_requests().await.unwrap();
+    assert!(
+        requests.iter().any(|r| r.url.path() == "/json/state"),
+        "no set_state call reached the device"
+    );
+}
+
+#[tokio::test]
+async fn mcp_set_light_unknown_name_lists_available() {
+    let bridge = wled_mock().await;
+    let (app, _light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "mcp").await;
+
+    let resp = app
+        .oneshot(mcp_tool_call(
+            &key,
+            "set_light",
+            serde_json::json!({ "light": "nonexistent", "on": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["result"]["isError"], true);
+    // The error names the available light so the assistant can self-correct.
+    assert!(mcp_result_text(&body).contains("Test Light"));
+}
+
+// ── Power devices (HA multi-domain discover/control) ─────────────────────────
+
+/// A wiremock HA serving power entities plus the domain-agnostic toggle service.
+async fn ha_power_mock() -> wiremock::MockServer {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/states"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            { "entity_id": "switch.porch", "state": "on",
+              "attributes": { "friendly_name": "Porch" } },
+            { "entity_id": "fan.bedroom", "state": "off",
+              "attributes": { "friendly_name": "Bedroom Fan" } }
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/services/homeassistant/turn_off"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn power_devices_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/power/devices")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn v1_power_without_key_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/power/devices")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn discover_ha_populates_power_devices_with_kinds() {
+    let ha = ha_power_mock().await;
+    let (app, prov_id) = helpers::test_app_with_ha(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Discover runs across HA's domains (lights + power); the mock has only
+    // power entities, so the two switches/fans are what land.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/providers/{prov_id}/discover"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(helpers::response_json(resp).await["discovered"], 2);
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/power/devices", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    let arr = body.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    let porch = arr
+        .iter()
+        .find(|d| d["device_id"] == "switch.porch")
+        .unwrap();
+    assert_eq!(porch["kind"], "switch");
+    assert_eq!(porch["state"]["on"], true);
+    let fan = arr
+        .iter()
+        .find(|d| d["device_id"] == "fan.bedroom")
+        .unwrap();
+    assert_eq!(fan["kind"], "fan");
+    assert_eq!(fan["state"]["on"], false);
+}
+
+#[tokio::test]
+async fn set_power_device_drives_ha_toggle_service() {
+    let ha = ha_power_mock().await;
+    let (app, prov_id) = helpers::test_app_with_ha(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    app.clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/providers/{prov_id}/discover"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/power/devices", &cookie))
+        .await
+        .unwrap();
+    let body = helpers::response_json(resp).await;
+    let porch_id = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["device_id"] == "switch.porch")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/power/devices/{porch_id}/state"),
+            &cookie,
+            r#"{"on":false}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let reqs = ha.received_requests().await.unwrap();
+    assert!(
+        reqs.iter()
+            .any(|r| r.url.path() == "/api/services/homeassistant/turn_off"),
+        "no homeassistant.turn_off call reached HA"
+    );
+}
+
+#[tokio::test]
+async fn room_power_membership_roundtrips_and_lists() {
+    let ha = ha_power_mock().await;
+    let (app, prov_id) = helpers::test_app_with_ha(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Discover HA's power devices.
+    app.clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/providers/{prov_id}/discover"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/power/devices", &cookie))
+        .await
+        .unwrap();
+    let devices = helpers::response_json(resp).await;
+    let porch_id = devices.as_array().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Pick the porch switch specifically.
+    let porch_id = devices
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["device_id"] == "switch.porch")
+        .map(|d| d["id"].as_str().unwrap().to_string())
+        .unwrap_or(porch_id);
+
+    // Create a room.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/rooms",
+            &cookie,
+            r#"{"name":"Garage","light_ids":[]}"#,
+        ))
+        .await
+        .unwrap();
+    let room_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Assign the power device to the room.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/power"),
+            &cookie,
+            &format!(r#"{{"power_device_ids":["{porch_id}"]}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // The room now lists it (session shape) …
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/rooms", &cookie))
+        .await
+        .unwrap();
+    let rooms = helpers::response_json(resp).await;
+    let room = rooms
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == room_id)
+        .unwrap();
+    assert_eq!(room["power_device_ids"], serde_json::json!([porch_id]));
+
+    // … and an unknown device id is rejected.
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/power"),
+            &cookie,
+            r#"{"power_device_ids":["nope"]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn sync_groups_mirrors_ha_area_with_only_power_devices() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let ha = ha_power_mock().await; // serves /api/states with switch.porch + fan.bedroom
+    // An Area that contains a switch (and a light that isn't discovered) — it
+    // must still sync on the strength of its power member.
+    Mock::given(method("POST"))
+        .and(path("/api/template"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"[{"area_id":"garage","name":"Garage","entities":["switch.porch","light.ghost","sensor.x"]}]"#,
+        ))
+        .mount(&ha)
+        .await;
+
+    let (app, prov_id) = helpers::test_app_with_ha(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Discover devices, then sync areas → rooms.
+    app.clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/providers/{prov_id}/discover"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/providers/{prov_id}/sync-groups"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["synced"], 1, "the Garage area should sync: {body}");
+
+    // A "Garage" room now exists and carries the switch as a power member (via
+    // the synced link, not direct membership).
+    let resp = app
+        .oneshot(helpers::authed_get("/api/rooms", &cookie))
+        .await
+        .unwrap();
+    let rooms = helpers::response_json(resp).await;
+    let garage = rooms
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "Garage")
+        .expect("Garage room created from the synced area");
+    assert_eq!(
+        garage["power_device_ids"].as_array().unwrap().len(),
+        1,
+        "Garage should contain the porch switch via its link: {garage}"
+    );
+}

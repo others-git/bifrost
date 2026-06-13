@@ -1,6 +1,7 @@
 pub mod discovery;
 pub mod govee;
 pub mod govee_lan;
+pub mod ha;
 pub mod hue;
 pub mod onkyo;
 pub mod shelly;
@@ -11,6 +12,7 @@ pub mod wled;
 use discovery::DeviceDiscovery;
 
 use crate::models::audio::{AudioCommand, AudioDevice, AudioEvent, AudioFavorite, AudioState};
+use crate::models::power::{PowerDevice, PowerState};
 use crate::models::{Light, LightState};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -114,6 +116,28 @@ pub trait AudioProvider: Send + Sync {
     }
 }
 
+/// Runtime interface for **power devices** — strictly on/off endpoints
+/// (switches, plugs, fans, boolean helpers). The shape mirrors `LightProvider`
+/// and `AudioProvider`, but the write is just a bool: this domain exists
+/// precisely so simple toggles don't carry a light's or a receiver's unused
+/// state. Implemented today by the Home Assistant adapter, which surfaces HA's
+/// `switch.*` / `fan.*` / `input_boolean.*` entities through it.
+#[async_trait]
+pub trait PowerProvider: Send + Sync {
+    fn name(&self) -> &str;
+    async fn discover(&self) -> Result<Vec<PowerDevice>>;
+    async fn get_state(&self, device_id: &str) -> Result<PowerState>;
+    async fn set_state(&self, device_id: &str, on: bool) -> Result<()>;
+
+    /// Provider-native groups (rooms/areas) containing power devices, mirrored
+    /// and wrapped by Bifrost Rooms — the power analog of
+    /// `LightProvider::discover_groups`. `member_device_ids` hold power device
+    /// ids (matching `PowerDevice::provider_id`). Default: none.
+    async fn discover_groups(&self) -> Result<Vec<ProviderGroup>> {
+        Ok(vec![])
+    }
+}
+
 /// How the runtime keeps an audio provider's state fresh.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AudioConnectionMode {
@@ -149,6 +173,25 @@ pub trait AudioProviderFactory: Send + Sync {
     fn discoverer(&self) -> Option<Box<dyn DeviceDiscovery>> {
         None
     }
+}
+
+/// Factory for one power provider type. A `provider_type` may register a power
+/// factory **in addition to** a light/audio one — that's how a single
+/// integration (Home Assistant) serves several device domains from one provider
+/// row. Power devices are polled like light pollers; there is no push variant
+/// yet, so there is no separate connection-mode enum.
+pub trait PowerProviderFactory: Send + Sync {
+    /// The stable string key stored in `providers.provider_type` (e.g. `"ha"`).
+    fn provider_type(&self) -> &'static str;
+
+    /// Human-facing name for the UI. Defaults to the type key.
+    fn display_name(&self) -> &'static str {
+        self.provider_type()
+    }
+
+    fn build(&self, credentials_json: &str) -> Result<Box<dyn PowerProvider>>;
+
+    fn credentials_schema(&self) -> &'static [CredentialField];
 }
 
 // ── Credential schema (for the setup UI) ───────────────────────────────────
@@ -214,6 +257,13 @@ pub trait ProviderFactory: Send + Sync {
         }
     }
 
+    /// How this type is grouped in the "Add provider" UI. Defaults to `Light`
+    /// (this is a `ProviderFactory`); a platform adapter that surfaces many
+    /// device kinds (e.g. Home Assistant) overrides to `Integration`.
+    fn domain(&self) -> ProviderDomain {
+        ProviderDomain::Light
+    }
+
     /// Network auto-detect for this provider type. Default: none — providers
     /// with a LAN discovery protocol override.
     fn discoverer(&self) -> Option<Box<dyn DeviceDiscovery>> {
@@ -229,6 +279,7 @@ pub trait ProviderFactory: Send + Sync {
 pub struct ProviderRegistry {
     factories: HashMap<&'static str, Box<dyn ProviderFactory>>,
     audio_factories: HashMap<&'static str, Box<dyn AudioProviderFactory>>,
+    power_factories: HashMap<&'static str, Box<dyn PowerProviderFactory>>,
 }
 
 impl ProviderRegistry {
@@ -236,6 +287,7 @@ impl ProviderRegistry {
         Self {
             factories: HashMap::new(),
             audio_factories: HashMap::new(),
+            power_factories: HashMap::new(),
         }
     }
 
@@ -247,6 +299,31 @@ impl ProviderRegistry {
     pub fn register_audio<F: AudioProviderFactory + 'static>(&mut self, factory: F) {
         self.audio_factories
             .insert(factory.provider_type(), Box::new(factory));
+    }
+
+    /// Register the power domain for a provider type. A type registered here as
+    /// well as in `register` (light) is served across both domains from one
+    /// provider row — the multi-domain integration case (Home Assistant).
+    pub fn register_power<F: PowerProviderFactory + 'static>(&mut self, factory: F) {
+        self.power_factories
+            .insert(factory.provider_type(), Box::new(factory));
+    }
+
+    /// Build a live power provider from a type string + decrypted credentials JSON.
+    pub fn build_power(
+        &self,
+        provider_type: &str,
+        credentials_json: &str,
+    ) -> Result<Box<dyn PowerProvider>> {
+        self.power_factories
+            .get(provider_type)
+            .ok_or_else(|| anyhow!("unknown power provider type: {provider_type}"))?
+            .build(credentials_json)
+    }
+
+    /// Returns true if `provider_type` serves the power domain.
+    pub fn is_known_power(&self, provider_type: &str) -> bool {
+        self.power_factories.contains_key(provider_type)
     }
 
     /// Build a live audio provider from a type string + decrypted credentials JSON.
@@ -266,12 +343,16 @@ impl ProviderRegistry {
         self.audio_factories.contains_key(provider_type)
     }
 
-    /// Human-facing name for a provider type (light or audio), if registered.
+    /// Human-facing name for a provider type (light, audio, or power), if
+    /// registered. A multi-domain type (HA) resolves via its light factory.
     pub fn display_name(&self, provider_type: &str) -> Option<&'static str> {
         if let Some(f) = self.factories.get(provider_type) {
             return Some(f.display_name());
         }
-        self.audio_factories
+        if let Some(f) = self.audio_factories.get(provider_type) {
+            return Some(f.display_name());
+        }
+        self.power_factories
             .get(provider_type)
             .map(|f| f.display_name())
     }
@@ -318,7 +399,10 @@ impl ProviderRegistry {
         if let Some(f) = self.factories.get(provider_type) {
             return Some(f.credentials_schema());
         }
-        self.audio_factories
+        if let Some(f) = self.audio_factories.get(provider_type) {
+            return Some(f.credentials_schema());
+        }
+        self.power_factories
             .get(provider_type)
             .map(|f| f.credentials_schema())
     }
@@ -339,7 +423,7 @@ impl ProviderRegistry {
             .map(|f| ProviderTypeInfo {
                 provider_type: f.provider_type(),
                 display_name: f.display_name(),
-                kind: ProviderDomain::Light,
+                kind: f.domain(),
                 supports_discovery: f.discoverer().is_some(),
                 schema: f.credentials_schema().to_vec(),
             })
@@ -356,12 +440,17 @@ impl ProviderRegistry {
     }
 }
 
-/// Which domain a provider type belongs to.
+/// How a provider type is grouped in the "Add provider" UI. Most providers map
+/// to a single device domain (`Light`/`Audio`); an `Integration` is a
+/// higher-level platform adapter (e.g. Home Assistant) that can surface many
+/// device kinds at once, so it gets its own category rather than being filed
+/// under one domain.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderDomain {
     Light,
     Audio,
+    Integration,
 }
 
 impl Default for ProviderRegistry {
@@ -393,6 +482,12 @@ pub fn default_registry() -> ProviderRegistry {
     r.register(shelly::ShellyProviderFactory);
     r.register(tasmota::TasmotaProviderFactory);
     r.register(wled::WledProviderFactory);
+    // Home Assistant serves multiple device domains from one provider row:
+    // lights and power (switch/fan/plug) are registered; the audio
+    // (media_player) factory is implemented but left unregistered while audio
+    // work is on hold — see `providers::ha`.
+    r.register(ha::HaLightFactory);
+    r.register_power(ha::HaPowerFactory);
     r.register_audio(onkyo::OnkyoProviderFactory);
     r.register_audio(sonos::SonosProviderFactory);
     r
@@ -512,6 +607,43 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn default_registry_registers_ha_on_light_domain_only() {
+        let reg = default_registry();
+        // HA is a light-domain provider for now; its audio factory is on hold.
+        assert!(reg.is_known("ha"));
+        assert!(!reg.is_known_audio("ha"));
+        // Builds from URL + token without touching the network.
+        assert!(
+            reg.build("ha", r#"{"base_url":"http://ha.local:8123","token":"t"}"#)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn default_registry_serves_ha_on_light_and_power_domains() {
+        let reg = default_registry();
+        // One "ha" provider row serves multiple device domains.
+        assert!(reg.is_known("ha"), "light domain");
+        assert!(reg.is_known_power("ha"), "power domain");
+        assert!(!reg.is_known_audio("ha"), "audio still on hold");
+        assert!(
+            reg.build_power("ha", r#"{"base_url":"http://ha.local:8123","token":"t"}"#)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn ha_polls_faster_than_the_cloud_default() {
+        let reg = default_registry();
+        match reg.connection_mode("ha") {
+            Some(ConnectionMode::Poll { interval_secs }) => {
+                assert!(interval_secs < DEFAULT_POLL_INTERVAL_SECS);
+            }
+            other => panic!("expected HA to poll, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn hue_uses_sse_mode_all_others_poll() {
         let reg = default_registry();
         assert_eq!(reg.connection_mode("hue"), Some(ConnectionMode::Sse));
@@ -568,6 +700,9 @@ pub(crate) mod tests {
         assert_eq!(kind_of("hue"), ProviderDomain::Light);
         assert_eq!(kind_of("onkyo"), ProviderDomain::Audio);
         assert_eq!(kind_of("sonos"), ProviderDomain::Audio);
+        // HA is a platform adapter, surfaced under its own "Integration" group
+        // rather than filed under Lights despite being a light-domain provider.
+        assert_eq!(kind_of("ha"), ProviderDomain::Integration);
     }
 
     #[test]

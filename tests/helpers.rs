@@ -243,6 +243,38 @@ pub async fn test_app_with_hue_light(base_url: &str) -> (Router, String) {
     (build_app(state), light_id)
 }
 
+/// Test app with a configured password plus one Home Assistant provider whose
+/// `base_url` points at `base_url` (a wiremock server). Nothing is discovered
+/// yet — call `POST /api/providers/{id}/discover` to populate. Returns the app
+/// and the HA provider's id.
+#[allow(dead_code)]
+pub async fn test_app_with_ha(base_url: &str) -> (Router, String) {
+    let db = test_db().await;
+    let hash = hash_password(TEST_PASSWORD);
+    sqlx::query("INSERT INTO config (id, password_hash, setup_complete) VALUES (1, ?, 1)")
+        .bind(&hash)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let registry = providers::default_registry();
+    let state = Arc::new(AppState::new(db.clone(), TEST_SECRET, registry));
+
+    let creds = format!(r#"{{"base_url":"{base_url}","token":"test-token"}}"#);
+    let enc = state.encrypt_credentials(&creds).unwrap();
+    let provider_id = "prov-ha-1".to_string();
+    sqlx::query(
+        "INSERT INTO providers (id, provider_type, name, credentials) VALUES (?, 'ha', 'HA', ?)",
+    )
+    .bind(&provider_id)
+    .bind(&enc)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    (build_app(state), provider_id)
+}
+
 pub async fn response_json(resp: Response<Body>) -> serde_json::Value {
     let bytes = http_body_util::BodyExt::collect(resp.into_body())
         .await

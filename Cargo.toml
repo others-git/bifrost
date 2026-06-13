@@ -1,6 +1,6 @@
 [package]
 name = "bifrost"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 
 [lib]
@@ -67,6 +67,9 @@ hex = "0.4"
 # deterministic hashing for API key lookup (keys are high-entropy)
 sha2 = "0.10"
 futures-util = "0.3"
+# embedded MCP server (Streamable HTTP) — the /mcp surface over the service layer
+rmcp = { version = "1.7.0", features = ["server", "transport-streamable-http-server", "schemars"] }
+schemars = "1" # JSON Schema for MCP tool argument structs
 
 [dev-dependencies]
 wiremock = "0.6"

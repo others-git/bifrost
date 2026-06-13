@@ -21,9 +21,11 @@ use crate::api::palette_scenes::{
     create_scene_from_room, delete_scene as delete_palette_scene,
     list_scenes as list_palette_scenes,
 };
-use crate::api::rooms::{
-    apply_uniform_state, effective_audio_members, effective_member_ids, effective_members,
+use crate::api::power::{
+    PowerCommand, apply_power_state, get_power_device_live, list_all_power_devices,
+    set_power_status,
 };
+use crate::api::rooms::{apply_uniform_state, effective_members, list_public_rooms};
 use crate::models::LightState;
 use axum::{
     Json, Router,
@@ -32,8 +34,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post, put},
 };
-use serde::{Deserialize, Serialize};
-use sqlx::Row;
+use serde::Deserialize;
 use std::sync::Arc;
 
 pub fn router() -> Router<Arc<AppState>> {
@@ -57,6 +58,9 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route("/audio/devices/{id}/group", post(group_audio))
         .route("/audio/devices/{id}/ungroup", post(ungroup_audio))
+        .route("/power/devices", get(list_power))
+        .route("/power/devices/{id}", get(get_power))
+        .route("/power/devices/{id}/state", put(set_power))
 }
 
 /// Shared 401 guard. Returns `Err(401)` when the Bearer key is missing/invalid.
@@ -108,44 +112,11 @@ async fn set_light_state(
 
 // ── Rooms ────────────────────────────────────────────────────────────────────
 
-#[derive(Serialize)]
-struct V1Room {
-    id: String,
-    name: String,
-    /// Effective members (linked provider-group lights ∪ direct lights).
-    light_ids: Vec<String>,
-    /// Audio devices the room controls — drive each via /audio/devices/{id}/state.
-    audio_device_ids: Vec<String>,
-}
-
 async fn list_rooms(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
     if let Err(s) = auth(&state, &headers).await {
         return s.into_response();
     }
-
-    // Disabled rooms are hidden from the public API too.
-    let rows = sqlx::query("SELECT id, name FROM rooms WHERE enabled = 1 ORDER BY created_at")
-        .fetch_all(&state.db)
-        .await
-        .unwrap_or_default();
-
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let id: String = row.get("id");
-        let light_ids = effective_member_ids(&state, &id).await;
-        let audio_device_ids = effective_audio_members(&state, &id)
-            .await
-            .into_iter()
-            .map(|m| m.audio_device_id)
-            .collect();
-        out.push(V1Room {
-            name: row.get("name"),
-            light_ids,
-            audio_device_ids,
-            id,
-        });
-    }
-    Json(out).into_response()
+    Json(list_public_rooms(&state).await).into_response()
 }
 
 async fn set_room_state(
@@ -343,4 +314,43 @@ async fn ungroup_audio(
         return s.into_response();
     }
     group_response(ungroup_device(&state, &id).await)
+}
+
+// ── Power devices ──────────────────────────────────────────────────────────────
+
+async fn list_power(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(s) = auth(&state, &headers).await {
+        return s.into_response();
+    }
+    match list_all_power_devices(&state).await {
+        Ok(devices) => Json(devices).into_response(),
+        Err(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn get_power(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(s) = auth(&state, &headers).await {
+        return s.into_response();
+    }
+    match get_power_device_live(&state, &id).await {
+        Ok(Some(device)) => Json(device).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn set_power(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(cmd): Json<PowerCommand>,
+) -> impl IntoResponse {
+    if let Err(s) = auth(&state, &headers).await {
+        return s.into_response();
+    }
+    set_power_status(apply_power_state(&state, &id, cmd.on).await).into_response()
 }

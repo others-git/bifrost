@@ -470,6 +470,73 @@ async fn provider_status(
 
 // ── Sync provider groups (rooms/zones mirrors) ─────────────────────────────
 
+/// A device domain a provider group's members can belong to. A single area
+/// (HA) may carry members in several of these at once.
+#[derive(Clone, Copy)]
+enum SyncDomain {
+    Light,
+    Audio,
+    Power,
+}
+
+/// An area merged across the domains that reported it — one mirror, with members
+/// grouped by the domain they belong to.
+struct MergedArea {
+    provider_group_id: String,
+    name: String,
+    grouped_ref: Option<String>,
+    members: Vec<(SyncDomain, Vec<String>)>,
+}
+
+/// Match an area's `member_device_ids` (provider-native) to the local device
+/// rows of `domain` and (re)populate that domain's `provider_group_*` table.
+/// Table/column names are fixed per domain, so the formatted SQL is injection-free.
+async fn refresh_group_members(
+    state: &AppState,
+    provider_row_id: &str,
+    mirror_id: &str,
+    domain: SyncDomain,
+    member_device_ids: &[String],
+) {
+    let (device_table, member_table, member_col) = match domain {
+        SyncDomain::Light => ("lights", "provider_group_lights", "light_id"),
+        SyncDomain::Audio => (
+            "audio_devices",
+            "provider_group_audio_devices",
+            "audio_device_id",
+        ),
+        SyncDomain::Power => (
+            "power_devices",
+            "provider_group_power_devices",
+            "power_device_id",
+        ),
+    };
+    let _ = sqlx::query(&format!(
+        "DELETE FROM {member_table} WHERE provider_group_id = ?"
+    ))
+    .bind(mirror_id)
+    .execute(&state.db)
+    .await;
+    for device_id in member_device_ids {
+        if let Ok(Some(r)) = sqlx::query(&format!(
+            "SELECT id FROM {device_table} WHERE provider_id = ? AND device_id = ?"
+        ))
+        .bind(provider_row_id)
+        .bind(device_id)
+        .fetch_optional(&state.db)
+        .await
+        {
+            let _ = sqlx::query(&format!(
+                "INSERT OR IGNORE INTO {member_table} (provider_group_id, {member_col}) VALUES (?, ?)"
+            ))
+            .bind(mirror_id)
+            .bind(r.get::<String, _>("id"))
+            .execute(&state.db)
+            .await;
+        }
+    }
+}
+
 /// Refresh this provider's group mirrors and keep Rooms in step:
 /// - upsert `provider_groups` (names, native handles) and their members
 /// - rename-follow: a room still carrying its inherited name renames with
@@ -505,14 +572,46 @@ async fn sync_groups(
     let provider_type: String = row.get("provider_type");
     let credentials_enc: String = row.get("credentials");
 
-    // Audio providers (Sonos) mirror their rooms/zones through the same
-    // provider_groups + room_links machinery as lights; only the provider build
-    // and the member table differ by domain.
-    let is_audio = state.registry.is_known_audio(&provider_type);
-    let provider_groups = if is_audio {
+    // A provider can mirror its rooms/areas across several device domains (HA
+    // surfaces lights + power; an Area with only switches still has to sync).
+    // Gather each domain's groups, then merge by area id so one area → one
+    // mirror with members populated per domain. Hue (light) and Sonos (audio)
+    // serve a single domain, so this collapses to the old behaviour for them.
+    let mut domain_groups: Vec<(SyncDomain, Vec<crate::providers::ProviderGroup>)> = Vec::new();
+    if state.registry.is_known(&provider_type) {
+        match build_provider(&state, &provider_type, &credentials_enc) {
+            Ok(p) => match p.discover_groups().await {
+                Ok(g) => domain_groups.push((SyncDomain::Light, g)),
+                Err(e) => {
+                    tracing::error!("light group discovery error: {e:#}");
+                    return StatusCode::BAD_GATEWAY.into_response();
+                }
+            },
+            Err(e) => {
+                tracing::error!("failed to build provider: {e:#}");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        }
+    }
+    if state.registry.is_known_power(&provider_type) {
+        match crate::api::power::build_power_provider(&state, &provider_type, &credentials_enc) {
+            Ok(p) => match p.discover_groups().await {
+                Ok(g) => domain_groups.push((SyncDomain::Power, g)),
+                Err(e) => {
+                    tracing::error!("power group discovery error: {e:#}");
+                    return StatusCode::BAD_GATEWAY.into_response();
+                }
+            },
+            Err(e) => {
+                tracing::error!("failed to build power provider: {e:#}");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        }
+    }
+    if state.registry.is_known_audio(&provider_type) {
         match crate::api::audio::build_audio_provider(&state, &provider_type, &credentials_enc) {
             Ok(p) => match p.discover_groups().await {
-                Ok(g) => g,
+                Ok(g) => domain_groups.push((SyncDomain::Audio, g)),
                 Err(e) => {
                     tracing::error!("audio group discovery error: {e:#}");
                     return StatusCode::BAD_GATEWAY.into_response();
@@ -523,21 +622,35 @@ async fn sync_groups(
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
         }
-    } else {
-        match build_provider(&state, &provider_type, &credentials_enc) {
-            Ok(p) => match p.discover_groups().await {
-                Ok(g) => g,
-                Err(e) => {
-                    tracing::error!("group discovery error: {e:#}");
-                    return StatusCode::BAD_GATEWAY.into_response();
-                }
-            },
-            Err(e) => {
-                tracing::error!("failed to build provider: {e:#}");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    // Merge by area id, preserving first-seen order so room creation is stable.
+    let mut order: Vec<String> = Vec::new();
+    let mut merged: std::collections::HashMap<String, MergedArea> =
+        std::collections::HashMap::new();
+    for (dom, groups) in domain_groups {
+        for g in groups {
+            let entry = merged
+                .entry(g.provider_group_id.clone())
+                .or_insert_with(|| {
+                    order.push(g.provider_group_id.clone());
+                    MergedArea {
+                        provider_group_id: g.provider_group_id.clone(),
+                        name: g.name.clone(),
+                        grouped_ref: g.grouped_ref.clone(),
+                        members: Vec::new(),
+                    }
+                });
+            if entry.grouped_ref.is_none() {
+                entry.grouped_ref = g.grouped_ref.clone();
             }
+            entry.members.push((dom, g.member_device_ids));
         }
-    };
+    }
+    let provider_groups: Vec<MergedArea> = order
+        .into_iter()
+        .filter_map(|k| merged.remove(&k))
+        .collect();
 
     // Existing mirrors: provider_group_id → (mirror id, name)
     let existing: std::collections::HashMap<String, (String, String)> = sqlx::query(
@@ -594,55 +707,10 @@ async fn sync_groups(
             }
         };
 
-        // Refresh members (matched to discovered devices by device id). Audio
-        // groups populate provider_group_audio_devices; light groups the
-        // existing provider_group_lights.
-        if is_audio {
-            let _ =
-                sqlx::query("DELETE FROM provider_group_audio_devices WHERE provider_group_id = ?")
-                    .bind(&mirror_id)
-                    .execute(&state.db)
-                    .await;
-            for device_id in &pg.member_device_ids {
-                if let Ok(Some(r)) = sqlx::query(
-                    "SELECT id FROM audio_devices WHERE provider_id = ? AND device_id = ?",
-                )
-                .bind(&id)
-                .bind(device_id)
-                .fetch_optional(&state.db)
-                .await
-                {
-                    let _ = sqlx::query(
-                        "INSERT OR IGNORE INTO provider_group_audio_devices (provider_group_id, audio_device_id) VALUES (?, ?)",
-                    )
-                    .bind(&mirror_id)
-                    .bind(r.get::<String, _>("id"))
-                    .execute(&state.db)
-                    .await;
-                }
-            }
-        } else {
-            let _ = sqlx::query("DELETE FROM provider_group_lights WHERE provider_group_id = ?")
-                .bind(&mirror_id)
-                .execute(&state.db)
-                .await;
-            for device_id in &pg.member_device_ids {
-                if let Ok(Some(r)) =
-                    sqlx::query("SELECT id FROM lights WHERE provider_id = ? AND device_id = ?")
-                        .bind(&id)
-                        .bind(device_id)
-                        .fetch_optional(&state.db)
-                        .await
-                {
-                    let _ = sqlx::query(
-                        "INSERT OR IGNORE INTO provider_group_lights (provider_group_id, light_id) VALUES (?, ?)",
-                    )
-                    .bind(&mirror_id)
-                    .bind(r.get::<String, _>("id"))
-                    .execute(&state.db)
-                    .await;
-                }
-            }
+        // Refresh members for each domain this area carries (matched to local
+        // device rows by provider-native id).
+        for (dom, member_ids) in &pg.members {
+            refresh_group_members(&state, &id, &mirror_id, *dom, member_ids).await;
         }
 
         // Rename-follow: rooms still carrying the inherited name move with it.
@@ -817,9 +885,55 @@ async fn discover(
     let provider_type: String = row.get("provider_type");
     let credentials_enc: String = row.get("credentials");
 
-    // Audio providers populate audio_devices instead of lights.
-    if state.registry.is_known_audio(&provider_type) {
-        return match crate::api::audio::discover_audio_devices(
+    // A provider type can serve several device domains (Home Assistant does
+    // lights + power from one row); discover each domain it's registered for and
+    // sum the counts. A hard failure in any domain aborts the whole discover.
+    let mut discovered = 0usize;
+
+    // Light domain.
+    if state.registry.is_known(&provider_type) {
+        let provider = match build_provider(&state, &provider_type, &credentials_enc) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("failed to build provider: {e}");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+        let lights = match provider.discover().await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!("discovery error: {e:#}");
+                return StatusCode::BAD_GATEWAY.into_response();
+            }
+        };
+        for light in &lights {
+            let light_id = light.id.to_string();
+            let caps = serde_json::to_string(&light.capabilities).unwrap_or_default();
+            let state_json = serde_json::to_string(&light.state).unwrap_or_default();
+            let _ = sqlx::query(
+                "INSERT INTO lights (id, provider_id, device_id, name, capabilities, last_state, last_seen)
+                 VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                 ON CONFLICT (provider_id, device_id)
+                 DO UPDATE SET name        = excluded.name,
+                               capabilities = excluded.capabilities,
+                               last_state  = excluded.last_state,
+                               last_seen   = excluded.last_seen",
+            )
+            .bind(&light_id)
+            .bind(&id)
+            .bind(&light.provider_id)
+            .bind(&light.name)
+            .bind(&caps)
+            .bind(&state_json)
+            .execute(&state.db)
+            .await;
+        }
+        discovered += lights.len();
+    }
+
+    // Power domain (switches/plugs/fans — HA today).
+    if state.registry.is_known_power(&provider_type) {
+        match crate::api::power::discover_power_devices(
             &state,
             &id,
             &provider_type,
@@ -827,52 +941,25 @@ async fn discover(
         )
         .await
         {
-            Ok(discovered) => Json(DiscoverResponse { discovered }).into_response(),
-            Err(status) => status.into_response(),
-        };
+            Ok(n) => discovered += n,
+            Err(status) => return status.into_response(),
+        }
     }
 
-    let provider = match build_provider(&state, &provider_type, &credentials_enc) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!("failed to build provider: {e}");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-
-    let lights = match provider.discover().await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!("discovery error: {e:#}");
-            return StatusCode::BAD_GATEWAY.into_response();
-        }
-    };
-
-    for light in &lights {
-        let light_id = light.id.to_string();
-        let caps = serde_json::to_string(&light.capabilities).unwrap_or_default();
-        let state_json = serde_json::to_string(&light.state).unwrap_or_default();
-        let _ = sqlx::query(
-            "INSERT INTO lights (id, provider_id, device_id, name, capabilities, last_state, last_seen)
-             VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-             ON CONFLICT (provider_id, device_id)
-             DO UPDATE SET name        = excluded.name,
-                           capabilities = excluded.capabilities,
-                           last_state  = excluded.last_state,
-                           last_seen   = excluded.last_seen",
+    // Audio domain.
+    if state.registry.is_known_audio(&provider_type) {
+        match crate::api::audio::discover_audio_devices(
+            &state,
+            &id,
+            &provider_type,
+            &credentials_enc,
         )
-        .bind(&light_id)
-        .bind(&id)
-        .bind(&light.provider_id)
-        .bind(&light.name)
-        .bind(&caps)
-        .bind(&state_json)
-        .execute(&state.db)
-        .await;
+        .await
+        {
+            Ok(n) => discovered += n,
+            Err(status) => return status.into_response(),
+        }
     }
 
-    Json(DiscoverResponse {
-        discovered: lights.len(),
-    })
-    .into_response()
+    Json(DiscoverResponse { discovered }).into_response()
 }

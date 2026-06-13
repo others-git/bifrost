@@ -8,7 +8,7 @@ Bifrost is a **smart-home control hub**.
 - **Scenes** capture and re-apply member device state. Today: light color/brightness (a *save-scene* snapshot, plus global color palettes applied to a room). The design goal is to capture **all** device state so scenes stay future-proof — for audio, the *selected* source/playlist/station (e.g. a Spotify radio station), **not** the transient now-playing track. Audio-in-scenes is planned — see `PLAN.md`.
 - **Per-device control:** every device is also controllable independently of any Room (`PUT /api/lights/{id}`, `PUT /api/audio/devices/{id}/state`).
 - **Floor planner** — a rough 2D plan of the home: paint tiles/walls, place devices roughly where they physically reside, and bind painted regions to Bifrost Rooms. Devices and rooms are controlled directly from the plan via **fly-outs** (popovers). It is purely an *alternate visualization* of the same devices — its controls reuse the same central control components and API actions as the Dashboard/Rooms (`LightEditor`, scene controls, `setLightState`/`setRoomState`/`setAudioState`), never a forked control path.
-- **Everything is exposed via the API**, kept in sync with docs: `API.md` (public `/api/v1`, Bearer-key) and `MCP.md` (companion `bifrost-mcp` tool roadmap).
+- **Everything is exposed via the API**, kept in sync with docs: `API.md` (public `/api/v1`, Bearer-key) and `MCP.md` (the embedded MCP server's tool catalogue). The MCP server is a **first-class Bifrost surface** (`src/api/mcp.rs`, served at `/mcp`), not a separate repo.
 
 ### Current providers
 
@@ -22,8 +22,15 @@ Registered in `ProviderRegistry::default_registry()` (`src/providers/mod.rs`). *
 | Light | `shelly` | Shelly | poll |
 | Light | `tasmota` | Tasmota | poll |
 | Light | `wled` | WLED | poll |
-| Audio | `onkyo` | Onkyo / Integra | eISCP push (incl. zone 2) |
-| Audio | `sonos` | Sonos | on-demand UPnP (incl. groups, favorites) |
+| Integration | `ha` | Home Assistant | poll (REST; WS push planned) |
+| Audio | `onkyo` | Onkyo / Integra | eISCP push (incl. zone 2) — **on hold** |
+| Audio | `sonos` | Sonos | on-demand UPnP (incl. groups, live grouping, favorites) — **on hold** |
+
+The **Domain** column above is the **add-provider UI category** (`ProviderDomain`: `Light` / `Audio` / `Integration`), set per-factory via `ProviderFactory::domain()` (defaults to `Light`). It is *not* the functional device domain.
+
+**Home Assistant is a "high-class" provider** (`src/providers/ha`): one adapter surfaces *any* HA integration as Bifrost devices and imports **HA Areas as Bifrost Rooms** via the shared Sync flow. It's grouped under **"Integrations"** in the add-provider menu (`domain()` → `ProviderDomain::Integration`) because it isn't a single-device-domain provider — but it is *functionally* **registered on the light domain** for now (`register(HaLightFactory)`), so its devices flow through the light paths. The HA `media_player` (audio) side is implemented and tested but intentionally **not registered** while audio is on hold (`HaAudioFactory` is the single switch to enable it — see the registry light-XOR-audio caveat in the module docs).
+
+**Device domains.** Bifrost has three device-domain models, kept deliberately separate so each domain's state shape stays honest: **lights** (`models`), **audio** (`models::audio`), and **power** (`models::power`) — the DRY home for *strictly on/off* devices (switches, plugs, fans, boolean helpers). A power device's only state is `on`; its `PowerKind` drives the UI glyph but not behaviour, so a switch isn't modelled as "a light with an empty capability set". Devices with genuinely richer state (climate, covers, …) get their own domain rather than being forced into one of these. HA's `PowerProvider` impl maps `switch.*`/`fan.*`/`input_boolean.*`. The power domain is **wired through the backend**: `power_devices` table (migration 0019, no `capabilities` column), `api::power` service layer shared by session (`/api/power/*`), `/api/v1/power/*`, and MCP (`list_power_devices`/`set_power`). One provider type can now serve **multiple device domains** from a single row — `register_power` alongside `register`, and `/api/providers/{id}/discover` is **additive** (discovers lights ∪ power ∪ audio for whatever the type is registered for). Still staged (PLAN.md M19): live polling for power state, frontend cards/glyphs, and power devices as Room members.
 
 ## Test coverage is mandatory
 
@@ -66,7 +73,7 @@ There are no exceptions. This is not negotiable.
 - Credentials are encrypted with AES-256-GCM before persisting. Never store plaintext credentials in the DB.
 - The Hue connection manager must be the only code that reconnects to the bridge SSE stream. Do not open a second stream anywhere.
 - The Floor Planner is a visualization layer only. Device and room controls there must be fly-outs that reuse the shared control components and API actions the Dashboard/Rooms use — never reimplement control UI or logic per view.
-- The session API (`/api/*`) and the public API (`/api/v1/*`) delegate to the **same shared service functions** (in `api::lights` / `api::audio` / `api::rooms`). Put control/behaviour in the service layer, not duplicated per router, so the two surfaces can't drift.
+- The session API (`/api/*`), the public API (`/api/v1/*`), and the embedded MCP server (`/mcp`, `api::mcp`) all delegate to the **same shared service functions** (in `api::lights` / `api::audio` / `api::rooms` / `api::palette_scenes`). Put control/behaviour in the service layer, not duplicated per router, so the three surfaces can't drift. MCP tools are a third caller of those fns — never a forked control path, and never an HTTP hop back into `/api/v1`.
 - Migrations are **append-only**: add the next `migrations/NNNN_*.sql`; never edit a migration that has shipped.
 - Frontend has no CSS framework — inline style objects plus `frontend/src/styles.ts` (`S`, `ACCENT`). Reuse the shared control components (`LightEditor`, `components/scenes`, `components/dialogs`) rather than re-implementing controls.
 - **Responsive:** inline styles can't express media queries, so branch layout on the **`useViewport()`** hook (`frontend/src/useViewport.ts`) — `isMobile` (≤640px) is the switch; **tablets get the desktop layout**. Phones use a bottom tab bar (`App.tsx`), and anchored fly-outs (`LightEditor`/`AudioEditor`) become bottom sheets via `components/sheet.ts`.
@@ -83,4 +90,4 @@ There are no exceptions. This is not negotiable.
 
 ## See also
 
-`README.md` (architecture, schema, dev commands), `PLAN.md` (roadmap), `API.md` (public API), `MCP.md` (companion MCP tool roadmap).
+`README.md` (architecture, schema, dev commands), `PLAN.md` (roadmap), `API.md` (public API), `MCP.md` (embedded MCP server tool catalogue).
