@@ -43,6 +43,11 @@ pub struct AudioCapabilities {
     /// next discovery refreshes it.
     #[serde(default)]
     pub favorites: bool,
+    /// Device can be joined into/out of a provider-native playback group of
+    /// speakers that play in sync (e.g. Sonos grouping), independent of Bifrost
+    /// Rooms. `#[serde(default)]` keeps older stored state deserializable.
+    #[serde(default)]
+    pub grouping: bool,
 }
 
 /// A saved favorite/preset on a provider (e.g. a Sonos Favorite) that the user

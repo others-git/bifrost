@@ -11,9 +11,9 @@
 use crate::AppState;
 use crate::api::apikeys::require_api_key;
 use crate::api::audio::{
-    PlayFavoriteRequest, apply_audio_command, favorites_response, get_device_live,
-    list_all_devices, list_device_favorites, play_device_favorite, play_favorite_response,
-    set_audio_status,
+    GroupRequest, PlayFavoriteRequest, apply_audio_command, favorites_response, get_device_live,
+    group_devices, group_response, list_all_devices, list_device_favorites, play_device_favorite,
+    play_favorite_response, set_audio_status, ungroup_device,
 };
 use crate::api::lights::{apply_light_state, get_light_by_id, list_all_lights, set_light_status};
 use crate::api::palette_scenes::{
@@ -55,6 +55,8 @@ pub fn router() -> Router<Arc<AppState>> {
             "/audio/devices/{id}/favorites/play",
             post(play_audio_favorite),
         )
+        .route("/audio/devices/{id}/group", post(group_audio))
+        .route("/audio/devices/{id}/ungroup", post(ungroup_audio))
 }
 
 /// Shared 401 guard. Returns `Err(401)` when the Bearer key is missing/invalid.
@@ -318,4 +320,27 @@ async fn play_audio_favorite(
         return s.into_response();
     }
     play_favorite_response(play_device_favorite(&state, &id, &req.favorite_id).await)
+}
+
+async fn group_audio(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<GroupRequest>,
+) -> impl IntoResponse {
+    if let Err(s) = auth(&state, &headers).await {
+        return s.into_response();
+    }
+    group_response(group_devices(&state, &id, &req.coordinator_id).await)
+}
+
+async fn ungroup_audio(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(s) = auth(&state, &headers).await {
+        return s.into_response();
+    }
+    group_response(ungroup_device(&state, &id).await)
 }

@@ -69,17 +69,42 @@
         background-size: 300% 300%;
         animation: bifrost-pan 45s ease-in-out infinite;
       }
+      /* Flare strength (0 at rest, ~1 on hover) — registered so it can
+         transition; the cursor offset (--fx/--fy) snaps for instant tracking. */
+      @property --fa {
+        syntax: "<number>";
+        inherits: false;
+        initial-value: 0;
+      }
       .bifrost-brand {
-        background-image: linear-gradient(110deg,
-          #7dd3fc 0%, #a5b4fc 25%, #f0abfc 50%, #5eead4 75%, #7dd3fc 100%);
-        background-size: 300% 300%;
+        /* Spelled in Elder Futhark runes — needs a runic-capable font, with
+           graceful fallbacks per platform before the latin UI font. */
+        font-family: "Noto Sans Runic", "Segoe UI Historic", "Segoe UI Symbol",
+          "Apple Symbols", "Inter Variable", system-ui, sans-serif;
+        /* Two text-clipped layers: a small flare that tracks the cursor over
+           the panning aurora gradient. The flare layer is sized 100% so the
+           pan never moves it — it sits wherever --fx/--fy point, brightening
+           only the runes under the pointer rather than the whole wordmark. */
+        background-image:
+          radial-gradient(circle 56px at var(--fx, 50%) var(--fy, 50%),
+            rgba(240, 248, 255, var(--fa, 0)) 0%,
+            rgba(175, 210, 255, calc(var(--fa, 0) * 0.5)) 45%,
+            transparent 100%),
+          linear-gradient(110deg,
+            #7dd3fc 0%, #a5b4fc 25%, #f0abfc 50%, #5eead4 75%, #7dd3fc 100%);
+        background-size: 100% 100%, 300% 300%;
         animation: bifrost-pan 16s ease-in-out infinite;
         -webkit-background-clip: text;
         background-clip: text;
         color: transparent;
+        /* Faint static aurora glow on the runes; the local flare above does
+           the hover brightening, so no whole-wordmark filter change. */
+        filter: drop-shadow(0 0 2px rgba(125, 211, 252, 0.25));
+        transition: --fa 0.3s ease;
       }
       @media (prefers-reduced-motion: reduce) {
         .bifrost-aurora, .bifrost-brand { animation: none; }
+        .bifrost-brand { transition: none; }
       }
     </style>
   </head>

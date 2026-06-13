@@ -27,6 +27,15 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/devices/{id}/state", put(set_device_handler))
         .route("/devices/{id}/favorites", get(list_favorites_handler))
         .route("/devices/{id}/favorites/play", post(play_favorite_handler))
+        .route("/devices/{id}/group", post(group_handler))
+        .route("/devices/{id}/ungroup", post(ungroup_handler))
+}
+
+/// Body for "group this speaker with a coordinator" — the Bifrost device id of
+/// the speaker that should coordinate the synced playback group.
+#[derive(Deserialize)]
+pub(crate) struct GroupRequest {
+    pub coordinator_id: String,
 }
 
 /// Body for "play a favorite" — the id is carried here rather than in the path
@@ -309,6 +318,123 @@ pub(crate) fn play_favorite_response(outcome: PlayFavoriteOutcome) -> axum::resp
     }
 }
 
+// ── Speaker grouping (provider-native, e.g. Sonos) ───────────────────────────
+
+/// The bits needed to build a provider and address a device within it.
+struct AudioRow {
+    device_id: String,
+    /// `audio_devices.provider_id` — the providers-table row id (which provider
+    /// instance owns the device), not the provider-native id.
+    provider_row_id: String,
+    provider_type: String,
+    credentials: String,
+}
+
+async fn load_audio_row(state: &AppState, id: &str) -> Result<Option<AudioRow>, ()> {
+    let row = sqlx::query(
+        "SELECT a.device_id, a.provider_id AS provider_row_id, p.provider_type, p.credentials
+         FROM audio_devices a JOIN providers p ON a.provider_id = p.id
+         WHERE a.id = ? AND p.enabled = 1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| tracing::error!("db error loading audio device: {e}"))?;
+    Ok(row.map(|r| AudioRow {
+        device_id: r.get("device_id"),
+        provider_row_id: r.get("provider_row_id"),
+        provider_type: r.get("provider_type"),
+        credentials: r.get("credentials"),
+    }))
+}
+
+pub(crate) enum GroupOutcome {
+    Ok,
+    NotFound,
+    BadRequest(String),
+    Unreachable,
+    Db,
+}
+
+/// Map a provider grouping call's result. A "not supported" provider or a
+/// rejected request (e.g. grouping a speaker with itself) is the caller's
+/// mistake (422); a transport failure is a gateway error (502).
+fn map_group_result(res: anyhow::Result<()>) -> GroupOutcome {
+    match res {
+        Ok(()) => GroupOutcome::Ok,
+        Err(e) if e.to_string().contains("not support") || e.to_string().contains("itself") => {
+            GroupOutcome::BadRequest(e.to_string())
+        }
+        Err(e) => {
+            tracing::error!("audio grouping error: {e:#}");
+            GroupOutcome::Unreachable
+        }
+    }
+}
+
+/// Join the speaker `id` into the synced playback group coordinated by
+/// `coordinator_id`. Both must be devices of the same provider instance.
+pub(crate) async fn group_devices(
+    state: &AppState,
+    id: &str,
+    coordinator_id: &str,
+) -> GroupOutcome {
+    let member = match load_audio_row(state, id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return GroupOutcome::NotFound,
+        Err(()) => return GroupOutcome::Db,
+    };
+    let coordinator = match load_audio_row(state, coordinator_id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return GroupOutcome::NotFound,
+        Err(()) => return GroupOutcome::Db,
+    };
+    if member.provider_row_id != coordinator.provider_row_id {
+        return GroupOutcome::BadRequest(
+            "speakers must belong to the same provider to be grouped".into(),
+        );
+    }
+    let provider = match build_audio_provider(state, &member.provider_type, &member.credentials) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("failed to build audio provider: {e:#}");
+            return GroupOutcome::Db;
+        }
+    };
+    map_group_result(
+        provider
+            .group(&member.device_id, &coordinator.device_id)
+            .await,
+    )
+}
+
+/// Remove the speaker `id` from any playback group it's in.
+pub(crate) async fn ungroup_device(state: &AppState, id: &str) -> GroupOutcome {
+    let row = match load_audio_row(state, id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return GroupOutcome::NotFound,
+        Err(()) => return GroupOutcome::Db,
+    };
+    let provider = match build_audio_provider(state, &row.provider_type, &row.credentials) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("failed to build audio provider: {e:#}");
+            return GroupOutcome::Db;
+        }
+    };
+    map_group_result(provider.ungroup(&row.device_id).await)
+}
+
+pub(crate) fn group_response(outcome: GroupOutcome) -> axum::response::Response {
+    match outcome {
+        GroupOutcome::Ok => StatusCode::NO_CONTENT.into_response(),
+        GroupOutcome::NotFound => StatusCode::NOT_FOUND.into_response(),
+        GroupOutcome::BadRequest(m) => (StatusCode::UNPROCESSABLE_ENTITY, m).into_response(),
+        GroupOutcome::Unreachable => StatusCode::BAD_GATEWAY.into_response(),
+        GroupOutcome::Db => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 pub(crate) fn set_audio_status(outcome: SetAudioOutcome) -> axum::response::Response {
     match outcome {
         SetAudioOutcome::Ok => StatusCode::NO_CONTENT.into_response(),
@@ -431,4 +557,27 @@ async fn play_favorite_handler(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     play_favorite_response(play_device_favorite(&state, &id, &req.favorite_id).await)
+}
+
+async fn group_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<GroupRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    group_response(group_devices(&state, &id, &req.coordinator_id).await)
+}
+
+async fn ungroup_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    group_response(ungroup_device(&state, &id).await)
 }

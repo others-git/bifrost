@@ -195,6 +195,9 @@ export interface AudioCapabilities {
   now_playing: boolean;
   /** Device exposes saved favorites the user can start playing (Sonos). */
   favorites?: boolean;
+  /** Device can be grouped/ungrouped with other speakers to play in sync
+   * (provider-native grouping, e.g. Sonos), independent of Bifrost Rooms. */
+  grouping?: boolean;
 }
 
 /** A saved favorite/preset (e.g. a Sonos Favorite) playable by reference. */
@@ -267,6 +270,35 @@ export async function playAudioFavorite(
   });
   if (res.ok) return null;
   return (await res.text()) || `HTTP ${res.status}`;
+}
+
+/** Join `id` into the synced playback group coordinated by `coordinatorId`
+ * (provider-native speaker grouping, e.g. Sonos). */
+export async function groupAudioDevice(
+  id: string,
+  coordinatorId: string,
+): Promise<string | null> {
+  const res = await fetch(`/api/audio/devices/${id}/group`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ coordinator_id: coordinatorId }),
+  });
+  if (res.ok) return null;
+  return (await res.text()) || `HTTP ${res.status}`;
+}
+
+/** Remove `id` from any playback group, returning it to standalone playback. */
+export async function ungroupAudioDevice(id: string): Promise<string | null> {
+  const res = await fetch(`/api/audio/devices/${id}/ungroup`, { method: "POST" });
+  if (res.ok) return null;
+  return (await res.text()) || `HTTP ${res.status}`;
+}
+
+/** Re-run a provider's device discovery (lights or audio). */
+export async function discoverProvider(id: string): Promise<{ discovered: number }> {
+  const res = await fetch(`/api/providers/${id}/discover`, { method: "POST" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
 }
 
 export async function getProviders(): Promise<Provider[]> {

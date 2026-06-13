@@ -91,6 +91,20 @@ pub trait AudioProvider: Send + Sync {
         Err(anyhow!("{} does not support favorites", self.name()))
     }
 
+    /// Join `device_id` into the playback group coordinated by `coordinator_id`
+    /// (both provider-native ids) so the two play in sync, controlled through
+    /// the coordinator — the provider's own speaker grouping (e.g. Sonos),
+    /// independent of Bifrost Rooms. Default: unsupported.
+    async fn group(&self, _device_id: &str, _coordinator_id: &str) -> Result<()> {
+        Err(anyhow!("{} does not support speaker grouping", self.name()))
+    }
+
+    /// Remove `device_id` from any playback group, returning it to standalone
+    /// playback. Default: unsupported.
+    async fn ungroup(&self, _device_id: &str) -> Result<()> {
+        Err(anyhow!("{} does not support speaker grouping", self.name()))
+    }
+
     /// The provider's own rooms/zones (e.g. each Sonos player's room), mirrored
     /// locally and wrapped by Bifrost Rooms — the audio analog of
     /// `LightProvider::discover_groups`. `ProviderGroup::member_device_ids` hold

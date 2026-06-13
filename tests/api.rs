@@ -3162,6 +3162,12 @@ async fn audio_routes_require_session() {
             "/api/audio/devices/some-id/favorites/play",
             r#"{"favorite_id":"x"}"#,
         ),
+        (
+            "POST",
+            "/api/audio/devices/some-id/group",
+            r#"{"coordinator_id":"x"}"#,
+        ),
+        ("POST", "/api/audio/devices/some-id/ungroup", "{}"),
     ] {
         let resp = app
             .clone()
@@ -3199,39 +3205,34 @@ mod sonos_mock {
         )
     }
 
-    pub async fn start() -> MockServer {
-        let server = MockServer::start().await;
-        let base = server.uri();
-
-        let topo = format!(
-            r#"<ZoneGroups><ZoneGroup Coordinator="RINCON_LIVING" ID="RINCON_LIVING:1"><ZoneGroupMember UUID="RINCON_LIVING" Location="{base}/xml/device_description.xml" ZoneName="Living Room"/></ZoneGroup></ZoneGroups>"#
-        );
+    /// Mount the topology response plus generic per-service handlers (one
+    /// response per service path covers every action the provider sends:
+    /// Get/Set volume+mute, transport reads, Play, enqueue, group join/leave).
+    async fn mount_household(server: &MockServer, topo: &str) {
         Mock::given(method("POST"))
             .and(path("/ZoneGroupTopology/Control"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_string(envelope(&format!(
                     "<ZoneGroupState>{}</ZoneGroupState>",
-                    esc(&topo)
+                    esc(topo)
                 ))),
             )
-            .mount(&server)
+            .mount(server)
             .await;
 
-        // One generic response per service path covers every action the
-        // provider sends (Get/Set volume+mute, transport reads, Play, enqueue).
         Mock::given(method("POST"))
             .and(path("/MediaRenderer/RenderingControl/Control"))
             .respond_with(ResponseTemplate::new(200).set_body_string(envelope(
                 "<CurrentVolume>30</CurrentVolume><CurrentMute>0</CurrentMute>",
             )))
-            .mount(&server)
+            .mount(server)
             .await;
         Mock::given(method("POST"))
             .and(path("/MediaRenderer/AVTransport/Control"))
             .respond_with(ResponseTemplate::new(200).set_body_string(envelope(
                 "<CurrentTransportState>STOPPED</CurrentTransportState>",
             )))
-            .mount(&server)
+            .mount(server)
             .await;
 
         let didl = concat!(
@@ -3251,9 +3252,29 @@ mod sonos_mock {
                 ResponseTemplate::new(200)
                     .set_body_string(envelope(&format!("<Result>{}</Result>", esc(didl)))),
             )
-            .mount(&server)
+            .mount(server)
             .await;
+    }
 
+    /// A single standalone Living Room player.
+    pub async fn start() -> MockServer {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        let topo = format!(
+            r#"<ZoneGroups><ZoneGroup Coordinator="RINCON_LIVING" ID="RINCON_LIVING:1"><ZoneGroupMember UUID="RINCON_LIVING" Location="{base}/xml/device_description.xml" ZoneName="Living Room"/></ZoneGroup></ZoneGroups>"#
+        );
+        mount_household(&server, &topo).await;
+        server
+    }
+
+    /// Two standalone players — Living Room + Kitchen — so they can be grouped.
+    pub async fn start_pair() -> MockServer {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        let topo = format!(
+            r#"<ZoneGroups><ZoneGroup Coordinator="RINCON_LIVING" ID="RINCON_LIVING:1"><ZoneGroupMember UUID="RINCON_LIVING" Location="{base}/xml/device_description.xml" ZoneName="Living Room"/></ZoneGroup><ZoneGroup Coordinator="RINCON_KITCHEN" ID="RINCON_KITCHEN:1"><ZoneGroupMember UUID="RINCON_KITCHEN" Location="{base}/xml/device_description.xml" ZoneName="Kitchen"/></ZoneGroup></ZoneGroups>"#
+        );
+        mount_household(&server, &topo).await;
         server
     }
 }
@@ -3431,6 +3452,154 @@ async fn audio_play_favorite_unknown_id_returns_422() {
             &format!("/api/audio/devices/{device_id}/favorites/play"),
             &cookie,
             r#"{"favorite_id":"FV:2/999"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// Return (Living Room id, Kitchen id) from a discovered two-player household.
+async fn sonos_pair_ids(app: &Router, cookie: &str) -> (String, String) {
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/audio/devices", cookie))
+        .await
+        .unwrap();
+    let devices = helpers::response_json(resp).await;
+    let find = |name: &str| {
+        devices
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["name"] == name)
+            .unwrap_or_else(|| panic!("no device named {name}"))["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    (find("Living Room"), find("Kitchen"))
+}
+
+#[tokio::test]
+async fn audio_group_joins_speaker_to_coordinator() {
+    let server = sonos_mock::start_pair().await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    setup_sonos(&app, &cookie, &server.uri()).await;
+    let (living, kitchen) = sonos_pair_ids(&app, &cookie).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "POST",
+            &format!("/api/audio/devices/{kitchen}/group"),
+            &cookie,
+            &format!(r#"{{"coordinator_id":"{living}"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // The member was pointed at the coordinator via the x-rincon scheme.
+    let joined = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| String::from_utf8_lossy(&r.body).contains("x-rincon:RINCON_LIVING"));
+    assert!(
+        joined,
+        "expected a SetAVTransportURI join to the coordinator"
+    );
+}
+
+#[tokio::test]
+async fn audio_ungroup_makes_speaker_standalone() {
+    let server = sonos_mock::start_pair().await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    setup_sonos(&app, &cookie, &server.uri()).await;
+    let (_living, kitchen) = sonos_pair_ids(&app, &cookie).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "POST",
+            &format!("/api/audio/devices/{kitchen}/ungroup"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let standalone = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|r| r.headers.get("SOAPACTION").and_then(|v| v.to_str().ok()))
+        .any(|a| a.contains("BecomeCoordinatorOfStandaloneGroup"));
+    assert!(standalone, "expected the player to become standalone");
+}
+
+#[tokio::test]
+async fn audio_group_with_itself_returns_422() {
+    let server = sonos_mock::start_pair().await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    setup_sonos(&app, &cookie, &server.uri()).await;
+    let (_living, kitchen) = sonos_pair_ids(&app, &cookie).await;
+
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "POST",
+            &format!("/api/audio/devices/{kitchen}/group"),
+            &cookie,
+            &format!(r#"{{"coordinator_id":"{kitchen}"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn audio_group_unknown_device_returns_404() {
+    let server = sonos_mock::start_pair().await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    setup_sonos(&app, &cookie, &server.uri()).await;
+    let (living, _kitchen) = sonos_pair_ids(&app, &cookie).await;
+
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "POST",
+            "/api/audio/devices/nope/group",
+            &cookie,
+            &format!(r#"{{"coordinator_id":"{living}"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn audio_group_across_providers_returns_422() {
+    let server = sonos_mock::start_pair().await;
+    let (port, _recorded) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    setup_sonos(&app, &cookie, &server.uri()).await;
+    let (_living, kitchen) = sonos_pair_ids(&app, &cookie).await;
+    let onkyo = setup_onkyo(&app, &cookie, port).await;
+
+    // A Sonos speaker can't coordinate an Onkyo receiver (different provider).
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "POST",
+            &format!("/api/audio/devices/{kitchen}/group"),
+            &cookie,
+            &format!(r#"{{"coordinator_id":"{onkyo}"}}"#),
         ))
         .await
         .unwrap();

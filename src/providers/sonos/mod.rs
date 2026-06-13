@@ -480,6 +480,8 @@ impl AudioProvider for SonosProvider {
                     transport: true,
                     now_playing: true,
                     favorites: true,
+                    // Individual players can be grouped/ungrouped with others.
+                    grouping: true,
                 },
                 state,
             });
@@ -514,6 +516,9 @@ impl AudioProvider for SonosProvider {
                     transport: true,
                     now_playing: true,
                     favorites: true,
+                    // The group is the result of grouping; you ungroup its
+                    // members individually, not the synthetic zone itself.
+                    grouping: false,
                 },
                 state,
             });
@@ -700,6 +705,42 @@ impl AudioProvider for SonosProvider {
         }
 
         self.transport(&target, "Play").await
+    }
+
+    async fn group(&self, device_id: &str, coordinator_id: &str) -> Result<()> {
+        if device_id == coordinator_id {
+            return Err(anyhow!("a speaker cannot be grouped with itself"));
+        }
+        let member = self.find_target(device_id).await?;
+        // A player joins a group by pointing its transport at the coordinator
+        // via the x-rincon scheme; the coordinator then drives playback.
+        let coord_uuid = coordinator_id
+            .strip_prefix(GROUP_PREFIX)
+            .unwrap_or(coordinator_id);
+        self.av(
+            &member,
+            "SetAVTransportURI",
+            format!(
+                "<InstanceID>0</InstanceID>\
+                 <CurrentURI>x-rincon:{coord_uuid}</CurrentURI>\
+                 <CurrentURIMetaData></CurrentURIMetaData>"
+            ),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn ungroup(&self, device_id: &str) -> Result<()> {
+        let player = self.find_target(device_id).await?;
+        // Leaving a group = becoming the coordinator of your own standalone
+        // group. Harmless (and idempotent) on an already-standalone player.
+        self.av(
+            &player,
+            "BecomeCoordinatorOfStandaloneGroup",
+            "<InstanceID>0</InstanceID>".into(),
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn discover_groups(&self) -> Result<Vec<crate::providers::ProviderGroup>> {
@@ -957,6 +998,10 @@ mod tests {
             devices.iter().all(|d| d.capabilities.favorites),
             "every Sonos device advertises favorites"
         );
+        assert!(
+            devices[..3].iter().all(|d| d.capabilities.grouping),
+            "individual players can be grouped"
+        );
     }
 
     #[tokio::test]
@@ -976,6 +1021,54 @@ mod tests {
         assert_eq!(zone.provider_id, "group:RINCON_LIVING");
         assert_eq!(zone.name, "Living Room + Kitchen");
         assert_eq!(zone.state.volume, 22, "group volume, not player volume");
+        assert!(
+            !zone.capabilities.grouping,
+            "the synthetic group zone is not itself groupable"
+        );
+    }
+
+    #[tokio::test]
+    async fn group_joins_member_to_coordinator_via_x_rincon() {
+        use wiremock::matchers::body_string_contains;
+        let server = MockServer::start().await;
+        mount_topology(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/MediaRenderer/AVTransport/Control"))
+            .and(header(
+                "SOAPACTION",
+                format!("\"{AV_TRANSPORT}#SetAVTransportURI\"").as_str(),
+            ))
+            .and(body_string_contains("x-rincon:RINCON_LIVING"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(soap_ok(
+                "SetAVTransportURI",
+                "AVTransport",
+                "",
+            )))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let p = SonosProvider::new_for_test(server.uri()).unwrap();
+        // Kitchen joins the group coordinated by Living Room.
+        p.group("RINCON_KITCHEN", "RINCON_LIVING").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn group_rejects_grouping_a_player_with_itself() {
+        let server = MockServer::start().await;
+        let p = SonosProvider::new_for_test(server.uri()).unwrap();
+        let err = p.group("RINCON_LIVING", "RINCON_LIVING").await.unwrap_err();
+        assert!(err.to_string().contains("itself"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn ungroup_makes_player_a_standalone_coordinator() {
+        let server = MockServer::start().await;
+        mount_topology(&server).await;
+        mount_av_action(&server, "BecomeCoordinatorOfStandaloneGroup", Some(1)).await;
+
+        let p = SonosProvider::new_for_test(server.uri()).unwrap();
+        p.ungroup("RINCON_KITCHEN").await.unwrap();
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type MouseEvent } from "react";
 import { getHealth, getLights, logout, getSetupStatus, type Light } from "./api";
 import { SetupPage } from "./pages/Setup";
 import { LoginPage } from "./pages/Login";
@@ -14,6 +14,37 @@ import { useViewport } from "./useViewport";
 /** Pages reachable from the nav tray. */
 type NavPage = "dashboard" | "audio" | "scenes" | "rooms" | "plan" | "settings";
 type Page = "loading" | "setup" | "login" | NavPage;
+
+/** "BIFROST" in Elder Futhark — ᛒ(B) ᛁ(I) ᚠ(F) ᚱ(R) ᛟ(O) ᛋ(S) ᛏ(T). */
+const BRAND_RUNES = "ᛒᛁᚠᚱᛟᛋᛏ";
+
+/** The runic wordmark. `compact` shows just the leading rune (collapsed nav).
+ * Gradient comes from the `.bifrost-brand` class; the hover flare follows the
+ * cursor via the `--fx`/`--fy`/`--fa` custom properties we set here. */
+function Brand({ compact = false, fontSize }: { compact?: boolean; fontSize: string }) {
+  // Park the flare under the pointer so only the runes near it brighten.
+  const track = (e: MouseEvent<HTMLSpanElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    e.currentTarget.style.setProperty("--fx", `${e.clientX - r.left}px`);
+    e.currentTarget.style.setProperty("--fy", `${e.clientY - r.top}px`);
+  };
+  const flare = (on: boolean) => (e: MouseEvent<HTMLSpanElement>) =>
+    e.currentTarget.style.setProperty("--fa", on ? "0.95" : "0");
+  return (
+    <span
+      className="bifrost-brand"
+      role="img"
+      aria-label="Bifrost"
+      title="Bifrost"
+      onMouseMove={track}
+      onMouseEnter={flare(true)}
+      onMouseLeave={flare(false)}
+      style={{ fontWeight: 800, fontSize, letterSpacing: "0.14em", cursor: "default" }}
+    >
+      {compact ? "ᛒ" : BRAND_RUNES}
+    </span>
+  );
+}
 
 const NAV_ITEMS: { id: NavPage; glyph: string; label: string }[] = [
   { id: "dashboard", glyph: "◉", label: "Lights" },
@@ -142,12 +173,7 @@ function MobileTopBar({
         zIndex: 30,
       }}
     >
-      <span
-        className="bifrost-brand"
-        style={{ fontWeight: 800, fontSize: "1.05rem", letterSpacing: "0.06em" }}
-      >
-        BIFROST
-      </span>
+      <Brand fontSize="1.05rem" />
       {title && <span style={{ fontSize: "0.85rem", color: "#8b93a1" }}>{title}</span>}
       <span style={{ flex: 1 }} />
       {version && <span style={{ fontSize: "0.65rem", color: "#5d6878" }}>v{version}</span>}
@@ -267,12 +293,7 @@ function NavTray({
           whiteSpace: "nowrap",
         }}
       >
-        <span
-          className="bifrost-brand"
-          style={{ fontWeight: 800, fontSize: "1.15rem", letterSpacing: "0.06em" }}
-        >
-          {collapsed ? "B" : "BIFROST"}
-        </span>
+        <Brand compact={collapsed} fontSize="1.15rem" />
         {!collapsed && version && (
           <span style={{ fontSize: "0.7rem", color: "#5d6878" }}>v{version}</span>
         )}
