@@ -58,6 +58,7 @@ All tools below are served natively from `src/api/mcp.rs`.
 | `play_audio_favorite` | `list_device_favorites` + `play_device_favorite` | resolve `favorite` (id/title/substring) then play. *"play my jazz favorite in the office."* |
 | `group_speakers` | `group_devices` (per member) | join speakers under a coordinator. *"play the kitchen and living room together."* |
 | `ungroup_speaker` | `ungroup_device` | remove a speaker from its synced group |
+| `bind_receiver` | `set_audio_receiver` | bind a source (TV/streamer) to a receiver that owns its volume + the input to switch to on power-on; omit `receiver` to unbind. *"route the living room TV's sound through the AV receiver on the Game input."* |
 | `list_power_devices` | `list_all_power_devices` | switches / plugs / fans / toggles with on/off state + kind |
 | `set_power` | `apply_power_state` | turn a power device on/off, by id or name. *"turn off the porch switch."* |
 

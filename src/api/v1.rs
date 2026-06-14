@@ -13,7 +13,8 @@ use crate::api::apikeys::require_api_key;
 use crate::api::audio::{
     GroupRequest, PlayFavoriteRequest, apply_audio_command, favorites_response, get_device_live,
     group_devices, group_response, list_all_devices, list_device_favorites, play_device_favorite,
-    play_favorite_response, set_audio_status, ungroup_device,
+    play_favorite_response, set_audio_receiver, set_audio_status, set_receiver_status,
+    ungroup_device,
 };
 use crate::api::lights::{apply_light_state, get_light_by_id, list_all_lights, set_light_status};
 use crate::api::palette_scenes::{
@@ -25,7 +26,7 @@ use crate::api::power::{
     PowerCommand, apply_power_state, get_power_device_live, list_all_power_devices,
     set_power_status,
 };
-use crate::api::rooms::{apply_uniform_state, effective_members, list_public_rooms};
+use crate::api::rooms::{apply_room_state, effective_members, list_public_rooms};
 use crate::models::LightState;
 use axum::{
     Json, Router,
@@ -58,6 +59,7 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route("/audio/devices/{id}/group", post(group_audio))
         .route("/audio/devices/{id}/ungroup", post(ungroup_audio))
+        .route("/audio/devices/{id}/receiver", put(set_receiver_audio))
         .route("/power/devices", get(list_power))
         .route("/power/devices/{id}", get(get_power))
         .route("/power/devices/{id}/state", put(set_power))
@@ -129,10 +131,10 @@ async fn set_room_state(
         return s.into_response();
     }
     let members = effective_members(&state, &id).await;
-    if members.is_empty() {
+    let (applied, failed) = apply_room_state(&state, &id, &new_state, members).await;
+    if applied == 0 && failed == 0 {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let (applied, failed) = apply_uniform_state(&state, &id, &new_state, members).await;
     Json(serde_json::json!({ "applied": applied, "failed": failed })).into_response()
 }
 
@@ -314,6 +316,18 @@ async fn ungroup_audio(
         return s.into_response();
     }
     group_response(ungroup_device(&state, &id).await)
+}
+
+async fn set_receiver_audio(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<crate::api::SetReceiverRequest>,
+) -> impl IntoResponse {
+    if let Err(s) = auth(&state, &headers).await {
+        return s.into_response();
+    }
+    set_receiver_status(set_audio_receiver(&state, &id, req.receiver_id, req.receiver_source).await)
 }
 
 // ── Power devices ──────────────────────────────────────────────────────────────

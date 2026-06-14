@@ -3168,6 +3168,11 @@ async fn audio_routes_require_session() {
             r#"{"coordinator_id":"x"}"#,
         ),
         ("POST", "/api/audio/devices/some-id/ungroup", "{}"),
+        (
+            "PUT",
+            "/api/audio/devices/some-id/receiver",
+            r#"{"receiver_id":"x"}"#,
+        ),
     ] {
         let resp = app
             .clone()
@@ -3183,6 +3188,405 @@ async fn audio_routes_require_session() {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{method} {uri}");
     }
+}
+
+/// Add an Onkyo provider pointed at `port`, discover it, and return the id of
+/// the audio device that wasn't in `existing` (so two providers can be told
+/// apart). Used by the M22 receiver-binding tests, which need two devices.
+async fn add_onkyo_device(
+    app: &Router,
+    cookie: &str,
+    port: u16,
+    name: &str,
+    existing: &[String],
+) -> String {
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/providers",
+            cookie,
+            &format!(
+                r#"{{"name":"{name}","provider_type":"onkyo","credentials":{{"host":"127.0.0.1","port":{port}}}}}"#
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let provider_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/providers/{provider_id}/discover"),
+            cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/audio/devices", cookie))
+        .await
+        .unwrap();
+    let devices = helpers::response_json(resp).await;
+    devices
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["id"].as_str().unwrap().to_string())
+        .find(|id| !existing.contains(id))
+        .expect("a newly-discovered device")
+}
+
+/// True if the recorded eISCP stream contains a master-volume *set* (an `MVL`
+/// command that isn't the `MVLQSTN` read).
+fn heard_volume_set(recorded: &[String]) -> bool {
+    recorded
+        .iter()
+        .any(|m| m.starts_with("MVL") && !m.contains("QSTN"))
+}
+
+/// Count master-volume *sets* in the recorded eISCP stream.
+fn volume_set_count(recorded: &[String]) -> usize {
+    recorded
+        .iter()
+        .filter(|m| m.starts_with("MVL") && !m.contains("QSTN"))
+        .count()
+}
+
+/// Poll a mock's recorded stream until a volume set lands (commands flow through
+/// the shared link actor asynchronously, so they arrive a beat after the HTTP
+/// response). Returns false if none arrives within ~2s.
+async fn wait_for_volume_set(recorded: &std::sync::Arc<tokio::sync::Mutex<Vec<String>>>) -> bool {
+    for _ in 0..40 {
+        if heard_volume_set(&recorded.lock().await) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    false
+}
+
+#[tokio::test]
+async fn audio_receiver_binding_crud_and_validation() {
+    let (port_s, _) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let (port_r, _) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let source = add_onkyo_device(&app, &cookie, port_s, "Source", &[]).await;
+    let receiver = add_onkyo_device(
+        &app,
+        &cookie,
+        port_r,
+        "Receiver",
+        std::slice::from_ref(&source),
+    )
+    .await;
+
+    // A device can't be its own receiver.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/audio/devices/{source}/receiver"),
+            &cookie,
+            &format!(r#"{{"receiver_id":"{source}"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // An unknown receiver id is rejected.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/audio/devices/{source}/receiver"),
+            &cookie,
+            r#"{"receiver_id":"does-not-exist"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Bind source → receiver with an input to select.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/audio/devices/{source}/receiver"),
+            &cookie,
+            &format!(r#"{{"receiver_id":"{receiver}","receiver_source":"Game"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get(
+            &format!("/api/audio/devices/{source}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    let dev = helpers::response_json(resp).await;
+    assert_eq!(dev["receiver_id"], receiver);
+    assert_eq!(dev["receiver_source"], "Game");
+
+    // Chaining is rejected: the receiver can't itself be bound to a bound device.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/audio/devices/{receiver}/receiver"),
+            &cookie,
+            &format!(r#"{{"receiver_id":"{source}"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Clearing the binding removes it (and its stored input).
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/audio/devices/{source}/receiver"),
+            &cookie,
+            r#"{"receiver_id":null}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(helpers::authed_get(
+            &format!("/api/audio/devices/{source}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    let dev = helpers::response_json(resp).await;
+    assert!(dev["receiver_id"].is_null());
+    assert!(dev["receiver_source"].is_null());
+}
+
+#[tokio::test]
+async fn audio_receiver_binding_routes_volume_to_receiver() {
+    let (port_s, src_cmds) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let (port_r, rcv_cmds) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let source = add_onkyo_device(&app, &cookie, port_s, "Source", &[]).await;
+    let receiver = add_onkyo_device(
+        &app,
+        &cookie,
+        port_r,
+        "Receiver",
+        std::slice::from_ref(&source),
+    )
+    .await;
+
+    // Bind, then set volume on the source.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/audio/devices/{source}/receiver"),
+            &cookie,
+            &format!(r#"{{"receiver_id":"{receiver}"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/audio/devices/{source}/state"),
+            &cookie,
+            r#"{"volume":33}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // The volume landed on the receiver, not the source.
+    assert!(
+        wait_for_volume_set(&rcv_cmds).await,
+        "receiver should have received the volume command"
+    );
+    assert!(
+        !heard_volume_set(&src_cmds.lock().await),
+        "source must not receive volume while bound"
+    );
+
+    // Unbind and set volume again — now it lands on the device itself.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/audio/devices/{source}/receiver"),
+            &cookie,
+            r#"{"receiver_id":null}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/audio/devices/{source}/state"),
+            &cookie,
+            r#"{"volume":50}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        wait_for_volume_set(&src_cmds).await,
+        "an unbound device controls its own volume"
+    );
+}
+
+#[tokio::test]
+async fn list_overlays_bound_source_with_receiver_volume() {
+    // The list endpoint (Control/Rooms/Floor-Plan load from it) must show a bound
+    // source the *receiver's* volume, like the single-device read does. Give the
+    // two devices distinct volumes so the overlay is unambiguous: source 0x0A=10,
+    // receiver 0x1E=30 — the bound source must report 30, not its own 10.
+    let source_state = std::collections::HashMap::from([
+        ("PWR", "01".to_string()),
+        ("MVL", "0A".to_string()),
+        ("AMT", "00".to_string()),
+        ("SLI", "12".to_string()),
+    ]);
+    let (port_s, _) = audio_mock::spawn(source_state).await;
+    let (port_r, _) = audio_mock::spawn(audio_mock::receiver_state()).await; // MVL 1E = 30
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let source = add_onkyo_device(&app, &cookie, port_s, "Source", &[]).await;
+    let receiver = add_onkyo_device(
+        &app,
+        &cookie,
+        port_r,
+        "Receiver",
+        std::slice::from_ref(&source),
+    )
+    .await;
+
+    app.clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/audio/devices/{source}/receiver"),
+            &cookie,
+            &format!(r#"{{"receiver_id":"{receiver}"}}"#),
+        ))
+        .await
+        .unwrap();
+
+    let list = helpers::response_json(
+        app.oneshot(helpers::authed_get("/api/audio/devices", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let src = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == source)
+        .unwrap();
+    assert_eq!(
+        src["state"]["volume"], 30,
+        "list must overlay the bound source with the receiver's volume (30), not its own (10)"
+    );
+}
+
+#[tokio::test]
+async fn room_volume_skips_a_bound_receiver_member() {
+    // Source + receiver both in the room; the source is bound to the receiver.
+    // Room volume must reach the receiver exactly once (routed via the source),
+    // not twice (also directly), which would race on the volume value.
+    let (port_s, _) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let (port_r, rcv_cmds) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let source = add_onkyo_device(&app, &cookie, port_s, "Source", &[]).await;
+    let receiver = add_onkyo_device(
+        &app,
+        &cookie,
+        port_r,
+        "Receiver",
+        std::slice::from_ref(&source),
+    )
+    .await;
+
+    let room_id = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_post(
+                "/api/rooms",
+                &cookie,
+                r#"{"name":"Den","light_ids":[]}"#,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Both devices are room audio members.
+    app.clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/audio"),
+            &cookie,
+            &format!(
+                r#"{{"devices":[{{"audio_device_id":"{source}"}},{{"audio_device_id":"{receiver}"}}]}}"#
+            ),
+        ))
+        .await
+        .unwrap();
+    // Bind the source to the receiver.
+    app.clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/audio/devices/{source}/receiver"),
+            &cookie,
+            &format!(r#"{{"receiver_id":"{receiver}"}}"#),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/audio/state"),
+            &cookie,
+            r#"{"volume":40}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Wait for the routed volume to land (commands flow through the link actor
+    // asynchronously), then confirm the receiver was driven exactly once — not
+    // twice (direct + via the bound source).
+    assert!(wait_for_volume_set(&rcv_cmds).await, "receiver was driven");
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert_eq!(
+        volume_set_count(&rcv_cmds.lock().await),
+        1,
+        "receiver should be driven exactly once"
+    );
 }
 
 /// A wiremock Sonos household: one standalone player plus a Favorites list.
@@ -4352,12 +4756,85 @@ async fn mcp_tools_list_exposes_the_tool_set() {
         "set_audio",
         "play_audio_favorite",
         "group_speakers",
+        "bind_receiver",
     ] {
         assert!(
             names.contains(&expected),
             "missing tool {expected} in {names:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn mcp_bind_receiver_binds_and_unbinds() {
+    let (port_s, _) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let (port_r, _) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let source = add_onkyo_device(&app, &cookie, port_s, "Source", &[]).await;
+    let receiver = add_onkyo_device(
+        &app,
+        &cookie,
+        port_r,
+        "Receiver",
+        std::slice::from_ref(&source),
+    )
+    .await;
+    let key = create_api_key(&app, &cookie, "mcp").await;
+
+    // Bind the source to the receiver via the MCP tool.
+    let resp = app
+        .clone()
+        .oneshot(mcp_tool_call(
+            &key,
+            "bind_receiver",
+            serde_json::json!({"device": source, "receiver": receiver, "receiver_source": "Game"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(mcp_result_text(&body), "ok");
+
+    // get_audio_state reflects the binding on the source.
+    let resp = app
+        .clone()
+        .oneshot(mcp_tool_call(
+            &key,
+            "get_audio_state",
+            serde_json::json!({"device": source}),
+        ))
+        .await
+        .unwrap();
+    let body = helpers::response_json(resp).await;
+    let dev: serde_json::Value = serde_json::from_str(&mcp_result_text(&body)).unwrap();
+    assert_eq!(dev["receiver_id"], receiver);
+    assert_eq!(dev["receiver_source"], "Game");
+
+    // Omitting `receiver` unbinds.
+    let resp = app
+        .clone()
+        .oneshot(mcp_tool_call(
+            &key,
+            "bind_receiver",
+            serde_json::json!({"device": source}),
+        ))
+        .await
+        .unwrap();
+    let body = helpers::response_json(resp).await;
+    assert_eq!(mcp_result_text(&body), "ok");
+
+    let resp = app
+        .oneshot(mcp_tool_call(
+            &key,
+            "get_audio_state",
+            serde_json::json!({"device": source}),
+        ))
+        .await
+        .unwrap();
+    let body = helpers::response_json(resp).await;
+    let dev: serde_json::Value = serde_json::from_str(&mcp_result_text(&body)).unwrap();
+    assert!(dev["receiver_id"].is_null());
 }
 
 #[tokio::test]
@@ -4436,6 +4913,188 @@ async fn mcp_set_light_unknown_name_lists_available() {
     assert_eq!(body["result"]["isError"], true);
     // The error names the available light so the assistant can self-correct.
     assert!(mcp_result_text(&body).contains("Test Light"));
+}
+
+// ── Voice command seam (M23 P1) ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn voice_command_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/voice/command")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"text":"turn off the office"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn voice_command_resolves_light_by_name_and_drives_provider() {
+    let bridge = wled_mock().await;
+    let (app, _light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // "turn off test light" → resolve the light by name → drive its provider.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "POST",
+            "/api/voice/command",
+            &cookie,
+            r#"{"text":"bifrost, turn off test light"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["ok"], true, "command failed: {body}");
+    assert!(
+        body["said"].as_str().unwrap().contains("Turned off"),
+        "{body}"
+    );
+
+    let requests = bridge.received_requests().await.unwrap();
+    assert!(
+        requests.iter().any(|r| r.url.path() == "/json/state"),
+        "no set_state call reached the device"
+    );
+}
+
+#[tokio::test]
+async fn voice_command_unknown_target_reports_not_found() {
+    let bridge = wled_mock().await;
+    let (app, _light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "POST",
+            "/api/voice/command",
+            &cookie,
+            r#"{"text":"turn off the dungeon"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["ok"], false);
+    assert!(body["said"].as_str().unwrap().contains("dungeon"), "{body}");
+}
+
+#[tokio::test]
+async fn voice_command_compound_runs_each_clause() {
+    let bridge = wled_mock().await;
+    let (app, _light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // One clause resolves (the light), one doesn't (no such room) — partial.
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "POST",
+            "/api/voice/command",
+            &cookie,
+            r#"{"text":"turn on test light and turn off the dungeon"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["clauses"].as_array().unwrap().len(), 2);
+    assert_eq!(body["clauses"][0]["ok"], true);
+    assert_eq!(body["clauses"][1]["ok"], false);
+    assert_eq!(body["ok"], false, "compound ok only if all clauses ok");
+}
+
+#[tokio::test]
+async fn voice_relative_dim_drives_the_light() {
+    let bridge = wled_mock().await;
+    let (app, _light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // "dim test light" → relative brightness down → drives the provider.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "POST",
+            "/api/voice/command",
+            &cookie,
+            r#"{"text":"dim test light"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["ok"], true, "{body}");
+    assert!(body["said"].as_str().unwrap().contains("Dimmed"), "{body}");
+    let reqs = bridge.received_requests().await.unwrap();
+    assert!(reqs.iter().any(|r| r.url.path() == "/json/state"));
+}
+
+#[tokio::test]
+async fn voice_room_color_touches_lights_not_audio() {
+    // Color/brightness on a room must drive only its lights — never power on the
+    // room's speakers (regression: "make the studio blue" was starting Sonos).
+    let (port, audio_cmds) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let bridge = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let audio_id = add_onkyo_device(&app, &cookie, port, "AV", &[]).await;
+
+    // A room with the light, plus the audio device as a member.
+    let room_id = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_json(
+                "POST",
+                "/api/rooms",
+                &cookie,
+                &format!(r#"{{"name":"Studio","light_ids":["{light_id}"]}}"#),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    app.clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/audio/devices/{audio_id}/room"),
+            &cookie,
+            &format!(r#"{{"room_id":"{room_id}"}}"#),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "POST",
+            "/api/voice/command",
+            &cookie,
+            r#"{"text":"make the studio blue"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(helpers::response_json(resp).await["ok"], true);
+
+    // The light got a state write …
+    let reqs = bridge.received_requests().await.unwrap();
+    assert!(reqs.iter().any(|r| r.url.path() == "/json/state"));
+    // … but the audio member was never powered on (no PWR set command).
+    let powered = audio_cmds
+        .lock()
+        .await
+        .iter()
+        .any(|m| m.starts_with("PWR") && !m.contains("QSTN"));
+    assert!(!powered, "room color must not power on the room's audio");
 }
 
 // ── Power devices (HA multi-domain discover/control) ─────────────────────────
@@ -4675,6 +5334,81 @@ async fn room_power_membership_roundtrips_and_lists() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn room_on_off_fans_out_to_power_members() {
+    let ha = ha_power_mock().await;
+    let (app, prov_id) = helpers::test_app_with_ha(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    app.clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/providers/{prov_id}/discover"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let devices = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/power/devices", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let porch_id = devices
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["device_id"] == "switch.porch")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // A room whose only member is the power device (no lights).
+    let room_id = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_post(
+                "/api/rooms",
+                &cookie,
+                r#"{"name":"Garage","light_ids":[]}"#,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    app.clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/power"),
+            &cookie,
+            &format!(r#"{{"power_device_ids":["{porch_id}"]}}"#),
+        ))
+        .await
+        .unwrap();
+
+    // Turning the (light-less) room off must reach the power member.
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/state"),
+            &cookie,
+            r#"{"on":false}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let reqs = ha.received_requests().await.unwrap();
+    assert!(
+        reqs.iter()
+            .any(|r| r.url.path() == "/api/services/homeassistant/turn_off"),
+        "room off didn't fan out to the power member"
+    );
 }
 
 #[tokio::test]

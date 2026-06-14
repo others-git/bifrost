@@ -33,11 +33,15 @@ export function AudioControls({
   device,
   onLocalPatch,
   compact = false,
+  receiverName,
 }: {
   device: AudioDevice;
   onLocalPatch: (id: string, patch: Partial<AudioDevice["state"]>) => void;
   /** Tighter spacing + smaller transport buttons, for cramped cards (phones). */
   compact?: boolean;
+  /** When this source is bound to a receiver (M22), the receiver's name — shown
+   * by the volume row, since volume/mute control the receiver, not this device. */
+  receiverName?: string;
 }) {
   const volumeTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const s = device.state;
@@ -138,6 +142,11 @@ export function AudioControls({
             style={{ flex: 1, accentColor: ACCENT }}
           />
           <span style={{ fontSize: "0.78rem", color: T.dim, width: 30, textAlign: "right" }}>{s.volume}</span>
+        </div>
+      )}
+      {!offline && receiverName && (
+        <div style={{ fontSize: "0.7rem", color: T.dim, marginTop: -2 }}>
+          Volume → {receiverName}
         </div>
       )}
 
@@ -290,6 +299,7 @@ export function AudioEditor({
   onLocalPatch,
   onSetEnabled,
   onClose,
+  receiverName,
 }: {
   device: AudioDevice;
   anchor: HTMLElement | { x: number; y: number };
@@ -297,15 +307,17 @@ export function AudioEditor({
   /** Enable/disable the device. Disabling drops it from room control. */
   onSetEnabled?: (enabled: boolean) => void;
   onClose: () => void;
+  /** M22: name of the receiver this source's volume routes to, if bound. */
+  receiverName?: string;
 }) {
-  const { isMobile } = useViewport();
+  const { isCompact } = useViewport();
   const panelRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const cap = device.capabilities;
   const offline = device.state.reachable === false;
 
   useLayoutEffect(() => {
-    if (isMobile) return; // bottom sheet on phones — no anchor math
+    if (isCompact) return; // bottom sheet on phones — no anchor math
     const panel = panelRef.current;
     if (!panel) return;
     const rect =
@@ -318,7 +330,7 @@ export function AudioEditor({
     let top = rect.top + rect.height / 2 - h / 2;
     top = Math.max(8, Math.min(window.innerHeight - h - 8, top));
     setPos({ left, top });
-  }, [anchor, isMobile]);
+  }, [anchor, isCompact]);
 
   useEffect(() => {
     const onDown = (e: PointerEvent) => {
@@ -345,7 +357,7 @@ export function AudioEditor({
     <div
       ref={panelRef}
       style={
-        isMobile
+        isCompact
           ? sheetStyle
           : {
               position: "fixed",
@@ -386,7 +398,7 @@ export function AudioEditor({
       {offline ? (
         <div style={{ fontSize: "0.8rem", color: "#c66" }}>Device offline.</div>
       ) : (
-        <AudioControls device={device} onLocalPatch={onLocalPatch} />
+        <AudioControls device={device} onLocalPatch={onLocalPatch} receiverName={receiverName} />
       )}
       {onSetEnabled && (
         <DisableRow

@@ -170,6 +170,7 @@ provider-native synced playback group (see below).
 | `POST` | `/api/v1/audio/devices/{id}/favorites/play` | Start a favorite (body below) |
 | `POST` | `/api/v1/audio/devices/{id}/group` | Join this speaker into a group (body below) |
 | `POST` | `/api/v1/audio/devices/{id}/ungroup` | Remove this speaker from its group |
+| `PUT` | `/api/v1/audio/devices/{id}/receiver` | Bind this source to a receiver (body below) |
 
 `PUT …/state` takes a **sparse command** — only the fields present are applied:
 
@@ -192,6 +193,29 @@ maps to play/pause.
 
 Responses: `204` success, `404` unknown device, `422` invalid command (e.g.
 unknown source — message in body), `502` device unreachable.
+
+A bound source's read (`GET …/{id}`) reports the **receiver's** volume/mute,
+and its `receiver_id` / `receiver_source` fields name the binding.
+
+#### Bind a source to a receiver
+
+Real AV: a TV / streamer / console feeds audio *through* an AV receiver, which
+owns the volume. Bind the source to its receiver and `PUT …/state` to the source
+then routes `volume`/`mute` to the receiver, while `power`/`source`/`transport`
+stay on the source. Powering the source **on** also wakes the receiver and (if
+`receiver_source` is set) switches it to that input. Many sources may share one
+receiver. Stored on the source.
+
+```json
+// PUT …/{id}/receiver
+{
+  "receiver_id": "<audio device id>",  // null to unbind
+  "receiver_source": "Game"             // optional: receiver input to select on power-on
+}
+```
+
+Responses: `204` success, `404` unknown source device, `422` invalid binding
+(self-binding, unknown receiver, or a receiver that is itself bound).
 
 #### Favorites
 

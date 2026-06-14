@@ -38,7 +38,7 @@ const T = {
 export function AudioPage() {
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [loading, setLoading] = useState(true);
-  const { isMobile } = useViewport();
+  const { isMobile, isCompact } = useViewport();
 
   useEffect(() => {
     let cancelled = false;
@@ -184,7 +184,7 @@ export function AudioPage() {
               )}
               onLocalPatch={patchLocal}
               onGroupingChanged={onGroupingChanged}
-              compact={isMobile}
+              compact={isCompact}
             />
           ))}
         </div>

@@ -25,6 +25,7 @@ import {
   setLightRoom,
   setAudioRoom,
   setPowerRoom,
+  setAudioReceiver,
   type Light,
   type AudioDevice,
   type PowerDevice,
@@ -71,6 +72,13 @@ interface Item {
   shadowAuto: boolean;
   /** Directly-assigned room id, or null (room links aren't reflected here). */
   roomId: string | null;
+  /** Audio only: the device kind, so a source (TV/speaker/zone) can be bound to
+   * a receiver while receivers themselves aren't offered the control. */
+  audioKind?: AudioDevice["kind"];
+  /** Audio only (M22): the receiver this source's volume routes to; null = none. */
+  receiverId?: string | null;
+  /** Audio only (M22): the receiver input to select when this source plays. */
+  receiverSource?: string | null;
 }
 
 const POWER_KIND_LABEL: Record<PowerKind, string> = {
@@ -121,6 +129,9 @@ function audioItem(a: AudioDevice): Item {
     shadowedBy: a.shadowed_by ?? null,
     shadowAuto: a.shadow_auto === true,
     roomId: a.room_id ?? null,
+    audioKind: a.kind,
+    receiverId: a.receiver_id ?? null,
+    receiverSource: a.receiver_source ?? null,
   };
 }
 
@@ -219,13 +230,13 @@ function Toggle({
 /// translucent. On phones it's a full-width bottom sheet (touch-friendly).
 function AnchoredPanel({
   anchor,
-  isMobile,
+  isCompact,
   width = 200,
   onClose,
   children,
 }: {
   anchor: HTMLElement | null;
-  isMobile: boolean;
+  isCompact: boolean;
   width?: number;
   onClose: () => void;
   children: React.ReactNode;
@@ -234,7 +245,7 @@ function AnchoredPanel({
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
 
   useLayoutEffect(() => {
-    if (isMobile || !anchor || !ref.current) return;
+    if (isCompact || !anchor || !ref.current) return;
     const rect = anchor.getBoundingClientRect();
     const w = ref.current.offsetWidth;
     const h = ref.current.offsetHeight;
@@ -244,9 +255,9 @@ function AnchoredPanel({
     if (top + h > window.innerHeight - 8) top = rect.top - 6 - h; // flip up if needed
     top = Math.max(8, top);
     setPos({ left, top });
-  }, [anchor, isMobile]);
+  }, [anchor, isCompact]);
 
-  const panelStyle: React.CSSProperties = isMobile
+  const panelStyle: React.CSSProperties = isCompact
     ? {
         position: "fixed",
         left: 0,
@@ -293,19 +304,19 @@ function AnchoredPanel({
 /// Pick a device's glyph override. "Use type default" clears it.
 function GlyphPicker({
   anchor,
-  isMobile,
+  isCompact,
   current,
   onPick,
   onClose,
 }: {
   anchor: HTMLElement | null;
-  isMobile: boolean;
+  isCompact: boolean;
   current: string | null;
   onPick: (glyph: string | null) => void;
   onClose: () => void;
 }) {
   return (
-    <AnchoredPanel anchor={anchor} isMobile={isMobile} onClose={onClose}>
+    <AnchoredPanel anchor={anchor} isCompact={isCompact} onClose={onClose}>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: "0.3rem" }}>
         {GLYPH_OPTIONS.map((g) => {
           const active = current === g.name;
@@ -317,7 +328,7 @@ function GlyphPicker({
               style={{
                 display: "grid",
                 placeItems: "center",
-                height: isMobile ? 44 : 32,
+                height: isCompact ? 44 : 32,
                 borderRadius: 7,
                 cursor: "pointer",
                 color: active ? ACCENT : T.dim,
@@ -325,7 +336,7 @@ function GlyphPicker({
                 border: `1px solid ${active ? "rgba(56,189,248,0.4)" : "transparent"}`,
               }}
             >
-              <Glyph name={g.name} size={isMobile ? 22 : 18} />
+              <Glyph name={g.name} size={isCompact ? 22 : 18} />
             </button>
           );
         })}
@@ -341,7 +352,7 @@ function GlyphPicker({
           color: current === null ? ACCENT : T.dim,
           cursor: "pointer",
           fontSize: "0.78rem",
-          padding: isMobile ? "0.6rem" : "0.32rem",
+          padding: isCompact ? "0.6rem" : "0.32rem",
         }}
       >
         Use type default
@@ -356,14 +367,14 @@ function RoomPicker({
   anchor,
   rooms,
   current,
-  isMobile,
+  isCompact,
   onPick,
   onClose,
 }: {
   anchor: HTMLElement | null;
   rooms: Room[];
   current: string | null;
-  isMobile: boolean;
+  isCompact: boolean;
   onPick: (roomId: string | null) => void;
   onClose: () => void;
 }) {
@@ -372,8 +383,8 @@ function RoomPicker({
     ...rooms.map((r) => ({ id: r.id as string | null, name: r.name })),
   ];
   return (
-    <AnchoredPanel anchor={anchor} isMobile={isMobile} onClose={onClose}>
-      {isMobile && (
+    <AnchoredPanel anchor={anchor} isCompact={isCompact} onClose={onClose}>
+      {isCompact && (
         <div style={{ color: T.dim, fontSize: "0.78rem", padding: "0.3rem 0.6rem 0.5rem" }}>
           Assign room
         </div>
@@ -395,8 +406,8 @@ function RoomPicker({
               borderRadius: 8,
               color: active ? ACCENT : c.id ? T.text : T.faint,
               cursor: "pointer",
-              fontSize: isMobile ? "0.95rem" : "0.82rem",
-              padding: isMobile ? "0.7rem 0.6rem" : "0.45rem 0.5rem",
+              fontSize: isCompact ? "0.95rem" : "0.82rem",
+              padding: isCompact ? "0.7rem 0.6rem" : "0.45rem 0.5rem",
             }}
           >
             <span style={{ width: 16, display: "grid", placeItems: "center", flexShrink: 0 }}>
@@ -410,20 +421,146 @@ function RoomPicker({
   );
 }
 
+/// Bind a source audio device (TV / streamer / console) to a receiver (M22):
+/// its volume/mute then route to the receiver, and — if an input is chosen — the
+/// receiver switches to that input when the source plays. Two sections: pick the
+/// receiver, then (once bound, if the receiver enumerates inputs) the input to
+/// switch to. Anchored popover on desktop, bottom sheet on phones.
+function ReceiverPicker({
+  anchor,
+  isCompact,
+  sourceId,
+  devices,
+  currentReceiver,
+  currentSource,
+  onPick,
+  onClose,
+}: {
+  anchor: HTMLElement | null;
+  isCompact: boolean;
+  sourceId: string;
+  devices: AudioDevice[];
+  currentReceiver: string | null;
+  currentSource: string | null;
+  onPick: (receiverId: string | null, receiverSource: string | null) => void;
+  onClose: () => void;
+}) {
+  // Candidate receivers: receivers/zones, not the source itself, and not already
+  // bound elsewhere (the backend rejects chaining, so don't offer it).
+  const candidates = devices.filter(
+    (a) =>
+      a.id !== sourceId &&
+      (a.kind === "receiver" || a.kind === "zone") &&
+      !a.receiver_id &&
+      a.enabled !== false,
+  );
+  const bound = currentReceiver ? devices.find((a) => a.id === currentReceiver) : null;
+  const inputs = bound?.state?.source_list ?? [];
+  const rowStyle = (active: boolean, dim = false): React.CSSProperties => ({
+    display: "flex",
+    alignItems: "center",
+    gap: "0.5rem",
+    width: "100%",
+    textAlign: "left",
+    background: active ? "rgba(56,189,248,0.12)" : "transparent",
+    border: "none",
+    borderRadius: 8,
+    color: active ? ACCENT : dim ? T.faint : T.text,
+    cursor: "pointer",
+    fontSize: isCompact ? "0.95rem" : "0.82rem",
+    padding: isCompact ? "0.7rem 0.6rem" : "0.45rem 0.5rem",
+  });
+  const check = (active: boolean) => (
+    <span style={{ width: 16, display: "grid", placeItems: "center", flexShrink: 0 }}>
+      {active ? "✓" : ""}
+    </span>
+  );
+  return (
+    <AnchoredPanel anchor={anchor} isCompact={isCompact} onClose={onClose}>
+      <div style={{ color: T.dim, fontSize: "0.78rem", padding: "0.3rem 0.6rem 0.4rem" }}>
+        Route volume to
+      </div>
+      <button style={rowStyle(!currentReceiver, true)} onClick={() => onPick(null, null)}>
+        {check(!currentReceiver)}
+        Not bound
+      </button>
+      {candidates.length === 0 && !bound ? (
+        <div style={{ color: T.faint, fontSize: "0.78rem", padding: "0.2rem 0.6rem 0.5rem" }}>
+          No receivers found.
+        </div>
+      ) : (
+        candidates.map((r) => {
+          const active = currentReceiver === r.id;
+          return (
+            <button
+              key={r.id}
+              style={rowStyle(active)}
+              // Keep the chosen input only while staying on the same receiver.
+              onClick={() => onPick(r.id, active ? currentSource : null)}
+            >
+              {check(active)}
+              {r.name}
+            </button>
+          );
+        })
+      )}
+      {bound && inputs.length > 0 && (
+        <>
+          <div
+            style={{
+              color: T.dim,
+              fontSize: "0.78rem",
+              padding: "0.5rem 0.6rem 0.4rem",
+              borderTop: `1px solid ${T.cardBorder}`,
+              marginTop: "0.3rem",
+            }}
+          >
+            Switch {bound.name} to
+          </div>
+          <button
+            style={rowStyle(!currentSource, true)}
+            onClick={() => onPick(currentReceiver, null)}
+          >
+            {check(!currentSource)}
+            Don’t switch input
+          </button>
+          {inputs.map((src) => {
+            const active = currentSource === src;
+            return (
+              <button
+                key={src}
+                style={rowStyle(active)}
+                onClick={() => onPick(currentReceiver, src)}
+              >
+                {check(active)}
+                {src}
+              </button>
+            );
+          })}
+        </>
+      )}
+    </AnchoredPanel>
+  );
+}
+
 function DeviceCard({
   item,
   rooms,
+  audioDevices,
   onToggle,
   onSetEnabled,
   onSetGlyph,
   onSetRoom,
+  onSetReceiver,
 }: {
   item: Item;
   rooms: Room[];
+  audioDevices: AudioDevice[];
   onToggle: (next: boolean) => void;
   onSetEnabled: (enabled: boolean) => void;
   onSetGlyph: (glyph: string | null) => void;
   onSetRoom: (roomId: string | null) => void;
+  onSetReceiver: (receiverId: string | null, receiverSource: string | null) => void;
 }) {
   const offline = item.offline;
   const disabled = !item.enabled;
@@ -434,10 +571,18 @@ function DeviceCard({
   const [expanded, setExpanded] = useState(false);
   const [picking, setPicking] = useState(false);
   const [roomPicking, setRoomPicking] = useState(false);
+  const [receiverPicking, setReceiverPicking] = useState(false);
   const glyphBtnRef = useRef<HTMLButtonElement>(null);
   const roomBtnRef = useRef<HTMLButtonElement>(null);
-  const { isMobile } = useViewport();
+  const receiverBtnRef = useRef<HTMLButtonElement>(null);
+  const { isCompact } = useViewport();
   const roomName = item.roomId ? (rooms.find((r) => r.id === item.roomId)?.name ?? null) : null;
+  // A source device (TV/streamer/console — any audio that isn't itself a
+  // receiver) can route its volume to a receiver.
+  const isAudioSource = item.domain === "audio" && item.audioKind !== "receiver";
+  const boundReceiver = item.receiverId
+    ? (audioDevices.find((a) => a.id === item.receiverId)?.name ?? null)
+    : null;
   const clamp: React.CSSProperties = expanded
     ? { whiteSpace: "normal", overflowWrap: "anywhere" }
     : { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
@@ -479,7 +624,7 @@ function DeviceCard({
       {picking && (
         <GlyphPicker
           anchor={glyphBtnRef.current}
-          isMobile={isMobile}
+          isCompact={isCompact}
           current={item.glyph}
           onPick={(g) => {
             onSetGlyph(g);
@@ -528,6 +673,51 @@ function DeviceCard({
         </div>
       </div>
 
+      {isAudioSource && (
+        <>
+          <button
+            ref={receiverBtnRef}
+            onClick={() => setReceiverPicking((v) => !v)}
+            title={
+              boundReceiver
+                ? `Volume → ${boundReceiver} — click to change`
+                : "Bind to a receiver (route volume)"
+            }
+            style={{
+              flexShrink: 0,
+              width: 34,
+              height: 34,
+              borderRadius: 9,
+              display: "grid",
+              placeItems: "center",
+              color: item.receiverId ? ACCENT : T.faint,
+              background: item.receiverId ? "rgba(56,189,248,0.10)" : "rgba(255,255,255,0.03)",
+              border: item.receiverId
+                ? `1px solid rgba(56,189,248,0.35)`
+                : `1px solid ${T.cardBorder}`,
+              cursor: "pointer",
+            }}
+          >
+            <Glyph name="receiver" size={18} />
+          </button>
+          {receiverPicking && (
+            <ReceiverPicker
+              anchor={receiverBtnRef.current}
+              isCompact={isCompact}
+              sourceId={item.id}
+              devices={audioDevices}
+              currentReceiver={item.receiverId ?? null}
+              currentSource={item.receiverSource ?? null}
+              onPick={(rid, rsrc) => {
+                onSetReceiver(rid, rsrc);
+                if (!rid) setReceiverPicking(false);
+              }}
+              onClose={() => setReceiverPicking(false)}
+            />
+          )}
+        </>
+      )}
+
       <button
         ref={roomBtnRef}
         onClick={() => setRoomPicking((v) => !v)}
@@ -552,7 +742,7 @@ function DeviceCard({
           anchor={roomBtnRef.current}
           rooms={rooms}
           current={item.roomId}
-          isMobile={isMobile}
+          isCompact={isCompact}
           onPick={(r) => {
             onSetRoom(r);
             setRoomPicking(false);
@@ -662,6 +852,9 @@ const SECTIONS: { domain: Domain; title: string }[] = [
 export function DevicesPage() {
   const [items, setItems] = useState<Item[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
+  // Raw audio devices kept around so the receiver-binding picker has names +
+  // each receiver's input list (the normalized Item drops device state).
+  const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
   const [loading, setLoading] = useState(true);
   const { isMobile } = useViewport();
 
@@ -674,6 +867,7 @@ export function DevicesPage() {
     ]);
     const lightItems = lights === "unauthorized" ? [] : lights.map(lightItem);
     setItems([...lightItems, ...audio.map(audioItem), ...power.map(powerItem)]);
+    setAudioDevices(audio);
     setRooms(roomList);
     setLoading(false);
   }, []);
@@ -705,6 +899,22 @@ export function DevicesPage() {
   async function setRoom(item: Item, roomId: string | null) {
     setItems((prev) => prev.map((d) => (d.id === item.id ? { ...d, roomId } : d)));
     await SET_ROOM[item.domain](item.id, roomId);
+  }
+
+  async function setReceiver(
+    item: Item,
+    receiverId: string | null,
+    receiverSource: string | null,
+  ) {
+    setItems((prev) =>
+      prev.map((d) => (d.id === item.id ? { ...d, receiverId, receiverSource } : d)),
+    );
+    setAudioDevices((prev) =>
+      prev.map((a) =>
+        a.id === item.id ? { ...a, receiver_id: receiverId, receiver_source: receiverSource } : a,
+      ),
+    );
+    await setAudioReceiver(item.id, receiverId, receiverSource);
   }
 
   // Clear a manual duplicate link so the device shows up on its own again.
@@ -800,10 +1010,12 @@ export function DevicesPage() {
                     key={d.id}
                     item={d}
                     rooms={rooms}
+                    audioDevices={audioDevices}
                     onToggle={(next) => toggle(d, next)}
                     onSetEnabled={(en) => setEnabled(d, en)}
                     onSetGlyph={(g) => setGlyph(d, g)}
                     onSetRoom={(r) => setRoom(d, r)}
+                    onSetReceiver={(rid, rsrc) => setReceiver(d, rid, rsrc)}
                   />
                 ))}
               </div>

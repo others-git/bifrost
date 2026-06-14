@@ -33,14 +33,14 @@ export function PowerFlyout({
   onSetEnabled?: (enabled: boolean) => void;
   onClose: () => void;
 }) {
-  const { isMobile } = useViewport();
+  const { isCompact } = useViewport();
   const panelRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const on = device.state.on;
   const offline = device.state.reachable === false;
 
   useLayoutEffect(() => {
-    if (isMobile) return;
+    if (isCompact) return;
     const panel = panelRef.current;
     if (!panel) return;
     const rect =
@@ -55,7 +55,7 @@ export function PowerFlyout({
     let top = rect.top + rect.height / 2 - h / 2;
     top = Math.max(8, Math.min(window.innerHeight - h - 8, top));
     setPos({ left, top });
-  }, [anchor, isMobile]);
+  }, [anchor, isCompact]);
 
   useEffect(() => {
     const onDown = (e: PointerEvent) => {
@@ -77,7 +77,7 @@ export function PowerFlyout({
     <div
       ref={panelRef}
       style={
-        isMobile
+        isCompact
           ? sheetStyle
           : {
               position: "fixed",

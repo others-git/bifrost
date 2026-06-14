@@ -245,7 +245,7 @@ export function LightEditor({
   /** Extra controls rendered at the bottom (e.g. a room's scene selector). */
   children?: ReactNode;
 }) {
-  const { isMobile } = useViewport();
+  const { isCompact } = useViewport();
   const panelRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   // Uncontrolled after mount: seeding from props once avoids hex→hsv→hex
@@ -256,7 +256,7 @@ export function LightEditor({
 
   useLayoutEffect(() => {
     // On phones the editor is a bottom sheet — no anchor math needed.
-    if (isMobile) return;
+    if (isCompact) return;
     const panel = panelRef.current;
     if (!panel) return;
     const rect =
@@ -271,7 +271,7 @@ export function LightEditor({
     let top = rect.top + rect.height / 2 - h / 2;
     top = Math.max(8, Math.min(window.innerHeight - h - 8, top));
     setPos({ left, top });
-  }, [anchor, isMobile]);
+  }, [anchor, isCompact]);
 
   useEffect(() => {
     const onDown = (e: PointerEvent) => {
@@ -309,7 +309,7 @@ export function LightEditor({
     <div
       ref={panelRef}
       style={
-        isMobile
+        isCompact
           ? sheetStyle
           : {
               position: "fixed",

@@ -33,6 +33,19 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/devices/{id}/glyph", put(set_glyph_handler))
         .route("/devices/{id}/shadow", put(set_shadow_handler))
         .route("/devices/{id}/room", put(set_room_handler))
+        .route("/devices/{id}/receiver", put(set_receiver_handler))
+}
+
+async fn set_receiver_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<crate::api::SetReceiverRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    set_receiver_status(set_audio_receiver(&state, &id, req.receiver_id, req.receiver_source).await)
 }
 
 async fn set_enabled_handler(
@@ -140,6 +153,12 @@ pub(crate) struct AudioDeviceRow {
     /// The room this device is directly assigned to (Devices-page assignment),
     /// or `None`. Room *links* (synced provider groups) aren't reflected here.
     pub room_id: Option<String>,
+    /// M22 receiver binding: the audio device id whose volume/mute this source
+    /// routes to (the receiver is the volume authority). `None` = unbound.
+    pub receiver_id: Option<String>,
+    /// The receiver input to select when this source becomes active; `None` =
+    /// leave the receiver's input alone.
+    pub receiver_source: Option<String>,
 }
 
 fn row_to_device(r: sqlx::sqlite::SqliteRow) -> AudioDeviceRow {
@@ -161,6 +180,8 @@ fn row_to_device(r: sqlx::sqlite::SqliteRow) -> AudioDeviceRow {
         shadowed_by: r.get("shadowed_by"),
         shadow_auto: r.get::<i64, _>("shadow_auto") != 0,
         room_id: r.get("room_id"),
+        receiver_id: r.get("receiver_id"),
+        receiver_source: r.get("receiver_source"),
     }
 }
 
@@ -176,15 +197,34 @@ pub(crate) fn build_audio_provider(
 }
 
 pub(crate) async fn list_all_devices(state: &AppState) -> Result<Vec<AudioDeviceRow>, ()> {
-    sqlx::query(
-        "SELECT id, provider_id, device_id, name, kind, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto,
+    let mut devices: Vec<AudioDeviceRow> = sqlx::query(
+        "SELECT id, provider_id, device_id, name, kind, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto, receiver_id, receiver_source,
                 (SELECT room_id FROM room_audio_devices WHERE audio_device_id = audio_devices.id LIMIT 1) AS room_id
          FROM audio_devices ORDER BY name",
     )
     .fetch_all(&state.db)
     .await
-    .map_err(|e| tracing::error!("db error listing audio devices: {e}"))
-    .map(|rows| rows.into_iter().map(row_to_device).collect())
+    .map_err(|e| tracing::error!("db error listing audio devices: {e}"))?
+    .into_iter()
+    .map(row_to_device)
+    .collect();
+
+    // A bound source shows its receiver's volume/mute (the receiver owns volume),
+    // mirroring `get_device_live`. The receiver is in this same list, so overlay
+    // from it — no extra query.
+    let vol_mute: std::collections::HashMap<String, (u8, bool)> = devices
+        .iter()
+        .map(|d| (d.id.clone(), (d.state.volume, d.state.mute)))
+        .collect();
+    for d in &mut devices {
+        if let Some(rid) = &d.receiver_id
+            && let Some((volume, mute)) = vol_mute.get(rid)
+        {
+            d.state.volume = *volume;
+            d.state.mute = *mute;
+        }
+    }
+    Ok(devices)
 }
 
 /// Fetch one device with a live state read. Falls back to the cached state
@@ -196,6 +236,7 @@ pub(crate) async fn get_device_live(
     let row = sqlx::query(
         "SELECT a.id, a.provider_id, a.device_id, a.name, a.kind, a.capabilities,
                 a.last_state, a.last_seen, a.enabled, a.glyph, a.hw_id, a.shadowed_by, a.shadow_auto,
+                a.receiver_id, a.receiver_source,
                 (SELECT room_id FROM room_audio_devices WHERE audio_device_id = a.id LIMIT 1) AS room_id,
                 p.provider_type, p.credentials
          FROM audio_devices a JOIN providers p ON a.provider_id = p.id
@@ -235,6 +276,27 @@ pub(crate) async fn get_device_live(
             device.state.reachable = Some(false);
         }
     }
+
+    // For a bound source the receiver owns volume/mute, so show the receiver's
+    // values — what the source's own volume slider actually controls. Use the
+    // receiver's *cached* state, not a fresh read: push-mode receivers (Onkyo)
+    // allow only one eISCP connection, which the push manager holds, so a
+    // competing per-request read returns a partial response and would clobber a
+    // good cached volume with 0. The push manager keeps last_state current.
+    if let Some(rid) = &device.receiver_id
+        && let Ok(Some(r)) = sqlx::query(
+            "SELECT last_state FROM audio_devices WHERE id = ? AND enabled = 1 AND shadowed_by IS NULL",
+        )
+        .bind(rid)
+        .fetch_optional(&state.db)
+        .await
+        && let Some(rstate) = r
+            .get::<Option<String>, _>("last_state")
+            .and_then(|s| serde_json::from_str::<AudioState>(&s).ok())
+    {
+        device.state.volume = rstate.volume;
+        device.state.mute = rstate.mute;
+    }
     Ok(Some(device))
 }
 
@@ -246,11 +308,129 @@ pub(crate) enum SetAudioOutcome {
     Db,
 }
 
+pub(crate) enum SetReceiverOutcome {
+    Ok,
+    NotFound,
+    BadRequest(String),
+    Db,
+}
+
+/// Bind (or, with `receiver_id = None`, unbind) a source audio device to a
+/// receiver. Stored on the source — many sources may share one receiver. Rejects
+/// a missing source/receiver and self-binding; chaining (binding to a device
+/// that is itself bound) is rejected so volume can't route in a loop.
+pub(crate) async fn set_audio_receiver(
+    state: &AppState,
+    id: &str,
+    receiver_id: Option<String>,
+    receiver_source: Option<String>,
+) -> SetReceiverOutcome {
+    if let Some(rid) = &receiver_id {
+        if rid == id {
+            return SetReceiverOutcome::BadRequest("a device cannot be its own receiver".into());
+        }
+        let receiver = sqlx::query("SELECT receiver_id FROM audio_devices WHERE id = ?")
+            .bind(rid)
+            .fetch_optional(&state.db)
+            .await;
+        match receiver {
+            Ok(Some(r)) => {
+                if r.get::<Option<String>, _>("receiver_id").is_some() {
+                    return SetReceiverOutcome::BadRequest(
+                        "that device is itself bound to a receiver; pick a standalone receiver"
+                            .into(),
+                    );
+                }
+            }
+            Ok(None) => return SetReceiverOutcome::BadRequest("unknown receiver device".into()),
+            Err(e) => {
+                tracing::error!("db error validating receiver: {e}");
+                return SetReceiverOutcome::Db;
+            }
+        }
+    }
+    // Clearing the binding clears the input too; setting it stores both.
+    let stored_source = receiver_id.as_ref().and(receiver_source);
+    match sqlx::query("UPDATE audio_devices SET receiver_id = ?, receiver_source = ? WHERE id = ?")
+        .bind(&receiver_id)
+        .bind(&stored_source)
+        .bind(id)
+        .execute(&state.db)
+        .await
+    {
+        Ok(r) if r.rows_affected() > 0 => SetReceiverOutcome::Ok,
+        Ok(_) => SetReceiverOutcome::NotFound,
+        Err(e) => {
+            tracing::error!("db error setting receiver binding: {e}");
+            SetReceiverOutcome::Db
+        }
+    }
+}
+
+pub(crate) fn set_receiver_status(outcome: SetReceiverOutcome) -> axum::response::Response {
+    match outcome {
+        SetReceiverOutcome::Ok => StatusCode::NO_CONTENT.into_response(),
+        SetReceiverOutcome::NotFound => StatusCode::NOT_FOUND.into_response(),
+        SetReceiverOutcome::BadRequest(m) => (StatusCode::UNPROCESSABLE_ENTITY, m).into_response(),
+        SetReceiverOutcome::Db => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Route a command for an audio device, honouring an M22 receiver binding: a
+/// bound source sends `volume`/`mute` to its receiver (and switches the receiver
+/// input on power-on) while keeping `power`/`source`/`transport` on itself.
+/// Unbound devices apply the command directly. Shared by session, `/v1`, and MCP
+/// so every surface routes identically.
 pub(crate) async fn apply_audio_command(
     state: &AppState,
     id: &str,
     cmd: &AudioCommand,
 ) -> SetAudioOutcome {
+    match load_receiver_binding(state, id).await {
+        Err(()) => SetAudioOutcome::Db,
+        Ok(None) => apply_to_device(state, id, cmd).await,
+        Ok(Some((receiver_id, receiver_source))) => {
+            let (source_cmd, receiver_cmd) = cmd.split_for_receiver(receiver_source.as_deref());
+            // Source first (power/input), so the receiver wakes to an active source.
+            if !source_cmd.is_empty() {
+                match apply_to_device(state, id, &source_cmd).await {
+                    SetAudioOutcome::Ok => {}
+                    other => return other,
+                }
+            }
+            if !receiver_cmd.is_empty() {
+                return apply_to_device(state, &receiver_id, &receiver_cmd).await;
+            }
+            SetAudioOutcome::Ok
+        }
+    }
+}
+
+/// Return `(receiver_id, receiver_source)` when `id` is a controllable source
+/// bound to a usable (enabled, non-shadowed) receiver; `Ok(None)` when unbound
+/// or the receiver is gone/disabled (treat a dangling binding as unbound).
+async fn load_receiver_binding(
+    state: &AppState,
+    id: &str,
+) -> Result<Option<(String, Option<String>)>, ()> {
+    let row = sqlx::query(
+        "SELECT a.receiver_id, a.receiver_source
+         FROM audio_devices a JOIN providers p ON a.provider_id = p.id
+         WHERE a.id = ? AND p.enabled = 1 AND a.enabled = 1 AND a.shadowed_by IS NULL
+           AND a.receiver_id IS NOT NULL
+           AND EXISTS (
+               SELECT 1 FROM audio_devices r JOIN providers rp ON r.provider_id = rp.id
+               WHERE r.id = a.receiver_id AND r.enabled = 1 AND r.shadowed_by IS NULL AND rp.enabled = 1
+           )",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| tracing::error!("db error loading receiver binding: {e}"))?;
+    Ok(row.map(|r| (r.get("receiver_id"), r.get("receiver_source"))))
+}
+
+async fn apply_to_device(state: &AppState, id: &str, cmd: &AudioCommand) -> SetAudioOutcome {
     // A disabled device receives no commands (control lookups skip it).
     let row = sqlx::query(
         "SELECT a.device_id, p.provider_type, p.credentials

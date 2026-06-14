@@ -829,6 +829,9 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
               anchor={editor.anchor}
               onLocalPatch={patchAudio}
               onClose={() => setEditor(null)}
+              receiverName={
+                device.receiver_id ? audioById.get(device.receiver_id)?.name : undefined
+              }
             />
           );
         }

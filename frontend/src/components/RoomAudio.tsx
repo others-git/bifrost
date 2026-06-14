@@ -16,9 +16,16 @@ import { S } from "../styles";
 const ACCENT = "#a78bfa";
 
 function members(room: Room, devices: AudioDevice[]) {
-  return room.audio_devices
+  const resolved = room.audio_devices
     .map((m) => ({ m, dev: devices.find((d) => d.id === m.audio_device_id) }))
     .filter((x): x is { m: RoomAudioMember; dev: AudioDevice } => !!x.dev);
+  // M22: a receiver that is another member's volume-target is driven through the
+  // bound source, so don't count it as its own room volume target (avoids a
+  // double-apply / inflated speaker count).
+  const boundTargets = new Set(
+    resolved.map((x) => x.dev.receiver_id).filter((id): id is string => !!id),
+  );
+  return resolved.filter((x) => !boundTargets.has(x.dev.id));
 }
 
 /** Live room volume + mute — fans out to all the room's audio members. */

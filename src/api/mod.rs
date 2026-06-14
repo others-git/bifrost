@@ -14,6 +14,7 @@ pub mod scenes;
 pub mod settings;
 pub mod setup;
 pub mod v1;
+pub mod voice;
 
 use crate::AppState;
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
@@ -45,6 +46,16 @@ pub(crate) struct SetShadowRequest {
 #[derive(Deserialize)]
 pub(crate) struct SetRoomRequest {
     pub room_id: Option<String>,
+}
+
+/// Body for binding a source audio device to a receiver (M22). `receiver_id`
+/// `null` clears the binding; `receiver_source` is the receiver input to select
+/// when the source becomes active (`null` = leave the input alone).
+#[derive(Deserialize)]
+pub(crate) struct SetReceiverRequest {
+    pub receiver_id: Option<String>,
+    #[serde(default)]
+    pub receiver_source: Option<String>,
 }
 
 /// Set (or clear) a device row's glyph override. `table` is a fixed per-domain
@@ -112,6 +123,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .nest("/settings", settings::router())
         .nest("/setup", setup::router())
         .nest("/v1", v1::router())
+        .nest("/voice", voice::router())
         .route("/health", get(health))
 }
 

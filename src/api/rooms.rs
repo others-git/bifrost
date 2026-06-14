@@ -9,9 +9,10 @@
 //! single linked group; otherwise it fans out per light in parallel.
 
 use crate::AppState;
-use crate::api::audio::apply_audio_command;
+use crate::api::audio::{SetAudioOutcome, apply_audio_command};
 use crate::api::auth::require_session;
 use crate::api::lights::build_provider;
+use crate::api::power::{SetPowerOutcome, apply_power_state};
 use crate::models::LightState;
 use crate::models::audio::AudioCommand;
 use axum::{
@@ -324,6 +325,38 @@ pub(crate) async fn effective_audio_members(
     .collect()
 }
 
+/// Of the given audio device ids, the subset that is some *other* id's receiver
+/// (M22) — i.e. a receiver whose volume is driven through a bound source also in
+/// the set. Used to collapse a bound pair to a single volume target.
+async fn receiver_targets_within(
+    state: &AppState,
+    ids: &[String],
+) -> std::collections::HashSet<String> {
+    if ids.is_empty() {
+        return std::collections::HashSet::new();
+    }
+    let placeholders = std::iter::repeat_n("?", ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT DISTINCT receiver_id FROM audio_devices
+         WHERE receiver_id IS NOT NULL AND id IN ({placeholders}) AND receiver_id IN ({placeholders})"
+    );
+    let mut q = sqlx::query(&sql);
+    for id in ids {
+        q = q.bind(id);
+    }
+    for id in ids {
+        q = q.bind(id);
+    }
+    q.fetch_all(&state.db)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| r.get::<String, _>("receiver_id"))
+        .collect()
+}
+
 /// A room as exposed to third parties (the public `/api/v1` API and the MCP
 /// surface): enabled rooms only, with effective light and audio membership.
 /// Shared so the two surfaces can't drift.
@@ -557,29 +590,39 @@ async fn set_room_audio_state(
         return StatusCode::NOT_FOUND.into_response();
     }
 
+    // A receiver that is the volume-target of another member in this room is
+    // driven *through* that bound source (M22 routing), so skip it here — else
+    // the room volume would hit the receiver twice (once direct, once routed),
+    // a last-write-wins race when their offsets differ.
+    let member_ids: Vec<String> = members.iter().map(|m| m.audio_device_id.clone()).collect();
+    let bound_targets = receiver_targets_within(&state, &member_ids).await;
+
     // Fan out to every audio member concurrently — a room's speakers are
     // distinct devices (Sonos units on their own IPs), so a room volume change
     // should hit them in parallel rather than serially round-tripping each.
-    let jobs = members.iter().filter_map(|m| {
-        let volume = req
-            .volume
-            .map(|v| (v as i64 + m.volume_offset).clamp(0, 100) as u8);
-        let cmd = AudioCommand {
-            volume,
-            mute: req.mute,
-            ..Default::default()
-        };
-        if cmd.is_empty() {
-            return None;
-        }
-        let state = &state;
-        Some(async move {
-            matches!(
-                apply_audio_command(state, &m.audio_device_id, &cmd).await,
-                crate::api::audio::SetAudioOutcome::Ok
-            )
-        })
-    });
+    let jobs = members
+        .iter()
+        .filter(|m| !bound_targets.contains(&m.audio_device_id))
+        .filter_map(|m| {
+            let volume = req
+                .volume
+                .map(|v| (v as i64 + m.volume_offset).clamp(0, 100) as u8);
+            let cmd = AudioCommand {
+                volume,
+                mute: req.mute,
+                ..Default::default()
+            };
+            if cmd.is_empty() {
+                return None;
+            }
+            let state = &state;
+            Some(async move {
+                matches!(
+                    apply_audio_command(state, &m.audio_device_id, &cmd).await,
+                    crate::api::audio::SetAudioOutcome::Ok
+                )
+            })
+        });
     let results = futures_util::future::join_all(jobs).await;
     let applied = results.iter().filter(|ok| **ok).count();
     let failed = results.len() - applied;
@@ -1129,6 +1172,63 @@ pub(crate) async fn apply_uniform_state(
     (applied, failed)
 }
 
+/// Apply a room on/off (+ color/brightness for lights) to **all** member
+/// domains: lights via [`apply_uniform_state`], then the room's `on` state
+/// fanned out to audio members (power only) and power-device members. This is
+/// the shared room-control path for the session, `/v1`, and MCP `set_room`, so
+/// "turn the room on/off" means the whole room (CLAUDE.md's room model), not
+/// just its lights. (Palette-scene apply stays lights-only and keeps calling
+/// `apply_uniform_state` directly — a color scene shouldn't toggle switches.)
+pub(crate) async fn apply_room_state(
+    state: &AppState,
+    room_id: &str,
+    new_state: &LightState,
+    members: Vec<MemberRow>,
+) -> (usize, usize) {
+    let (applied, failed) = apply_uniform_state(state, room_id, new_state, members).await;
+    // Only a *pure* power change (on/off with no light attributes) fans out to
+    // the room's audio + power members. A brightness/color/temp change is a
+    // lighting-attribute command — its implicit `on: true` must NOT power on the
+    // room's speakers/switches (e.g. "make the room blue" shouldn't start Sonos).
+    let pure_power = new_state.brightness.is_none()
+        && new_state.color.is_none()
+        && new_state.color_temp_mirek.is_none();
+    if !pure_power {
+        return (applied, failed);
+    }
+    let (a, f) = apply_room_power(state, room_id, new_state.on).await;
+    (applied + a, failed + f)
+}
+
+/// Drive every audio + power member of a room to `on`. Audio members get a
+/// power-only command (so a bound source still wakes its receiver, routing
+/// through `apply_audio_command`); power members go through `apply_power_state`.
+/// A disabled/absent member (`NotFound`) is skipped silently — it's not a
+/// failure, just out of scope; only real provider/DB errors count as failed.
+async fn apply_room_power(state: &AppState, room_id: &str, on: bool) -> (usize, usize) {
+    let mut applied = 0usize;
+    let mut failed = 0usize;
+    let cmd = AudioCommand {
+        power: Some(on),
+        ..Default::default()
+    };
+    for member in effective_audio_members(state, room_id).await {
+        match apply_audio_command(state, &member.audio_device_id, &cmd).await {
+            SetAudioOutcome::Ok => applied += 1,
+            SetAudioOutcome::NotFound => {}
+            _ => failed += 1,
+        }
+    }
+    for power_id in effective_power_member_ids(state, room_id).await {
+        match apply_power_state(state, &power_id, on).await {
+            SetPowerOutcome::Ok => applied += 1,
+            SetPowerOutcome::NotFound => {}
+            _ => failed += 1,
+        }
+    }
+    (applied, failed)
+}
+
 async fn set_room_state(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1140,11 +1240,10 @@ async fn set_room_state(
     }
 
     let members = effective_members(&state, &id).await;
-    if members.is_empty() {
+    let (applied, failed) = apply_room_state(&state, &id, &new_state, members).await;
+    if applied == 0 && failed == 0 {
         return StatusCode::NOT_FOUND.into_response();
     }
-
-    let (applied, failed) = apply_uniform_state(&state, &id, &new_state, members).await;
     Json(serde_json::json!({ "applied": applied, "failed": failed })).into_response()
 }
 

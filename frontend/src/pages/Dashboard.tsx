@@ -263,9 +263,16 @@ function RoomGrid({
       const power = room.power_device_ids
         .map((id) => powerById.get(id))
         .filter((d): d is PowerDevice => !!d && d.enabled !== false);
-      const audio = room.audio_devices
+      const members = room.audio_devices
         .map((m) => audioById.get(m.audio_device_id))
         .filter((d): d is AudioDevice => !!d && d.enabled !== false);
+      // M22 combined control: a receiver that is the volume-target of another
+      // member in this room isn't shown on its own — the bound source's control
+      // already drives it (volume routes there), so the pair reads as one device.
+      const boundReceivers = new Set(
+        members.map((d) => d.receiver_id).filter((id): id is string => !!id),
+      );
+      const audio = members.filter((d) => !boundReceivers.has(d.id));
       for (const l of roomLights) assigned.add(l.id);
       return { room, lights: roomLights, power, audio };
     })
@@ -285,6 +292,11 @@ function RoomGrid({
     (providerName.get(a[0]) ?? "").localeCompare(providerName.get(b[0]) ?? ""),
   );
 
+  // Resolve a bound source's receiver name (the receiver may be collapsed out of
+  // the room's member list, but still lives in the global device map).
+  const receiverNameFor = (d: AudioDevice) =>
+    d.receiver_id ? audioById.get(d.receiver_id)?.name : undefined;
+
   const common = {
     scenes,
     dialogs,
@@ -296,6 +308,7 @@ function RoomGrid({
     onAudioSetEnabled,
     onPowerSetEnabled,
     onChanged,
+    receiverNameFor,
   };
 
   return (
@@ -380,6 +393,7 @@ function RoomBox({
   onAudioSetEnabled,
   onPowerSetEnabled,
   onChanged,
+  receiverNameFor,
 }: {
   name: string;
   roomId?: string;
@@ -396,8 +410,9 @@ function RoomBox({
   onAudioSetEnabled: (id: string, enabled: boolean) => void;
   onPowerSetEnabled: (id: string, enabled: boolean) => void;
   onChanged: () => void;
+  receiverNameFor?: (d: AudioDevice) => string | undefined;
 }) {
-  const { isMobile } = useViewport();
+  const { isCompact } = useViewport();
   const tuneRef = useRef<HTMLDivElement>(null);
   const [editing, setEditing] = useState(false);
   const [scenesOpen, setScenesOpen] = useState(false);
@@ -514,8 +529,8 @@ function RoomBox({
         style={{
           display: "flex",
           alignItems: "center",
-          gap: isMobile ? "0.5rem" : "0.7rem",
-          padding: isMobile ? "0.5rem 0.7rem 0.45rem" : "0.7rem 1rem",
+          gap: isCompact ? "0.5rem" : "0.7rem",
+          padding: isCompact ? "0.5rem 0.7rem 0.45rem" : "0.7rem 1rem",
           borderBottom: `1px solid ${T.hairline}`,
           cursor: tunable ? "pointer" : "default",
         }}
@@ -550,8 +565,8 @@ function RoomBox({
         style={{
           display: "flex",
           flexWrap: "wrap",
-          gap: isMobile ? "0.4rem" : "0.5rem",
-          padding: isMobile ? "0.6rem" : "0.8rem 1rem",
+          gap: isCompact ? "0.4rem" : "0.5rem",
+          padding: isCompact ? "0.6rem" : "0.8rem 1rem",
         }}
       >
         {lights.map((l) => (
@@ -575,6 +590,7 @@ function RoomBox({
               device={entry.coordinator}
               onAudioPatch={onAudioPatch}
               onSetEnabled={onAudioSetEnabled}
+              receiverName={receiverNameFor?.(entry.coordinator)}
             />
           ),
         )}
@@ -781,6 +797,7 @@ function AudioButton({
   groupMembers,
   onAudioPatch,
   onSetEnabled,
+  receiverName,
 }: {
   device: AudioDevice;
   /** When set (≥2), this button represents a live sync group coordinated by
@@ -788,6 +805,8 @@ function AudioButton({
   groupMembers?: AudioDevice[];
   onAudioPatch: (id: string, patch: Partial<AudioDevice["state"]>) => void;
   onSetEnabled: (id: string, enabled: boolean) => void;
+  /** M22: name of the receiver this source's volume routes to, if bound. */
+  receiverName?: string;
 }) {
   const ref = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
@@ -814,6 +833,7 @@ function AudioButton({
           onLocalPatch={onAudioPatch}
           onSetEnabled={(en) => { onSetEnabled(device.id, en); if (!en) setOpen(false); }}
           onClose={() => setOpen(false)}
+          receiverName={receiverName}
         />
       )}
     </>

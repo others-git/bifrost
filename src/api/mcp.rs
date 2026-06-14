@@ -15,16 +15,16 @@
 use crate::AppState;
 use crate::api::apikeys::require_api_key;
 use crate::api::audio::{
-    FavoritesOutcome, GroupOutcome, PlayFavoriteOutcome, SetAudioOutcome, apply_audio_command,
-    get_device_live, group_devices, list_all_devices, list_device_favorites, play_device_favorite,
-    ungroup_device,
+    FavoritesOutcome, GroupOutcome, PlayFavoriteOutcome, SetAudioOutcome, SetReceiverOutcome,
+    apply_audio_command, get_device_live, group_devices, list_all_devices, list_device_favorites,
+    play_device_favorite, set_audio_receiver, ungroup_device,
 };
 use crate::api::lights::{SetLightOutcome, apply_light_state, list_all_lights};
 use crate::api::palette_scenes::{
     SceneError, apply_scene_to_room, create_scene_from_room, list_scenes, parse_hex_color,
 };
 use crate::api::power::{SetPowerOutcome, apply_power_state, list_all_power_devices};
-use crate::api::rooms::{apply_uniform_state, effective_members, list_public_rooms};
+use crate::api::rooms::{apply_room_state, effective_members, list_public_rooms};
 use crate::models::audio::{AudioCommand, AudioFavorite, TransportCmd};
 use crate::models::{Color, LightState};
 use axum::{
@@ -203,6 +203,18 @@ pub struct GroupSpeakersRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct BindReceiverRequest {
+    /// The source audio device (TV / streamer / console) to bind, id or name.
+    pub device: String,
+    /// The receiver that owns volume for this source, id or name. Omit (null)
+    /// to *unbind* the device so it controls its own volume again.
+    pub receiver: Option<String>,
+    /// Optional receiver input to switch to when the source powers on (a name
+    /// from the receiver's `source_list`, e.g. "Game", "BD/DVD").
+    pub receiver_source: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SetPowerRequest {
     /// Power device id, or a case-insensitive name/substring (switch, plug, fan, …).
     pub device: String,
@@ -291,10 +303,10 @@ impl BifrostMcp {
                 Err(e) => return Ok(fail(e)),
             };
         let members = effective_members(&self.state, &id).await;
-        if members.is_empty() {
-            return Ok(fail("the room has no member lights"));
+        let (applied, failed) = apply_room_state(&self.state, &id, &new_state, members).await;
+        if applied == 0 && failed == 0 {
+            return Ok(fail("the room has no controllable members"));
         }
-        let (applied, failed) = apply_uniform_state(&self.state, &id, &new_state, members).await;
         Ok(ok_json(
             serde_json::json!({ "applied": applied, "failed": failed }),
         ))
@@ -566,6 +578,33 @@ impl BifrostMcp {
             }
             SetPowerOutcome::ProviderError => Ok(fail("the device could not be reached")),
             SetPowerOutcome::Db => Err(internal("setting power state")),
+        }
+    }
+
+    #[tool(
+        description = "Bind a source audio device (a TV / streamer / console) to an AV receiver that owns its volume: afterwards volume/mute for the source route to the receiver, and powering the source on switches the receiver to the given input. Omit `receiver` to unbind. E.g. 'route the living room TV's sound through the AV receiver on the Game input.'"
+    )]
+    async fn bind_receiver(
+        &self,
+        Parameters(req): Parameters<BindReceiverRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let devices = named_audio(&self.state).await?;
+        let id = match resolve("audio device", &req.device, &devices) {
+            Ok(id) => id,
+            Err(e) => return Ok(e),
+        };
+        let receiver_id = match &req.receiver {
+            None => None,
+            Some(r) => match resolve("receiver", r, &devices) {
+                Ok(rid) => Some(rid),
+                Err(e) => return Ok(e),
+            },
+        };
+        match set_audio_receiver(&self.state, &id, receiver_id, req.receiver_source).await {
+            SetReceiverOutcome::Ok => Ok(ok_text("ok")),
+            SetReceiverOutcome::NotFound => Ok(fail("audio device not found")),
+            SetReceiverOutcome::BadRequest(m) => Ok(fail(m)),
+            SetReceiverOutcome::Db => Err(internal("binding receiver")),
         }
     }
 }

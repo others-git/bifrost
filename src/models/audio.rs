@@ -147,6 +147,37 @@ impl AudioCommand {
             && self.source.is_none()
             && self.transport.is_none()
     }
+
+    /// Split a command for a source device bound to a receiver (M22). The
+    /// receiver is the volume authority, so `volume`/`mute` route to it while
+    /// `power`/`source`/`transport` stay on the source. Powering the source
+    /// **on** also wakes the receiver and (when `receiver_source` is set)
+    /// switches it to that input — so "turn on the TV" lands sound on the right
+    /// receiver input. Powering *off* is not propagated: a receiver may serve
+    /// several bound sources (many-to-one), so one source going dark mustn't
+    /// silence it. Returns `(source_cmd, receiver_cmd)`.
+    pub fn split_for_receiver(
+        &self,
+        receiver_source: Option<&str>,
+    ) -> (AudioCommand, AudioCommand) {
+        let source_cmd = AudioCommand {
+            power: self.power,
+            source: self.source.clone(),
+            transport: self.transport,
+            volume: None,
+            mute: None,
+        };
+        let mut receiver_cmd = AudioCommand {
+            volume: self.volume,
+            mute: self.mute,
+            ..Default::default()
+        };
+        if self.power == Some(true) {
+            receiver_cmd.power = Some(true);
+            receiver_cmd.source = receiver_source.map(str::to_string);
+        }
+        (source_cmd, receiver_cmd)
+    }
 }
 
 /// A full-state update pushed by an audio device (e.g. Onkyo's unsolicited
@@ -214,6 +245,50 @@ mod tests {
         assert_eq!(back.volume, Some(55));
         assert_eq!(back.source.as_deref(), Some("net"));
         assert_eq!(back.transport, Some(TransportCmd::Play));
+    }
+
+    #[test]
+    fn split_for_receiver_routes_volume_and_mute_to_receiver() {
+        let cmd = AudioCommand {
+            volume: Some(40),
+            mute: Some(true),
+            transport: Some(TransportCmd::Play),
+            ..Default::default()
+        };
+        let (source, receiver) = cmd.split_for_receiver(Some("Game"));
+        // Volume/mute leave the source and land on the receiver.
+        assert_eq!(source.volume, None);
+        assert_eq!(source.mute, None);
+        assert_eq!(source.transport, Some(TransportCmd::Play));
+        assert_eq!(receiver.volume, Some(40));
+        assert_eq!(receiver.mute, Some(true));
+        // No power-on, so the receiver input is left alone.
+        assert_eq!(receiver.power, None);
+        assert_eq!(receiver.source, None);
+    }
+
+    #[test]
+    fn split_for_receiver_power_on_wakes_receiver_and_switches_input() {
+        let cmd = AudioCommand {
+            power: Some(true),
+            ..Default::default()
+        };
+        let (source, receiver) = cmd.split_for_receiver(Some("BD/DVD"));
+        assert_eq!(source.power, Some(true));
+        assert_eq!(receiver.power, Some(true));
+        assert_eq!(receiver.source.as_deref(), Some("BD/DVD"));
+    }
+
+    #[test]
+    fn split_for_receiver_power_off_is_not_propagated_to_receiver() {
+        // Many sources may share one receiver, so one going dark mustn't silence it.
+        let cmd = AudioCommand {
+            power: Some(false),
+            ..Default::default()
+        };
+        let (source, receiver) = cmd.split_for_receiver(Some("Game"));
+        assert_eq!(source.power, Some(false));
+        assert!(receiver.is_empty());
     }
 
     #[test]

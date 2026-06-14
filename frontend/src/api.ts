@@ -156,6 +156,20 @@ export async function setPowerRoom(id: string, room_id: string | null): Promise<
     body: JSON.stringify({ room_id }),
   });
 }
+/** M22: bind a source audio device to a receiver (volume/mute route to it), or
+ * unbind with receiver_id = null. `receiver_source` is the receiver input to
+ * select when the source becomes active. */
+export async function setAudioReceiver(
+  id: string,
+  receiver_id: string | null,
+  receiver_source: string | null,
+): Promise<void> {
+  await fetch(`/api/audio/devices/${id}/receiver`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ receiver_id, receiver_source }),
+  });
+}
 
 export interface Provider {
   id: string;
@@ -357,6 +371,10 @@ export interface AudioDevice {
   /** The room this device is directly assigned to (Devices-page assignment),
    * or null. Room links (synced provider groups) aren't reflected here. */
   room_id?: string | null;
+  /** M22: the receiver this source's volume/mute routes to; null = unbound. */
+  receiver_id?: string | null;
+  /** The receiver input to select when this source becomes active; null = none. */
+  receiver_source?: string | null;
 }
 
 /** Sparse command — only the fields present are applied. */

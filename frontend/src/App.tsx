@@ -61,7 +61,7 @@ export function App() {
   const [page, setPage] = useState<Page>("loading");
   const [lights, setLights] = useState<Light[]>([]);
   const [version, setVersion] = useState("");
-  const { isMobile } = useViewport();
+  const { isMobile, isCompact } = useViewport();
 
   useEffect(() => {
     getHealth().then((h) => setVersion(h.version));
@@ -106,13 +106,13 @@ export function App() {
     <div
       style={{
         display: "flex",
-        flexDirection: isMobile ? "column" : "row",
+        flexDirection: isCompact ? "column" : "row",
         minHeight: "100vh",
         background: "#111",
         color: "#f0f0f0",
       }}
     >
-      {isMobile ? (
+      {isCompact ? (
         <MobileTopBar version={version} page={page} onLogout={onLogout} />
       ) : (
         <NavTray version={version} page={page} onNavigate={navigate} onLogout={onLogout} />
@@ -122,8 +122,8 @@ export function App() {
         style={{
           flex: 1,
           minWidth: 0,
-          // Clear the fixed bottom tab bar (plus the phone's home-bar inset).
-          paddingBottom: isMobile ? "calc(58px + env(safe-area-inset-bottom))" : 0,
+          // Clear the fixed bottom tab bar (plus the device's home-bar inset).
+          paddingBottom: isCompact ? "calc(58px + env(safe-area-inset-bottom))" : 0,
         }}
       >
         {page === "dashboard" && (
@@ -144,7 +144,7 @@ export function App() {
         {page === "settings" && <SettingsPage onNavigate={(p) => setPage(p)} />}
       </main>
 
-      {isMobile && <BottomNav page={page} onNavigate={navigate} />}
+      {isCompact && <BottomNav page={page} onNavigate={navigate} showPlan={!isMobile} />}
     </div>
   );
 }
@@ -166,6 +166,7 @@ function MobileTopBar({
       style={{
         display: "flex",
         alignItems: "center",
+        justifyContent: "flex-end",
         gap: "0.6rem",
         padding: "calc(0.5rem + env(safe-area-inset-top)) 0.9rem 0.5rem",
         borderBottom: "1px solid #1c2430",
@@ -176,9 +177,20 @@ function MobileTopBar({
         zIndex: 30,
       }}
     >
-      <Brand fontSize="1.05rem" />
-      {title && <span style={{ fontSize: "0.85rem", color: "#8b93a1" }}>{title}</span>}
-      <span style={{ flex: 1 }} />
+      {/* Brand + current page, centered in the bar; controls stay flush right. */}
+      <div
+        style={{
+          position: "absolute",
+          left: "50%",
+          transform: "translateX(-50%)",
+          display: "flex",
+          alignItems: "center",
+          gap: "0.6rem",
+        }}
+      >
+        <Brand fontSize="1.05rem" />
+        {title && <span style={{ fontSize: "0.85rem", color: "#8b93a1" }}>{title}</span>}
+      </div>
       {version && <span style={{ fontSize: "0.65rem", color: "#5d6878" }}>v{version}</span>}
       <button
         onClick={onLogout}
@@ -192,7 +204,15 @@ function MobileTopBar({
 }
 
 /** Bottom tab bar for phones — thumb-reachable, fixed to the viewport bottom. */
-function BottomNav({ page, onNavigate }: { page: Page; onNavigate: (p: NavPage) => void }) {
+function BottomNav({
+  page,
+  onNavigate,
+  showPlan,
+}: {
+  page: Page;
+  onNavigate: (p: NavPage) => void;
+  showPlan: boolean;
+}) {
   return (
     <nav
       style={{
@@ -207,8 +227,8 @@ function BottomNav({ page, onNavigate }: { page: Page; onNavigate: (p: NavPage) 
         paddingBottom: "env(safe-area-inset-bottom)",
       }}
     >
-      {/* Floor Plan is a desktop tool — hidden from the mobile tab bar for now. */}
-      {NAV_ITEMS.filter((item) => item.id !== "plan").map((item) => {
+      {/* Floor Plan needs room to draw — shown on tablet fixtures, hidden on phones. */}
+      {NAV_ITEMS.filter((item) => item.id !== "plan" || showPlan).map((item) => {
         const active = page === item.id;
         return (
           <button

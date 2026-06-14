@@ -1,7 +1,9 @@
 // Responsive breakpoints for the inline-style UI. Inline styles can't express
 // media queries, so components read these booleans and branch their styles.
-// Per project decision, tablets get the desktop layout — `isMobile` (phones)
-// is the only switch most components need.
+// `isCompact` (phones + tablets) is the primary layout switch — both get the
+// mobile chrome (top title bar + bottom nav, touch sheets, stacked cards) so a
+// wall-mounted tablet works as a dedicated control fixture. `isMobile` (phones
+// only) is reserved for the few things a phone genuinely can't fit (Floor Plan).
 
 import { useSyncExternalStore } from "react";
 
@@ -20,12 +22,17 @@ function useMedia(query: string, serverValue = false): boolean {
 }
 
 export interface Viewport {
-  /** Phone-width: ≤ 640px. The main layout switch. */
+  /** Phone-width: ≤ 640px. Reserved for phone-only behaviour (e.g. hiding the
+   * Floor Plan). For general layout, prefer `isCompact`. */
   isMobile: boolean;
-  /** Tablet: 641–1024px. Treated as desktop, but exposed for fine-tuning. */
+  /** Tablet: 641–1024px. Gets the compact (mobile) chrome, not desktop. */
   isTablet: boolean;
   /** ≥ 1025px. */
   isDesktop: boolean;
+  /** Phones + tablets (≤ 1024px). The primary layout switch: compact chrome,
+   * touch sheets, stacked cards. Tablets are control fixtures, so they share
+   * the mobile layout. */
+  isCompact: boolean;
 }
 
 export function useViewport(): Viewport {
@@ -33,5 +40,10 @@ export function useViewport(): Viewport {
   const isTablet = useMedia(
     `(min-width: ${BREAKPOINTS.mobile + 1}px) and (max-width: ${BREAKPOINTS.tablet}px)`,
   );
-  return { isMobile, isTablet, isDesktop: !isMobile && !isTablet };
+  return {
+    isMobile,
+    isTablet,
+    isDesktop: !isMobile && !isTablet,
+    isCompact: isMobile || isTablet,
+  };
 }

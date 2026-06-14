@@ -6,9 +6,12 @@
 //! responses and pushes are indistinguishable, so reads are "collect codes
 //! until satisfied or timeout".
 //!
-//! This provider opens a short-lived connection per operation (the receiver
-//! accepts several concurrent eISCP clients). A persistent push subscription
-//! for live UI updates is a planned follow-up.
+//! A receiver honors only **one** eISCP control connection at a time, so Bifrost
+//! opens exactly one socket per receiver and multiplexes everything over it: a
+//! shared per-host [`OnkyoLink`] actor owns the socket, broadcasts every decoded
+//! message (the push stream) and writes command batches. Reads/writes and the
+//! push subscription all go through that one link — opening a second connection
+//! would make the receiver drop the first, kicking the push channel.
 //!
 //! Key command groups used:
 //! - `PWR` power, `MVL` volume (hex), `AMT` mute, `SLI` input selector
@@ -25,13 +28,22 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
 pub const DEFAULT_PORT: u16 = 60128;
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(2500);
+
+/// The full-state query battery sent on every (re)connect and by readers, so a
+/// fresh subscriber and the cache re-sync to the receiver's current state.
+const STATE_QUERIES: &[&str] = &[
+    "PWRQSTN", "MVLQSTN", "AMTQSTN", "SLIQSTN", "NSTQSTN", "NTIQSTN", "NATQSTN", "NALQSTN",
+    "ZPWQSTN", "ZVLQSTN", "ZMTQSTN", "SLZQSTN",
+];
 
 // ── eISCP packet codec (pure functions) ─────────────────────────────────────
 
@@ -327,17 +339,6 @@ impl OnkyoProvider {
         }
     }
 
-    async fn connect(&self) -> Result<TcpStream> {
-        let addr = format!("{}:{}", self.host, self.port);
-        tokio::time::timeout(self.timeout, TcpStream::connect(&addr))
-            .await
-            .with_context(|| format!("Onkyo connect to {addr} timed out"))?
-            .with_context(|| format!("Onkyo connect to {addr} failed"))
-    }
-
-    /// Send `commands`, then read packets until every code in `wanted` has
-    /// been seen (replies and unsolicited echoes both count) or the timeout
-    /// elapses. Returns code → latest data.
     /// Best-effort receiver MAC (cross-provider `hw_id`) from the device-info
     /// (`NRI`) reply — a chunk of XML carrying a `macaddress`. `None` if the
     /// receiver doesn't answer NRI, so discovery never fails on its account.
@@ -346,56 +347,152 @@ impl OnkyoProvider {
         parse_nri_mac(reply.get("NRI")?)
     }
 
+    /// Send `commands` over the shared link, then collect every code in `wanted`
+    /// from the link's broadcast (replies and unsolicited echoes both count)
+    /// until satisfied or the timeout elapses. Returns code → latest data.
+    /// `wanted` empty = fire-and-forget write. Never opens its own socket — all
+    /// I/O multiplexes over the one [`OnkyoLink`] connection.
     async fn exchange(
         &self,
         commands: &[String],
         wanted: &[&str],
     ) -> Result<HashMap<String, String>> {
-        let mut stream = self.connect().await?;
-        for cmd in commands {
-            stream.write_all(&encode_packet(cmd)).await?;
+        let link = link_for(&self.host, self.port);
+        // Subscribe before writing so a fast reply can't slip past us.
+        let mut rx = link.events.subscribe();
+        if !commands.is_empty() {
+            let mut batch = Vec::new();
+            for cmd in commands {
+                batch.extend_from_slice(&encode_packet(cmd));
+            }
+            link.writes
+                .send(batch)
+                .map_err(|_| anyhow!("Onkyo link closed"))?;
         }
 
         let mut collected: HashMap<String, String> = HashMap::new();
         if wanted.is_empty() {
-            // Fire-and-forget writes still deserve a moment on the wire before
-            // the socket closes — receivers drop unread input on RST.
-            let _ =
-                tokio::time::timeout(Duration::from_millis(50), stream.read(&mut [0u8; 256])).await;
             return Ok(collected);
         }
-
-        let mut buf: Vec<u8> = Vec::with_capacity(1024);
         let deadline = tokio::time::Instant::now() + self.timeout;
-        let mut chunk = [0u8; 1024];
-
-        'outer: while collected.len() < wanted.len() {
+        while collected.len() < wanted.len() {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 break;
             }
-            let n = match tokio::time::timeout(remaining, stream.read(&mut chunk)).await {
-                Ok(Ok(0)) | Err(_) => break, // closed or timed out
-                Ok(Ok(n)) => n,
-                Ok(Err(e)) => return Err(e.into()),
-            };
-            buf.extend_from_slice(&chunk[..n]);
-
-            while let Some((msg, consumed)) = decode_packet(&buf) {
-                buf.drain(..consumed);
-                if msg.len() < 3 {
-                    continue;
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Ok((code, data))) => {
+                    if wanted.contains(&code.as_str()) {
+                        collected.insert(code, data);
+                    }
                 }
-                let (code, data) = msg.split_at(3);
-                if wanted.contains(&code) {
-                    collected.insert(code.to_string(), data.to_string());
-                }
-                if collected.len() >= wanted.len() {
-                    break 'outer;
-                }
+                // Dropped a few broadcasts under load — keep waiting for ours.
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                // Link actor gone, or our own deadline — stop with what we have.
+                Ok(Err(broadcast::error::RecvError::Closed)) | Err(_) => break,
             }
         }
         Ok(collected)
+    }
+}
+
+// ── Shared single-connection link ───────────────────────────────────────────
+
+/// A decoded eISCP message split into `(code, data)`, e.g. `("MVL", "1F")`.
+type RawMsg = (String, String);
+
+/// The one socket Bifrost holds to a receiver. A background actor owns it,
+/// reconnecting with backoff; it broadcasts every decoded message on `events`
+/// and writes batches sent on `writes`. Shared process-wide per `host:port`, so
+/// the push manager and every per-request read/write use the same connection
+/// instead of fighting over the receiver's single eISCP slot.
+struct OnkyoLink {
+    writes: mpsc::UnboundedSender<Vec<u8>>,
+    events: broadcast::Sender<RawMsg>,
+}
+
+static LINKS: OnceLock<std::sync::Mutex<HashMap<String, Arc<OnkyoLink>>>> = OnceLock::new();
+
+/// Get (or lazily create) the shared link to `host:port`.
+fn link_for(host: &str, port: u16) -> Arc<OnkyoLink> {
+    let map = LINKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let key = format!("{host}:{port}");
+    let mut guard = map.lock().unwrap();
+    if let Some(link) = guard.get(&key) {
+        return link.clone();
+    }
+    let (writes_tx, writes_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (events_tx, _) = broadcast::channel::<RawMsg>(256);
+    tokio::spawn(onkyo_link_actor(
+        host.to_string(),
+        port,
+        writes_rx,
+        events_tx.clone(),
+    ));
+    let link = Arc::new(OnkyoLink {
+        writes: writes_tx,
+        events: events_tx,
+    });
+    guard.insert(key, link.clone());
+    link
+}
+
+/// Owns the single socket: connects (refreshing full state each time), then
+/// loops writing queued batches and broadcasting decoded replies/echoes.
+async fn onkyo_link_actor(
+    host: String,
+    port: u16,
+    mut writes: mpsc::UnboundedReceiver<Vec<u8>>,
+    events: broadcast::Sender<RawMsg>,
+) {
+    let addr = format!("{host}:{port}");
+    let mut attempt: u32 = 0;
+    loop {
+        if let Ok(Ok(mut stream)) =
+            tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&addr)).await
+        {
+            attempt = 0;
+            // Re-query full state on (re)connect so subscribers and the cache resync.
+            let mut init = Vec::new();
+            for q in STATE_QUERIES {
+                init.extend_from_slice(&encode_packet(q));
+            }
+            if stream.write_all(&init).await.is_ok() {
+                let mut buf: Vec<u8> = Vec::with_capacity(1024);
+                let mut chunk = [0u8; 1024];
+                loop {
+                    tokio::select! {
+                        biased;
+                        w = writes.recv() => match w {
+                            Some(bytes) => {
+                                if stream.write_all(&bytes).await.is_err() {
+                                    break; // socket died → reconnect
+                                }
+                            }
+                            None => return, // all senders dropped (link gone)
+                        },
+                        r = stream.read(&mut chunk) => match r {
+                            Ok(0) | Err(_) => break, // closed → reconnect
+                            Ok(n) => {
+                                buf.extend_from_slice(&chunk[..n]);
+                                while let Some((msg, consumed)) = decode_packet(&buf) {
+                                    buf.drain(..consumed);
+                                    if msg.len() < 3 {
+                                        continue;
+                                    }
+                                    let (code, data) = msg.split_at(3);
+                                    let _ = events.send((code.to_string(), data.to_string()));
+                                }
+                            }
+                        },
+                    }
+                }
+            }
+        }
+        // Backoff before reconnecting (capped); writes queued meanwhile flush on reconnect.
+        let delay = Duration::from_millis(250u64.saturating_mul(1 << attempt.min(6)).min(20_000));
+        attempt = attempt.saturating_add(1);
+        tokio::time::sleep(delay).await;
     }
 }
 
@@ -484,12 +581,22 @@ impl AudioProvider for OnkyoProvider {
             )
             .await?;
 
-        let power = base.get(zone.power).map(|d| d == "01").unwrap_or(false);
+        // Onkyo allows ~one eISCP connection, which the push manager holds; a
+        // competing per-request read can come back without the volume reply.
+        // Don't fabricate `volume = 0` (it would clobber the push-maintained
+        // cache and zero a bound source's slider) — fail so the caller falls
+        // back to the cached state instead.
         let volume = base
             .get(zone.volume)
             .and_then(|d| u8::from_str_radix(d, 16).ok())
-            .unwrap_or(0)
+            .with_context(|| {
+                format!(
+                    "Onkyo {device_id}: incomplete state read (no {})",
+                    zone.volume
+                )
+            })?
             .min(100);
+        let power = base.get(zone.power).map(|d| d == "01").unwrap_or(false);
         let mute = base.get(zone.mute).map(|d| d == "01").unwrap_or(false);
         let source_code = base.get(zone.selector).cloned();
         let source = source_code.as_deref().map(source_name);
@@ -562,24 +669,28 @@ impl AudioProvider for OnkyoProvider {
         Ok(())
     }
 
-    /// Persistent push channel. Connects, queries a full initial state, then
-    /// forwards every message (replies and unsolicited echoes alike) as
-    /// accumulated full-state events. The receiver closes when the socket
-    /// drops; the `AudioPushManager` reconnects.
+    /// Live push channel: subscribe to the shared link and fold its broadcast
+    /// of decoded messages into accumulated per-zone state snapshots. The link
+    /// owns connection/reconnection, so this returns immediately (lazy) and the
+    /// channel stays open across receiver reconnects — the actor re-queries full
+    /// state on each (re)connect, so the stream re-syncs without the manager
+    /// having to reconnect (no more per-command push-channel bounce).
     async fn event_stream(
         &self,
     ) -> Result<tokio::sync::mpsc::Receiver<crate::models::audio::AudioEvent>> {
         use crate::models::audio::AudioEvent;
 
-        let mut stream = self.connect().await?;
-        for q in [
-            "PWRQSTN", "MVLQSTN", "AMTQSTN", "SLIQSTN", "NSTQSTN", "NTIQSTN", "NATQSTN", "NALQSTN",
-            "ZPWQSTN", "ZVLQSTN", "ZMTQSTN", "SLZQSTN",
-        ] {
-            stream.write_all(&encode_packet(q)).await?;
+        let link = link_for(&self.host, self.port);
+        let mut rx = link.events.subscribe();
+        // Nudge a refresh so a just-subscribed reader sees current state even if
+        // the actor connected before this subscription existed.
+        let mut init = Vec::new();
+        for q in STATE_QUERIES {
+            init.extend_from_slice(&encode_packet(q));
         }
+        let _ = link.writes.send(init);
 
-        let (tx, rx) = tokio::sync::mpsc::channel::<AudioEvent>(64);
+        let (tx, out_rx) = tokio::sync::mpsc::channel::<AudioEvent>(64);
         tokio::spawn(async move {
             // One accumulator per zone; zone codes fold via their canonical form.
             let fresh = || AudioState {
@@ -588,48 +699,39 @@ impl AudioProvider for OnkyoProvider {
             };
             let mut main_state = fresh();
             let mut zone2_state = fresh();
-            let mut buf: Vec<u8> = Vec::with_capacity(1024);
-            let mut chunk = [0u8; 1024];
             loop {
-                let n = match stream.read(&mut chunk).await {
-                    Ok(0) | Err(_) => return, // socket closed → manager reconnects
-                    Ok(n) => n,
+                let (code, data) = match rx.recv().await {
+                    Ok(m) => m,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => return,
                 };
-                buf.extend_from_slice(&chunk[..n]);
-                while let Some((msg, consumed)) = decode_packet(&buf) {
-                    buf.drain(..consumed);
-                    if msg.len() < 3 {
-                        continue;
-                    }
-                    let (code, data) = msg.split_at(3);
-                    if data == "QSTN" || data == "N/A" {
-                        // Someone else's query echo, or "command unsupported"
-                        // (e.g. ZPW on a receiver with no zone 2) — not state.
-                        continue;
-                    }
-                    let Some((device_id, canon)) = canonical(code) else {
-                        continue;
-                    };
-                    let state = if device_id == "zone2" {
-                        &mut zone2_state
-                    } else {
-                        &mut main_state
-                    };
-                    if apply_message(state, canon, data)
-                        && tx
-                            .send(AudioEvent {
-                                device_id: device_id.to_string(),
-                                state: state.clone(),
-                            })
-                            .await
-                            .is_err()
-                    {
-                        return; // receiver dropped → stop reading
-                    }
+                if data == "QSTN" || data == "N/A" {
+                    // A query echo, or "command unsupported" (e.g. ZPW on a
+                    // receiver with no zone 2) — not state.
+                    continue;
+                }
+                let Some((device_id, canon)) = canonical(&code) else {
+                    continue;
+                };
+                let state = if device_id == "zone2" {
+                    &mut zone2_state
+                } else {
+                    &mut main_state
+                };
+                if apply_message(state, canon, &data)
+                    && tx
+                        .send(AudioEvent {
+                            device_id: device_id.to_string(),
+                            state: state.clone(),
+                        })
+                        .await
+                        .is_err()
+                {
+                    return; // consumer dropped → stop
                 }
             }
         });
-        Ok(rx)
+        Ok(out_rx)
     }
 }
 
@@ -978,6 +1080,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_state_errors_when_volume_reply_is_missing() {
+        // A read that doesn't return a usable MVL (here the receiver answers
+        // "N/A", as it would under eISCP connection contention) must error —
+        // not report volume 0, which would clobber the push-maintained cache
+        // and zero a bound source's slider.
+        let mut scripted = baseline_scripted();
+        scripted.remove("MVL");
+        let (port, _) = spawn_mock_receiver(scripted).await;
+        let p = OnkyoProvider::new_for_test("127.0.0.1", port);
+
+        assert!(p.get_state("main").await.is_err());
+    }
+
+    #[tokio::test]
     async fn get_state_on_net_input_includes_now_playing() {
         let mut scripted = baseline_scripted();
         scripted.insert("SLI", "2B".to_string());
@@ -1232,9 +1348,79 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn event_stream_against_dead_port_errors() {
+    async fn event_stream_against_dead_port_yields_no_events() {
+        // The link connects (and reconnects) in the background, so subscribing
+        // always succeeds; a dead receiver simply produces no events.
         let p = OnkyoProvider::new_for_test("127.0.0.1", 1);
-        assert!(p.event_stream().await.is_err());
+        let mut rx = p.event_stream().await.expect("subscribe is lazy");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), rx.recv())
+                .await
+                .is_err(),
+            "a dead receiver yields no events"
+        );
+    }
+
+    #[tokio::test]
+    async fn reads_and_push_share_one_connection() {
+        // The core M22/Onkyo fix: a receiver honors ~one eISCP connection, so a
+        // read while the push stream is live must reuse the same socket, never
+        // open a second one (which would kick the push channel).
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let conns = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&conns);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                counter.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let scripted = baseline_scripted();
+                    let mut buf: Vec<u8> = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    loop {
+                        let Ok(n) = sock.read(&mut chunk).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        while let Some((msg, consumed)) = decode_packet(&buf) {
+                            buf.drain(..consumed);
+                            if msg.len() < 3 {
+                                continue;
+                            }
+                            let (code, data) = msg.split_at(3);
+                            let reply = if data == "QSTN" {
+                                format!(
+                                    "{code}{}",
+                                    scripted.get(code).cloned().unwrap_or("N/A".into())
+                                )
+                            } else {
+                                msg.clone()
+                            };
+                            let _ = sock.write_all(&encode_packet(&reply)).await;
+                        }
+                    }
+                });
+            }
+        });
+
+        let p = OnkyoProvider::new_for_test("127.0.0.1", port);
+        let _push = p.event_stream().await.unwrap(); // holds the shared link
+        for _ in 0..3 {
+            let _ = p.get_state("main").await; // reads multiplex over the same link
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            conns.load(Ordering::SeqCst),
+            1,
+            "all I/O must share one connection"
+        );
     }
 
     // ── Network discovery ────────────────────────────────────────────────────

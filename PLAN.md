@@ -137,10 +137,16 @@ shape stays honest.
   `0021_provider_group_power`; `effective_power_member_ids` now unions direct +
   linked members; `provider-groups` listing reports members of all domains; merge
   also fixed to move audio membership. Wiremock test covers a power-only area.
+- [x] **Room on/off fan-out to power (and audio) members**: `apply_room_state`
+  (shared by session, `/v1`, MCP `set_room`) now drives a room's `on` to its audio
+  members (power-only, routed so a bound source still wakes its receiver) **and**
+  its power-device members — previously room on/off was lights-only. Light-less
+  rooms (only switches/speakers) are now controllable. Covered by an integration test.
 - [ ] **Power: remaining wiring** — live polling into the event pipeline (state
-  currently refreshes on a 30s poll + live GET, not pushed); **room-level control
-  fan-out** to power members (room on/off drives lights+audio, not yet power).
-  Provider-list `domain` label still shows "light" for HA (cosmetic).
+  currently refreshes on a 30s poll + live GET, not pushed). Best done with the
+  generic push channel from the **WebSocket push** item (today only Hue SSE +
+  light polling emit `LightEvent`s; power needs its own event path). Provider-list
+  `domain` label still shows "light" for HA (cosmetic).
 - [ ] **Richer domains as their own type**, when their state surface justifies it:
   `climate.*` (setpoint/mode/current temp), `cover.*` (position), `lock.*`. Each
   is a new domain (model + control surface + UI), grouped where applicable.
@@ -256,27 +262,222 @@ Add a row whenever a gap is flagged; check it off when the native provider has i
 
 ---
 
-## Milestone 22 — Bind a receiver to its source devices (TV / streamer) — NOT STARTED
+## Milestone 22 — Bind a receiver to its source devices (TV / streamer) — PHASE 1 + 2 SHIPPED
 
 Real-world AV: N source devices (a TV, a streamer, a console) feed audio **through an
-AV receiver**, which is the thing that actually controls **volume**. Today Bifrost
-models them as independent audio devices, so a room shows a receiver *and* a TV with
+AV receiver**, which is the thing that actually controls **volume**. Bifrost modelled
+them as independent audio devices, so a room showed a receiver *and* a TV with
 duplicate/overlapping controls and the "wrong" thing owning volume.
 
-Idea: let a user **bind** a source device (TV/"thing") to a receiver. After binding:
-- **Volume/mute** for the bound source is **routed to the receiver** (the receiver is
-  the volume authority; optionally also drives receiver input/power).
-- **Playback** (play/pause/next, and the M19 north-star "play Bob's Burgers") stays on
-  the **TV/source** (`media_player.play_media` / HA Assist).
-- The room/Control surface shows **one combined control** for the bound pair (source
-  glyph for transport + receiver for volume), not two.
+**Decisions (settled):** a **many-to-one** binding (many sources → one receiver),
+**stored on the source** (`audio_devices.receiver_id` + `receiver_source`, migration
+0026 — no new table). Binding **implies switching the receiver to the source's input**
+when the source powers on, where the receiver enumerates one. A future big MCP win
+("turn on the TV" lands sound on the right input by voice).
 
-Open questions: persist the binding (new table vs a field on the source device); how it
-interacts with receiver input selection (binding could also imply "switch the receiver
-to input X when this source plays"); multi-source receivers (one receiver, several bound
-sources). Relates to the M19 TV-media work and the audio-group derivation (M21/zones).
+**Phase 1 — shipped:**
+- [x] **Storage** (migration `0026_audio_receiver`): `receiver_id` (the receiver an
+  audio source routes volume/mute to; NULL = unbound) + `receiver_source` (the receiver
+  input to select when the source becomes active) on `audio_devices`, stored on the
+  source. A dangling `receiver_id` (receiver deleted/disabled) is treated as unbound.
+- [x] **Routing** (`AudioCommand::split_for_receiver` + `apply_audio_command`): a bound
+  source sends `volume`/`mute` to the receiver and keeps `power`/`source`/`transport`
+  on itself. Powering the source **on** wakes the receiver and switches it to
+  `receiver_source`; powering **off** is *not* propagated (many sources may share one
+  receiver). Routing lives in the shared service fn, so session, `/v1`, **and MCP**
+  (`set_audio`) all route identically — the MCP win comes for free.
+- [x] **Binding API**: `PUT /api/audio/devices/{id}/receiver` + `/api/v1/...`
+  (`set_audio_receiver`), `null` to unbind. Rejects self-binding, an unknown receiver,
+  and chaining (binding to a device that is itself bound) → 422. A bound source's read
+  overlays the **receiver's** (cached) volume/mute, and exposes `receiver_id` /
+  `receiver_source`.
+- [x] **UI**: a receiver-bind control on each source device on the **Devices** page —
+  pick the receiver, then (once bound, if the receiver enumerates inputs) the input to
+  switch to. Anchored popover on desktop, bottom sheet on phones/tablets.
+- [x] Unit tests (the command split) + API tests (binding CRUD/validation; volume
+  routes to the receiver, not the source).
+
+**Phase 2 — shipped:**
+- [x] **One combined control** on the Control page: a receiver that is the
+  volume-target of another audio member **in the same room** is collapsed out of the
+  member list, so the bound source's glyph represents the pair (its volume already
+  routes to the receiver). The source's fly-out (`AudioEditor`/`AudioControls`) shows a
+  **"Volume → {receiver}"** hint by the slider.
+- [x] **Receiver volume overlay** on a bound source reads the receiver's **cached**
+  state (kept fresh by the push manager), not a competing live read — a live read of a
+  push-managed receiver (Onkyo) returns a partial result and would clobber the volume
+  with 0. (Initially tried a live overlay; reverted after it surfaced the Onkyo
+  single-connection bug below.)
+- [x] **MCP `bind_receiver` tool** (bind/unbind by name; resolves source + receiver,
+  optional `receiver_source`). Routing already benefited MCP `set_audio`; this adds
+  *creating* the binding by voice. `get_home_state` already carries the binding fields.
+
+**Phase 2 — also shipped:**
+- [x] **Combined pair on Rooms + Floor Plan**: `RoomVolumeStrip` (Rooms page + Floor
+  Plan) drops a bound receiver from its member set, and the Floor-Plan `AudioEditor`
+  shows the "Volume → {receiver}" hint. Backend `set_room_audio_state` skips a bound
+  receiver in the room volume fan-out (`receiver_targets_within`), so room volume hits
+  the receiver once via the source, not twice. Covered by an integration test.
+- [x] **Onkyo single shared connection (off hold)**: a receiver honors ~one eISCP
+  connection, so the old "connection per operation" model meant every read/write opened
+  a socket that kicked the persistent push channel — stale/0 volumes and a ~1s push
+  bounce per command. Fixed with a process-global per-receiver **`OnkyoLink`** actor
+  that owns the one socket and multiplexes the push stream + all reads/writes over it
+  (reconnects with backoff, re-queries state on reconnect). Onkyo is now **active**
+  (off hold). Test `reads_and_push_share_one_connection` asserts one socket for N ops;
+  `get_state` also now errors (instead of reporting 0) on a partial/missing volume read.
+
+**Phase 2 — deferred:**
+- [ ] Optionally drive **receiver power-off / input restore** with smarter multi-source
+  arbitration (when the *last* bound source powers off). Needs design (ref-counting
+  active sources per receiver).
 
 # Open milestones
+
+## Milestone 23 — Native voice: command control — NOT STARTED (flagship)
+
+Bifrost owns its **own voice pipeline** rather than handing off to Home Assistant —
+because we have first-class providers, voice should drive them directly. A
+mic-equipped tablet (the wall-fixture use case) is the first voice ingress, but the
+engine is ingress-agnostic. **This decides the M19 Tier-B fork: native NL control,
+HA Assist only as a last resort for HA-only *content* launch.** (Free-form
+conversation / live translation is its own milestone — see **M24**.)
+
+**Guiding constraints (hard rules — apply to M24 too):**
+- **Models are pluggable, local-runnable, open-source — never mandated.** Bifrost
+  ships **zero weights and zero runtimes**; it's a thin client to whatever the user
+  runs. Assume most run **lightweight CPU-only** models.
+- **Don't dictate usage.** Give many ways to use it; the engine is ingress- and
+  client-agnostic (tablet, phone, future). Context is supplied by the client, not
+  imposed by Bifrost.
+- **Degrade gracefully.** Core control must work with **zero models configured**
+  (built-in grammar). STT/LLM/TTS are optional upgrades; one being down never mutes
+  the hub.
+
+**Pluggable model roles** (config mirrors providers — an `ai_endpoints` table, one row
+per role: `base_url` + `model` + optional encrypted `api_key` + enabled; Settings CRUD
+with a per-row **Test**). All are **OpenAI-compatible HTTP** so Ollama / llama.cpp /
+faster-whisper / LocalAI / the user's own *whisperr* all work unchanged:
+- `transcription` — STT (`POST {base_url}/audio/transcriptions`, multipart).
+- `chat` — NLU / conversation (`POST {base_url}/chat/completions`, tool-calling).
+- `tts` — speech out (`POST {base_url}/audio/speech`), optional.
+
+**Predefined models / dev stack — a *separate, optional* artifact, never in the binary.**
+Since Bifrost mandates nothing, "predefined but optional" models live outside it, and
+it doubles as the thing we develop against ("we'll need something for dev anyway").
+Both options below are *just another endpoint* to Bifrost — it never special-cases them:
+- **Preferred first: assemble existing OSS** via a checked-in `docker-compose.voice.yml`
+  — e.g. **LocalAI** (one OpenAI-compatible server for STT+chat+TTS) or
+  faster-whisper-server + Ollama + Piper, with small CPU models. Zero new code to
+  maintain; serves as both the dev harness and a turnkey "voice pack."
+- **Only if that's clunky: a companion repo** (a thin harness around whisper.cpp + a
+  small chat model + Piper) exposing the same roles — a branded turnkey. Re-introduces
+  the model-serving maintenance we deliberately kept out of the binary, so defer it.
+
+### Command pipeline ("bifrost, turn off the office lights")
+**P1 shipped** (`src/api/voice.rs`, `POST /api/voice/command { text, context? }`, session-
+gated): pure grammar (wake-word + politeness strip, clause split on `and`/`then`/`,`) →
+**power** (room-wide / `{room} lights` / single light·power·audio · `everything`),
+**brightness** (absolute + **relative** %-of-current), **color** (named→RGB, with shade
+modifiers — "dark red"/"light blue") + **color-temp** (`warm white`/`daylight`→mirek),
+**volume** (absolute + relative), **mute**, **transport**, **scene** (room / `in {room}`
+/ everywhere), with entity resolution mirroring `mcp::resolve` and dispatch through the
+shared service fns. Returns `{ ok, said, clauses[] }`. 23 grammar unit tests + 6 seam API
+tests. Color/brightness on a room touch **lights only** (don't power the room's audio).
+**Fast-follows (P1.x):** play-favorite, group/ungroup, read/queries, anaphora.
+- [ ] **Grammar engine** (Rust, built-in, deterministic, 0 models): strip wake prefix +
+  politeness/filler; verb families — on/off, brightness (abs %, relative `dim/brighten`,
+  qualitative `half/max`), color (named→hex), color-temp (`warm/cool/daylight`→mirek),
+  scene (`{scene} scene/mode`, `… in {room}`, `… everywhere`), volume (abs/relative/qual),
+  mute, transport (play/pause/stop/next/previous), play-favorite (`play X in Y`),
+  speaker group/ungroup. **Entity = `mcp::resolve`** (rooms first, then lights/audio/power;
+  articles/plurals stripped). Ambiguous → return `resolve`'s candidate list as a
+  disambiguation question.
+- [ ] **Targeting/scoping**: bare **`{room}`** → **room-wide** control (`set_room` /
+  room audio fan-out — already built, all members); **`{room} lights`** → that room's
+  **light members only** (fan-out); `here`/`this room`/bare command → the **client
+  context room**; `everything`/`whole house` → whole-home. `turn up/down` → volume if the
+  target has audio, else brightness.
+- [ ] **Read/queries** (in scope): "is the office on?", "what's the volume in the
+  kitchen?", "are any lights on?" → read from `get_home_state`/device state, answer in
+  `said` (read-only, good for talk-back).
+- [ ] **Compound commands**: split on `and`/`then`/`,` and run each clause through the
+  grammar; a clause the grammar can't parse falls to the LLM (per-clause), so
+  "dim the office and play jazz" works.
+- [ ] **Relative steps = % of *current*** (not fixed points): a step is **50% of the
+  current value**, applied directionally — `dim`/`down` → ×0.5 (80→40, 20→10);
+  `up`/`brighten` → +50% (×1.5, clamped 100). `a bit/slightly` = 25% of current;
+  `a lot/way` = 75%. Floors: result clamps ≥1 (or off for "all the way down");
+  `up`/`brighten` from 0/off turns on at a base (50%). Qualitative absolutes unchanged
+  (`half`=50, `max`=100, `low`=20). All tunable.
+- [ ] *(later)* **Anaphora** ("turn *it* off", "*them* up") via short conversation
+  memory (last entity) — deferred; the conversation modal can hold it.
+- [ ] **LLM fallback** (only on grammar miss / low confidence / unparsed clause): feed the
+  model the **MCP tool schemas** (generated from the registry so they can't drift) + a
+  names-only `get_home_state` snapshot; **single tool call, no agent loop** for v1;
+  validate the entity resolves, then dispatch through the **same service fns** the
+  grammar/MCP use.
+- [x] **`POST /api/voice/command { text, context? }`** → `{ ok, said, clauses }` — the
+  pure text→action seam, fully unit-testable (no audio). **(P1 — shipped.)**
+- [ ] **`POST /api/voice/listen` (audio)** → transcription role → command pipeline.
+- [ ] **Tablet PTT UI** (push-to-talk) — the spike ingress; record → POST → show result.
+
+### Cross-cutting
+- [ ] **Client room context — modular, not prescriptive.** A per-request `context`
+  (first field: `room`) lets bare references resolve ("turn off the lights" → *this
+  device's room*; "turn it up"). The **client** decides what to send and how it
+  persists (a wall tablet pins its room; a phone may send none). Bifrost just honors the
+  context — it does not impose a device/room registry. Shared with M24.
+- [ ] **Conversation modal** (frontend): shows the live "current conversation"
+  (heard → did). **Configurable to persist to disk** for longer debugging sessions
+  (retention configurable). Builds trust + surfaces mis-hears. Reused by M24.
+- [ ] **Privacy/reliability**: audio stays on the LAN (endpoints are local); creds
+  encrypted; session-gated; nothing recorded until PTT/wake; grammar keeps working if
+  models are down.
+
+### Later phases
+- [ ] **Wake word** ("bifrost") — openWakeWord in-browser, custom-trained; on-device VAD,
+  audio leaves the tablet only after the wake word. (PTT covers the spike.)
+- [ ] Multi-tablet / multi-ingress polish.
+- [ ] **Spoken confirmation** via the optional `tts` role (a short `said` read aloud).
+
+### Phasing
+P1 grammar + `/api/voice/command` seam (+ tests) · P2 STT role + `/api/voice/listen` +
+tablet PTT + client room context · P3 LLM fallback over MCP tool schemas · P4
+conversation modal (+ optional disk persistence) · P5 wake word + optional spoken `tts`.
+
+### Open questions
+- TTS voice/lang selection surface (per client? per command?).
+- Conversation persistence format (table vs files) + retention defaults.
+
+## Milestone 24 — Talk mode: conversation & live translator — NOT STARTED
+
+A continuous back-and-forth voice mode — free-form conversation, and the headline
+use case **a live translator between two people** — **as close to real-time as
+possible over a WebSocket** (`/api/voice/stream`, WSS), not HTTP round-trips. Builds on
+M23's pluggable roles (`transcription` / `chat` / `tts`) and the conversation modal;
+inherits M23's hard constraints (pluggable/local/open models, graceful degradation).
+**Distinct from M23** because it's a streaming bidirectional pipeline, not a
+one-shot command.
+
+- [ ] **WSS streaming transport**: client streams mic frames; server VAD-chunks →
+  streaming/chunked STT → (converse or translate) → response → **streaming TTS** frames
+  back. Target ~1–2s turn latency; partial/interim results where the backend supports
+  them.
+- [ ] **Translator flow**: STT (lang A) → translate (chat/translation model) → TTS
+  (lang B), pluggable each; two-party turn-taking; per-side language selection.
+- [ ] **Converse flow**: free chat (optionally with the home/tool context so "…and turn
+  the lights down" mid-conversation still acts), rendered in the shared conversation
+  modal.
+- [ ] Backend-streaming is preferred; **degrade to chunked** when an endpoint can't
+  stream.
+
+### Open questions
+- **Real-time on CPU is the hard part.** Whisper isn't natively streaming, so translator
+  turn-taking depends on which open backend streams well enough (whisper-streaming,
+  faster-whisper+VAD, realtime servers). **Spike this latency before committing** to the
+  ~1–2s target — it may dictate the recommended dev/turnkey stack in M23.
+- Barge-in / turn detection (when has a speaker finished?) for natural two-party flow.
 
 ## Milestone 12.2 — Music services: real Spotify (and friends) — NOT STARTED
 
