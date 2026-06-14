@@ -142,7 +142,8 @@ Receivers and networked speakers (Onkyo via eISCP, Sonos via local UPnP).
     "power": true,
     "volume": 35,                  // 0–100
     "mute": false,
-    "source": "net",               // receivers only
+    "source": "net",               // current input/app
+    "source_list": ["net","tv","Hulu"], // selectable inputs / TV apps (omitted if none); switch by sending one as `source`
     "now_playing": {               // when available
       "title": "Karma Police",
       "artist": "Radiohead",

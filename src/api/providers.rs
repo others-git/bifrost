@@ -4,7 +4,7 @@ use crate::api::lights::build_provider;
 use crate::connection::ConnectionStatus;
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{delete, get, post, put},
@@ -24,6 +24,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{id}/config", get(provider_config))
         .route("/{id}/credentials", put(update_credentials))
         .route("/{id}/status", get(provider_status))
+        .route("/{id}/prune", put(set_prune))
         .route("/{id}/discover", post(discover))
         .route("/{id}/sync-groups", post(sync_groups))
 }
@@ -91,10 +92,12 @@ struct ProviderRow {
     provider_type: String,
     /// Human-facing type name (e.g. "Sonos"); falls back to the type key.
     type_name: String,
-    /// "light" or "audio".
+    /// UI category: "light", "audio", or "integration" (matches the add menu).
     domain: String,
     name: String,
     enabled: bool,
+    /// When set, a discover removes devices the provider no longer reports.
+    prune: bool,
     created_at: String,
 }
 
@@ -107,7 +110,7 @@ async fn list_providers(
     }
 
     match sqlx::query(
-        "SELECT id, provider_type, name, enabled, created_at FROM providers ORDER BY created_at",
+        "SELECT id, provider_type, name, enabled, prune, created_at FROM providers ORDER BY created_at",
     )
     .fetch_all(&state.db)
     .await
@@ -121,10 +124,10 @@ async fn list_providers(
                         .display_name(&provider_type)
                         .unwrap_or(provider_type.as_str())
                         .to_string();
-                    let domain = if state.registry.is_known_audio(&provider_type) {
-                        "audio"
-                    } else {
-                        "light"
+                    let domain = match state.registry.ui_domain(&provider_type) {
+                        Some(crate::providers::ProviderDomain::Audio) => "audio",
+                        Some(crate::providers::ProviderDomain::Integration) => "integration",
+                        _ => "light",
                     }
                     .to_string();
                     ProviderRow {
@@ -134,6 +137,7 @@ async fn list_providers(
                         id: r.get("id"),
                         name: r.get("name"),
                         enabled: r.get::<i64, _>("enabled") != 0,
+                        prune: r.get::<i64, _>("prune") != 0,
                         created_at: r.get("created_at"),
                     }
                 })
@@ -430,6 +434,10 @@ async fn remove_provider(
         .bind(&id)
         .execute(&state.db)
         .await;
+
+    // Removing a native provider should re-surface any integration copies it was
+    // shadowing (and vice-versa); recompute the de-dup shadows.
+    crate::api::dedup::reconcile_duplicates(&state).await;
 
     StatusCode::NO_CONTENT.into_response()
 }
@@ -824,10 +832,14 @@ async fn hue_pair(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
+    // Default to HTTPS: the Bridge Pro only serves the `/api` pairing endpoint
+    // over HTTPS and redirects plain HTTP, which downgrades our POST to a GET
+    // (bridge error 4). HTTPS-with-self-signed-cert works on every CLIP v2
+    // bridge, so this is safe for the older square bridge too.
     let base = if req.bridge_ip.starts_with("http://") || req.bridge_ip.starts_with("https://") {
         req.bridge_ip.clone()
     } else {
-        format!("http://{}", req.bridge_ip)
+        format!("https://{}", req.bridge_ip)
     };
 
     match pairing::pair(&base).await {
@@ -855,19 +867,58 @@ async fn hue_pair(
 #[derive(Serialize)]
 struct DiscoverResponse {
     discovered: usize,
+    #[serde(default)]
+    pruned: u64,
+}
+
+#[derive(Deserialize)]
+struct SetPruneRequest {
+    prune: bool,
+}
+
+/// Set a provider's "prune stale devices on discover" preference.
+async fn set_prune(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<SetPruneRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match sqlx::query("UPDATE providers SET prune = ? WHERE id = ?")
+        .bind(i64::from(req.prune))
+        .bind(&id)
+        .execute(&state.db)
+        .await
+    {
+        Ok(r) if r.rows_affected() > 0 => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("db error setting prune: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// `?prune=true|false` overrides the provider's stored `prune` flag for one run.
+#[derive(Deserialize)]
+struct DiscoverQuery {
+    prune: Option<bool>,
 }
 
 async fn discover(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(q): Query<DiscoverQuery>,
 ) -> impl IntoResponse {
     if require_session(&state, &headers).await.is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
     let row = sqlx::query(
-        "SELECT provider_type, credentials FROM providers WHERE id = ? AND enabled = 1",
+        "SELECT provider_type, credentials, prune FROM providers WHERE id = ? AND enabled = 1",
     )
     .bind(&id)
     .fetch_optional(&state.db)
@@ -884,6 +935,14 @@ async fn discover(
 
     let provider_type: String = row.get("provider_type");
     let credentials_enc: String = row.get("credentials");
+    // Prune stale devices when the request asks, else when the provider's flag
+    // is set. `prune_before` is captured now; rediscovered devices get a newer
+    // `last_seen`, so anything older is no longer reported and gets removed.
+    let prune = q.prune.unwrap_or(row.get::<i64, _>("prune") != 0);
+    let prune_before: String = sqlx::query_scalar("SELECT datetime('now')")
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or_default();
 
     // A provider type can serve several device domains (Home Assistant does
     // lights + power from one row); discover each domain it's registered for and
@@ -911,13 +970,14 @@ async fn discover(
             let caps = serde_json::to_string(&light.capabilities).unwrap_or_default();
             let state_json = serde_json::to_string(&light.state).unwrap_or_default();
             let _ = sqlx::query(
-                "INSERT INTO lights (id, provider_id, device_id, name, capabilities, last_state, last_seen)
-                 VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                "INSERT INTO lights (id, provider_id, device_id, name, capabilities, last_state, last_seen, hw_id)
+                 VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)
                  ON CONFLICT (provider_id, device_id)
                  DO UPDATE SET name        = excluded.name,
                                capabilities = excluded.capabilities,
                                last_state  = excluded.last_state,
-                               last_seen   = excluded.last_seen",
+                               last_seen   = excluded.last_seen,
+                               hw_id       = excluded.hw_id",
             )
             .bind(&light_id)
             .bind(&id)
@@ -925,6 +985,7 @@ async fn discover(
             .bind(&light.name)
             .bind(&caps)
             .bind(&state_json)
+            .bind(&light.hw_id)
             .execute(&state.db)
             .await;
         }
@@ -961,5 +1022,39 @@ async fn discover(
         }
     }
 
-    Json(DiscoverResponse { discovered }).into_response()
+    // Prune devices no longer reported — but never on an empty result (a likely
+    // transient failure shouldn't wipe a provider's devices).
+    let mut pruned = 0u64;
+    if prune && discovered > 0 {
+        if state.registry.is_known(&provider_type) {
+            pruned += prune_stale(&state, &id, "lights", &prune_before).await;
+        }
+        if state.registry.is_known_power(&provider_type) {
+            pruned += prune_stale(&state, &id, "power_devices", &prune_before).await;
+        }
+        if state.registry.is_known_audio(&provider_type) {
+            pruned += prune_stale(&state, &id, "audio_devices", &prune_before).await;
+        }
+    }
+
+    // Collapse any device now reachable both natively and via this integration.
+    crate::api::dedup::reconcile_duplicates(&state).await;
+
+    Json(DiscoverResponse { discovered, pruned }).into_response()
+}
+
+/// Delete a provider's devices in `table` whose `last_seen` predates this
+/// discovery run — i.e. the provider didn't report them. `table` is a fixed
+/// per-domain identifier, so the formatted SQL is injection-free. Returns the
+/// number removed.
+async fn prune_stale(state: &AppState, provider_id: &str, table: &str, before: &str) -> u64 {
+    sqlx::query(&format!(
+        "DELETE FROM {table} WHERE provider_id = ? AND (last_seen IS NULL OR last_seen < ?)"
+    ))
+    .bind(provider_id)
+    .bind(before)
+    .execute(&state.db)
+    .await
+    .map(|r| r.rows_affected())
+    .unwrap_or(0)
 }

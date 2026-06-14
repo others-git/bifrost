@@ -176,6 +176,8 @@ fn govee_device_to_light(d: GoveeDevice, state: Option<LightState>) -> Light {
 
     Light {
         id: Uuid::new_v4(),
+        // Govee's `device` id is the unit's MAC — our cross-provider de-dup key.
+        hw_id: crate::providers::mac_hw_id(&d.device),
         provider_id: d.device,
         provider: Provider::Govee,
         name: d.device_name,

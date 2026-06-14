@@ -42,6 +42,119 @@ export interface Light {
   device_id: string;
   capabilities: LightCapabilities;
   last_state?: LightState;
+  /** Disabled devices keep their room membership but get no commands and are
+   * hidden from room control. */
+  enabled?: boolean;
+  /** Optional glyph-name override; absent/null = use the type default. */
+  glyph?: string | null;
+  /** Normalized hardware id used for cross-provider de-dup; null if unknown. */
+  hw_id?: string | null;
+  /** When set, this device is a duplicate of (shadowed by) that device id —
+   * hidden from control and collapsed in the inventory. */
+  shadowed_by?: string | null;
+  /** true if the shadow was set automatically by hw_id matching (native wins). */
+  shadow_auto?: boolean;
+  /** The room this device is directly assigned to (Devices-page assignment),
+   * or null. Room links (synced provider groups) aren't reflected here. */
+  room_id?: string | null;
+}
+
+/** Enable/disable a device of any domain (lights / audio / power). Disabled =
+ * tracked, still in its room, but no commands and hidden from room control. */
+export async function setLightEnabled(id: string, enabled: boolean): Promise<void> {
+  await fetch(`/api/lights/${id}/enabled`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+}
+export async function setAudioEnabled(id: string, enabled: boolean): Promise<void> {
+  await fetch(`/api/audio/devices/${id}/enabled`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+}
+export async function setPowerEnabled(id: string, enabled: boolean): Promise<void> {
+  await fetch(`/api/power/devices/${id}/enabled`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+}
+
+/** Override (or clear, with `null`) a device's glyph. Mirrors the enabled
+ * setters: one per domain, same `{glyph}` body, type default when cleared. */
+export async function setLightGlyph(id: string, glyph: string | null): Promise<void> {
+  await fetch(`/api/lights/${id}/glyph`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ glyph }),
+  });
+}
+export async function setAudioGlyph(id: string, glyph: string | null): Promise<void> {
+  await fetch(`/api/audio/devices/${id}/glyph`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ glyph }),
+  });
+}
+export async function setPowerGlyph(id: string, glyph: string | null): Promise<void> {
+  await fetch(`/api/power/devices/${id}/glyph`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ glyph }),
+  });
+}
+
+/** Manually link a device as a duplicate of `shadowed_by` (or `null` to clear
+ * the link → device becomes visible again). The de-dup auto-reconciler handles
+ * exact hardware matches; this is the no-hw_id fallback and user override. */
+export async function setLightShadow(id: string, shadowed_by: string | null): Promise<void> {
+  await fetch(`/api/lights/${id}/shadow`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ shadowed_by }),
+  });
+}
+export async function setAudioShadow(id: string, shadowed_by: string | null): Promise<void> {
+  await fetch(`/api/audio/devices/${id}/shadow`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ shadowed_by }),
+  });
+}
+export async function setPowerShadow(id: string, shadowed_by: string | null): Promise<void> {
+  await fetch(`/api/power/devices/${id}/shadow`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ shadowed_by }),
+  });
+}
+
+/** Assign a device to a room from the device side (`null` removes it from its
+ * room). Sets *direct* membership — room links (synced provider groups) are
+ * managed on the Rooms page. */
+export async function setLightRoom(id: string, room_id: string | null): Promise<void> {
+  await fetch(`/api/lights/${id}/room`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ room_id }),
+  });
+}
+export async function setAudioRoom(id: string, room_id: string | null): Promise<void> {
+  await fetch(`/api/audio/devices/${id}/room`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ room_id }),
+  });
+}
+export async function setPowerRoom(id: string, room_id: string | null): Promise<void> {
+  await fetch(`/api/power/devices/${id}/room`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ room_id }),
+  });
 }
 
 export interface Provider {
@@ -49,10 +162,12 @@ export interface Provider {
   provider_type: string;
   /** Human-facing type name, e.g. "Sonos". */
   type_name: string;
-  /** Which kind of devices this provider manages. */
-  domain: "light" | "audio";
+  /** UI category: a single device domain, or "integration" (e.g. Home Assistant). */
+  domain: "light" | "audio" | "integration";
   name: string;
   enabled: boolean;
+  /** When set, discovering this provider removes devices it no longer reports. */
+  prune: boolean;
   created_at: string;
 }
 
@@ -190,8 +305,15 @@ export interface AudioState {
   volume: number;
   mute: boolean;
   source?: string;
+  /** Selectable sources/inputs — receiver inputs, or a smart TV's apps (HA
+   * `source_list`). Switch to one by sending it as `source`. */
+  source_list?: string[];
   now_playing?: NowPlaying;
   reachable?: boolean;
+  /** When this device is in a live multi-speaker sync group, the provider id of
+   * the group's coordinator. Devices sharing this are playing in sync; the UI
+   * derives a single grouped control from them. null/absent = standalone. */
+  group_coordinator?: string | null;
 }
 
 export interface AudioCapabilities {
@@ -218,10 +340,23 @@ export interface AudioDevice {
   /** Provider-native id (e.g. "main") — matches audio_state push events. */
   device_id: string;
   name: string;
-  kind: "receiver" | "speaker" | "zone";
+  kind: "receiver" | "speaker" | "tv" | "zone";
   capabilities: AudioCapabilities;
   state: AudioState;
   last_seen?: string;
+  enabled?: boolean;
+  /** Optional glyph-name override; absent/null = use the type default. */
+  glyph?: string | null;
+  /** Normalized hardware id used for cross-provider de-dup; null if unknown. */
+  hw_id?: string | null;
+  /** When set, this device is a duplicate of (shadowed by) that device id —
+   * hidden from control and collapsed in the inventory. */
+  shadowed_by?: string | null;
+  /** true if the shadow was set automatically by hw_id matching (native wins). */
+  shadow_auto?: boolean;
+  /** The room this device is directly assigned to (Devices-page assignment),
+   * or null. Room links (synced provider groups) aren't reflected here. */
+  room_id?: string | null;
 }
 
 /** Sparse command — only the fields present are applied. */
@@ -320,6 +455,19 @@ export interface PowerDevice {
   kind: PowerKind;
   state: PowerState;
   last_seen?: string;
+  enabled?: boolean;
+  /** Optional glyph-name override; absent/null = use the type default. */
+  glyph?: string | null;
+  /** Normalized hardware id used for cross-provider de-dup; null if unknown. */
+  hw_id?: string | null;
+  /** When set, this device is a duplicate of (shadowed by) that device id —
+   * hidden from control and collapsed in the inventory. */
+  shadowed_by?: string | null;
+  /** true if the shadow was set automatically by hw_id matching (native wins). */
+  shadow_auto?: boolean;
+  /** The room this device is directly assigned to (Devices-page assignment),
+   * or null. Room links (synced provider groups) aren't reflected here. */
+  room_id?: string | null;
 }
 
 export async function getPowerDevices(): Promise<PowerDevice[]> {
@@ -346,10 +494,25 @@ export async function setPowerState(id: string, on: boolean): Promise<string | n
 }
 
 /** Re-run a provider's device discovery (lights or audio). */
-export async function discoverProvider(id: string): Promise<{ discovered: number }> {
-  const res = await fetch(`/api/providers/${id}/discover`, { method: "POST" });
+/** Discover a provider's devices. `prune` omitted → uses the provider's stored
+ * flag; `true`/`false` forces it for this run (removes / keeps stale devices). */
+export async function discoverProvider(
+  id: string,
+  opts?: { prune?: boolean },
+): Promise<{ discovered: number; pruned: number }> {
+  const q = opts?.prune === undefined ? "" : `?prune=${opts.prune}`;
+  const res = await fetch(`/api/providers/${id}/discover${q}`, { method: "POST" });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
+}
+
+/** Set whether discovering this provider prunes devices it no longer reports. */
+export async function setProviderPrune(id: string, prune: boolean): Promise<void> {
+  await fetch(`/api/providers/${id}/prune`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prune }),
+  });
 }
 
 export async function getProviders(): Promise<Provider[]> {
@@ -891,12 +1054,6 @@ export function rgbToXy(r: number, g: number, b: number): { x: number; y: number
   const sum = X + Y + Z;
   if (sum === 0) return { x: 0, y: 0, brightness: 0 };
   return { x: X / sum, y: Y / sum, brightness: Y };
-}
-
-export async function discoverLights(id: string): Promise<{ discovered: number }> {
-  const res = await fetch(`/api/providers/${id}/discover`, { method: "POST" });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
 }
 
 /** Sync the provider's rooms/zones into mirrors and keep Rooms in step. */

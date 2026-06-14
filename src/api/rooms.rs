@@ -119,7 +119,7 @@ pub(crate) async fn effective_members(state: &AppState, room_id: &str) -> Vec<Me
                 p.provider_type, p.credentials, l.name
          FROM lights l
          JOIN providers p ON p.id = l.provider_id
-         WHERE p.enabled = 1 AND l.id IN (
+         WHERE p.enabled = 1 AND l.enabled = 1 AND l.shadowed_by IS NULL AND l.id IN (
              SELECT light_id FROM room_lights WHERE room_id = ?1
              UNION
              SELECT pgl.light_id
@@ -152,7 +152,7 @@ pub(crate) async fn effective_member_ids(state: &AppState, room_id: &str) -> Vec
         "SELECT DISTINCT l.id AS light_id, l.name
          FROM lights l
          JOIN providers p ON p.id = l.provider_id
-         WHERE p.enabled = 1 AND l.id IN (
+         WHERE p.enabled = 1 AND l.enabled = 1 AND l.shadowed_by IS NULL AND l.id IN (
              SELECT light_id FROM room_lights WHERE room_id = ?1
              UNION
              SELECT pgl.light_id
@@ -180,7 +180,7 @@ pub(crate) async fn effective_power_member_ids(state: &AppState, room_id: &str) 
         "SELECT pd.id AS power_device_id
          FROM power_devices pd
          JOIN providers p ON p.id = pd.provider_id
-         WHERE p.enabled = 1
+         WHERE p.enabled = 1 AND pd.shadowed_by IS NULL
            AND pd.id IN (
                SELECT power_device_id FROM room_power_devices WHERE room_id = ?1
                UNION
@@ -199,6 +199,85 @@ pub(crate) async fn effective_power_member_ids(state: &AppState, room_id: &str) 
     .into_iter()
     .map(|r| r.get("power_device_id"))
     .collect()
+}
+
+/// Assign a device to (at most) one room from the *device* side — the knob the
+/// Devices page uses, the counterpart to the room-centric membership setters.
+/// Clears the device's existing direct membership in `member_table`, then adds
+/// it to `room_id` (or leaves it unassigned when `None`). `member_table` /
+/// `device_col` are fixed per-domain identifiers, so the formatted SQL is
+/// injection-free. Uses `INSERT OR IGNORE`, so a bad device or room id (FK
+/// violation) is skipped → `NOT_FOUND` rather than a 500. Only *direct*
+/// membership is touched; room links (synced provider groups) are managed on the
+/// Rooms page.
+pub(crate) async fn set_device_room(
+    state: &AppState,
+    device_table: &str,
+    member_table: &str,
+    device_col: &str,
+    device_id: &str,
+    room_id: Option<String>,
+) -> StatusCode {
+    // Unknown device → 404 (matches the other device sub-resource setters).
+    let exists = sqlx::query(&format!("SELECT 1 FROM {device_table} WHERE id = ?"))
+        .bind(device_id)
+        .fetch_optional(&state.db)
+        .await;
+    match exists {
+        Ok(Some(_)) => {}
+        Ok(None) => return StatusCode::NOT_FOUND,
+        Err(e) => {
+            tracing::error!("db error checking {device_table} {device_id}: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    }
+
+    // Validate the target room up front so a bad id is a clean 404, not an FK 500.
+    if let Some(room_id) = &room_id {
+        let room = sqlx::query("SELECT 1 FROM rooms WHERE id = ?")
+            .bind(room_id)
+            .fetch_optional(&state.db)
+            .await;
+        match room {
+            Ok(Some(_)) => {}
+            Ok(None) => return StatusCode::NOT_FOUND,
+            Err(e) => {
+                tracing::error!("db error checking room {room_id}: {e}");
+                return StatusCode::INTERNAL_SERVER_ERROR;
+            }
+        }
+    }
+
+    // One direct room per device: clear existing membership, then add the new one.
+    if let Err(e) = sqlx::query(&format!(
+        "DELETE FROM {member_table} WHERE {device_col} = ?"
+    ))
+    .bind(device_id)
+    .execute(&state.db)
+    .await
+    {
+        tracing::error!("db error clearing {member_table} for {device_id}: {e}");
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    }
+
+    let Some(room_id) = room_id else {
+        return StatusCode::NO_CONTENT; // unassigned
+    };
+
+    match sqlx::query(&format!(
+        "INSERT OR IGNORE INTO {member_table} (room_id, {device_col}) VALUES (?, ?)"
+    ))
+    .bind(&room_id)
+    .bind(device_id)
+    .execute(&state.db)
+    .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT,
+        Err(e) => {
+            tracing::error!("db error assigning {device_id} to room {room_id}: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
 }
 
 /// One audio device's membership in a room, with its per-room volume offset.
@@ -223,7 +302,7 @@ pub(crate) async fn effective_audio_members(
          FROM audio_devices d
          LEFT JOIN room_audio_devices rad
            ON rad.room_id = ?1 AND rad.audio_device_id = d.id
-         WHERE d.id IN (
+         WHERE d.shadowed_by IS NULL AND d.id IN (
              SELECT audio_device_id FROM room_audio_devices WHERE room_id = ?1
              UNION
              SELECT pga.audio_device_id

@@ -16,6 +16,10 @@ pub struct Light {
     pub state: LightState,
     pub capabilities: LightCapabilities,
     pub last_seen: DateTime<Utc>,
+    /// Normalized hardware identity for cross-provider de-dup (see
+    /// [`crate::providers::mac_hw_id`]); `None` when the provider can't supply one.
+    #[serde(default)]
+    pub hw_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

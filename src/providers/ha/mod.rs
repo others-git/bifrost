@@ -13,28 +13,34 @@
 //!   Rooms, exactly like Hue rooms/zones.
 //! - Registered as a **light-domain** factory in `default_registry()`.
 //!
-//! ## On hold (implemented, not registered)
-//! - **Audio:** the `AudioProvider` impl + `HaAudioFactory` (`media_player.*` →
-//!   `AudioDevice`, grouping, transport) are kept and tested, but **not**
-//!   registered while audio work is paused. Registering `HaAudioFactory`
-//!   alongside the light factory is the only step to bring HA audio online — at
-//!   which point the registry's light-XOR-audio assumption for one
-//!   `provider_type` (the `is_known` / `is_known_audio` branch in the Sync and
-//!   startup paths) needs auditing so one HA row can own both `lights` and
-//!   `audio_devices`.
+//! - **Audio (media_player):** `HaAudioFactory` (`media_player.*` →
+//!   `AudioDevice`: power/volume/mute/source/transport, grouping) is registered
+//!   too, so HA TVs and speakers surface on the Audio page and through the audio
+//!   API/MCP. Reads on demand (no background manager). *Not yet:* launching
+//!   named content on a player (`media_player.play_media` / HA Assist) — that's
+//!   the next media increment.
+//!
+//! ## Primary-entity filter (one-shot WebSocket)
+//! HA's model is one **device** → many **entities**; integrations expose a
+//! device's settings as extra `switch.*` etc. (e.g. a Sonos speaker's
+//! crossfade/loudness toggles). We surface only **primary** controls — entities
+//! with no `entity_category`, not disabled/hidden. That signal lives only in the
+//! **entity registry**, not `/api/states`, so discovery does a cached **one-shot
+//! WebSocket** call (`config/entity_registry/list`) and filters on it. A failed
+//! fetch degrades to unfiltered (the old behaviour). See `HA-API.md`.
 //!
 //! ## Transport: REST poll now, WebSocket push later
-//! Talks to the REST API (`GET /api/states`, `POST /api/services/*`,
-//! `POST /api/template`) under the existing **poll** model — no new
-//! connection-manager machinery, and `/api/template` covers Area→entity mapping
-//! without the WebSocket registry. The next increment is a WS `subscribe_events`
-//! push manager (mirroring Onkyo's `AudioConnectionMode::Push`) for instant
-//! state — see `references/ha_websocket_api.md`.
+//! State is REST-polled (`GET /api/states`, services, `/api/template`) under the
+//! existing **poll** model. The next increment upgrades the WebSocket use from
+//! the one-shot registry fetch to a persistent `subscribe_events` push channel
+//! (mirroring Onkyo's `AudioConnectionMode::Push`) for instant state — see
+//! `references/ha_websocket_api.md`.
 //!
-//! ## Known limitation
+//! ## Known limitations / next
 //! - **De-dup:** a device exposed *both* natively (e.g. Hue) *and* via HA shows
-//!   up twice. For now, leave it to Rooms membership to de-dupe; a provider-level
-//!   guard can come later.
+//!   up twice — left to Rooms membership to de-dupe for now.
+//! - **Device grouping:** the registry also gives each entity's `device_id` — the
+//!   basis for grouping a device's entities (the deferred device-registry import).
 
 use crate::models::audio::{
     AudioCapabilities, AudioCommand, AudioDevice, AudioDeviceKind, AudioState, NowPlaying,
@@ -46,13 +52,17 @@ use crate::providers::{
     AudioProvider, AudioProviderFactory, CredentialField, FieldKind, LightProvider, PowerProvider,
     PowerProviderFactory, ProviderFactory, ProviderGroup,
 };
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use chrono::Utc;
 use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 const LIGHT_PREFIX: &str = "light.";
@@ -73,6 +83,85 @@ pub struct HaProvider {
     client: Client,
     /// Normalised, e.g. `http://homeassistant.local:8123` (no trailing slash).
     base_url: String,
+    /// Raw long-lived token — REST uses the header on `client`; the WebSocket
+    /// auth message needs the raw value.
+    token: String,
+    /// Cached entity registry (entity_id → metadata), refreshed over WebSocket.
+    /// Lets discovery surface only *primary* device controls, not a device's
+    /// `config`/`diagnostic` sub-entities. `None` until first fetched.
+    registry_cache: RegistryCache,
+    /// Cached device registry (HA `device_id` → normalized hardware id). Joined
+    /// with the entity registry's `device_id` to give each entity a `hw_id` for
+    /// cross-provider de-dup. `None` until first fetched.
+    device_cache: DeviceCache,
+}
+
+/// Time-stamped entity registry snapshot behind a lock (see `registry_cache`).
+type RegistryCache = Mutex<Option<(Instant, Arc<HashMap<String, EntityMeta>>)>>;
+/// Time-stamped device registry snapshot: HA device_id → hardware id.
+type DeviceCache = Mutex<Option<(Instant, Arc<HashMap<String, String>>)>>;
+
+/// Entity-registry metadata that decides whether an entity is a primary,
+/// user-facing device control or an auxiliary one (a device's config switch,
+/// diagnostics, or a disabled/hidden entity). Only in the registry, not
+/// `/api/states`. See `HA-API.md`.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct EntityMeta {
+    #[serde(default)]
+    entity_category: Option<String>,
+    #[serde(default)]
+    disabled_by: Option<String>,
+    #[serde(default)]
+    hidden_by: Option<String>,
+    /// The HA *device* this entity belongs to — the join key into the device
+    /// registry for a hardware id (de-dup). Absent for entity-only integrations.
+    #[serde(default)]
+    device_id: Option<String>,
+}
+
+impl EntityMeta {
+    fn is_primary(&self) -> bool {
+        self.entity_category.is_none() && self.disabled_by.is_none() && self.hidden_by.is_none()
+    }
+}
+
+/// Derive a normalized hardware id from one HA device-registry entry, for
+/// cross-provider de-dup. Prefers an explicit `("mac", …)` **connection** (the
+/// authoritative source); failing that, falls back to a MAC-shaped value in
+/// `identifiers` — some integrations (e.g. Onkyo) key the device by its MAC
+/// string there rather than as a connection. `mac_hw_id` only accepts a real
+/// MAC-48/EUI-64 shape, so a non-hardware identifier is ignored. `None` when the
+/// device exposes no usable hardware id.
+fn ha_device_hw_id(d: &Value) -> Option<String> {
+    let pairs = |key: &str| {
+        d.get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|c| c.as_array())
+    };
+    // Authoritative: a ("mac", "...") connection.
+    let from_connection = pairs("connections")
+        .filter(|c| c.first().and_then(Value::as_str) == Some("mac"))
+        .find_map(|c| c.get(1).and_then(Value::as_str))
+        .and_then(crate::providers::mac_hw_id);
+    if from_connection.is_some() {
+        return from_connection;
+    }
+    // Fallback: a MAC-shaped identifier value, e.g. ["onkyo", "0009b0e82343"].
+    pairs("identifiers")
+        .find_map(|c| c.get(1).and_then(Value::as_str))
+        .and_then(crate::providers::mac_hw_id)
+}
+
+/// Keep an entity iff it's a primary control. Entities absent from the registry
+/// (or an empty registry from a failed fetch) default to kept — so a WebSocket
+/// failure degrades to the old unfiltered behaviour rather than hiding devices.
+fn keep_entity(registry: &HashMap<String, EntityMeta>, entity_id: &str) -> bool {
+    registry
+        .get(entity_id)
+        .map(EntityMeta::is_primary)
+        .unwrap_or(true)
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,7 +189,13 @@ impl HaProvider {
             .timeout(std::time::Duration::from_secs(15))
             .build()?;
 
-        Ok(Self { client, base_url })
+        Ok(Self {
+            client,
+            base_url,
+            token: token.to_string(),
+            registry_cache: Mutex::new(None),
+            device_cache: Mutex::new(None),
+        })
     }
 
     pub fn from_credentials(creds_json: &str) -> Result<Self> {
@@ -184,6 +279,183 @@ impl HaProvider {
         Ok(text)
     }
 
+    // ── Entity registry (WebSocket) ───────────────────────────────────────────
+
+    fn ws_url(&self) -> String {
+        let base = self
+            .base_url
+            .replacen("https://", "wss://", 1)
+            .replacen("http://", "ws://", 1);
+        format!("{base}/api/websocket")
+    }
+
+    /// The entity registry, cached briefly. Used to filter discovery to primary
+    /// device controls. A fetch failure caches an **empty** map (→ no filtering)
+    /// so HA stays usable when the WebSocket can't be reached.
+    async fn entity_registry(&self) -> Arc<HashMap<String, EntityMeta>> {
+        const TTL: Duration = Duration::from_secs(60);
+        if let Some((at, reg)) = self.registry_cache.lock().await.as_ref()
+            && at.elapsed() < TTL
+        {
+            return Arc::clone(reg);
+        }
+        let reg = Arc::new(self.fetch_entity_registry().await.unwrap_or_else(|e| {
+            tracing::warn!(
+                "HA entity registry fetch failed ({e:#}); surfacing all entities unfiltered"
+            );
+            HashMap::new()
+        }));
+        *self.registry_cache.lock().await = Some((Instant::now(), Arc::clone(&reg)));
+        reg
+    }
+
+    /// One-shot WebSocket fetch of `config/entity_registry/list`: connect, auth
+    /// with the token, request the registry, parse, close. See `HA-API.md`.
+    async fn fetch_entity_registry(&self) -> Result<HashMap<String, EntityMeta>> {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let url = self.ws_url();
+        let (mut ws, _) = tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio_tungstenite::connect_async(url.as_str()),
+        )
+        .await
+        .context("HA WebSocket connect timed out")?
+        .with_context(|| format!("HA WebSocket connect to {url} failed"))?;
+
+        // `auth_required` greeting → send token → expect `auth_ok`.
+        let _ = ws_next_json(&mut ws).await?;
+        ws.send(Message::text(
+            json!({ "type": "auth", "access_token": self.token }).to_string(),
+        ))
+        .await?;
+        let auth = ws_next_json(&mut ws).await?;
+        if auth.get("type").and_then(Value::as_str) != Some("auth_ok") {
+            bail!("HA WebSocket auth rejected: {auth}");
+        }
+
+        ws.send(Message::text(
+            json!({ "id": 1, "type": "config/entity_registry/list" }).to_string(),
+        ))
+        .await?;
+        let result = loop {
+            let v = ws_next_json(&mut ws).await?;
+            if v.get("id").and_then(Value::as_i64) == Some(1)
+                && v.get("type").and_then(Value::as_str) == Some("result")
+            {
+                break v;
+            }
+        };
+        let _ = ws.close(None).await;
+
+        let entries = result
+            .get("result")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("HA entity-registry result has no array"))?;
+        let mut map = HashMap::with_capacity(entries.len());
+        for e in entries {
+            if let Some(id) = e.get("entity_id").and_then(Value::as_str) {
+                let meta: EntityMeta = serde_json::from_value(e.clone()).unwrap_or_default();
+                map.insert(id.to_string(), meta);
+            }
+        }
+        Ok(map)
+    }
+
+    /// The device registry (HA `device_id` → hardware id), cached briefly like
+    /// the entity registry. A fetch failure caches an **empty** map, so de-dup
+    /// simply doesn't fire rather than breaking discovery.
+    async fn device_registry(&self) -> Arc<HashMap<String, String>> {
+        const TTL: Duration = Duration::from_secs(60);
+        if let Some((at, reg)) = self.device_cache.lock().await.as_ref()
+            && at.elapsed() < TTL
+        {
+            return Arc::clone(reg);
+        }
+        let reg = Arc::new(self.fetch_device_registry().await.unwrap_or_else(|e| {
+            tracing::warn!("HA device registry fetch failed ({e:#}); de-dup disabled this run");
+            HashMap::new()
+        }));
+        *self.device_cache.lock().await = Some((Instant::now(), Arc::clone(&reg)));
+        reg
+    }
+
+    /// One-shot WebSocket fetch of `config/device_registry/list`, mapping each
+    /// device's id to a normalized hardware id taken from its `connections`
+    /// (the `("mac", …)` pair). Devices without a usable MAC are omitted.
+    async fn fetch_device_registry(&self) -> Result<HashMap<String, String>> {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let url = self.ws_url();
+        let (mut ws, _) = tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio_tungstenite::connect_async(url.as_str()),
+        )
+        .await
+        .context("HA WebSocket connect timed out")?
+        .with_context(|| format!("HA WebSocket connect to {url} failed"))?;
+
+        let _ = ws_next_json(&mut ws).await?;
+        ws.send(Message::text(
+            json!({ "type": "auth", "access_token": self.token }).to_string(),
+        ))
+        .await?;
+        let auth = ws_next_json(&mut ws).await?;
+        if auth.get("type").and_then(Value::as_str) != Some("auth_ok") {
+            bail!("HA WebSocket auth rejected: {auth}");
+        }
+
+        ws.send(Message::text(
+            json!({ "id": 1, "type": "config/device_registry/list" }).to_string(),
+        ))
+        .await?;
+        let result = loop {
+            let v = ws_next_json(&mut ws).await?;
+            if v.get("id").and_then(Value::as_i64) == Some(1)
+                && v.get("type").and_then(Value::as_str) == Some("result")
+            {
+                break v;
+            }
+        };
+        let _ = ws.close(None).await;
+
+        let entries = result
+            .get("result")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("HA device-registry result has no array"))?;
+        let mut map = HashMap::new();
+        for d in entries {
+            let Some(id) = d.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some(hw) = ha_device_hw_id(d) {
+                map.insert(id.to_string(), hw);
+            }
+        }
+        Ok(map)
+    }
+
+    /// Each discoverable entity's hardware id (`entity_id` → `hw_id`), joining
+    /// the entity registry (entity → device) with the device registry (device →
+    /// MAC). Entities with no device or no MAC are simply absent (→ no de-dup).
+    async fn entity_hw_ids(&self) -> HashMap<String, String> {
+        let entities = self.entity_registry().await;
+        let devices = self.device_registry().await;
+        if devices.is_empty() {
+            return HashMap::new();
+        }
+        entities
+            .iter()
+            .filter_map(|(entity_id, meta)| {
+                let dev = meta.device_id.as_deref()?;
+                let hw = devices.get(dev)?;
+                Some((entity_id.clone(), hw.clone()))
+            })
+            .collect()
+    }
+
     /// Areas containing entities whose id starts with any of `prefixes`, as
     /// `ProviderGroup`s. Shared by the light, audio, and power `discover_groups`
     /// impls (each passes the entity domains it owns).
@@ -199,6 +471,7 @@ impl HaProvider {
         let rendered = self.render_template(template).await?;
         let areas: Vec<HaArea> =
             serde_json::from_str(&rendered).context("HA area template returned non-JSON")?;
+        let reg = self.entity_registry().await;
 
         Ok(areas
             .into_iter()
@@ -206,7 +479,7 @@ impl HaProvider {
                 let members: Vec<String> = a
                     .entities
                     .into_iter()
-                    .filter(|e| prefixes.iter().any(|p| e.starts_with(p)))
+                    .filter(|e| prefixes.iter().any(|p| e.starts_with(p)) && keep_entity(&reg, e))
                     .collect();
                 if members.is_empty() {
                     return None; // areas with no devices of this domain are noise
@@ -316,7 +589,7 @@ fn light_capabilities(attrs: &Value) -> LightCapabilities {
     }
 }
 
-fn entity_to_light(e: HaEntity) -> Light {
+fn entity_to_light(e: HaEntity, hw_id: Option<String>) -> Light {
     let state = parse_light_state(&e);
     let capabilities = light_capabilities(&e.attributes);
     Light {
@@ -327,6 +600,7 @@ fn entity_to_light(e: HaEntity) -> Light {
         state,
         capabilities,
         last_seen: Utc::now(),
+        hw_id,
     }
 }
 
@@ -367,8 +641,12 @@ fn parse_audio_state(e: &HaEntity) -> AudioState {
         volume,
         mute: attr_bool(attrs, "is_volume_muted").unwrap_or(false),
         source: attr_str(attrs, "source"),
+        // On a smart TV, `source_list` is the installed apps (Hulu, Netflix, …);
+        // on a receiver, its inputs. Switch with `select_source` (our `source`).
+        source_list: attr_str_vec(attrs, "source_list"),
         now_playing,
         reachable: Some(reachable),
+        group_coordinator: None, // HA media_player grouping not modelled yet
     }
 }
 
@@ -390,12 +668,13 @@ fn audio_capabilities(attrs: &Value) -> AudioCapabilities {
 
 fn audio_kind(attrs: &Value) -> AudioDeviceKind {
     match attr_str(attrs, "device_class").as_deref() {
-        Some("receiver") | Some("tv") => AudioDeviceKind::Receiver,
+        Some("tv") => AudioDeviceKind::Tv,
+        Some("receiver") => AudioDeviceKind::Receiver,
         _ => AudioDeviceKind::Speaker,
     }
 }
 
-fn entity_to_audio(e: HaEntity) -> AudioDevice {
+fn entity_to_audio(e: HaEntity, hw_id: Option<String>) -> AudioDevice {
     let state = parse_audio_state(&e);
     let capabilities = audio_capabilities(&e.attributes);
     let kind = audio_kind(&e.attributes);
@@ -406,6 +685,7 @@ fn entity_to_audio(e: HaEntity) -> AudioDevice {
         kind,
         capabilities,
         state,
+        hw_id,
     }
 }
 
@@ -447,7 +727,7 @@ fn parse_power_state(e: &HaEntity) -> PowerState {
     }
 }
 
-fn entity_to_power(e: HaEntity) -> PowerDevice {
+fn entity_to_power(e: HaEntity, hw_id: Option<String>) -> PowerDevice {
     let state = parse_power_state(&e);
     let kind = power_kind(&e.entity_id, &e.attributes);
     PowerDevice {
@@ -456,6 +736,7 @@ fn entity_to_power(e: HaEntity) -> PowerDevice {
         name: friendly_name(&e.entity_id, &e.attributes),
         provider_id: e.entity_id.clone(),
         state,
+        hw_id,
     }
 }
 
@@ -468,12 +749,17 @@ impl LightProvider for HaProvider {
     }
 
     async fn discover(&self) -> Result<Vec<Light>> {
+        let reg = self.entity_registry().await;
+        let hw = self.entity_hw_ids().await;
         Ok(self
             .get_states()
             .await?
             .into_iter()
-            .filter(|e| e.entity_id.starts_with(LIGHT_PREFIX))
-            .map(entity_to_light)
+            .filter(|e| e.entity_id.starts_with(LIGHT_PREFIX) && keep_entity(&reg, &e.entity_id))
+            .map(|e| {
+                let hw_id = hw.get(&e.entity_id).cloned();
+                entity_to_light(e, hw_id)
+            })
             .collect())
     }
 
@@ -515,12 +801,17 @@ impl AudioProvider for HaProvider {
     }
 
     async fn discover(&self) -> Result<Vec<AudioDevice>> {
+        let reg = self.entity_registry().await;
+        let hw = self.entity_hw_ids().await;
         Ok(self
             .get_states()
             .await?
             .into_iter()
-            .filter(|e| e.entity_id.starts_with(MEDIA_PREFIX))
-            .map(entity_to_audio)
+            .filter(|e| e.entity_id.starts_with(MEDIA_PREFIX) && keep_entity(&reg, &e.entity_id))
+            .map(|e| {
+                let hw_id = hw.get(&e.entity_id).cloned();
+                entity_to_audio(e, hw_id)
+            })
             .collect())
     }
 
@@ -602,12 +893,20 @@ impl PowerProvider for HaProvider {
     }
 
     async fn discover(&self) -> Result<Vec<PowerDevice>> {
+        let reg = self.entity_registry().await;
+        let hw = self.entity_hw_ids().await;
         Ok(self
             .get_states()
             .await?
             .into_iter()
-            .filter(|e| POWER_PREFIXES.iter().any(|p| e.entity_id.starts_with(p)))
-            .map(entity_to_power)
+            .filter(|e| {
+                POWER_PREFIXES.iter().any(|p| e.entity_id.starts_with(p))
+                    && keep_entity(&reg, &e.entity_id)
+            })
+            .map(|e| {
+                let hw_id = hw.get(&e.entity_id).cloned();
+                entity_to_power(e, hw_id)
+            })
             .collect())
     }
 
@@ -638,6 +937,29 @@ fn normalise_base_url(raw: &str) -> String {
         format!("http://{raw}")
     };
     with_scheme.trim_end_matches('/').to_string()
+}
+
+/// Read the next text frame from a HA WebSocket as JSON, skipping ping/pong.
+async fn ws_next_json<S>(ws: &mut S) -> Result<Value>
+where
+    S: futures_util::Stream<
+            Item = Result<
+                tokio_tungstenite::tungstenite::Message,
+                tokio_tungstenite::tungstenite::Error,
+            >,
+        > + Unpin,
+{
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+    while let Some(msg) = ws.next().await {
+        match msg? {
+            Message::Text(t) => return Ok(serde_json::from_str(t.as_str())?),
+            Message::Ping(_) | Message::Pong(_) => continue,
+            Message::Close(_) => bail!("HA WebSocket closed during handshake"),
+            _ => continue,
+        }
+    }
+    bail!("HA WebSocket stream ended before a response")
 }
 
 // ── Factories ─────────────────────────────────────────────────────────────────
@@ -740,6 +1062,36 @@ mod tests {
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    #[test]
+    fn ha_device_hw_id_prefers_mac_connection() {
+        let d = json!({
+            "connections": [["mac", "00:09:B0:E8:23:43"]],
+            "identifiers": [["onkyo", "somethingelse"]],
+        });
+        assert_eq!(ha_device_hw_id(&d).as_deref(), Some("mac:0009b0e82343"));
+    }
+
+    #[test]
+    fn ha_device_hw_id_falls_back_to_mac_shaped_identifier() {
+        // Onkyo's HA integration keys the device by its MAC string in identifiers,
+        // not as a ("mac", …) connection — this is what made it miss de-dup.
+        let d = json!({
+            "connections": [],
+            "identifiers": [["onkyo", "0009b0e82343"]],
+        });
+        assert_eq!(ha_device_hw_id(&d).as_deref(), Some("mac:0009b0e82343"));
+    }
+
+    #[test]
+    fn ha_device_hw_id_ignores_non_hardware_identifiers() {
+        // A non-MAC identifier (a UUID, an entity id) must not become a hw_id.
+        let d = json!({
+            "identifiers": [["hue", "0b2c3d4e-1111-2222-3333-444455556666"]],
+        });
+        assert_eq!(ha_device_hw_id(&d), None);
+        assert_eq!(ha_device_hw_id(&json!({})), None);
+    }
+
     fn light_entity() -> Value {
         json!({
             "entity_id": "light.kitchen",
@@ -762,6 +1114,7 @@ mod tests {
                 "volume_level": 0.4,
                 "is_volume_muted": false,
                 "source": "Spotify",
+                "source_list": ["Spotify", "Hulu", "Netflix"],
                 "media_title": "Test Track",
                 "media_artist": "Tester",
                 "device_class": "speaker",
@@ -855,6 +1208,8 @@ mod tests {
         assert_eq!(d.state.volume, 40);
         assert!(d.state.power);
         assert_eq!(d.state.source.as_deref(), Some("Spotify"));
+        // The TV/receiver's selectable inputs/apps are surfaced for switching.
+        assert_eq!(d.state.source_list, vec!["Spotify", "Hulu", "Netflix"]);
         assert!(d.capabilities.transport);
         assert!(d.capabilities.grouping);
         assert_eq!(
@@ -1032,5 +1387,96 @@ mod tests {
             .err()
             .expect("missing token should fail to build");
         assert!(err.to_string().contains("base_url") || err.to_string().contains("token"));
+    }
+
+    #[test]
+    fn is_primary_only_for_uncategorised_active_entities() {
+        assert!(
+            EntityMeta::default().is_primary(),
+            "a plain entity is primary"
+        );
+        let config = EntityMeta {
+            entity_category: Some("config".into()),
+            ..Default::default()
+        };
+        assert!(!config.is_primary(), "config sub-controls are not");
+        let disabled = EntityMeta {
+            disabled_by: Some("user".into()),
+            ..Default::default()
+        };
+        assert!(!disabled.is_primary());
+        let hidden = EntityMeta {
+            hidden_by: Some("integration".into()),
+            ..Default::default()
+        };
+        assert!(!hidden.is_primary());
+    }
+
+    /// A mock HA WebSocket: greets, accepts any auth, and answers
+    /// `config/entity_registry/list` with the given entries.
+    async fn spawn_mock_ha_ws(entries: Value) -> u16 {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            ws.send(Message::text(r#"{"type":"auth_required"}"#))
+                .await
+                .unwrap();
+            let _ = ws.next().await; // auth message
+            ws.send(Message::text(r#"{"type":"auth_ok"}"#))
+                .await
+                .unwrap();
+            let _ = ws.next().await; // list request
+            let result = json!({ "id": 1, "type": "result", "success": true, "result": entries });
+            ws.send(Message::text(result.to_string())).await.unwrap();
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn entity_registry_keeps_primary_drops_config_entities() {
+        let port = spawn_mock_ha_ws(json!([
+            { "entity_id": "switch.real_plug", "entity_category": null },
+            { "entity_id": "switch.sonos_crossfade", "entity_category": "config" },
+            { "entity_id": "switch.led_indicator", "entity_category": "config" },
+            { "entity_id": "media_player.tv", "entity_category": null },
+            { "entity_id": "switch.was_disabled", "disabled_by": "user" }
+        ]))
+        .await;
+
+        let p = HaProvider::new_for_test(format!("http://127.0.0.1:{port}")).unwrap();
+        let reg = p.entity_registry().await;
+
+        assert!(keep_entity(&reg, "switch.real_plug"));
+        assert!(keep_entity(&reg, "media_player.tv"), "the TV stays primary");
+        assert!(
+            !keep_entity(&reg, "switch.sonos_crossfade"),
+            "config dropped"
+        );
+        assert!(!keep_entity(&reg, "switch.led_indicator"));
+        assert!(!keep_entity(&reg, "switch.was_disabled"));
+        // An entity absent from the registry defaults to kept.
+        assert!(keep_entity(&reg, "switch.unknown"));
+    }
+
+    #[tokio::test]
+    async fn entity_registry_unreachable_ws_keeps_everything() {
+        // A just-freed port refuses the connection fast (vs. a blackholed one),
+        // so the fetch fails quickly and degrades to no filtering.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let p = HaProvider::new_for_test(format!("http://127.0.0.1:{port}")).unwrap();
+        let reg = p.entity_registry().await;
+        assert!(reg.is_empty());
+        assert!(
+            keep_entity(&reg, "switch.anything"),
+            "no registry → unfiltered"
+        );
     }
 }

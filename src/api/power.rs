@@ -27,6 +27,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/devices", get(list_devices_handler))
         .route("/devices/{id}", get(get_device_handler))
         .route("/devices/{id}/state", put(set_device_handler))
+        .route("/devices/{id}/enabled", put(set_enabled_handler))
+        .route("/devices/{id}/glyph", put(set_glyph_handler))
+        .route("/devices/{id}/shadow", put(set_shadow_handler))
+        .route("/devices/{id}/room", put(set_room_handler))
 }
 
 /// Body for a power write — the whole command is a single bool.
@@ -47,6 +51,21 @@ pub(crate) struct PowerDeviceRow {
     pub kind: PowerKind,
     pub state: PowerState,
     pub last_seen: Option<String>,
+    /// Disabled devices keep their room membership but receive no commands and
+    /// are hidden from room control.
+    pub enabled: bool,
+    /// Optional glyph override (name); `None` = derive from `kind`.
+    pub glyph: Option<String>,
+    /// Normalized hardware identity for cross-provider de-dup; `None` if unknown.
+    pub hw_id: Option<String>,
+    /// When set, a duplicate of (shadowed by) this device id — hidden from
+    /// control and collapsed in the inventory.
+    pub shadowed_by: Option<String>,
+    /// `true` if the shadow was set automatically by hw_id matching.
+    pub shadow_auto: bool,
+    /// The room this device is directly assigned to (Devices-page assignment),
+    /// or `None`. Room *links* (synced provider groups) aren't reflected here.
+    pub room_id: Option<String>,
 }
 
 fn kind_str(kind: PowerKind) -> &'static str {
@@ -81,6 +100,12 @@ fn row_to_device(r: sqlx::sqlite::SqliteRow) -> PowerDeviceRow {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default(),
         last_seen: r.get("last_seen"),
+        enabled: r.get::<i64, _>("enabled") != 0,
+        glyph: r.get("glyph"),
+        hw_id: r.get("hw_id"),
+        shadowed_by: r.get("shadowed_by"),
+        shadow_auto: r.get::<i64, _>("shadow_auto") != 0,
+        room_id: r.get("room_id"),
     }
 }
 
@@ -98,7 +123,8 @@ pub(crate) fn build_power_provider(
 
 pub(crate) async fn list_all_power_devices(state: &AppState) -> Result<Vec<PowerDeviceRow>, ()> {
     sqlx::query(
-        "SELECT id, provider_id, device_id, name, kind, last_state, last_seen
+        "SELECT id, provider_id, device_id, name, kind, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto,
+                (SELECT room_id FROM room_power_devices WHERE power_device_id = power_devices.id LIMIT 1) AS room_id
          FROM power_devices ORDER BY name",
     )
     .fetch_all(&state.db)
@@ -115,6 +141,8 @@ pub(crate) async fn get_power_device_live(
 ) -> Result<Option<PowerDeviceRow>, ()> {
     let row = sqlx::query(
         "SELECT pd.id, pd.provider_id, pd.device_id, pd.name, pd.kind, pd.last_state, pd.last_seen,
+                pd.enabled, pd.glyph, pd.hw_id, pd.shadowed_by, pd.shadow_auto,
+                (SELECT room_id FROM room_power_devices WHERE power_device_id = pd.id LIMIT 1) AS room_id,
                 p.provider_type, p.credentials
          FROM power_devices pd JOIN providers p ON pd.provider_id = p.id
          WHERE pd.id = ? AND p.enabled = 1",
@@ -157,10 +185,11 @@ pub(crate) enum SetPowerOutcome {
 }
 
 pub(crate) async fn apply_power_state(state: &AppState, id: &str, on: bool) -> SetPowerOutcome {
+    // A disabled device (or disabled provider) receives no commands.
     let row = sqlx::query(
         "SELECT pd.device_id, p.provider_type, p.credentials
          FROM power_devices pd JOIN providers p ON pd.provider_id = p.id
-         WHERE pd.id = ? AND p.enabled = 1",
+         WHERE pd.id = ? AND p.enabled = 1 AND pd.enabled = 1 AND pd.shadowed_by IS NULL",
     )
     .bind(id)
     .fetch_optional(&state.db)
@@ -251,13 +280,14 @@ pub(crate) async fn discover_power_devices(
     for device in &devices {
         let state_json = serde_json::to_string(&device.state).unwrap_or_default();
         let _ = sqlx::query(
-            "INSERT INTO power_devices (id, provider_id, device_id, name, kind, last_state, last_seen)
-             VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+            "INSERT INTO power_devices (id, provider_id, device_id, name, kind, last_state, last_seen, hw_id)
+             VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)
              ON CONFLICT (provider_id, device_id)
              DO UPDATE SET name       = excluded.name,
                            kind       = excluded.kind,
                            last_state = excluded.last_state,
-                           last_seen  = excluded.last_seen",
+                           last_seen  = excluded.last_seen,
+                           hw_id      = excluded.hw_id",
         )
         .bind(device.id.to_string())
         .bind(provider_row_id)
@@ -265,6 +295,7 @@ pub(crate) async fn discover_power_devices(
         .bind(&device.name)
         .bind(kind_str(device.kind))
         .bind(&state_json)
+        .bind(&device.hw_id)
         .execute(&state.db)
         .await;
     }
@@ -311,4 +342,67 @@ async fn set_device_handler(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     set_power_status(apply_power_state(&state, &id, cmd.on).await).into_response()
+}
+
+async fn set_enabled_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<crate::api::SetEnabledRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    crate::api::set_device_enabled(&state, "power_devices", &id, req.enabled)
+        .await
+        .into_response()
+}
+
+async fn set_glyph_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<crate::api::SetGlyphRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    crate::api::set_device_glyph(&state, "power_devices", &id, req.glyph)
+        .await
+        .into_response()
+}
+
+async fn set_shadow_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<crate::api::SetShadowRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    crate::api::dedup::set_device_shadow(&state, "power_devices", &id, req.shadowed_by)
+        .await
+        .into_response()
+}
+
+async fn set_room_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<crate::api::SetRoomRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    crate::api::rooms::set_device_room(
+        &state,
+        "power_devices",
+        "room_power_devices",
+        "power_device_id",
+        &id,
+        req.room_id,
+    )
+    .await
+    .into_response()
 }

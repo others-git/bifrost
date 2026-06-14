@@ -150,6 +150,7 @@ impl LightProvider for WledProvider {
                 hue_gamut: None,
             },
             last_seen: Utc::now(),
+            hw_id: None,
         };
 
         Ok(vec![light])

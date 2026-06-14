@@ -26,6 +26,10 @@ pub struct PowerDevice {
     pub name: String,
     pub kind: PowerKind,
     pub state: PowerState,
+    /// Normalized hardware identity for cross-provider de-dup (see
+    /// [`crate::providers::mac_hw_id`]); `None` when the provider can't supply one.
+    #[serde(default)]
+    pub hw_id: Option<String>,
 }
 
 /// The flavour of power device — chosen so the UI can pick a meaningful glyph
@@ -102,6 +106,7 @@ mod tests {
                 on: false,
                 reachable: Some(true),
             },
+            hw_id: None,
         };
         let json = serde_json::to_string(&d).unwrap();
         let back: PowerDevice = serde_json::from_str(&json).unwrap();

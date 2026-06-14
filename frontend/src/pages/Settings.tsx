@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import {
   addProvider,
-  discoverLights,
+  discoverProvider,
   getProviderConfig,
   getProviderStatus,
   getProviderTypes,
   getProviders,
+  setProviderPrune,
   syncProviderGroups,
   pairHueBridge,
   scanForDevices,
@@ -65,22 +66,55 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
     await loadProviders();
   }
 
+  const [running, setRunning] = useState("");
+
   async function handleDiscover(id: string) {
-    const result = await discoverLights(id);
+    const result = await discoverProvider(id);
     await loadProviders();
-    showToast(`Discovered ${result.discovered} device${result.discovered !== 1 ? "s" : ""}.`);
+    showToast(
+      `Discovered ${result.discovered} device${result.discovered !== 1 ? "s" : ""}` +
+        (result.pruned ? `, pruned ${result.pruned}.` : "."),
+    );
   }
 
   async function handleAdded(id: string) {
     setShowAdd(false);
     await loadProviders();
-    // Run discovery right away so devices appear without an extra click.
     try {
-      const result = await discoverLights(id);
+      const result = await discoverProvider(id);
       showToast(`Provider added — found ${result.discovered} device${result.discovered !== 1 ? "s" : ""}.`);
     } catch {
       showToast("Provider added. Discovery failed — check the connection and try Discover.");
     }
+  }
+
+  /** Run discover (and optionally sync-groups) across every provider. */
+  async function runAll(mode: "discover" | "sync" | "prune-sync") {
+    setRunning(mode);
+    let discovered = 0;
+    let pruned = 0;
+    let synced = 0;
+    for (const p of providers) {
+      try {
+        const d = await discoverProvider(p.id, mode === "prune-sync" ? { prune: true } : undefined);
+        discovered += d.discovered;
+        pruned += d.pruned;
+        if (mode !== "discover") {
+          const s = await syncProviderGroups(p.id);
+          synced += s.synced;
+        }
+      } catch {
+        /* skip a failing provider, keep going */
+      }
+    }
+    await loadProviders();
+    setRunning("");
+    const tail = pruned ? `, pruned ${pruned}` : "";
+    showToast(
+      mode === "discover"
+        ? `Discovered ${discovered} device${discovered !== 1 ? "s" : ""}${tail}.`
+        : `Discovered ${discovered}${tail}; synced ${synced} room${synced !== 1 ? "s" : ""}.`,
+    );
   }
 
   return (
@@ -90,6 +124,25 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
       {toast && (
         <div style={{ background: "#1e3a1e", border: "1px solid #2a5a2a", borderRadius: 8, padding: "0.6rem 1rem", marginBottom: "1rem", color: "#8f8", fontSize: "0.875rem" }}>
           {toast}
+        </div>
+      )}
+
+      {providers.length > 0 && (
+        <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginBottom: "1rem" }}>
+          <button onClick={() => runAll("discover")} disabled={!!running} style={S.buttonGhost} title="Discover devices on every provider">
+            {running === "discover" ? "Discovering…" : "Discover all"}
+          </button>
+          <button onClick={() => runAll("sync")} disabled={!!running} style={S.buttonGhost} title="Discover devices and mirror rooms/zones for every provider">
+            {running === "sync" ? "Syncing…" : "Sync all"}
+          </button>
+          <button
+            onClick={() => runAll("prune-sync")}
+            disabled={!!running}
+            style={S.buttonGhost}
+            title="Force-prune devices providers no longer report, then discover + sync — across all providers"
+          >
+            {running === "prune-sync" ? "Pruning…" : "Prune + Sync all"}
+          </button>
         </div>
       )}
 
@@ -105,6 +158,10 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
             onCredentialsSaved={() => showToast("Credentials updated — reconnecting.")}
             onRemove={() => handleRemove(p.id)}
             onDiscover={() => handleDiscover(p.id)}
+            onSetPrune={async (prune) => {
+              await setProviderPrune(p.id, prune);
+              await loadProviders();
+            }}
             onImportGroups={async () => {
               const r = await syncProviderGroups(p.id);
               showToast(
@@ -386,6 +443,7 @@ function ProviderCard({
   onRemove,
   onDiscover,
   onImportGroups,
+  onSetPrune,
 }: {
   provider: Provider;
   types: ProviderType[];
@@ -393,6 +451,7 @@ function ProviderCard({
   onRemove: () => void;
   onDiscover: () => Promise<void>;
   onImportGroups: () => Promise<void>;
+  onSetPrune: (prune: boolean) => Promise<void>;
 }) {
   const { isMobile } = useViewport();
   const [status, setStatus] = useState<ConnectionStatus | null>(null);
@@ -438,6 +497,7 @@ function ProviderCard({
             <span style={{ color: "#888", fontSize: "0.8rem" }}>
               {provider.type_name}
               {provider.domain === "audio" ? " · Audio" : ""}
+              {provider.domain === "integration" ? " · Integration" : ""}
             </span>
             {status && <StatusBadge state={status.state} />}
           </div>
@@ -464,6 +524,24 @@ function ProviderCard({
           <button onClick={onRemove} style={S.buttonDanger}>Remove</button>
         </div>
       </div>
+      <label
+        style={{ display: "flex", alignItems: "flex-start", gap: "0.55rem", cursor: "pointer", color: "#9a9488", fontSize: "0.78rem" }}
+      >
+        <input
+          type="checkbox"
+          checked={provider.prune}
+          onChange={(e) => onSetPrune(e.target.checked)}
+          style={{ width: 16, height: 16, marginTop: 1, accentColor: ACCENT, flexShrink: 0, cursor: "pointer" }}
+        />
+        <span>
+          <strong style={{ color: provider.prune ? ACCENT : "#bbb", fontWeight: 600 }}>Prune on discover</strong>
+          {" — "}
+          {provider.prune
+            ? "the next discover removes devices this provider no longer reports (and drops them from rooms)."
+            : "devices stay even if the provider stops reporting them. Enable to auto-remove them."}
+        </span>
+      </label>
+
       {editingCreds && (
         <EditCredentialsForm
           provider={provider}

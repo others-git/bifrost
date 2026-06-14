@@ -172,7 +172,9 @@ pub struct SetAudioRequest {
     pub volume: Option<u8>,
     /// Mute on/off.
     pub mute: Option<bool>,
-    /// Input source name (as reported by the device) or provider-native code.
+    /// Switch input / app: a source name from the device's `source_list` (a
+    /// smart TV's apps like "Hulu", or a receiver's inputs). Call get_audio_state
+    /// first to see the exact available names.
     pub source: Option<String>,
     /// Transport command: play, pause, stop, next, previous, or toggle.
     pub transport: Option<String>,
@@ -407,7 +409,7 @@ impl BifrostMcp {
     }
 
     #[tool(
-        description = "Live state of one audio device, including now-playing metadata where available."
+        description = "Live state of one audio device: power/volume/mute/source, now-playing metadata, and `source_list` (selectable inputs / a smart TV's apps) where available."
     )]
     async fn get_audio_state(
         &self,

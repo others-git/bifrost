@@ -155,18 +155,18 @@ function RoomCard({
   const speakers = room.audio_devices.length;
   const powerCount = room.power_device_ids.length;
 
-  async function handleMerge(sourceId: string) {
-    const source = mergeCandidates.find((r) => r.id === sourceId);
-    if (!source) return;
+  async function handleMerge(targetId: string) {
+    const target = mergeCandidates.find((r) => r.id === targetId);
+    if (!target) return;
     const ok = await dialogs.confirm({
       title: "Merge rooms",
-      message: `Merge "${source.name}" into "${room.name}"? Its links, lights, scenes, and plan regions move here, then "${source.name}" is deleted.`,
+      message: `Merge "${room.name}" into "${target.name}"? "${room.name}"'s links, lights, scenes, and plan regions move there, then "${room.name}" is deleted.`,
       confirmLabel: "Merge",
     });
     if (!ok) return;
     setMerging(true);
     try {
-      await mergeRooms(room.id, sourceId);
+      await mergeRooms(targetId, room.id);
       await onChanged();
     } catch (e) {
       await dialogs.alert({ title: "Merge failed", message: e instanceof Error ? e.message : String(e) });
@@ -181,10 +181,10 @@ function RoomCard({
         value=""
         disabled={merging}
         onChange={(e) => { if (e.target.value) handleMerge(e.target.value); }}
-        title="Absorb another room into this one"
+        title="Merge this room into another (this room is deleted)"
         style={{ ...S.input, width: "auto", padding: "0.3rem 0.5rem", fontSize: "0.8rem", cursor: "pointer" }}
       >
-        <option value="">{merging ? "Merging…" : "Merge in…"}</option>
+        <option value="">{merging ? "Merging…" : "Merge into…"}</option>
         {mergeCandidates.map((r) => (
           <option key={r.id} value={r.id}>{r.name}</option>
         ))}

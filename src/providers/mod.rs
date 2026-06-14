@@ -19,6 +19,23 @@ use async_trait::async_trait;
 use serde::Serialize;
 use std::collections::HashMap;
 
+/// Normalize a raw hardware identity (a MAC-48 or EUI-64, as a provider reports
+/// it — `AA:BB:CC:DD:EE:FF`, `00:17:88:01:0b:...`, etc.) into the stable de-dup
+/// key Bifrost stores in `*.hw_id`: lowercased hex, separators stripped, with a
+/// `mac:` prefix. Returns `None` for anything that isn't a plausible MAC/EUI-64
+/// so two devices can never match on garbage. Every provider that populates
+/// `hw_id`, and the de-dup reconciler, route through this so the keys are
+/// directly comparable.
+pub fn mac_hw_id(raw: &str) -> Option<String> {
+    let hex: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .flat_map(char::to_lowercase)
+        .collect();
+    // 12 hex = MAC-48 (Govee, Sonos, most Wi-Fi gear); 16 = EUI-64 (Zigbee/Hue).
+    (hex.len() == 12 || hex.len() == 16).then(|| format!("mac:{hex}"))
+}
+
 // ── Core provider trait ─────────────────────────────────────────────────────
 
 /// A light group defined inside the provider's own ecosystem (e.g. a Hue
@@ -414,8 +431,27 @@ impl ProviderRegistry {
             .map(|f| f.connection_mode())
     }
 
-    /// All registered provider types (light and audio) with their UI schemas,
-    /// sorted by type name.
+    /// The UI category for a configured provider type — the same grouping shown
+    /// in the add-provider menu. A light/integration factory's `domain()` wins
+    /// (so a multi-domain type like HA reads as `Integration`, not `Audio`);
+    /// otherwise an audio-only type is `Audio`.
+    pub fn ui_domain(&self, provider_type: &str) -> Option<ProviderDomain> {
+        if let Some(f) = self.factories.get(provider_type) {
+            return Some(f.domain());
+        }
+        if self.audio_factories.contains_key(provider_type) {
+            return Some(ProviderDomain::Audio);
+        }
+        self.power_factories
+            .get(provider_type)
+            .map(|_| ProviderDomain::Light)
+    }
+
+    /// All registered provider types for the "Add provider" UI, **one entry per
+    /// type**, sorted by type name. A multi-domain integration (HA) registers in
+    /// several maps but must appear once — its light/integration factory is
+    /// authoritative for the menu, so an audio factory sharing that type key is
+    /// skipped here (it still serves discovery/control behind the scenes).
     pub fn all_types(&self) -> Vec<ProviderTypeInfo> {
         let mut types: Vec<_> = self
             .factories
@@ -427,13 +463,18 @@ impl ProviderRegistry {
                 supports_discovery: f.discoverer().is_some(),
                 schema: f.credentials_schema().to_vec(),
             })
-            .chain(self.audio_factories.values().map(|f| ProviderTypeInfo {
-                provider_type: f.provider_type(),
-                display_name: f.display_name(),
-                kind: ProviderDomain::Audio,
-                supports_discovery: f.discoverer().is_some(),
-                schema: f.credentials_schema().to_vec(),
-            }))
+            .chain(
+                self.audio_factories
+                    .values()
+                    .filter(|f| !self.factories.contains_key(f.provider_type()))
+                    .map(|f| ProviderTypeInfo {
+                        provider_type: f.provider_type(),
+                        display_name: f.display_name(),
+                        kind: ProviderDomain::Audio,
+                        supports_discovery: f.discoverer().is_some(),
+                        schema: f.credentials_schema().to_vec(),
+                    }),
+            )
             .collect();
         types.sort_by_key(|t| t.provider_type);
         types
@@ -476,18 +517,19 @@ pub struct ProviderTypeInfo {
 /// Call this once in main; pass the result into AppState.
 pub fn default_registry() -> ProviderRegistry {
     let mut r = ProviderRegistry::new();
+    // First-class providers. WLED / Tasmota / Shelly / Govee-LAN are kept in the
+    // tree but intentionally **not registered** (dropped from the add-provider
+    // menu); re-add a `register(...)` line to bring one back. `wled` is still
+    // registered in test fixtures as the generic mockable light provider.
     r.register(hue::HueProviderFactory);
     r.register(govee::GoveeProviderFactory);
-    r.register(govee_lan::GoveeLanProviderFactory);
-    r.register(shelly::ShellyProviderFactory);
-    r.register(tasmota::TasmotaProviderFactory);
-    r.register(wled::WledProviderFactory);
     // Home Assistant serves multiple device domains from one provider row:
-    // lights and power (switch/fan/plug) are registered; the audio
-    // (media_player) factory is implemented but left unregistered while audio
-    // work is on hold — see `providers::ha`.
+    // lights, power (switch/fan/plug), and audio (media_player — TVs, speakers).
+    // It appears once in the add-provider menu as an "Integration" (its light
+    // factory's domain); the power/audio factories serve discovery + control.
     r.register(ha::HaLightFactory);
     r.register_power(ha::HaPowerFactory);
+    r.register_audio(ha::HaAudioFactory);
     r.register_audio(onkyo::OnkyoProviderFactory);
     r.register_audio(sonos::SonosProviderFactory);
     r
@@ -498,6 +540,33 @@ pub(crate) mod tests {
     use super::*;
     use crate::models::{Light, LightState};
     use anyhow::Result;
+
+    #[test]
+    fn mac_hw_id_normalizes_mac48_and_eui64() {
+        // MAC-48 with colons → lowercased, separators stripped, prefixed.
+        assert_eq!(
+            mac_hw_id("AA:BB:CC:DD:EE:FF"),
+            Some("mac:aabbccddeeff".to_string())
+        );
+        // Hyphen-separated, mixed case — same canonical key.
+        assert_eq!(
+            mac_hw_id("aa-bb-cc-dd-ee-ff"),
+            Some("mac:aabbccddeeff".to_string())
+        );
+        // EUI-64 (Zigbee/Hue) is 16 hex digits and also accepted.
+        assert_eq!(
+            mac_hw_id("00:17:88:01:0b:12:34:56"),
+            Some("mac:001788010b123456".to_string())
+        );
+    }
+
+    #[test]
+    fn mac_hw_id_rejects_non_mac() {
+        assert_eq!(mac_hw_id(""), None);
+        assert_eq!(mac_hw_id("not-a-mac"), None);
+        assert_eq!(mac_hw_id("AA:BB:CC"), None); // too short
+        assert_eq!(mac_hw_id("light.kitchen"), None); // an HA entity id, not hardware
+    }
 
     // ── Minimal mock provider for registry tests ────────────────────────────
 
@@ -586,50 +655,39 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn default_registry_contains_govee_lan() {
+    fn default_registry_drops_secondary_light_providers() {
+        // First-class only: WLED / Tasmota / Shelly / Govee-LAN are kept in the
+        // tree but unregistered (re-add a `register(...)` line to restore).
         let reg = default_registry();
-        assert!(reg.is_known("govee-lan"));
-        // Builds from a bind address without touching the network.
-        assert!(reg.build("govee-lan", r#"{"bind_addr":"0.0.0.0"}"#).is_ok());
+        for t in ["wled", "tasmota", "shelly", "govee-lan"] {
+            assert!(!reg.is_known(t), "{t} should be unregistered");
+        }
     }
 
     #[test]
-    fn default_registry_contains_wled() {
+    fn default_registry_serves_ha_across_all_device_domains() {
         let reg = default_registry();
-        assert!(reg.is_known("wled"));
-    }
-
-    #[test]
-    fn default_registry_contains_tasmota_and_shelly() {
-        let reg = default_registry();
-        assert!(reg.is_known("tasmota"));
-        assert!(reg.is_known("shelly"));
-    }
-
-    #[test]
-    fn default_registry_registers_ha_on_light_domain_only() {
-        let reg = default_registry();
-        // HA is a light-domain provider for now; its audio factory is on hold.
-        assert!(reg.is_known("ha"));
-        assert!(!reg.is_known_audio("ha"));
-        // Builds from URL + token without touching the network.
-        assert!(
-            reg.build("ha", r#"{"base_url":"http://ha.local:8123","token":"t"}"#)
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn default_registry_serves_ha_on_light_and_power_domains() {
-        let reg = default_registry();
-        // One "ha" provider row serves multiple device domains.
+        let creds = r#"{"base_url":"http://ha.local:8123","token":"t"}"#;
+        // One "ha" provider row serves lights, power, and audio (media_player).
         assert!(reg.is_known("ha"), "light domain");
         assert!(reg.is_known_power("ha"), "power domain");
-        assert!(!reg.is_known_audio("ha"), "audio still on hold");
-        assert!(
-            reg.build_power("ha", r#"{"base_url":"http://ha.local:8123","token":"t"}"#)
-                .is_ok()
-        );
+        assert!(reg.is_known_audio("ha"), "audio (media_player) domain");
+        assert!(reg.build("ha", creds).is_ok());
+        assert!(reg.build_power("ha", creds).is_ok());
+        assert!(reg.build_audio("ha", creds).is_ok());
+    }
+
+    #[test]
+    fn ha_appears_once_in_the_add_menu_despite_multiple_domains() {
+        let reg = default_registry();
+        let ha: Vec<_> = reg
+            .all_types()
+            .into_iter()
+            .filter(|t| t.provider_type == "ha")
+            .collect();
+        assert_eq!(ha.len(), 1, "HA must not be listed once per domain");
+        // …and it's categorised as an Integration, not Audio.
+        assert_eq!(ha[0].kind, ProviderDomain::Integration);
     }
 
     #[test]
@@ -647,7 +705,7 @@ pub(crate) mod tests {
     fn hue_uses_sse_mode_all_others_poll() {
         let reg = default_registry();
         assert_eq!(reg.connection_mode("hue"), Some(ConnectionMode::Sse));
-        for t in ["govee", "govee-lan", "wled", "tasmota", "shelly"] {
+        for t in ["govee"] {
             match reg.connection_mode(t) {
                 Some(ConnectionMode::Poll { interval_secs }) => {
                     assert!(interval_secs > 0, "{t}: zero poll interval")

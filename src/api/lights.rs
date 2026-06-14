@@ -16,6 +16,10 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(list_lights))
         .route("/{id}", get(get_light).put(set_light_state))
+        .route("/{id}/enabled", axum::routing::put(set_light_enabled))
+        .route("/{id}/glyph", axum::routing::put(set_light_glyph))
+        .route("/{id}/shadow", axum::routing::put(set_light_shadow))
+        .route("/{id}/room", axum::routing::put(set_light_room))
 }
 
 #[derive(Serialize)]
@@ -27,6 +31,23 @@ pub(crate) struct LightRow {
     capabilities: serde_json::Value,
     last_state: Option<serde_json::Value>,
     last_seen: Option<String>,
+    /// A disabled device is still tracked and keeps its room membership, but
+    /// receives no commands and is hidden from room control.
+    enabled: bool,
+    /// Optional glyph override (name); `None` = the default light glyph.
+    glyph: Option<String>,
+    /// Normalized hardware identity used for cross-provider de-dup; `None` if
+    /// the provider doesn't expose one.
+    hw_id: Option<String>,
+    /// When set, this device is a duplicate of (shadowed by) the device with
+    /// this id — hidden from control and collapsed in the inventory.
+    shadowed_by: Option<String>,
+    /// `true` when the shadow was set automatically by hw_id matching (native
+    /// wins); `false` for a manual user link.
+    shadow_auto: bool,
+    /// The room this device is directly assigned to (Devices-page assignment),
+    /// or `None`. Room *links* (synced provider groups) aren't reflected here.
+    room_id: Option<String>,
 }
 
 fn row_to_light(r: sqlx::sqlite::SqliteRow) -> LightRow {
@@ -43,6 +64,12 @@ fn row_to_light(r: sqlx::sqlite::SqliteRow) -> LightRow {
             .get::<Option<String>, _>("last_state")
             .and_then(|s| serde_json::from_str(&s).ok()),
         last_seen: r.get("last_seen"),
+        enabled: r.get::<i64, _>("enabled") != 0,
+        glyph: r.get("glyph"),
+        hw_id: r.get("hw_id"),
+        shadowed_by: r.get("shadowed_by"),
+        shadow_auto: r.get::<i64, _>("shadow_auto") != 0,
+        room_id: r.get("room_id"),
     }
 }
 
@@ -50,7 +77,8 @@ fn row_to_light(r: sqlx::sqlite::SqliteRow) -> LightRow {
 
 pub(crate) async fn list_all_lights(state: &AppState) -> Result<Vec<LightRow>, ()> {
     sqlx::query(
-        "SELECT id, provider_id, device_id, name, capabilities, last_state, last_seen
+        "SELECT id, provider_id, device_id, name, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto,
+                (SELECT room_id FROM room_lights WHERE light_id = lights.id LIMIT 1) AS room_id
          FROM lights ORDER BY name",
     )
     .fetch_all(&state.db)
@@ -61,7 +89,8 @@ pub(crate) async fn list_all_lights(state: &AppState) -> Result<Vec<LightRow>, (
 
 pub(crate) async fn get_light_by_id(state: &AppState, id: &str) -> Result<Option<LightRow>, ()> {
     sqlx::query(
-        "SELECT id, provider_id, device_id, name, capabilities, last_state, last_seen
+        "SELECT id, provider_id, device_id, name, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto,
+                (SELECT room_id FROM room_lights WHERE light_id = lights.id LIMIT 1) AS room_id
          FROM lights WHERE id = ?",
     )
     .bind(id)
@@ -85,10 +114,12 @@ pub(crate) async fn apply_light_state(
     id: &str,
     new_state: &LightState,
 ) -> SetLightOutcome {
+    // A disabled or shadowed light (or disabled provider) receives no commands —
+    // a shadowed duplicate defers to its native canonical.
     let row = sqlx::query(
         "SELECT l.device_id, p.provider_type, p.credentials
          FROM lights l JOIN providers p ON l.provider_id = p.id
-         WHERE l.id = ? AND p.enabled = 1",
+         WHERE l.id = ? AND p.enabled = 1 AND l.enabled = 1 AND l.shadowed_by IS NULL",
     )
     .bind(id)
     .fetch_optional(&state.db)
@@ -182,6 +213,69 @@ async fn set_light_state(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     set_light_status(apply_light_state(&state, &id, &new_state).await).into_response()
+}
+
+async fn set_light_enabled(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<crate::api::SetEnabledRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    crate::api::set_device_enabled(&state, "lights", &id, req.enabled)
+        .await
+        .into_response()
+}
+
+async fn set_light_glyph(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<crate::api::SetGlyphRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    crate::api::set_device_glyph(&state, "lights", &id, req.glyph)
+        .await
+        .into_response()
+}
+
+async fn set_light_shadow(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<crate::api::SetShadowRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    crate::api::dedup::set_device_shadow(&state, "lights", &id, req.shadowed_by)
+        .await
+        .into_response()
+}
+
+async fn set_light_room(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<crate::api::SetRoomRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    crate::api::rooms::set_device_room(
+        &state,
+        "lights",
+        "room_lights",
+        "light_id",
+        &id,
+        req.room_id,
+    )
+    .await
+    .into_response()
 }
 
 /// Decrypt credentials and construct a provider via the registry.

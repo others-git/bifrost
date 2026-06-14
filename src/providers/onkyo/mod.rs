@@ -338,6 +338,14 @@ impl OnkyoProvider {
     /// Send `commands`, then read packets until every code in `wanted` has
     /// been seen (replies and unsolicited echoes both count) or the timeout
     /// elapses. Returns code → latest data.
+    /// Best-effort receiver MAC (cross-provider `hw_id`) from the device-info
+    /// (`NRI`) reply — a chunk of XML carrying a `macaddress`. `None` if the
+    /// receiver doesn't answer NRI, so discovery never fails on its account.
+    async fn nri_hw_id(&self) -> Option<String> {
+        let reply = self.exchange(&["NRIQSTN".into()], &["NRI"]).await.ok()?;
+        parse_nri_mac(reply.get("NRI")?)
+    }
+
     async fn exchange(
         &self,
         commands: &[String],
@@ -391,6 +399,21 @@ impl OnkyoProvider {
     }
 }
 
+/// Pull a MAC out of an `NRI` device-info XML payload. Handles both the child
+/// element (`<macaddress>0009B0…</macaddress>`) and attribute (`macaddress="…"`)
+/// shapes, returning the normalized cross-provider `hw_id`.
+fn parse_nri_mac(xml: &str) -> Option<String> {
+    let idx = xml.find("macaddress")?;
+    // Skip past the tag/attr name, the `>` or `="`, then take the hex run.
+    let after = &xml[idx + "macaddress".len()..];
+    let hex: String = after
+        .chars()
+        .skip_while(|c| !c.is_ascii_hexdigit())
+        .take_while(|c| c.is_ascii_hexdigit())
+        .collect();
+    crate::providers::mac_hw_id(&hex)
+}
+
 #[async_trait]
 impl AudioProvider for OnkyoProvider {
     fn name(&self) -> &str {
@@ -400,6 +423,9 @@ impl AudioProvider for OnkyoProvider {
     async fn discover(&self) -> Result<Vec<AudioDevice>> {
         // Main-zone probe doubles as the reachability check.
         let main_state = self.get_state("main").await?;
+        // The receiver's MAC identifies the physical unit for de-dup; the main
+        // zone carries it (zone 2 is the same box, kept None to avoid a self-cluster).
+        let hw_id = self.nri_hw_id().await;
         let mut devices = vec![AudioDevice {
             id: Uuid::new_v4(),
             provider_id: "main".to_string(),
@@ -415,6 +441,7 @@ impl AudioProvider for OnkyoProvider {
                 grouping: false,
             },
             state: main_state,
+            hw_id,
         }];
 
         // Zone 2 exists when ZPW answers with a real power state ("00"/"01");
@@ -435,6 +462,7 @@ impl AudioProvider for OnkyoProvider {
                     grouping: false,
                 },
                 state,
+                hw_id: None,
             });
         }
         Ok(devices)
@@ -497,8 +525,10 @@ impl AudioProvider for OnkyoProvider {
             volume,
             mute,
             source,
+            source_list: Vec::new(),
             now_playing,
             reachable: Some(true),
+            group_coordinator: None, // receiver zones aren't sync groups
         })
     }
 
@@ -717,6 +747,25 @@ mod tests {
     use std::sync::Arc;
     use tokio::net::TcpListener;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn parse_nri_mac_handles_element_and_attribute_shapes() {
+        // Child-element form.
+        assert_eq!(
+            parse_nri_mac(
+                "<device><model>NR686</model><macaddress>0009B012ABCD</macaddress></device>"
+            ),
+            Some("mac:0009b012abcd".to_string())
+        );
+        // Attribute form.
+        assert_eq!(
+            parse_nri_mac(r#"<device id="x" macaddress="0009B012ABCD"/>"#),
+            Some("mac:0009b012abcd".to_string())
+        );
+        // No MAC present, or a junk reply (e.g. "N/A") → None.
+        assert_eq!(parse_nri_mac("<device><model>NR686</model></device>"), None);
+        assert_eq!(parse_nri_mac("N/A"), None);
+    }
 
     // ── Codec ────────────────────────────────────────────────────────────────
 
@@ -1043,6 +1092,22 @@ mod tests {
         assert_eq!(d.kind, AudioDeviceKind::Receiver);
         assert!(d.capabilities.sources && d.capabilities.transport);
         assert!(d.state.power);
+        // No NRI scripted → the receiver reports no MAC, so no hw_id.
+        assert!(d.hw_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn discover_populates_hw_id_from_nri_macaddress() {
+        let mut scripted = baseline_scripted();
+        scripted.insert(
+            "NRI",
+            "<device><model>NR686</model><macaddress>0009B012ABCD</macaddress></device>".into(),
+        );
+        let (port, _) = spawn_mock_receiver(scripted).await;
+        let p = OnkyoProvider::new_for_test("127.0.0.1", port);
+
+        let devices = p.discover().await.unwrap();
+        assert_eq!(devices[0].hw_id.as_deref(), Some("mac:0009b012abcd"));
     }
 
     fn with_zone2(mut scripted: Scripted) -> Scripted {

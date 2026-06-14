@@ -1,6 +1,6 @@
 //! Philips Hue API v2 (local CLIP v2 REST + SSE event stream).
 //!
-//! Authentication: press the bridge link button, then POST to `http://<bridge>/api` with
+//! Authentication: press the bridge link button, then POST to `https://<bridge>/api` with
 //! `{"devicetype": "bifrost#server"}`. The response contains the `username` which is used
 //! as the `hue-application-key` header on all subsequent requests.
 //!
@@ -185,6 +185,15 @@ struct HueDeviceResource {
     services: Vec<HueResourceRef>,
 }
 
+/// A device's Zigbee radio service — carries its MAC, the basis for the
+/// cross-provider `hw_id`.
+#[derive(Debug, Deserialize)]
+struct HueZigbeeResource {
+    id: String,
+    #[serde(default)]
+    mac_address: Option<String>,
+}
+
 #[derive(Debug, Serialize, Default)]
 struct HuePutLight {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -208,7 +217,7 @@ fn gamut_from_str(s: &str) -> Option<HueGamut> {
     }
 }
 
-fn hue_resource_to_light(r: HueLightResource) -> Light {
+fn hue_resource_to_light(r: HueLightResource, hw_id: Option<String>) -> Light {
     // CLIP v2 puts gamut_type inside `color`; the top-level field is kept as a
     // fallback for older firmware.
     let gamut = r
@@ -251,6 +260,7 @@ fn hue_resource_to_light(r: HueLightResource) -> Light {
             hue_gamut: gamut,
         },
         last_seen: Utc::now(),
+        hw_id,
     }
 }
 
@@ -275,7 +285,15 @@ impl LightProvider for HueProvider {
             .json()
             .await?;
 
-        Ok(resp.data.into_iter().map(hue_resource_to_light).collect())
+        let hw = self.light_hw_ids().await;
+        Ok(resp
+            .data
+            .into_iter()
+            .map(|r| {
+                let hw_id = hw.get(&r.id).cloned();
+                hue_resource_to_light(r, hw_id)
+            })
+            .collect())
     }
 
     async fn set_state(&self, provider_id: &str, state: &LightState) -> Result<()> {
@@ -317,7 +335,7 @@ impl LightProvider for HueProvider {
             .await?;
 
         let resource = resp.data.into_iter().next().context("light not found")?;
-        Ok(hue_resource_to_light(resource).state)
+        Ok(hue_resource_to_light(resource, None).state)
     }
 
     /// Hue rooms + zones. Room children are *devices* — their light service
@@ -454,6 +472,76 @@ impl HueProvider {
         Ok(())
     }
 
+    /// Map each light resource id → its Zigbee MAC (`hw_id`) for cross-provider
+    /// de-dup. Best-effort: any failure yields an empty map so discovery still
+    /// works (de-dup just doesn't fire). Joins `/resource/device` (a device's
+    /// `light` services + its `zigbee_connectivity` service) with
+    /// `/resource/zigbee_connectivity` (the MAC).
+    async fn light_hw_ids(&self) -> std::collections::HashMap<String, String> {
+        match self.fetch_light_hw_ids().await {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("Hue hardware-id fetch failed ({e:#}); de-dup disabled this run");
+                std::collections::HashMap::new()
+            }
+        }
+    }
+
+    async fn fetch_light_hw_ids(&self) -> Result<std::collections::HashMap<String, String>> {
+        use std::collections::HashMap;
+
+        let devices: HueListResponse<HueDeviceResource> = self
+            .client
+            .get(self.resource_url("/device"))
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .context("Hue device request failed")?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        let zigbee: HueListResponse<HueZigbeeResource> = self
+            .client
+            .get(self.resource_url("/zigbee_connectivity"))
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .context("Hue zigbee_connectivity request failed")?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        // zigbee service id → normalized MAC
+        let zb_mac: HashMap<String, String> = zigbee
+            .data
+            .into_iter()
+            .filter_map(|z| {
+                let mac = z.mac_address?;
+                crate::providers::mac_hw_id(&mac).map(|hw| (z.id, hw))
+            })
+            .collect();
+
+        // For each device, attach its MAC to every light service it exposes.
+        let mut out = HashMap::new();
+        for d in devices.data {
+            let Some(mac) = d
+                .services
+                .iter()
+                .find(|s| s.rtype == "zigbee_connectivity")
+                .and_then(|s| zb_mac.get(&s.rid))
+            else {
+                continue;
+            };
+            for s in &d.services {
+                if s.rtype == "light" {
+                    out.insert(s.rid.clone(), mac.clone());
+                }
+            }
+        }
+        Ok(out)
+    }
+
     pub async fn event_stream(
         &self,
     ) -> Result<
@@ -539,7 +627,7 @@ impl ProviderFactory for HueProviderFactory {
                 kind: FieldKind::Password,
                 required: true,
                 hint: Some(
-                    "Press the link button, then POST to http://<bridge-ip>/api with {\"devicetype\":\"bifrost#server\"}",
+                    "Press the link button, then POST to https://<bridge-ip>/api with {\"devicetype\":\"bifrost#server\"}",
                 ),
             },
         ]
@@ -620,6 +708,66 @@ mod tests {
         assert!(lights[0].state.on);
         assert_eq!(lights[0].state.brightness, Some(80.0));
         assert_eq!(lights[0].capabilities.hue_gamut, Some(HueGamut::C));
+    }
+
+    #[tokio::test]
+    async fn discover_populates_hw_id_from_zigbee_mac() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/clip/v2/resource/light"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "id": "light-1",
+                    "metadata": {"name": "Bedroom"},
+                    "on": {"on": true}
+                }]
+            })))
+            .mount(&server)
+            .await;
+        // The device joins its light service to its zigbee_connectivity service…
+        Mock::given(method("GET"))
+            .and(path("/clip/v2/resource/device"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "id": "dev-1",
+                    "services": [
+                        {"rid": "light-1", "rtype": "light"},
+                        {"rid": "zb-1", "rtype": "zigbee_connectivity"}
+                    ]
+                }]
+            })))
+            .mount(&server)
+            .await;
+        // …which carries the MAC.
+        Mock::given(method("GET"))
+            .and(path("/clip/v2/resource/zigbee_connectivity"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "zb-1", "mac_address": "00:17:88:01:0b:12:34:56"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let lights = mock_provider(&server).await.discover().await.unwrap();
+        assert_eq!(lights[0].hw_id.as_deref(), Some("mac:001788010b123456"));
+    }
+
+    #[tokio::test]
+    async fn discover_hw_id_is_none_when_zigbee_lookup_fails() {
+        // Only /light is mocked; the device/zigbee fetches 404, so discovery
+        // still succeeds and the light simply carries no hw_id.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/clip/v2/resource/light"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "light-1", "metadata": {"name": "X"}, "on": {"on": false}}]
+            })))
+            .mount(&server)
+            .await;
+
+        let lights = mock_provider(&server).await.discover().await.unwrap();
+        assert_eq!(lights.len(), 1);
+        assert!(lights[0].hw_id.is_none());
     }
 
     #[tokio::test]

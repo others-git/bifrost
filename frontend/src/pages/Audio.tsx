@@ -18,6 +18,12 @@ import { useViewport } from "../useViewport";
 
 const ACCENT = "#a78bfa"; // violet — audio's counterpart to the lamps' warm glow
 
+/** Devices to show on the Audio control surface: drop de-dup **shadows** (a
+ * duplicate of a native device — e.g. a Sonos also imported via HA) and disabled
+ * devices. Both are managed on the Devices page, not controlled here. */
+const controllable = (list: AudioDevice[]) =>
+  list.filter((d) => !d.shadowed_by && d.enabled !== false);
+
 const T = {
   text: "#eae4d6",
   dim: "#97907e",
@@ -39,7 +45,7 @@ export function AudioPage() {
     let timer: ReturnType<typeof setTimeout>;
 
     async function refresh(live: boolean) {
-      const list = await getAudioDevices();
+      const list = controllable(await getAudioDevices());
       if (cancelled) return;
       if (live && list.length > 0) {
         const fresh = await Promise.all(list.map((d) => getAudioDevice(d.id)));
@@ -90,7 +96,7 @@ export function AudioPage() {
   // Re-fetch the device list with live state — used after a grouping change,
   // which alters the household topology (a synced-group zone appears/vanishes).
   const reloadDevices = useCallback(async () => {
-    const list = await getAudioDevices();
+    const list = controllable(await getAudioDevices());
     if (list.length === 0) {
       setDevices([]);
       return;

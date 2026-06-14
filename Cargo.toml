@@ -1,6 +1,6 @@
 [package]
 name = "bifrost"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2024"
 
 [lib]
@@ -70,6 +70,7 @@ futures-util = "0.3"
 # embedded MCP server (Streamable HTTP) — the /mcp surface over the service layer
 rmcp = { version = "1.7.0", features = ["server", "transport-streamable-http-server", "schemars"] }
 schemars = "1" # JSON Schema for MCP tool argument structs
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 
 [dev-dependencies]
 wiremock = "0.6"

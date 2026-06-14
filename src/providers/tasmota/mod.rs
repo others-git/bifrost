@@ -179,6 +179,7 @@ impl LightProvider for TasmotaProvider {
                 hue_gamut: None,
             },
             last_seen: Utc::now(),
+            hw_id: None,
         };
 
         Ok(vec![light])

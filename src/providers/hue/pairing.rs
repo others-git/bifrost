@@ -1,7 +1,7 @@
 //! Hue bridge link-button pairing.
 //!
 //! Flow: the user presses the physical link button on the bridge, then within
-//! 30 seconds we POST to `http://<bridge>/api` with a devicetype. The bridge
+//! 30 seconds we POST to `https://<bridge>/api` with a devicetype. The bridge
 //! answers `[{"success":{"username":"...","clientkey":"..."}}]`, and that
 //! username becomes the `hue-application-key` for all CLIP v2 requests.
 //!
@@ -50,6 +50,10 @@ struct PairError {
 pub async fn pair(bridge_base: &str) -> Result<PairOutcome> {
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
+        // Don't follow redirects: a bridge that redirects http→https would
+        // turn our POST /api into a GET / (bridge error 4). We want the POST
+        // to land directly, so callers should pass an https base.
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(PAIR_TIMEOUT)
         .build()?;
 
@@ -143,6 +147,22 @@ mod tests {
 
         let err = pair(&server.uri()).await.unwrap_err();
         assert!(err.to_string().contains("invalid value"));
+    }
+
+    #[tokio::test]
+    async fn pair_does_not_follow_redirect_to_get() {
+        // A Bridge Pro redirects plain HTTP to HTTPS; following it would
+        // downgrade our POST /api to a GET / (bridge error 4). We must not
+        // follow the redirect — it should surface as an error instead.
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", "/"))
+            .mount(&server)
+            .await;
+
+        assert!(pair(&server.uri()).await.is_err());
     }
 
     #[tokio::test]

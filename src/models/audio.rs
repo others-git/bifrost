@@ -19,6 +19,10 @@ pub struct AudioDevice {
     pub kind: AudioDeviceKind,
     pub capabilities: AudioCapabilities,
     pub state: AudioState,
+    /// Normalized hardware identity for cross-provider de-dup (see
+    /// [`crate::providers::mac_hw_id`]); `None` when the provider can't supply one.
+    #[serde(default)]
+    pub hw_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -26,6 +30,10 @@ pub struct AudioDevice {
 pub enum AudioDeviceKind {
     Receiver,
     Speaker,
+    /// A television / display whose audio Bifrost controls (HA `media_player`
+    /// with `device_class: "tv"`). Kept distinct from a plain speaker/receiver
+    /// so the UI can identify it as a TV.
+    Tv,
     Zone,
 }
 
@@ -74,11 +82,22 @@ pub struct AudioState {
     /// unknown or the device has a fixed source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Selectable sources/inputs the device exposes — receiver inputs, or the
+    /// apps on a smart TV (HA `source_list`). Switch to one by sending its name
+    /// as `AudioCommand::source`. Empty when the device doesn't enumerate them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_list: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub now_playing: Option<NowPlaying>,
     /// Whether the device answered its provider (None = not reported).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reachable: Option<bool>,
+    /// When this device is part of a live multi-speaker sync group, the
+    /// provider-native id of the group's *coordinator*. Devices sharing a
+    /// `group_coordinator` are playing in sync; the UI derives a single grouped
+    /// control from them (no group device is stored). `None` = standalone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_coordinator: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -733,6 +733,7 @@ mod tests {
                     state: LightState::default(),
                     capabilities: LightCapabilities::default(),
                     last_seen: Utc::now(),
+                    hw_id: None,
                 })
                 .collect())
         }

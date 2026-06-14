@@ -29,6 +29,73 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/devices/{id}/favorites/play", post(play_favorite_handler))
         .route("/devices/{id}/group", post(group_handler))
         .route("/devices/{id}/ungroup", post(ungroup_handler))
+        .route("/devices/{id}/enabled", put(set_enabled_handler))
+        .route("/devices/{id}/glyph", put(set_glyph_handler))
+        .route("/devices/{id}/shadow", put(set_shadow_handler))
+        .route("/devices/{id}/room", put(set_room_handler))
+}
+
+async fn set_enabled_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<crate::api::SetEnabledRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    crate::api::set_device_enabled(&state, "audio_devices", &id, req.enabled)
+        .await
+        .into_response()
+}
+
+async fn set_glyph_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<crate::api::SetGlyphRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    crate::api::set_device_glyph(&state, "audio_devices", &id, req.glyph)
+        .await
+        .into_response()
+}
+
+async fn set_shadow_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<crate::api::SetShadowRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    crate::api::dedup::set_device_shadow(&state, "audio_devices", &id, req.shadowed_by)
+        .await
+        .into_response()
+}
+
+async fn set_room_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<crate::api::SetRoomRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    crate::api::rooms::set_device_room(
+        &state,
+        "audio_devices",
+        "room_audio_devices",
+        "audio_device_id",
+        &id,
+        req.room_id,
+    )
+    .await
+    .into_response()
 }
 
 /// Body for "group this speaker with a coordinator" — the Bifrost device id of
@@ -58,6 +125,21 @@ pub(crate) struct AudioDeviceRow {
     pub capabilities: AudioCapabilities,
     pub state: AudioState,
     pub last_seen: Option<String>,
+    /// Disabled devices keep their room membership but receive no commands and
+    /// are hidden from room control.
+    pub enabled: bool,
+    /// Optional glyph override (name); `None` = derive from `kind`.
+    pub glyph: Option<String>,
+    /// Normalized hardware identity for cross-provider de-dup; `None` if unknown.
+    pub hw_id: Option<String>,
+    /// When set, a duplicate of (shadowed by) this device id — hidden from
+    /// control and collapsed in the inventory.
+    pub shadowed_by: Option<String>,
+    /// `true` if the shadow was set automatically by hw_id matching.
+    pub shadow_auto: bool,
+    /// The room this device is directly assigned to (Devices-page assignment),
+    /// or `None`. Room *links* (synced provider groups) aren't reflected here.
+    pub room_id: Option<String>,
 }
 
 fn row_to_device(r: sqlx::sqlite::SqliteRow) -> AudioDeviceRow {
@@ -73,6 +155,12 @@ fn row_to_device(r: sqlx::sqlite::SqliteRow) -> AudioDeviceRow {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default(),
         last_seen: r.get("last_seen"),
+        enabled: r.get::<i64, _>("enabled") != 0,
+        glyph: r.get("glyph"),
+        hw_id: r.get("hw_id"),
+        shadowed_by: r.get("shadowed_by"),
+        shadow_auto: r.get::<i64, _>("shadow_auto") != 0,
+        room_id: r.get("room_id"),
     }
 }
 
@@ -89,7 +177,8 @@ pub(crate) fn build_audio_provider(
 
 pub(crate) async fn list_all_devices(state: &AppState) -> Result<Vec<AudioDeviceRow>, ()> {
     sqlx::query(
-        "SELECT id, provider_id, device_id, name, kind, capabilities, last_state, last_seen
+        "SELECT id, provider_id, device_id, name, kind, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto,
+                (SELECT room_id FROM room_audio_devices WHERE audio_device_id = audio_devices.id LIMIT 1) AS room_id
          FROM audio_devices ORDER BY name",
     )
     .fetch_all(&state.db)
@@ -106,7 +195,9 @@ pub(crate) async fn get_device_live(
 ) -> Result<Option<AudioDeviceRow>, ()> {
     let row = sqlx::query(
         "SELECT a.id, a.provider_id, a.device_id, a.name, a.kind, a.capabilities,
-                a.last_state, a.last_seen, p.provider_type, p.credentials
+                a.last_state, a.last_seen, a.enabled, a.glyph, a.hw_id, a.shadowed_by, a.shadow_auto,
+                (SELECT room_id FROM room_audio_devices WHERE audio_device_id = a.id LIMIT 1) AS room_id,
+                p.provider_type, p.credentials
          FROM audio_devices a JOIN providers p ON a.provider_id = p.id
          WHERE a.id = ? AND p.enabled = 1",
     )
@@ -160,10 +251,11 @@ pub(crate) async fn apply_audio_command(
     id: &str,
     cmd: &AudioCommand,
 ) -> SetAudioOutcome {
+    // A disabled device receives no commands (control lookups skip it).
     let row = sqlx::query(
         "SELECT a.device_id, p.provider_type, p.credentials
          FROM audio_devices a JOIN providers p ON a.provider_id = p.id
-         WHERE a.id = ? AND p.enabled = 1",
+         WHERE a.id = ? AND p.enabled = 1 AND a.enabled = 1 AND a.shadowed_by IS NULL",
     )
     .bind(id)
     .fetch_optional(&state.db)
@@ -213,10 +305,11 @@ enum ProviderLookup {
 }
 
 async fn lookup_audio_provider(state: &AppState, id: &str) -> ProviderLookup {
+    // A disabled device receives no commands (control lookups skip it).
     let row = sqlx::query(
         "SELECT a.device_id, p.provider_type, p.credentials
          FROM audio_devices a JOIN providers p ON a.provider_id = p.id
-         WHERE a.id = ? AND p.enabled = 1",
+         WHERE a.id = ? AND p.enabled = 1 AND a.enabled = 1 AND a.shadowed_by IS NULL",
     )
     .bind(id)
     .fetch_optional(&state.db)
@@ -469,17 +562,19 @@ pub(crate) async fn discover_audio_devices(
         let kind = match device.kind {
             crate::models::audio::AudioDeviceKind::Receiver => "receiver",
             crate::models::audio::AudioDeviceKind::Speaker => "speaker",
+            crate::models::audio::AudioDeviceKind::Tv => "tv",
             crate::models::audio::AudioDeviceKind::Zone => "zone",
         };
         let _ = sqlx::query(
-            "INSERT INTO audio_devices (id, provider_id, device_id, name, kind, capabilities, last_state, last_seen)
-             VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            "INSERT INTO audio_devices (id, provider_id, device_id, name, kind, capabilities, last_state, last_seen, hw_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
              ON CONFLICT (provider_id, device_id)
              DO UPDATE SET name         = excluded.name,
                            kind         = excluded.kind,
                            capabilities = excluded.capabilities,
                            last_state   = excluded.last_state,
-                           last_seen    = excluded.last_seen",
+                           last_seen    = excluded.last_seen,
+                           hw_id        = excluded.hw_id",
         )
         .bind(device.id.to_string())
         .bind(provider_row_id)
@@ -488,6 +583,7 @@ pub(crate) async fn discover_audio_devices(
         .bind(kind)
         .bind(&caps)
         .bind(&state_json)
+        .bind(&device.hw_id)
         .execute(&state.db)
         .await;
     }

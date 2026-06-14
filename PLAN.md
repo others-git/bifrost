@@ -1,5 +1,17 @@
 # Bifrost — Implementation Plan
 
+## Active Milestone — Home Assistant as a high-class integration
+
+Make HA a first-class integration that surfaces *real* devices cleanly and is
+controllable by name (UI + voice/MCP). Recently landed: multi-domain HA (lights,
+power, audio/TV), the **entity-registry primary-entity filter** (one-shot WS,
+drops `config` sub-entities), **per-provider pruning** + global Discover/Sync/
+Prune+Sync, source/app switching, device enable/disable, the Control page. **Up
+next:** play named content on the TV (the voice north-star — `media_player.play_media`
+vs delegating to HA Assist), then WebSocket `subscribe_events` push and HA
+device-registry grouping. Open items live under *Open milestones* below; the
+per-milestone detail is in **M19**.
+
 ## Goals
 
 A self-hosted Rust smart home hub that is:
@@ -10,7 +22,7 @@ A self-hosted Rust smart home hub that is:
 
 ---
 
-## Shipped ✅
+## Completed milestones (one-liners)
 
 | Milestone | What shipped |
 |---|---|
@@ -32,6 +44,7 @@ A self-hosted Rust smart home hub that is:
 | 13 — Audio rooms → Bifrost Rooms | `discover_groups` (Sonos, one group per player) wraps into the shared `provider_groups`/`room_links` machinery; provider-card button unified to **"Sync"** for both domains |
 | 14 — Multi-device room audio | Migration 0018 `room_audio_devices`; room volume/mute **fans out** to all audio members with a per-room offset; `PUT /rooms/{id}/audio` + `/audio/state`; Floor-Plan member/offset panel |
 | 16 — Mobile / PWA | Responsive SPA via `useViewport()` (`isMobile` ≤640px, tablets get desktop); bottom tab bar, bottom-sheet fly-outs, compact 2-up cards, enlarged tap targets; installable PWA; Floor Plan hidden on phones (→ M17) |
+| 20 — Control page + device enable/disable | **Control** page (renamed from "Lights"): whole-home, **two-column** rooms on desktop (CSS columns; single column on mobile), each room a row of **glyph buttons** — one per member device (light/power/audio), type-glyph not name — each opening its **own fly-out** (`LightEditor` / `PowerFlyout` / `AudioEditor`) showing the full name. Shared `components/glyphs.tsx`. **Device enable/disable** across all domains: migration `0022` adds `enabled` to lights/audio_devices/power_devices; a disabled device stays tracked + a room member but gets **no commands** (control lookups skip it → 404) and drops from room control (effective members for lights; client-side on Control for power/audio). `PUT /api/{lights,audio/devices,power/devices}/{id}/enabled`; disable in each fly-out + the Devices page. |
 | 19 — Home Assistant ("high-class" provider) | `providers::ha` — one adapter (`base_url` + long-lived token), shown under an **"Integration"** add-provider category, that surfaces multiple HA device domains from one provider row. **Lights**: `light.*` → Bifrost lights + **HA Areas → Rooms** via the shared Sync flow. **Power**: new lean `models::power` domain (switch/fan/plug → `PowerKind` glyph, on/off only) wired end-to-end on the backend — multi-domain registry (`register_power`), additive discover, `power_devices` table (migration 0019), `api::power` + `/api/v1/power` + MCP tools. REST poll (30s). HA `media_player`/audio still **on hold**. Remaining: power live-polling/frontend/room-membership. See [Milestone 19 detail](#milestone-19--home-assistant-high-class-provider) |
 
 ### Open follow-ups from shipped milestones
@@ -91,11 +104,24 @@ shape stays honest.
   set on-off); **MCP** tools `list_power_devices` + `set_power` (name-resolved),
   and power devices added to `get_home_state`. Registry/factory/discover/control
   covered by unit + wiremock + in-memory-SQLite integration tests.
-- [x] **Generic "Devices" page** (`frontend/src/pages/Devices.tsx`, new nav entry):
-  inventory of power devices with per-`PowerKind` SVG glyph, name/id, reachability
-  indicator, and a vertical on/off toggle (optimistic, reconciles on error); 30s
-  poll + empty/loading states. The catch-all home for device classes without a
-  dedicated page.
+- [x] **"Devices" page = full device inventory** (`frontend/src/pages/Devices.tsx`,
+  nav entry): every device of every domain (lights, audio, power), grouped by
+  domain, regardless of room membership — the **configuration** surface (not
+  control). Each row shows the device's glyph, name/id, reachability dot, and an
+  enable/disable control; power devices also keep a vertical on/off toggle
+  (optimistic, reconciles on error). Earlier it was power-only; widening it back
+  to all domains fixed the "Devices shows only switches" regression.
+- [x] **Per-device glyph override** — migration `0024_device_glyph` adds a nullable
+  `glyph` to lights/audio_devices/power_devices (NULL = type default). Shared
+  `set_device_glyph` helper + `PUT /api/{lights,audio/devices,power/devices}/{id}/glyph`.
+  Frontend: a single by-name glyph registry (`components/glyphs.tsx`, `Glyph` /
+  `GLYPH_OPTIONS`, incl. a new `led_strip` glyph for switches that drive LED strip);
+  the Devices page has a glyph picker per device, and the Control page + fly-outs
+  render the **effective** glyph (`device.glyph ?? type default`).
+- [x] **Trim to first-class providers**: `govee-lan` / `shelly` / `tasmota` / `wled`
+  unregistered from `default_registry` (code kept on disk, dropped from the
+  add-provider menu); first-class set is Hue, Govee (Cloud), Home Assistant, Onkyo,
+  Sonos. `wled` stays as the generic mockable light in `tests/helpers.rs::test_registry`.
 - [x] **Power devices as Room members + unified Rooms config**: migration
   `0020_room_power_devices`; `PUT /rooms/{id}/power`; `power_device_ids` added to
   the session and public (`/v1` + MCP) room shapes; merge moves power (and audio)
@@ -113,23 +139,144 @@ shape stays honest.
   also fixed to move audio membership. Wiremock test covers a power-only area.
 - [ ] **Power: remaining wiring** — live polling into the event pipeline (state
   currently refreshes on a 30s poll + live GET, not pushed); **room-level control
-  fan-out** to power members (room on/off drives lights+audio, not yet power);
-  Devices page could later also surface lights/audio/climate as a unified
-  inventory. Provider-list `domain` label still shows "light" for HA (cosmetic).
+  fan-out** to power members (room on/off drives lights+audio, not yet power).
+  Provider-list `domain` label still shows "light" for HA (cosmetic).
 - [ ] **Richer domains as their own type**, when their state surface justifies it:
   `climate.*` (setpoint/mode/current temp), `cover.*` (position), `lock.*`. Each
   is a new domain (model + control surface + UI), grouped where applicable.
 - [ ] **WebSocket push** (`references/ha_websocket_api.md`): a `subscribe_events`
   push manager for `state_changed`, for instant updates instead of 30s polling.
   Needs a generic light push channel (today only Hue SSE + polling exist).
-- [ ] **Audio domain**: register `HaAudioFactory` (`media_player.*` → audio
-  devices; transport, volume, grouping — already implemented + tested) once audio
-  is off hold. Requires resolving the registry's one-type-is-light-XOR-audio
-  assumption so a single HA provider row can own both `lights` and `audio_devices`.
-- [ ] **De-dup**: guard against a device exposed both natively and via HA showing
-  up twice (currently left to Rooms membership to de-dupe).
+- [x] **Audio domain (media_player → TVs/speakers)**: `HaAudioFactory` registered
+  via the multi-domain path, so HA `media_player.*` (the Android TV, speakers)
+  surface as audio devices with power/volume/mute/source/transport on the Audio
+  page + audio API/MCP. `all_types` deduped so HA stays one menu entry (Integration);
+  `ui_domain` labels the provider card "Integration", not "Audio". Reads on demand.
+  Wiremock + integration tests.
+- [x] **Primary-entity filter (one-shot WebSocket entity registry)**: HA exposes a
+  device's *settings* as extra entities (e.g. Sonos crossfade/loudness `switch.*`,
+  a plug's LED-indicator) — `entity_category: config`/`diagnostic`. That's not in
+  REST `/api/states`, so discovery now does a **cached one-shot WS** call
+  (`config/entity_registry/list`, `tokio-tungstenite`) and surfaces only **primary**
+  entities (no category, not disabled/hidden). Live-verified: 14 switches → 3 real;
+  the TV stays. WS failure degrades to unfiltered. Findings in **`HA-API.md`**. Next:
+  use the registry's `device_id` to group a device's entities (device-registry import).
+- [x] **Per-provider pruning + global Discover/Sync/Prune+Sync**: a `providers.prune`
+  flag (migration 0023) + toggle on each provider card — when set, discovery removes
+  devices the provider no longer reports (cleans up orphaned config entities), cascading
+  out of rooms. `POST …/discover?prune=true|false` overrides per run; never prunes on an
+  empty result (transient-failure guard). New global Settings buttons run it across all
+  providers: **Discover** (devices), **Sync** (devices + rooms), **Prune + Sync** (force).
+- [x] **Source / app switching (Tier A)**: `AudioState.source_list` — selectable
+  inputs / a smart TV's installed apps (HA `source_list`), surfaced through the
+  audio API/`v1`/MCP and a source dropdown on the Audio device card; switch by
+  sending the name as `source` (the existing `select_source` path). Generic across
+  providers (Onkyo/Sonos can populate it later for free). Wiremock + UI.
+- [ ] **Play named content — Tier B (the voice north-star, filed for later)**:
+  "play Bob's Burgers on the bedroom TV" — launching a *specific title* inside an
+  app, beyond switching to it. Brittle/app-specific (deep-link URLs via
+  `media_player.play_media`, or `browse_media` over WebSocket). Design fork:
+  Bifrost resolves content itself, **or** delegate the NL media intent to **HA
+  Assist** (`conversation.process`) and let HA resolve it (preferred — fits the
+  Whisperr voice pipeline, reuses HA's media resolution). A TV is more than audio
+  (app launch/video) — may warrant its own media domain. **Decide the fork before
+  building.**
+- [x] **De-dup (Phase 1)** — see [Milestone 21](#milestone-21--cross-provider-de-dup).
+  A device imported both natively and via HA no longer shows twice: matched by
+  hardware id, the native copy wins and the HA copy is shadowed.
 - [ ] **Device registry import** (optional): HA *devices* (grouping multiple
-  entities) beyond Areas, if entity-flat import proves insufficient.
+  entities) beyond Areas, if entity-flat import proves insufficient. Phase 1 of
+  de-dup already fetches the device registry, so the join data is in hand.
+
+---
+
+## Milestone 21 — Cross-provider de-dup
+
+A physical device reachable both natively (Hue/Govee/Sonos/Onkyo) and via Home
+Assistant imports as two rows. De-dup recognises them by **hardware id** and
+collapses the integration copy under the native one — native always wins, since
+a direct provider is faster/more reliable than going through HA.
+
+**Phase 1 — shipped:**
+- [x] **Machinery**: migration `0025_device_dedup` adds `hw_id` (normalized
+  `mac:<hex>` via `providers::mac_hw_id`, MAC-48 or EUI-64), `shadowed_by`, and
+  `shadow_auto` to lights/audio/power. A shadowed device stays tracked but drops
+  from control + room membership (`shadowed_by IS NULL` guards) and the Devices
+  page collapses it under its canonical, with a "hidden duplicate" row.
+- [x] **Reconciler** (`api::dedup::reconcile_duplicates`): after every discovery
+  and provider delete, cluster by `hw_id` and auto-shadow the integration copy
+  (`registry.ui_domain(type) == Integration`) under a native canonical. Exact-MAC
+  only, so auto-apply is safe; removing the native side re-surfaces the copy.
+- [x] **hw_id sources**: HA reads it from the **device registry** over WebSocket
+  (`config/device_registry/list` → `connections` MAC, joined to the entity
+  registry's `device_id`); Govee from its device MAC. End-to-end **Govee ↔ HA**
+  de-dup works and is unit-tested.
+- [x] **Manual link** `PUT /api/{lights,audio/devices,power/devices}/{id}/shadow`
+  (`set_device_shadow`, `shadow_auto = 0`) — the no-hw_id fallback / override, and
+  an **Unlink** action; the reconciler never clobbers a manual link.
+- [x] **Phase 1.x — broaden native hw_id**: every first-class provider now stamps
+  a `hw_id` where the hardware exposes one — **Hue** (Zigbee MAC, joining
+  `/resource/device`'s `light`+`zigbee_connectivity` services with
+  `/resource/zigbee_connectivity`'s `mac_address`, best-effort so discovery never
+  fails on it), **Sonos** (MAC parsed from the `RINCON_<mac>…` uuid), **Onkyo**
+  (MAC from the `NRI` device-info reply, on the main zone). So a Hue/Govee/Sonos/
+  Onkyo device also imported via HA now de-dups, native-canonical. Govee LAN /
+  WLED / Tasmota / Shelly stay `None` (no MAC on hand; unregistered anyway).
+- [x] **HA hw_id from `identifiers`, not just `connections`**: HA's Onkyo integration
+  keys the receiver device by its **MAC string in `identifiers`** (`["onkyo",
+  "0009b0e82343"]`), not as a `("mac", …)` connection — so the native receiver (NRI
+  MAC) and the HA `media_player.onkyo` weren't matching. `ha_device_hw_id` now prefers
+  a connection MAC, then falls back to a MAC-shaped identifier (`mac_hw_id` rejects
+  non-hardware strings, keeping false-positive risk negligible). Native receiver wins.
+- [ ] **Phase 2 — heuristics (deferred)**: only if exact-MAC coverage proves
+  insufficient, a confirmation-gated fuzzy match (name/area) — never auto.
+
+**Capability parity (standing rule):** when HA exposes a capability a first-class
+provider lacks, build it into the native provider rather than leaning on the HA
+copy — de-dup makes the native device canonical, so the capability must live there.
+**Process:** any capability flagged as missing on a native provider (e.g. while
+de-dup hides the HA copy that had it) **must be filed in the parity-gaps list
+below** in the same change that flags it, so we never silently lose a capability.
+
+### Capability-parity gaps (tracked)
+
+Native-provider capabilities HA exposes that we still need to build natively.
+Add a row whenever a gap is flagged; check it off when the native provider has it.
+
+- [ ] **Sonos `source` / `source_list` (input + current-source).** Native Sonos
+  reports `source: None` / `source_list: []` and *rejects* `select_source`; HA's
+  Sonos `media_player` exposes both (e.g. shows "Spotify Connect" as the current
+  source). De-dup hides the HA copy, so we lost it. Buildable natively:
+  **(1)** current-source readout derived from the AVTransport track URI scheme
+  (`x-rincon-stream:` = Line-In, `x-sonos-htastream:` = TV, `x-sonosapi-*`/
+  `x-sonos-spotify:` = the service, `x-rincon:` = following a group); **(2)**
+  selectable Line-In / TV via `SetAVTransportURI` + favorites (already have
+  list/play) wired through `select_source`. Not doable: making "Spotify Connect"
+  itself a switch target (no UPnP path — it's a read-only current-source value).
+
+---
+
+## Milestone 22 — Bind a receiver to its source devices (TV / streamer) — NOT STARTED
+
+Real-world AV: N source devices (a TV, a streamer, a console) feed audio **through an
+AV receiver**, which is the thing that actually controls **volume**. Today Bifrost
+models them as independent audio devices, so a room shows a receiver *and* a TV with
+duplicate/overlapping controls and the "wrong" thing owning volume.
+
+Idea: let a user **bind** a source device (TV/"thing") to a receiver. After binding:
+- **Volume/mute** for the bound source is **routed to the receiver** (the receiver is
+  the volume authority; optionally also drives receiver input/power).
+- **Playback** (play/pause/next, and the M19 north-star "play Bob's Burgers") stays on
+  the **TV/source** (`media_player.play_media` / HA Assist).
+- The room/Control surface shows **one combined control** for the bound pair (source
+  glyph for transport + receiver for volume), not two.
+
+Open questions: persist the binding (new table vs a field on the source device); how it
+interacts with receiver input selection (binding could also imply "switch the receiver
+to input X when this source plays"); multi-source receivers (one receiver, several bound
+sources). Relates to the M19 TV-media work and the audio-group derivation (M21/zones).
+
+# Open milestones
 
 ## Milestone 12.2 — Music services: real Spotify (and friends) — NOT STARTED
 

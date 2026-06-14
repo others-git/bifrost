@@ -14,6 +14,7 @@ import {
   type AudioDevice,
   type AudioFavorite,
 } from "../api";
+import { DisableRow } from "./PowerFlyout";
 import { useViewport } from "../useViewport";
 import { sheetStyle } from "./sheet";
 
@@ -137,6 +138,26 @@ export function AudioControls({
             style={{ flex: 1, accentColor: ACCENT }}
           />
           <span style={{ fontSize: "0.78rem", color: T.dim, width: 30, textAlign: "right" }}>{s.volume}</span>
+        </div>
+      )}
+
+      {/* Source / app picker — receiver inputs, or a smart TV's apps. */}
+      {cap.sources && !offline && s.source_list && s.source_list.length > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+          <span style={{ fontSize: "0.74rem", color: T.dim, flexShrink: 0 }}>Source</span>
+          <select
+            value={s.source ?? ""}
+            onChange={(e) => send({ source: e.target.value })}
+            title="Switch input / app"
+            style={{ flex: 1, minWidth: 0, background: "rgba(255,255,255,0.04)", color: T.text, border: `1px solid ${T.cardBorder}`, borderRadius: 8, padding: "0.35rem 0.5rem", fontSize: "0.82rem", cursor: "pointer" }}
+          >
+            {!s.source && <option value="" disabled>Select…</option>}
+            {/* The current source can be outside the list (unknown/legacy) — keep it visible. */}
+            {s.source && !s.source_list.includes(s.source) && <option value={s.source}>{s.source}</option>}
+            {s.source_list.map((src) => (
+              <option key={src} value={src}>{src}</option>
+            ))}
+          </select>
         </div>
       )}
 
@@ -267,11 +288,14 @@ export function AudioEditor({
   device,
   anchor,
   onLocalPatch,
+  onSetEnabled,
   onClose,
 }: {
   device: AudioDevice;
   anchor: HTMLElement | { x: number; y: number };
   onLocalPatch: (id: string, patch: Partial<AudioDevice["state"]>) => void;
+  /** Enable/disable the device. Disabling drops it from room control. */
+  onSetEnabled?: (enabled: boolean) => void;
   onClose: () => void;
 }) {
   const { isMobile } = useViewport();
@@ -363,6 +387,12 @@ export function AudioEditor({
         <div style={{ fontSize: "0.8rem", color: "#c66" }}>Device offline.</div>
       ) : (
         <AudioControls device={device} onLocalPatch={onLocalPatch} />
+      )}
+      {onSetEnabled && (
+        <DisableRow
+          enabled={device.enabled !== false}
+          onSetEnabled={(en) => { onSetEnabled(en); if (!en) onClose(); }}
+        />
       )}
     </div>,
     document.body,

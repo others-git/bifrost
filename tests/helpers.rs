@@ -28,6 +28,15 @@ pub async fn test_db() -> SqlitePool {
     pool
 }
 
+/// The production registry plus WLED — the generic, easily-mockable light
+/// provider the integration tests are built on. WLED is unregistered in
+/// production (`default_registry`), so tests opt it back in here.
+fn test_registry() -> providers::ProviderRegistry {
+    let mut r = providers::default_registry();
+    r.register(providers::wled::WledProviderFactory);
+    r
+}
+
 /// Hash a password with reduced Argon2 params suitable for testing speed.
 pub fn hash_password(password: &str) -> String {
     use argon2::{Algorithm, Params, Version};
@@ -43,7 +52,7 @@ pub fn hash_password(password: &str) -> String {
 /// Build a complete test app with an in-memory DB and the default provider registry.
 pub async fn test_app() -> Router {
     let db = test_db().await;
-    let registry = providers::default_registry();
+    let registry = test_registry();
     let state = Arc::new(AppState::new(db, TEST_SECRET, registry));
     build_app(state)
 }
@@ -57,7 +66,7 @@ pub async fn test_app_with_password() -> Router {
         .execute(&db)
         .await
         .unwrap();
-    let registry = providers::default_registry();
+    let registry = test_registry();
     let state = Arc::new(AppState::new(db, TEST_SECRET, registry));
     build_app(state)
 }
@@ -133,7 +142,7 @@ pub async fn test_app_with_light(base_url: &str) -> (Router, String) {
         .await
         .unwrap();
 
-    let registry = providers::default_registry();
+    let registry = test_registry();
     let state = Arc::new(AppState::new(db.clone(), TEST_SECRET, registry));
 
     let creds = format!(r#"{{"device_ip":"{base_url}"}}"#);
@@ -172,7 +181,7 @@ pub async fn test_app_with_two_lights(base_url: &str) -> (Router, String, String
         .await
         .unwrap();
 
-    let registry = providers::default_registry();
+    let registry = test_registry();
     let state = Arc::new(AppState::new(db.clone(), TEST_SECRET, registry));
 
     let creds = format!(r#"{{"device_ip":"{base_url}"}}"#);
@@ -217,7 +226,7 @@ pub async fn test_app_with_hue_light(base_url: &str) -> (Router, String) {
         .await
         .unwrap();
 
-    let registry = providers::default_registry();
+    let registry = test_registry();
     let state = Arc::new(AppState::new(db.clone(), TEST_SECRET, registry));
 
     let creds = format!(r#"{{"bridge_ip":"{base_url}","app_key":"test-key"}}"#);
@@ -257,7 +266,7 @@ pub async fn test_app_with_ha(base_url: &str) -> (Router, String) {
         .await
         .unwrap();
 
-    let registry = providers::default_registry();
+    let registry = test_registry();
     let state = Arc::new(AppState::new(db.clone(), TEST_SECRET, registry));
 
     let creds = format!(r#"{{"base_url":"{base_url}","token":"test-token"}}"#);
@@ -273,6 +282,35 @@ pub async fn test_app_with_ha(base_url: &str) -> (Router, String) {
     .unwrap();
 
     (build_app(state), provider_id)
+}
+
+/// Like `test_app_with_ha`, but also returns the DB pool so a test can seed rows
+/// directly (e.g. a stale device to exercise pruning).
+#[allow(dead_code)]
+pub async fn test_app_with_ha_db(base_url: &str) -> (Router, String, SqlitePool) {
+    let db = test_db().await;
+    let hash = hash_password(TEST_PASSWORD);
+    sqlx::query("INSERT INTO config (id, password_hash, setup_complete) VALUES (1, ?, 1)")
+        .bind(&hash)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let registry = test_registry();
+    let state = Arc::new(AppState::new(db.clone(), TEST_SECRET, registry));
+    let creds = format!(r#"{{"base_url":"{base_url}","token":"test-token"}}"#);
+    let enc = state.encrypt_credentials(&creds).unwrap();
+    let provider_id = "prov-ha-1".to_string();
+    sqlx::query(
+        "INSERT INTO providers (id, provider_type, name, credentials) VALUES (?, 'ha', 'HA', ?)",
+    )
+    .bind(&provider_id)
+    .bind(&enc)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    (build_app(state), provider_id, db)
 }
 
 pub async fn response_json(resp: Response<Body>) -> serde_json::Value {

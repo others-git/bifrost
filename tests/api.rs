@@ -4066,8 +4066,9 @@ async fn provider_types_flag_discovery_support() {
             .as_bool()
             .unwrap()
     };
-    // Every IP-addressable provider supports auto-detect.
-    for t in ["onkyo", "sonos", "hue", "wled", "tasmota", "shelly"] {
+    // Every IP-addressable provider supports auto-detect. (tasmota/shelly are
+    // unregistered in production; wled stays as the generic test light.)
+    for t in ["onkyo", "sonos", "hue", "wled"] {
         assert!(flag(t), "{t} should advertise auto-detect");
     }
     // Cloud providers (token, no LAN IP) do not.
@@ -4208,11 +4209,12 @@ async fn audio_provider_lists_with_name_domain_and_ready_status() {
 }
 
 #[tokio::test]
-async fn sonos_provider_reports_ready_status_not_unmanaged() {
+async fn sonos_provider_is_push_managed() {
     let app = helpers::test_app_with_password().await;
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
 
-    // Add a Sonos provider (on-demand audio, no connection manager).
+    // Sonos is a Push audio provider (GENA + heartbeat poll), so adding it
+    // starts a connection manager.
     let resp = app
         .clone()
         .oneshot(helpers::authed_post(
@@ -4228,7 +4230,8 @@ async fn sonos_provider_reports_ready_status_not_unmanaged() {
         .unwrap()
         .to_string();
 
-    // Its status must read "ready" (operational), not "not_managed".
+    // Its status reflects a real managed connection (not "not_managed"); the host
+    // is unreachable in the test, so it's mid-connect/reconnect rather than ready.
     let resp = app
         .oneshot(helpers::authed_get(
             &format!("/api/providers/{id}/status"),
@@ -4237,7 +4240,14 @@ async fn sonos_provider_reports_ready_status_not_unmanaged() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(helpers::response_json(resp).await["state"], "ready");
+    let label = helpers::response_json(resp).await["state"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        ["disconnected", "connecting", "connected", "reconnecting"].contains(&label.as_str()),
+        "expected a managed connection state, got {label:?}"
+    );
 }
 
 // ── Embedded MCP surface (/mcp) ──────────────────────────────────────────────
@@ -4725,5 +4735,519 @@ async fn sync_groups_mirrors_ha_area_with_only_power_devices() {
         garage["power_device_ids"].as_array().unwrap().len(),
         1,
         "Garage should contain the porch switch via its link: {garage}"
+    );
+}
+
+#[tokio::test]
+async fn discover_ha_surfaces_media_player_as_audio_device() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let ha = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/states"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            { "entity_id": "media_player.bedroom_tv", "state": "playing",
+              "attributes": { "friendly_name": "Bedroom TV", "device_class": "tv",
+                              "volume_level": 0.3, "supported_features": 0 } }
+        ])))
+        .mount(&ha)
+        .await;
+
+    let (app, prov_id) = helpers::test_app_with_ha(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Multi-domain discover includes the audio (media_player) domain now.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/providers/{prov_id}/discover"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(helpers::response_json(resp).await["discovered"], 1);
+
+    // The TV shows up on the audio device list.
+    let resp = app
+        .oneshot(helpers::authed_get("/api/audio/devices", &cookie))
+        .await
+        .unwrap();
+    let devices = helpers::response_json(resp).await;
+    let tv = devices
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["device_id"] == "media_player.bedroom_tv")
+        .expect("Bedroom TV surfaced as an audio device");
+    assert_eq!(tv["name"], "Bedroom TV");
+    // HA's `device_class: "tv"` is preserved as a first-class kind so the UI
+    // can identify it as a TV rather than a generic speaker/receiver.
+    assert_eq!(tv["kind"], "tv");
+}
+
+#[tokio::test]
+async fn disabled_power_device_rejects_commands_but_stays_listed() {
+    let ha = ha_power_mock().await;
+    let (app, prov_id) = helpers::test_app_with_ha(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    app.clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/providers/{prov_id}/discover"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/power/devices", &cookie))
+        .await
+        .unwrap();
+    let id = helpers::response_json(resp).await[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Disable it.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/power/devices/{id}/enabled"),
+            &cookie,
+            r#"{"enabled":false}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // A command is now refused (no command reaches the device) …
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/power/devices/{id}/state"),
+            &cookie,
+            r#"{"on":true}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // … but it's still tracked, flagged disabled.
+    let resp = app
+        .oneshot(helpers::authed_get("/api/power/devices", &cookie))
+        .await
+        .unwrap();
+    let devices = helpers::response_json(resp).await;
+    let dev = devices
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == id)
+        .unwrap();
+    assert_eq!(dev["enabled"], false);
+}
+
+#[tokio::test]
+async fn set_light_glyph_overrides_then_clears() {
+    let server = wiremock::MockServer::start().await;
+    let (app, light_id) = helpers::test_app_with_light(&server.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // A fresh light has no glyph override.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get(
+            &format!("/api/lights/{light_id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert!(helpers::response_json(resp).await["glyph"].is_null());
+
+    // Pin the led_strip glyph.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/lights/{light_id}/glyph"),
+            &cookie,
+            r#"{"glyph":"led_strip"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get(
+            &format!("/api/lights/{light_id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(helpers::response_json(resp).await["glyph"], "led_strip");
+
+    // Clearing it (null) returns to the type default.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/lights/{light_id}/glyph"),
+            &cookie,
+            r#"{"glyph":null}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(helpers::authed_get(
+            &format!("/api/lights/{light_id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert!(helpers::response_json(resp).await["glyph"].is_null());
+}
+
+#[tokio::test]
+async fn set_light_glyph_requires_session() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/lights/some-id/glyph")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"glyph":"bulb"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn set_light_shadow_links_and_clears() {
+    let server = wiremock::MockServer::start().await;
+    let (app, light_id) = helpers::test_app_with_light(&server.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Manually shadow the light under an arbitrary canonical id.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/lights/{light_id}/shadow"),
+            &cookie,
+            r#"{"shadowed_by":"some-canonical-id"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get(
+            &format!("/api/lights/{light_id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["shadowed_by"], "some-canonical-id");
+    assert_eq!(body["shadow_auto"], false); // a manual link
+
+    // Clearing it (null) makes the device visible again.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/lights/{light_id}/shadow"),
+            &cookie,
+            r#"{"shadowed_by":null}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(helpers::authed_get(
+            &format!("/api/lights/{light_id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert!(helpers::response_json(resp).await["shadowed_by"].is_null());
+}
+
+#[tokio::test]
+async fn set_light_room_assigns_and_clears() {
+    let server = wiremock::MockServer::start().await;
+    let (app, light_id) = helpers::test_app_with_light(&server.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Create a room to assign into.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/rooms",
+            &cookie,
+            r#"{"name":"Living Room"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let room_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Assign the light to the room from the device side.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/lights/{light_id}/room"),
+            &cookie,
+            &format!(r#"{{"room_id":"{room_id}"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get(
+            &format!("/api/lights/{light_id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(helpers::response_json(resp).await["room_id"], room_id);
+
+    // Clearing (null) removes it from the room.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/lights/{light_id}/room"),
+            &cookie,
+            r#"{"room_id":null}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(helpers::authed_get(
+            &format!("/api/lights/{light_id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert!(helpers::response_json(resp).await["room_id"].is_null());
+}
+
+#[tokio::test]
+async fn set_light_room_unknown_room_is_not_found() {
+    let server = wiremock::MockServer::start().await;
+    let (app, light_id) = helpers::test_app_with_light(&server.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/lights/{light_id}/room"),
+            &cookie,
+            r#"{"room_id":"no-such-room"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn set_light_room_requires_session() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/lights/some-id/room")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"room_id":"x"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn set_light_shadow_requires_session() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/lights/some-id/shadow")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"shadowed_by":"x"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn set_power_glyph_overrides_device() {
+    let ha = ha_power_mock().await;
+    let (app, prov_id) = helpers::test_app_with_ha(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    app.clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/providers/{prov_id}/discover"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/power/devices", &cookie))
+        .await
+        .unwrap();
+    let id = helpers::response_json(resp).await[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/power/devices/{id}/glyph"),
+            &cookie,
+            r#"{"glyph":"led_strip"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/power/devices", &cookie))
+        .await
+        .unwrap();
+    let devices = helpers::response_json(resp).await;
+    let dev = devices
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == id)
+        .unwrap();
+    assert_eq!(dev["glyph"], "led_strip");
+}
+
+#[tokio::test]
+async fn set_prune_requires_session() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/providers/x/prune")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"prune":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn discover_with_prune_removes_devices_no_longer_reported() {
+    let ha = ha_power_mock().await; // reports switch.porch + fan.bedroom
+    let (app, prov_id, db) = helpers::test_app_with_ha_db(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // First discover → 2 devices.
+    app.clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/providers/{prov_id}/discover"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+
+    // Seed a stale device the provider no longer reports (old last_seen).
+    sqlx::query(
+        "INSERT INTO power_devices (id, provider_id, device_id, name, kind, last_state, last_seen)
+         VALUES ('ghost', ?, 'switch.ghost', 'Ghost', 'switch', '{\"on\":false}', '2000-01-01 00:00:00')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    // A plain discover keeps it (additive).
+    app.clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/providers/{prov_id}/discover"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/power/devices", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(
+        helpers::response_json(resp).await.as_array().unwrap().len(),
+        3
+    );
+
+    // Discover with ?prune=true removes the stale one, keeps the reported two.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/providers/{prov_id}/discover?prune=true"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["discovered"], 2);
+    assert_eq!(body["pruned"], 1);
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/power/devices", &cookie))
+        .await
+        .unwrap();
+    let devices = helpers::response_json(resp).await;
+    let ids: Vec<&str> = devices
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["device_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 2);
+    assert!(
+        !ids.contains(&"switch.ghost"),
+        "stale device pruned: {ids:?}"
     );
 }

@@ -224,6 +224,7 @@ fn scan_to_light(ip: &str, sku: &str) -> Light {
             hue_gamut: None,
         },
         last_seen: chrono::Utc::now(),
+        hw_id: None, // LAN scan exposes only IP; no MAC yet.
     }
 }
 
