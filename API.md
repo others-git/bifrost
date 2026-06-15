@@ -365,6 +365,28 @@ could not be reached.
 Keys are managed with a browser session, not with another key — a leaked key
 cannot mint more keys: `GET/POST /api/api-keys`, `DELETE /api/api-keys/{id}`.
 
+## Device enrollment (QR pairing)
+
+Headless devices (the wall-tablet voice satellite) get a key without anyone
+typing one. An authenticated dashboard session mints a short-lived, single-use
+token; the device scans a QR carrying it and redeems it for a normal `bfr_` key
+(which then shows up in **Settings → API keys** and is revocable like any other).
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `POST` | `/api/enrollment` | session | Mint a pairing token → `{ token, expires_at, expires_in_secs }` (TTL 5 min) |
+| `POST` | `/api/enrollment/redeem` | **token** (no key/session) | `{ token, device_name? }` → `201 { key, prefix, name }` |
+
+The redeem route is intentionally unauthenticated — the device has no credential
+yet — but is gated on a valid, unexpired, **unused** token, which only an authed
+session can create. Redemption is atomic and single-use; a replayed token gets
+`401`.
+
+The dashboard renders the QR as JSON `{ "v": 1, "base_url": "<origin>", "token": "<token>" }`.
+A client scans it, then `POST`s `{ token, device_name }` to
+`base_url + /api/enrollment/redeem` and stores the returned `key` for all
+subsequent `/api/v1` + `/api/voice` calls.
+
 ## Voice control (`/api/voice`)
 
 Natural-language command endpoints, gated by the **same Bearer API keys** as

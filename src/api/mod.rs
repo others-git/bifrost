@@ -3,6 +3,7 @@ pub mod apikeys;
 pub mod audio;
 pub mod auth;
 pub mod dedup;
+pub mod enrollment;
 pub mod events;
 pub mod lights;
 pub mod mcp;
@@ -121,6 +122,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .nest("/api-keys", apikeys::router())
         .nest("/audio", audio::router())
         .nest("/auth", auth::router())
+        .nest("/enrollment", enrollment::router())
         .nest("/events", events::router())
         .nest("/lights", lights::router())
         .nest("/palette-scenes", palette_scenes::router())

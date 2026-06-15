@@ -8,6 +8,15 @@
 ## Open milestones — what's left
 
 **Next up (small, scoped):**
+- **M28 — QR device pairing** *(backend + dashboard DONE in tree; app side pending)* —
+  authorize headless devices (the wall tablet) without typing a key. An authed
+  session mints a short-lived, single-use enrollment token (`POST /api/enrollment`)
+  rendered as a QR on the dashboard (Settings → API keys → "Pair a device"); the
+  device scans it and redeems it (`POST /api/enrollment/redeem`) for a normal
+  `bfr_` key (revocable like any other). Migration 0031, `api::enrollment`, shared
+  `apikeys::mint_api_key`; documented in `API.md`. **Remaining:** the companion
+  app's camera/QR scan → redeem step (other repo); then revisit (optional: bind a
+  token to one redeem, shorter TTL, "Test connection" affordance).
 - **M26 — Composite (merged) devices** *(draft)* — merge *complementary* same-device
   entities into one capability-routed device (the BRAVIA "two media_players" problem:
   one has now-playing, the other the remote). Distinct from de-dup, which is for

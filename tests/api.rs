@@ -2974,6 +2974,128 @@ fn bearer_json(method: &str, uri: &str, key: &str, body: &str) -> Request<Body> 
         .unwrap()
 }
 
+// ── Device enrollment (QR pairing) ───────────────────────────────────────────
+
+fn anon_json(method: &str, uri: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn enrollment_create_requires_session() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(anon_json("POST", "/api/enrollment", "{}"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn enrollment_redeem_rejects_unknown_token() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(anon_json(
+            "POST",
+            "/api/enrollment/redeem",
+            r#"{"token":"deadbeef","device_name":"x"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn enrollment_full_flow_mints_a_usable_revocable_key() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // 1. Authed session mints a pairing token (what the dashboard renders as a QR).
+    let mint = app
+        .clone()
+        .oneshot(helpers::authed_post("/api/enrollment", &cookie, "{}"))
+        .await
+        .unwrap();
+    assert_eq!(mint.status(), StatusCode::OK);
+    let mint = helpers::response_json(mint).await;
+    let token = mint["token"].as_str().unwrap().to_string();
+    assert_eq!(mint["expires_in_secs"], 300);
+
+    // 2. The headless device redeems it (no session) for a real key.
+    let redeem = app
+        .clone()
+        .oneshot(anon_json(
+            "POST",
+            "/api/enrollment/redeem",
+            &format!(r#"{{"token":"{token}","device_name":"Bedroom tablet"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(redeem.status(), StatusCode::CREATED);
+    let redeem = helpers::response_json(redeem).await;
+    let key = redeem["key"].as_str().unwrap().to_string();
+    assert!(key.starts_with("bfr_"));
+
+    // 3. The minted key actually authenticates the public API + voice seam.
+    let v1 = app
+        .clone()
+        .oneshot(bearer_get("/api/v1/lights", &key))
+        .await
+        .unwrap();
+    assert_eq!(v1.status(), StatusCode::OK);
+
+    // 4. It's a normal key — listed in Settings under the device name, revocable.
+    let list = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/api-keys", &cookie))
+        .await
+        .unwrap();
+    let keys = helpers::response_json(list).await;
+    assert!(
+        keys.as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k["name"] == "Bedroom tablet"),
+        "enrolled key should appear in the key list: {keys}"
+    );
+}
+
+#[tokio::test]
+async fn enrollment_token_is_single_use() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let mint = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_post("/api/enrollment", &cookie, "{}"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let token = mint["token"].as_str().unwrap().to_string();
+    let redeem = |t: String| {
+        app.clone().oneshot(anon_json(
+            "POST",
+            "/api/enrollment/redeem",
+            &format!(r#"{{"token":"{t}"}}"#),
+        ))
+    };
+
+    assert_eq!(
+        redeem(token.clone()).await.unwrap().status(),
+        StatusCode::CREATED
+    );
+    // Second redemption of the same token is rejected.
+    assert_eq!(
+        redeem(token).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
 #[tokio::test]
 async fn api_keys_management_requires_session() {
     let app = helpers::test_app_with_password().await;

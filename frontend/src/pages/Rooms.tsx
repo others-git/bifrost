@@ -23,7 +23,7 @@ import {
 import { RoomVolumeStrip } from "../components/RoomAudio";
 import { RoomDevicesPanel } from "../components/RoomDevices";
 import { SelectRow } from "../components/SelectRow";
-import { useDialogs } from "../components/dialogs";
+import { useDialogs, type Dialogs } from "../components/dialogs";
 import { PageHeader } from "../components/PageHeader";
 import { Select } from "../components/Select";
 import { useViewport } from "../useViewport";
@@ -93,6 +93,7 @@ export function RoomsPage() {
             providerGroups={providerGroups}
             audioDevices={audioDevices}
             powerDevices={powerDevices}
+            dialogs={dialogs}
             onChanged={load}
             onRemove={() => handleRemove(room.id, room.name)}
           />
@@ -142,6 +143,7 @@ function RoomCard({
   providerGroups,
   audioDevices,
   powerDevices,
+  dialogs,
   onChanged,
   onRemove,
 }: {
@@ -151,10 +153,14 @@ function RoomCard({
   providerGroups: ProviderGroupInfo[];
   audioDevices: AudioDevice[];
   powerDevices: PowerDevice[];
+  // Owned by RoomsPage (which renders `dialogs.element`). A RoomCard must NOT
+  // call useDialogs() itself: that returns a separate instance whose element is
+  // never mounted, so confirm()/alert() would hang forever (merge silently did
+  // nothing — no popup, no request).
+  dialogs: Dialogs;
   onChanged: () => Promise<void>;
   onRemove: () => void;
 }) {
-  const dialogs = useDialogs();
   const { isMobile } = useViewport();
   const [editingDevices, setEditingDevices] = useState(false);
   const [merging, setMerging] = useState(false);

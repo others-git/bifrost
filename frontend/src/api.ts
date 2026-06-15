@@ -1000,6 +1000,25 @@ export async function revokeApiKey(id: string): Promise<void> {
   await fetch(`/api/api-keys/${id}`, { method: "DELETE" });
 }
 
+/**
+ * Mint a short-lived device-pairing token. The dashboard renders it as a QR; a
+ * headless device (the wall tablet) scans it and POSTs to `/api/enrollment/redeem`
+ * to receive a real API key — no key typed on a touchscreen.
+ */
+export async function createEnrollmentToken(): Promise<{
+  token: string;
+  expires_at: string;
+  expires_in_secs: number;
+}> {
+  const res = await fetch("/api/enrollment", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+  return res.json();
+}
+
 // ── Floor plans ──────────────────────────────────────────────────────────────
 
 export type WallDir = "h" | "v";

@@ -50,6 +50,35 @@ fn hash_key(key: &str) -> String {
     hex::encode(Sha256::digest(key.as_bytes()))
 }
 
+/// A freshly minted key. The plaintext `key` is returned to the caller exactly
+/// once (it cannot be recovered later); only its hash is stored.
+pub(crate) struct MintedKey {
+    pub id: String,
+    pub key: String,
+    pub prefix: String,
+}
+
+/// Mint and persist a new API key named `name`, returning the one-time plaintext.
+/// Shared by the Settings "create key" route and device enrollment so every key
+/// is generated and stored identically.
+pub(crate) async fn mint_api_key(
+    state: &Arc<AppState>,
+    name: &str,
+) -> Result<MintedKey, sqlx::Error> {
+    let id = Uuid::new_v4().to_string();
+    let key = generate_key();
+    let key_hash = hash_key(&key);
+    let prefix = key[..DISPLAY_PREFIX_LEN].to_string();
+    sqlx::query("INSERT INTO api_keys (id, name, key_hash, prefix) VALUES (?, ?, ?, ?)")
+        .bind(&id)
+        .bind(name)
+        .bind(&key_hash)
+        .bind(&prefix)
+        .execute(&state.db)
+        .await?;
+    Ok(MintedKey { id, key, prefix })
+}
+
 /// Read a `Authorization: Bearer <key>` header value.
 fn extract_bearer(headers: &HeaderMap) -> Option<String> {
     let auth = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
@@ -131,30 +160,23 @@ async fn create_key(
         return (StatusCode::UNPROCESSABLE_ENTITY, "key name is required").into_response();
     }
 
-    let id = Uuid::new_v4().to_string();
-    let key = generate_key();
-    let key_hash = hash_key(&key);
-    let prefix = &key[..DISPLAY_PREFIX_LEN];
-
-    if let Err(e) =
-        sqlx::query("INSERT INTO api_keys (id, name, key_hash, prefix) VALUES (?, ?, ?, ?)")
-            .bind(&id)
-            .bind(req.name.trim())
-            .bind(&key_hash)
-            .bind(prefix)
-            .execute(&state.db)
-            .await
-    {
-        tracing::error!("db error creating api key: {e}");
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
+    let minted = match mint_api_key(&state, req.name.trim()).await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!("db error creating api key: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
 
     // The full key is returned exactly once — it cannot be recovered later.
     (
         StatusCode::CREATED,
-        Json(
-            serde_json::json!({ "id": id, "name": req.name.trim(), "key": key, "prefix": prefix }),
-        ),
+        Json(serde_json::json!({
+            "id": minted.id,
+            "name": req.name.trim(),
+            "key": minted.key,
+            "prefix": minted.prefix,
+        })),
     )
         .into_response()
 }

@@ -16,6 +16,7 @@ import {
   getApiKeys,
   createApiKey,
   revokeApiKey,
+  createEnrollmentToken,
   getSettings,
   updateSettings,
   type ApiKey,
@@ -24,7 +25,8 @@ import {
   type Provider,
   type ProviderType,
 } from "../api";
-import { useDialogs, type Dialogs } from "../components/dialogs";
+import { QRCodeSVG } from "qrcode.react";
+import { useDialogs, type Dialogs, Modal } from "../components/dialogs";
 import { PageHeader, SectionLabel } from "../components/PageHeader";
 import { ThemeSwitcher } from "../components/ThemeSwitcher";
 import { Select } from "../components/Select";
@@ -312,6 +314,7 @@ function ApiKeysSection({ dialogs }: { dialogs: Dialogs }) {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
+  const [pairing, setPairing] = useState(false);
   // The plaintext of a just-created key, shown once until dismissed.
   const [fresh, setFresh] = useState<{ name: string; key: string } | null>(null);
 
@@ -355,6 +358,35 @@ function ApiKeysSection({ dialogs }: { dialogs: Dialogs }) {
         <code style={{ color: "#9ab" }}>/api/v1</code> API. Send the key as{" "}
         <code style={{ color: "#9ab" }}>Authorization: Bearer &lt;key&gt;</code>.
       </p>
+
+      <div
+        style={{
+          ...S.card,
+          flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "0.7rem 1rem",
+          marginBottom: "1rem",
+          gap: "1rem",
+        }}
+      >
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontWeight: 600, fontSize: "0.9rem" }}>Pair a device</div>
+          <div style={{ color: "var(--bf-faint)", fontSize: "0.74rem" }}>
+            Scan a QR from the tablet to authorize it — no key to type.
+          </div>
+        </div>
+        <Button onClick={() => setPairing(true)}>Pair…</Button>
+      </div>
+
+      {pairing && (
+        <PairDeviceModal
+          onClose={() => {
+            setPairing(false);
+            void load(); // a freshly paired device's key shows up in the list
+          }}
+        />
+      )}
 
       {fresh && (
         <div
@@ -439,6 +471,90 @@ function ApiKeysSection({ dialogs }: { dialogs: Dialogs }) {
         </Button>
       </div>
     </section>
+  );
+}
+
+// Mints a pairing token and renders it as a QR the companion app scans. The
+// payload carries the server origin + token so the device knows where to redeem
+// it. The token is single-use and short-lived; we count it down and let the user
+// re-mint when it lapses.
+function PairDeviceModal({ onClose }: { onClose: () => void }) {
+  const [token, setToken] = useState<string | null>(null);
+  const [secondsLeft, setSecondsLeft] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+
+  async function mint() {
+    setError(null);
+    setToken(null);
+    try {
+      const t = await createEnrollmentToken();
+      setToken(t.token);
+      setSecondsLeft(t.expires_in_secs);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Couldn't create a pairing code.");
+    }
+  }
+
+  useEffect(() => {
+    void mint();
+  }, []);
+
+  useEffect(() => {
+    if (secondsLeft <= 0) return;
+    const t = setInterval(() => setSecondsLeft((s) => Math.max(0, s - 1)), 1000);
+    return () => clearInterval(t);
+  }, [secondsLeft > 0]);
+
+  const expired = token !== null && secondsLeft <= 0;
+  // What the tablet scans: where to redeem (origin) + the one-time token.
+  const payload = token
+    ? JSON.stringify({ v: 1, base_url: window.location.origin, token })
+    : "";
+
+  return (
+    <Modal title="Pair a device" onClose={onClose} width={340}>
+      <p style={{ margin: "0.8rem 0 1rem", color: "var(--bf-faint)", fontSize: "0.84rem" }}>
+        On the tablet, open the Bifrost app → <strong>Pair</strong>, then point its
+        camera at this code. It authorizes itself — nothing to type.
+      </p>
+
+      {error && (
+        <p style={{ color: "var(--bf-bad, #e57)", fontSize: "0.84rem" }}>{error}</p>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "0.8rem" }}>
+        {token && (
+          <div
+            style={{
+              background: "#fff",
+              padding: "0.9rem",
+              borderRadius: 10,
+              // Dim + non-scannable once it's lapsed, to avoid a stale scan.
+              opacity: expired ? 0.25 : 1,
+              transition: "opacity 0.2s",
+            }}
+          >
+            <QRCodeSVG value={payload} size={220} marginSize={0} />
+          </div>
+        )}
+        {!token && !error && (
+          <div style={{ color: "var(--bf-faint)", fontSize: "0.85rem", padding: "3rem 0" }}>
+            Generating…
+          </div>
+        )}
+
+        {expired ? (
+          <Button onClick={() => void mint()}>Generate a new code</Button>
+        ) : (
+          token && (
+            <div style={{ color: "var(--bf-faint)", fontSize: "0.78rem" }}>
+              Expires in {Math.floor(secondsLeft / 60)}:
+              {String(secondsLeft % 60).padStart(2, "0")}
+            </div>
+          )
+        )}
+      </div>
+    </Modal>
   );
 }
 

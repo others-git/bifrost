@@ -157,9 +157,36 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
     (to(r1), to(g1), to(b1))
 }
 
+/// sRGB → (hue 0–360, saturation 0–1). The inverse of [`hsv_to_rgb`]'s hue/sat,
+/// used to drive LIFX colour by hue+saturation only (see [`state_to_body`]).
+fn rgb_to_hs(r: u8, g: u8, b: u8) -> (f32, f32) {
+    let (rf, gf, bf) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+    let max = rf.max(gf).max(bf);
+    let min = rf.min(gf).min(bf);
+    let delta = max - min;
+    let hue = if delta == 0.0 {
+        0.0
+    } else if max == rf {
+        60.0 * ((gf - bf) / delta).rem_euclid(6.0)
+    } else if max == gf {
+        60.0 * ((bf - rf) / delta + 2.0)
+    } else {
+        60.0 * ((rf - gf) / delta + 4.0)
+    };
+    let sat = if max == 0.0 { 0.0 } else { delta / max };
+    (hue, sat)
+}
+
 /// Build the LIFX state PUT body (power + brightness + colour) from a Bifrost
 /// state. Colour and colour temperature are mutually exclusive — a `color` wins
 /// over a `kelvin` temperature, matching the per-light cache merge.
+///
+/// Colour is sent as **hue + saturation only**, never `rgb:`. LIFX derives
+/// brightness from the magnitude of an `rgb:` triple, so `rgb:255,0,0` forces
+/// the bulb to full brightness; since Bifrost stores colour at full value
+/// (brightness is a separate channel), a colour-only change would jump the bulb
+/// to max. Hue+saturation leaves brightness untouched, so it changes only when
+/// the explicit `brightness` field is present.
 fn state_to_body(state: &LightState) -> serde_json::Value {
     let mut body = json!({ "power": if state.on { "on" } else { "off" } });
     if let Some(b) = state.brightness {
@@ -167,7 +194,8 @@ fn state_to_body(state: &LightState) -> serde_json::Value {
     }
     if let Some(color) = &state.color {
         let (r, g, b) = color.to_rgb();
-        body["color"] = json!(format!("rgb:{r},{g},{b}"));
+        let (hue, sat) = rgb_to_hs(r, g, b);
+        body["color"] = json!(format!("hue:{hue:.1} saturation:{sat:.4}"));
     } else if let Some(mirek) = state.color_temp_mirek {
         let kelvin = (1_000_000u32 / mirek.max(1) as u32).clamp(1500, 9000);
         body["color"] = json!(format!("kelvin:{kelvin}"));
@@ -256,29 +284,53 @@ impl LightProvider for LifxProvider {
     }
 
     /// Mirror LIFX groups as Bifrost-linkable provider groups: cluster the
-    /// account's bulbs by their `group`, preserving first-seen order so the
-    /// synced rooms come out stable. `grouped_ref` is the `group_id:<id>`
+    /// account's bulbs by their `group` **id**, preserving first-seen order so
+    /// the synced rooms come out stable. `grouped_ref` is the `group_id:<id>`
     /// selector, enabling single-call group control via `set_group_state`.
+    ///
+    /// LIFX caches the group *name* on each bulb independently, so a rename can
+    /// leave a stale member reporting the old name (e.g. one bulb still says
+    /// "Bathroom" after the group was renamed "Bedeoom"). We therefore take the
+    /// **majority** name across the group's members rather than whichever bulb
+    /// the API happened to list first — a single laggy bulb can't misname the
+    /// room.
     async fn discover_groups(&self) -> Result<Vec<ProviderGroup>> {
         let lights = self.fetch_lights("all").await?;
         let mut order: Vec<String> = Vec::new();
-        let mut groups: HashMap<String, ProviderGroup> = HashMap::new();
+        let mut members: HashMap<String, Vec<String>> = HashMap::new();
+        // group id → (name → how many members report it)
+        let mut name_votes: HashMap<String, HashMap<String, usize>> = HashMap::new();
         for l in lights {
             let Some(g) = l.group else { continue };
-            let entry = groups.entry(g.id.clone()).or_insert_with(|| {
+            if !members.contains_key(&g.id) {
                 order.push(g.id.clone());
-                ProviderGroup {
-                    provider_group_id: g.id.clone(),
-                    name: g.name,
-                    member_device_ids: Vec::new(),
-                    grouped_ref: Some(format!("group_id:{}", g.id)),
-                }
-            });
-            entry.member_device_ids.push(l.id);
+            }
+            members.entry(g.id.clone()).or_default().push(l.id);
+            *name_votes
+                .entry(g.id.clone())
+                .or_default()
+                .entry(g.name)
+                .or_default() += 1;
         }
         Ok(order
             .into_iter()
-            .filter_map(|id| groups.remove(&id))
+            .map(|id| {
+                // Most-reported name wins; ties broken lexicographically so the
+                // result is deterministic regardless of map iteration order.
+                let name = name_votes
+                    .remove(&id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .max_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)))
+                    .map(|(n, _)| n)
+                    .unwrap_or_default();
+                ProviderGroup {
+                    member_device_ids: members.remove(&id).unwrap_or_default(),
+                    grouped_ref: Some(format!("group_id:{id}")),
+                    provider_group_id: id,
+                    name,
+                }
+            })
             .collect())
     }
 
@@ -352,6 +404,22 @@ mod tests {
         assert_eq!(hsv_to_rgb(0.0, 1.0, 1.0), (255, 0, 0));
         assert_eq!(hsv_to_rgb(120.0, 1.0, 1.0), (0, 255, 0));
         assert_eq!(hsv_to_rgb(240.0, 1.0, 1.0), (0, 0, 255));
+    }
+
+    #[test]
+    fn rgb_to_hs_primaries_and_gray() {
+        let approx = |(h, s): (f32, f32), eh: f32, es: f32| {
+            assert!((h - eh).abs() < 0.5, "hue {h} vs {eh}");
+            assert!((s - es).abs() < 0.01, "sat {s} vs {es}");
+        };
+        approx(rgb_to_hs(255, 0, 0), 0.0, 1.0);
+        approx(rgb_to_hs(0, 255, 0), 120.0, 1.0);
+        approx(rgb_to_hs(0, 0, 255), 240.0, 1.0);
+        // Brightness is carried separately, so a dim-but-saturated value still
+        // reports full saturation (magnitude doesn't leak into colour).
+        approx(rgb_to_hs(60, 0, 0), 0.0, 1.0);
+        // Gray/white has no saturation.
+        approx(rgb_to_hs(128, 128, 128), 0.0, 0.0);
     }
 
     #[tokio::test]
@@ -434,7 +502,36 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
         assert_eq!(body["power"], "on");
         assert!((body["brightness"].as_f64().unwrap() - 0.4).abs() < 1e-6);
-        assert_eq!(body["color"], "rgb:255,0,0");
+        // Colour goes as hue+saturation (red → hue 0, sat 1), never `rgb:` —
+        // LIFX would otherwise infer brightness from the RGB magnitude.
+        assert_eq!(body["color"], "hue:0.0 saturation:1.0000");
+    }
+
+    #[tokio::test]
+    async fn color_only_change_does_not_force_brightness() {
+        // The whole-room colour bug: a colour-only change (no brightness) must
+        // not carry a brightness field, and must use hue+saturation so LIFX
+        // leaves the bulb's current brightness alone (rgb: would jump it to max).
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/lights/id:x/state"))
+            .respond_with(ResponseTemplate::new(207))
+            .mount(&server)
+            .await;
+        let state = LightState {
+            on: true,
+            color: Some(Color::from_rgb(0, 255, 0)), // pure green
+            ..Default::default()
+        };
+        mock_provider(&server)
+            .await
+            .set_state("x", &state)
+            .await
+            .unwrap();
+        let req = &server.received_requests().await.unwrap()[0];
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        assert!(body.get("brightness").is_none(), "must not send brightness");
+        assert_eq!(body["color"], "hue:120.0 saturation:1.0000");
     }
 
     #[tokio::test]
@@ -570,6 +667,37 @@ mod tests {
 
         let bedroom = &groups[1];
         assert_eq!(bedroom.member_device_ids, vec!["d073d5000003"]);
+    }
+
+    #[tokio::test]
+    async fn discover_groups_uses_majority_name_when_lifx_caches_stale_names() {
+        // Real LIFX behaviour: all bulbs share one group id, but a renamed group
+        // can leave a laggy bulb reporting the old name. The majority wins, even
+        // when the stale bulb is listed first.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/lights/all"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                light_json_in_group("d073d5000004", "grp-1", "Bathroom"), // stale, first
+                light_json_in_group("d073d5000003", "grp-1", "Bedeoom"),
+                light_json_in_group("d073d5000002", "grp-1", "Bedeoom"),
+                light_json_in_group("d073d5000001", "grp-1", "Bedeoom"),
+            ])))
+            .mount(&server)
+            .await;
+
+        let groups = mock_provider(&server)
+            .await
+            .discover_groups()
+            .await
+            .unwrap();
+        assert_eq!(groups.len(), 1, "one group id → one room");
+        assert_eq!(
+            groups[0].name, "Bedeoom",
+            "majority name, not the stale first bulb"
+        );
+        assert_eq!(groups[0].member_device_ids.len(), 4, "all members kept");
+        assert_eq!(groups[0].grouped_ref.as_deref(), Some("group_id:grp-1"));
     }
 
     #[tokio::test]

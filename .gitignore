@@ -14,3 +14,6 @@ bifrost.db
 # Local dev runtime data
 /data/
 TODO
+
+# Local dev server launcher (holds BIFROST_SECRET) — never commit
+/dev.sh
