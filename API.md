@@ -387,6 +387,34 @@ A client scans it, then `POST`s `{ token, device_name }` to
 `base_url + /api/enrollment/redeem` and stores the returned `key` for all
 subsequent `/api/v1` + `/api/voice` calls.
 
+## Kiosk control (`/api/kiosks`)
+
+Manage the wall-tablet companion apps. A kiosk is identified by the `bfr_` key it
+was paired with (via enrollment); it **checks in** on a heartbeat and the server
+hands back a queued command. Management endpoints are **session-only** (driven
+from a phone/desktop), so they aren't reachable with a kiosk key — and the
+companion app sets a `BifrostKiosk/<ver>` User-Agent suffix so the frontend hides
+this view on the kiosk itself.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `POST` | `/api/kiosks/checkin` | **kiosk key** | Heartbeat: `{ name?, app_version?, screen_on? }` → `{ command }` (queued command, consumed) |
+| `GET` | `/api/kiosks` | session | List kiosks: `[{ id, name, app_version, screen_on, last_seen, online, pending_command, authorized }]` |
+| `POST` | `/api/kiosks/{id}/command` | session | Queue `{ command }` — one of `sleep`, `wake`, `lock` |
+| `POST` | `/api/kiosks/{id}/deauth` | session | Revoke the kiosk's key (it must re-enroll) |
+| `DELETE` | `/api/kiosks/{id}` | session | Forget a kiosk record |
+
+**Command semantics** (the app performs these on check-in):
+- `sleep` / `wake` — turn the display off / on.
+- `lock` — force sign-out of the Bifrost WebView session (re-enter password).
+- **de-auth** is *not* a queued command — it revokes the key immediately, so the
+  app's next call gets `401` and it re-enrolls via a fresh QR scan.
+
+**Companion-app contract:** check in every ~30–60s with the paired key; act on a
+returned `command` (and clear nothing — the server consumes it); treat a `401`
+from any authed call as "de-authed" → drop to QR enrollment. Set the WebView
+User-Agent to include `BifrostKiosk/<version>`.
+
 ## Voice control (`/api/voice`)
 
 Natural-language command endpoints, gated by the **same Bearer API keys** as

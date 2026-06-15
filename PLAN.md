@@ -8,6 +8,17 @@
 ## Open milestones — what's left
 
 **Next up (small, scoped):**
+- **M29 — Kiosk controller** *(backend DONE in tree; dashboard + app pending)* — see
+  and manage the wall-tablet companion apps. A kiosk is identified by its `bfr_`
+  key; it **checks in** on a heartbeat (`POST /api/kiosks/checkin`, key-auth) and
+  the server returns a queued command. Management is **session-only** (mobile/
+  desktop, not the kiosk): `GET /api/kiosks` (clients view), `POST …/{id}/command`
+  (`sleep`/`wake`/`lock` — lock = force WebView sign-out), `POST …/{id}/deauth`
+  (revoke key → app re-enrolls via QR on 401), `DELETE …/{id}`. Migration 0032,
+  `api::kiosks`; documented in `API.md`. **Remaining:** dashboard "Clients" page
+  (hidden on kiosk via `BifrostKiosk` UA); companion-app check-in loop + command
+  handling + UA suffix (other repo). Later: browser-session clients in the same
+  view; server-side kiosk-kind session enforcement.
 - **M28 — QR device pairing** *(backend + dashboard DONE in tree; app side pending)* —
   authorize headless devices (the wall tablet) without typing a key. An authed
   session mints a short-lived, single-use enrollment token (`POST /api/enrollment`)

@@ -3096,6 +3096,176 @@ async fn enrollment_token_is_single_use() {
     );
 }
 
+// ── Kiosk controller ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn kiosk_checkin_requires_api_key() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(anon_json("POST", "/api/kiosks/checkin", "{}"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn kiosk_list_and_command_require_session() {
+    let app = helpers::test_app_with_password().await;
+    for (method, uri) in [("GET", "/api/kiosks"), ("POST", "/api/kiosks/x/command")] {
+        let resp = app
+            .clone()
+            .oneshot(anon_json(method, uri, r#"{"command":"sleep"}"#))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn kiosk_checkin_registers_and_command_is_delivered_once() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "Bedroom tablet").await;
+
+    // First check-in registers the kiosk; nothing queued yet.
+    let r = app
+        .clone()
+        .oneshot(bearer_json(
+            "POST",
+            "/api/kiosks/checkin",
+            &key,
+            r#"{"app_version":"0.1","screen_on":true}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert!(helpers::response_json(r).await["command"].is_null());
+
+    // It shows up in the session-only clients view, online + authorized.
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let kiosk = &list.as_array().unwrap()[0];
+    assert_eq!(kiosk["name"], "Bedroom tablet");
+    assert_eq!(kiosk["online"], true);
+    assert_eq!(kiosk["authorized"], true);
+    let kiosk_id = kiosk["id"].as_str().unwrap().to_string();
+
+    // Queue a lock; the next check-in delivers it, the one after is clear.
+    let q = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/kiosks/{kiosk_id}/command"),
+            &cookie,
+            r#"{"command":"lock"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(q.status(), StatusCode::NO_CONTENT);
+
+    let r1 = helpers::response_json(
+        app.clone()
+            .oneshot(bearer_json("POST", "/api/kiosks/checkin", &key, "{}"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(r1["command"], "lock", "command delivered on check-in");
+    let r2 = helpers::response_json(
+        app.clone()
+            .oneshot(bearer_json("POST", "/api/kiosks/checkin", &key, "{}"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(r2["command"].is_null(), "command consumed (delivered once)");
+}
+
+#[tokio::test]
+async fn kiosk_command_rejects_unknown_verb() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "tablet").await;
+    app.clone()
+        .oneshot(bearer_json("POST", "/api/kiosks/checkin", &key, "{}"))
+        .await
+        .unwrap();
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let id = list.as_array().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = app
+        .oneshot(helpers::authed_post(
+            &format!("/api/kiosks/{id}/command"),
+            &cookie,
+            r#"{"command":"explode"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn kiosk_deauth_revokes_the_key_and_marks_unauthorized() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "tablet").await;
+    app.clone()
+        .oneshot(bearer_json("POST", "/api/kiosks/checkin", &key, "{}"))
+        .await
+        .unwrap();
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let id = list.as_array().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let d = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/kiosks/{id}/deauth"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(d.status(), StatusCode::NO_CONTENT);
+
+    // The revoked key no longer authenticates a check-in.
+    let r = app
+        .clone()
+        .oneshot(bearer_json("POST", "/api/kiosks/checkin", &key, "{}"))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+
+    // The kiosk row survives, now flagged as needing re-pair.
+    let list = helpers::response_json(
+        app.oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(list.as_array().unwrap()[0]["authorized"], false);
+}
+
 #[tokio::test]
 async fn api_keys_management_requires_session() {
     let app = helpers::test_app_with_password().await;

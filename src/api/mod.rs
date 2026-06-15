@@ -5,6 +5,7 @@ pub mod auth;
 pub mod dedup;
 pub mod enrollment;
 pub mod events;
+pub mod kiosks;
 pub mod lights;
 pub mod mcp;
 pub mod palette_scenes;
@@ -124,6 +125,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .nest("/auth", auth::router())
         .nest("/enrollment", enrollment::router())
         .nest("/events", events::router())
+        .nest("/kiosks", kiosks::router())
         .nest("/lights", lights::router())
         .nest("/palette-scenes", palette_scenes::router())
         .nest("/plans", plans::router())
