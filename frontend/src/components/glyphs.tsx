@@ -20,6 +20,15 @@ const base = {
 // <svg> so sizing and stroke styling live in one place.
 
 const BODIES: Record<string, JSX.Element> = {
+  logout: (
+    // The power symbol (a broken ring + top bar) — the sign-out affordance.
+    // Drawn as SVG so it renders everywhere; the `⏻` glyph is missing from many
+    // device fonts and shows as tofu.
+    <>
+      <path d="M12 3v8.5" />
+      <path d="M7.8 6.7a6.5 6.5 0 1 0 8.4 0" />
+    </>
+  ),
   bulb: (
     <>
       <path d="M9.5 18.5h5" />

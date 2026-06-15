@@ -1,5 +1,6 @@
 import { useEffect, useState, type MouseEvent } from "react";
 import { getHealth, getLights, logout, getSetupStatus, type Light } from "./api";
+import { Glyph } from "./components/glyphs";
 import { SetupPage } from "./pages/Setup";
 import { LoginPage } from "./pages/Login";
 import { DashboardPage } from "./pages/Dashboard";
@@ -199,9 +200,9 @@ function MobileTopBar({
       <button
         onClick={onLogout}
         aria-label="Sign out"
-        style={{ background: "none", border: "none", color: color.faint, cursor: "pointer", fontSize: "1.1rem", padding: "0.2rem 0.3rem" }}
+        style={{ display: "grid", placeItems: "center", background: "none", border: "none", color: color.faint, cursor: "pointer", padding: "0.2rem 0.3rem" }}
       >
-        ⏻
+        <Glyph name="logout" size={18} />
       </button>
     </header>
   );
@@ -384,7 +385,7 @@ function NavTray({
           overflow: "hidden",
         }}
       >
-        <span style={{ fontSize: "1rem", width: 18, textAlign: "center", flexShrink: 0 }}>⏻</span>
+        <span style={{ width: 18, display: "grid", placeItems: "center", flexShrink: 0 }}><Glyph name="logout" size={18} /></span>
         {!collapsed && "Sign out"}
       </button>
 
