@@ -3,6 +3,7 @@ pub mod govee;
 pub mod govee_lan;
 pub mod ha;
 pub mod hue;
+pub mod lifx;
 pub mod onkyo;
 pub mod shelly;
 pub mod sonos;
@@ -587,6 +588,7 @@ pub fn default_registry() -> ProviderRegistry {
     // registered in test fixtures as the generic mockable light provider.
     r.register(hue::HueProviderFactory);
     r.register(govee::GoveeProviderFactory);
+    r.register(lifx::LifxProviderFactory);
     // Home Assistant serves multiple device domains from one provider row:
     // lights, power (switch/fan/plug), and audio (media_player — TVs, speakers).
     // It appears once in the add-provider menu as an "Integration" (its light

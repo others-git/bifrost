@@ -350,7 +350,7 @@ async fn add_provider_with_unknown_type_returns_400() {
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::COOKIE, cookie_val)
                 .body(Body::from(
-                    r#"{"name":"Test","provider_type":"lifx","credentials":{}}"#,
+                    r#"{"name":"Test","provider_type":"nonexistent_provider","credentials":{}}"#,
                 ))
                 .unwrap(),
         )

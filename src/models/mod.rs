@@ -28,6 +28,7 @@ pub struct Light {
 pub enum Provider {
     Hue,
     Govee,
+    Lifx,
     Wled,
     Tasmota,
     Shelly,

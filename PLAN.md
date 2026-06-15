@@ -285,7 +285,7 @@ A self-hosted Rust smart home hub that is:
 | 4 — More providers | WLED, Tasmota, Shelly Gen1; schema migration removes type constraint |
 | 4.5 — Functional Hue + Govee | Link-button pairing UI, PollingManager, color picker, auto-discovery |
 | 5 — Production readiness | Global palette scenes, rooms/groups, Docker Compose, health v2 |
-| 6 — LIFX | Cloud REST provider (LAN/UDP deferred) |
+| 6 — LIFX | Cloud REST `LightProvider` (`api.lifx.com`, Bearer token) — discover/set/get, HSBK ⇄ Bifrost xy-colour/mirek, MAC-serial `hw_id` for de-dup; registered + wiremock-tested. LAN/UDP still deferred. |
 | 7 — Floor Plan | Tile editor, wall/room painting, light placement, live glow from SSE |
 | 8 — UI overhaul | Shared LightEditor popover, in-app dialogs, Lights page, strip corners |
 | 8.x — Polish | Global scenes, Govee LAN (UDP), floor-plan save perf (WAL + transactions), RoomPicker, aurora navbar, electric toggles |

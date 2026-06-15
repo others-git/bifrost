@@ -18,6 +18,7 @@ Registered in `ProviderRegistry::default_registry()` (`src/providers/mod.rs`). *
 |---|---|---|---|
 | Light | `hue` | Philips Hue | SSE push |
 | Light | `govee` | Govee (Cloud) | poll |
+| Light | `lifx` | LIFX (Cloud) | poll — `api.lifx.com` Bearer token; HSBK ⇄ xy/mirek |
 | Integration | `ha` | Home Assistant | **WebSocket push** (`subscribe_events`/`state_changed` via `HaPushManager`, `ConnectionMode::HaPush`) — one connection keeps lights+audio+power live; REST for discovery/control |
 | Audio | `onkyo` | Onkyo / Integra | eISCP — **one shared connection** per receiver (`OnkyoLink`): push + reads + writes multiplexed (incl. zone 2) |
 | Audio | `sonos` | Sonos | UPnP; **GENA push + heartbeat poll** for live state, live grouping, favorites — **on hold** |
@@ -26,7 +27,7 @@ Registered in `ProviderRegistry::default_registry()` (`src/providers/mod.rs`). *
 
 **Receiver binding (M22).** A **source** audio device (TV / streamer / console) can be **bound to a receiver** that owns its volume (`audio_devices.receiver_id` + `receiver_source`, stored on the source, **many sources → one receiver**; migration 0026). The split lives in `AudioCommand::split_for_receiver` and is applied by `apply_audio_command` (the shared service fn, so session/`v1`/MCP all route identically): a bound source's `volume`/`mute` route to the receiver while `power`/`source`/`transport` stay on the source, and powering the source **on** wakes the receiver and switches it to `receiver_source` (power-**off** is not propagated — the receiver may serve other sources). Bind via `PUT /api/{,v1/}audio/devices/{id}/receiver` (`set_audio_receiver`; rejects self/unknown/chained), config on the Devices page. A bound source's read overlays the receiver's volume/mute.
 
-**Unregistered (code kept, dropped from the add-provider menu):** `govee-lan`, `shelly`, `tasmota`, `wled`. Their `LightProvider`/factory code still lives in the tree; they're simply not `register`ed in `default_registry`, so the first-class set stays Hue, Govee (Cloud), Home Assistant, Onkyo, Sonos. Re-add a `register(...)` line to bring one back. `wled` is still the generic mockable light provider in the integration-test fixtures (`tests/helpers.rs::test_registry`).
+**Unregistered (code kept, dropped from the add-provider menu):** `govee-lan`, `shelly`, `tasmota`, `wled`. Their `LightProvider`/factory code still lives in the tree; they're simply not `register`ed in `default_registry`, so the first-class set stays Hue, Govee (Cloud), LIFX (Cloud), Home Assistant, Onkyo, Sonos. Re-add a `register(...)` line to bring one back. `wled` is still the generic mockable light provider in the integration-test fixtures (`tests/helpers.rs::test_registry`).
 
 The **Domain** column above is the **add-provider UI category** (`ProviderDomain`: `Light` / `Audio` / `Integration`), set per-factory via `ProviderFactory::domain()` (defaults to `Light`). It is *not* the functional device domain.
 
