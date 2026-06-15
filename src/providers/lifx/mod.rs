@@ -10,13 +10,14 @@
 //! bulb maps to an RGB colour, an unsaturated one to a white temperature.
 
 use crate::models::{Color, Light, LightCapabilities, LightState, Provider};
-use crate::providers::LightProvider;
+use crate::providers::{LightProvider, ProviderGroup};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use chrono::Utc;
 use reqwest::{Client, header};
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 const BASE_URL: &str = "https://api.lifx.com/v1";
@@ -62,6 +63,24 @@ impl LifxProvider {
         Ok(resp.json().await?)
     }
 
+    /// PUT a state body to a LIFX selector (`id:<id>`, `group_id:<id>`, …).
+    /// Shared by per-light `set_state` and native group control.
+    async fn put_state(&self, selector: &str, body: &serde_json::Value) -> Result<()> {
+        let resp = self
+            .client
+            .put(format!("{}/lights/{selector}/state", self.base_url))
+            .json(body)
+            .send()
+            .await
+            .context("LIFX set_state request failed")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            bail!("LIFX control error {status}: {text}");
+        }
+        Ok(())
+    }
+
     /// Test constructor: points at a local HTTP mock server instead of the LIFX cloud.
     #[cfg(test)]
     pub fn new_for_test(base_url: impl Into<String>, token: impl AsRef<str>) -> Result<Self> {
@@ -85,6 +104,15 @@ struct LifxLight {
     color: LifxColor,
     #[serde(default)]
     product: Option<LifxProduct>,
+    /// The LIFX group this bulb belongs to (mirrored as a Bifrost Room).
+    #[serde(default)]
+    group: Option<LifxGroup>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LifxGroup {
+    id: String,
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -127,6 +155,24 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
     let m = v - c;
     let to = |f: f32| ((f + m) * 255.0).round().clamp(0.0, 255.0) as u8;
     (to(r1), to(g1), to(b1))
+}
+
+/// Build the LIFX state PUT body (power + brightness + colour) from a Bifrost
+/// state. Colour and colour temperature are mutually exclusive — a `color` wins
+/// over a `kelvin` temperature, matching the per-light cache merge.
+fn state_to_body(state: &LightState) -> serde_json::Value {
+    let mut body = json!({ "power": if state.on { "on" } else { "off" } });
+    if let Some(b) = state.brightness {
+        body["brightness"] = json!((b / 100.0).clamp(0.0, 1.0));
+    }
+    if let Some(color) = &state.color {
+        let (r, g, b) = color.to_rgb();
+        body["color"] = json!(format!("rgb:{r},{g},{b}"));
+    } else if let Some(mirek) = state.color_temp_mirek {
+        let kelvin = (1_000_000u32 / mirek.max(1) as u32).clamp(1500, 9000);
+        body["color"] = json!(format!("kelvin:{kelvin}"));
+    }
+    body
 }
 
 fn lifx_to_light(l: LifxLight) -> Light {
@@ -195,31 +241,8 @@ impl LightProvider for LifxProvider {
     async fn set_state(&self, provider_id: &str, state: &LightState) -> Result<()> {
         // One PUT carries the whole state — LIFX applies power + brightness +
         // colour atomically (unlike Govee's one-request-per-capability).
-        let mut body = json!({ "power": if state.on { "on" } else { "off" } });
-        if let Some(b) = state.brightness {
-            body["brightness"] = json!((b / 100.0).clamp(0.0, 1.0));
-        }
-        if let Some(color) = &state.color {
-            let (r, g, b) = color.to_rgb();
-            body["color"] = json!(format!("rgb:{r},{g},{b}"));
-        } else if let Some(mirek) = state.color_temp_mirek {
-            let kelvin = (1_000_000u32 / mirek.max(1) as u32).clamp(1500, 9000);
-            body["color"] = json!(format!("kelvin:{kelvin}"));
-        }
-
-        let resp = self
-            .client
-            .put(format!("{}/lights/id:{provider_id}/state", self.base_url))
-            .json(&body)
-            .send()
+        self.put_state(&format!("id:{provider_id}"), &state_to_body(state))
             .await
-            .context("LIFX set_state request failed")?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            bail!("LIFX control error {status}: {text}");
-        }
-        Ok(())
     }
 
     async fn get_state(&self, provider_id: &str) -> Result<LightState> {
@@ -230,6 +253,40 @@ impl LightProvider for LifxProvider {
             .next()
             .ok_or_else(|| anyhow::anyhow!("LIFX light '{provider_id}' not found"))?;
         Ok(lifx_to_light(light).state)
+    }
+
+    /// Mirror LIFX groups as Bifrost-linkable provider groups: cluster the
+    /// account's bulbs by their `group`, preserving first-seen order so the
+    /// synced rooms come out stable. `grouped_ref` is the `group_id:<id>`
+    /// selector, enabling single-call group control via `set_group_state`.
+    async fn discover_groups(&self) -> Result<Vec<ProviderGroup>> {
+        let lights = self.fetch_lights("all").await?;
+        let mut order: Vec<String> = Vec::new();
+        let mut groups: HashMap<String, ProviderGroup> = HashMap::new();
+        for l in lights {
+            let Some(g) = l.group else { continue };
+            let entry = groups.entry(g.id.clone()).or_insert_with(|| {
+                order.push(g.id.clone());
+                ProviderGroup {
+                    provider_group_id: g.id.clone(),
+                    name: g.name,
+                    member_device_ids: Vec::new(),
+                    grouped_ref: Some(format!("group_id:{}", g.id)),
+                }
+            });
+            entry.member_device_ids.push(l.id);
+        }
+        Ok(order
+            .into_iter()
+            .filter_map(|id| groups.remove(&id))
+            .collect())
+    }
+
+    /// Drive a whole LIFX group in one cloud call via its `group_id:<id>`
+    /// selector (the `grouped_ref` from `discover_groups`).
+    async fn set_group_state(&self, grouped_ref: &str, state: &LightState) -> Result<bool> {
+        self.put_state(grouped_ref, &state_to_body(state)).await?;
+        Ok(true)
     }
 }
 
@@ -467,5 +524,103 @@ mod tests {
     #[test]
     fn factory_build_rejects_missing_token() {
         assert!(LifxProviderFactory.build(r#"{}"#).is_err());
+    }
+
+    fn light_json_in_group(id: &str, group_id: &str, group_name: &str) -> serde_json::Value {
+        json!({
+            "id": id,
+            "label": id,
+            "connected": true,
+            "power": "on",
+            "brightness": 0.5,
+            "color": { "hue": 0.0, "saturation": 0.0, "kelvin": 3500 },
+            "group": { "id": group_id, "name": group_name }
+        })
+    }
+
+    #[tokio::test]
+    async fn discover_groups_clusters_bulbs_by_lifx_group() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/lights/all"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                light_json_in_group("d073d5000001", "grp-kitchen", "Kitchen"),
+                light_json_in_group("d073d5000002", "grp-kitchen", "Kitchen"),
+                light_json_in_group("d073d5000003", "grp-bedroom", "Bedroom"),
+            ])))
+            .mount(&server)
+            .await;
+
+        let groups = mock_provider(&server)
+            .await
+            .discover_groups()
+            .await
+            .unwrap();
+        assert_eq!(groups.len(), 2);
+
+        let kitchen = &groups[0];
+        assert_eq!(kitchen.name, "Kitchen");
+        assert_eq!(kitchen.provider_group_id, "grp-kitchen");
+        assert_eq!(
+            kitchen.member_device_ids,
+            vec!["d073d5000001", "d073d5000002"]
+        );
+        // grouped_ref is the selector that drives the whole group in one call.
+        assert_eq!(kitchen.grouped_ref.as_deref(), Some("group_id:grp-kitchen"));
+
+        let bedroom = &groups[1];
+        assert_eq!(bedroom.member_device_ids, vec!["d073d5000003"]);
+    }
+
+    #[tokio::test]
+    async fn discover_groups_skips_ungrouped_bulbs() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/lights/all"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([light_json(
+                "d073d5000009",
+                "Lonely",
+                true,
+                0.0,
+                3000
+            )])))
+            .mount(&server)
+            .await;
+        assert!(
+            mock_provider(&server)
+                .await
+                .discover_groups()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn set_group_state_drives_group_id_selector_in_one_call() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/lights/group_id:grp-kitchen/state"))
+            .and(header("authorization", "Bearer tok"))
+            .respond_with(ResponseTemplate::new(207))
+            .mount(&server)
+            .await;
+
+        let state = LightState {
+            on: true,
+            brightness: Some(60.0),
+            ..Default::default()
+        };
+        let handled = mock_provider(&server)
+            .await
+            .set_group_state("group_id:grp-kitchen", &state)
+            .await
+            .unwrap();
+        assert!(handled, "LIFX advertises native group control");
+
+        let req = &server.received_requests().await.unwrap()[0];
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        assert_eq!(body["power"], "on");
+        assert!((body["brightness"].as_f64().unwrap() - 0.6).abs() < 1e-6);
     }
 }

@@ -18,7 +18,7 @@ Registered in `ProviderRegistry::default_registry()` (`src/providers/mod.rs`). *
 |---|---|---|---|
 | Light | `hue` | Philips Hue | SSE push |
 | Light | `govee` | Govee (Cloud) | poll |
-| Light | `lifx` | LIFX (Cloud) | poll — `api.lifx.com` Bearer token; HSBK ⇄ xy/mirek |
+| Light | `lifx` | LIFX (Cloud) | poll — `api.lifx.com` Bearer token; HSBK ⇄ xy/mirek; LIFX groups → Rooms (`discover_groups`), one-call `group_id:` group control |
 | Integration | `ha` | Home Assistant | **WebSocket push** (`subscribe_events`/`state_changed` via `HaPushManager`, `ConnectionMode::HaPush`) — one connection keeps lights+audio+power live; REST for discovery/control |
 | Audio | `onkyo` | Onkyo / Integra | eISCP — **one shared connection** per receiver (`OnkyoLink`): push + reads + writes multiplexed (incl. zone 2) |
 | Audio | `sonos` | Sonos | UPnP; **GENA push + heartbeat poll** for live state, live grouping, favorites — **on hold** |
