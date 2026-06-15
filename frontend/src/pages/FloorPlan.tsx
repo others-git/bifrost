@@ -39,7 +39,7 @@ import { SceneButton, SceneModal } from "../components/scenes";
 import { Modal, useDialogs } from "../components/dialogs";
 import { ACCENT, S } from "../styles";
 import { alpha } from "../theme";
-import { Switch as SharedSwitch } from "../components/controls";
+import { Button, Switch as SharedSwitch } from "../components/controls";
 
 type Tool = "view" | "floor" | "wall" | "erase" | "place" | "room" | "paint";
 
@@ -534,10 +534,10 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                 Saving adds devices placed inside a room to that room (never removes).
               </span>
             )}
-            <button onClick={handleSave} disabled={!dirty} style={{ ...(dirty ? S.button : S.buttonGhost), marginLeft: "0.5rem" }}>
+            <Button variant={dirty ? "primary" : "ghost"} onClick={handleSave} disabled={!dirty} style={{ marginLeft: "0.5rem" }}>
               {dirty ? "Save changes" : "Saved"}
-            </button>
-            <button onClick={handleDelete} style={{ ...S.buttonDanger, marginLeft: "0.4rem" }}>Delete</button>
+            </Button>
+            <Button variant="danger" onClick={handleDelete} style={{ marginLeft: "0.4rem" }}>Delete</Button>
           </>
         )}
       </div>
@@ -643,19 +643,15 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                   {lights.map((l) => {
                     const sel = selected?.kind === "light" && selected.id === l.id;
                     return (
-                      <button
+                      <Button variant="ghost"
                         key={l.id}
-                        onClick={() => setSelected(sel ? null : { kind: "light", id: l.id })}
-                        style={{
-                          ...S.buttonGhost,
-                          textAlign: "left",
+                        onClick={() => setSelected(sel ? null : { kind: "light", id: l.id })} style={{ textAlign: "left",
                           fontSize: "0.8rem",
                           ...(sel ? { borderColor: ACCENT, color: ACCENT } : {}),
-                          ...(placedIds.has(l.id) ? { opacity: 0.55 } : {}),
-                        }}
+                          ...(placedIds.has(l.id) ? { opacity: 0.55 } : {}) }}
                       >
                         {placedIds.has(l.id) ? "✓ " : ""}{lightLabel(l)}
-                      </button>
+                      </Button>
                     );
                   })}
                   {lights.length === 0 && (
@@ -672,19 +668,15 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                   {[...audioById.values()].map((d) => {
                     const sel = selected?.kind === "audio" && selected.id === d.id;
                     return (
-                      <button
+                      <Button variant="ghost"
                         key={d.id}
-                        onClick={() => setSelected(sel ? null : { kind: "audio", id: d.id })}
-                        style={{
-                          ...S.buttonGhost,
-                          textAlign: "left",
+                        onClick={() => setSelected(sel ? null : { kind: "audio", id: d.id })} style={{ textAlign: "left",
                           fontSize: "0.8rem",
                           ...(sel ? { borderColor: ACCENT, color: ACCENT } : {}),
-                          ...(placedAudioIds.has(d.id) ? { opacity: 0.55 } : {}),
-                        }}
+                          ...(placedAudioIds.has(d.id) ? { opacity: 0.55 } : {}) }}
                       >
                         {placedAudioIds.has(d.id) ? "✓ " : ""}{d.name}
-                      </button>
+                      </Button>
                     );
                   })}
                   {audioById.size === 0 && (
@@ -793,21 +785,20 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                 const light = lights.find((l) => l.id === p.light_id);
                 const on = statesById.get(p.light_id)?.on ?? false;
                 return (
-                  <button
+                  <Button variant="ghost"
                     key={p.light_id}
                     onClick={() => {
                       setEditor({ kind: "light", id: p.light_id, anchor: { x: popover.px, y: popover.py } });
                       setPopover(null);
-                    }}
-                    style={{ ...S.buttonGhost, fontSize: "0.8rem", textAlign: "left", color: on ? ACCENT : "var(--bf-dim)" }}
+                    }} style={{ fontSize: "0.8rem", textAlign: "left", color: on ? ACCENT : "var(--bf-dim)" }}
                   >
                     {on ? "● " : "○ "}{light ? lightLabel(light) : p.light_id}
-                  </button>
+                  </Button>
                 );
               })}
-              <button onClick={() => setPopover(null)} style={{ ...S.buttonGhost, fontSize: "0.75rem", color: "var(--bf-faint)" }}>
+              <Button variant="ghost" onClick={() => setPopover(null)} style={{ fontSize: "0.75rem", color: "var(--bf-faint)" }}>
                 Close
-              </button>
+              </Button>
             </div>
           )}
         </>
@@ -964,10 +955,10 @@ function NewPlanDialog({
         <span style={{ color: "var(--bf-faint)", fontSize: "0.78rem" }}>feet — one tile per foot, max 128</span>
       </div>
       <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end", marginTop: "0.25rem" }}>
-        <button onClick={onClose} style={S.buttonGhost}>Cancel</button>
-        <button onClick={submit} disabled={!valid || busy} style={S.button}>
+        <Button variant="ghost" onClick={onClose}>Cancel</Button>
+        <Button onClick={submit} disabled={!valid || busy}>
           {busy ? "Creating…" : "Create"}
-        </button>
+        </Button>
       </div>
     </Modal>
   );
@@ -1130,25 +1121,21 @@ function RoomEditorPanel({
       <h3 style={{ margin: "0 0 0.2rem", fontSize: "0.9rem", color: "var(--bf-dim)" }}>Rooms</h3>
       {rooms.map((r, i) => (
         <div key={r.id} style={{ display: "flex", gap: "0.3rem", alignItems: "center" }}>
-          <button
-            onClick={() => onSelect(r.id === selectedRoom ? "" : r.id)}
-            style={{
-              ...S.buttonGhost,
-              flex: 1,
+          <Button variant="ghost"
+            onClick={() => onSelect(r.id === selectedRoom ? "" : r.id)} style={{ flex: 1,
               textAlign: "left",
               fontSize: "0.8rem",
               borderLeft: `3px solid ${ROOM_COLORS[i % ROOM_COLORS.length]}`,
-              ...(r.id === selectedRoom ? { borderColor: ACCENT, color: ACCENT } : {}),
-            }}
+              ...(r.id === selectedRoom ? { borderColor: ACCENT, color: ACCENT } : {}) }}
           >
             {r.name}
             <span style={{ color: "var(--bf-faint)", marginLeft: "0.4rem" }}>{r.tiles.size}</span>
-          </button>
-          <button onClick={() => onRename(r.id)} title="Rename" style={{ ...S.buttonGhost, padding: "0.3rem 0.5rem" }}>✎</button>
-          <button onClick={() => onDelete(r.id)} title="Delete" style={{ ...S.buttonGhost, padding: "0.3rem 0.5rem", color: "#866" }}>×</button>
+          </Button>
+          <Button variant="ghost" onClick={() => onRename(r.id)} title="Rename" style={{ padding: "0.3rem 0.5rem" }}>✎</Button>
+          <Button variant="ghost" onClick={() => onDelete(r.id)} title="Delete" style={{ padding: "0.3rem 0.5rem", color: "#866" }}>×</Button>
         </div>
       ))}
-      <button onClick={onCreate} style={S.buttonGhost}>+ New room</button>
+      <Button variant="ghost" onClick={onCreate}>+ New room</Button>
       {rooms.length > 0 && !selectedRoom && (
         <span style={{ color: "var(--bf-faint)", fontSize: "0.75rem" }}>Select a room, then paint its tiles.</span>
       )}

@@ -30,6 +30,7 @@ import { ThemeSwitcher } from "../components/ThemeSwitcher";
 import { Select } from "../components/Select";
 import { useViewport } from "../useViewport";
 import { ACCENT, S } from "../styles";
+import { Button } from "../components/controls";
 
 interface Props {
   onNavigate: (page: "dashboard") => void;
@@ -139,20 +140,19 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
 
       {providers.length > 0 && (
         <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginBottom: "1rem" }}>
-          <button onClick={() => runAll("discover")} disabled={!!running} style={S.buttonGhost} title="Discover devices on every provider">
+          <Button variant="ghost" onClick={() => runAll("discover")} disabled={!!running} title="Discover devices on every provider">
             {running === "discover" ? "Discovering…" : "Discover all"}
-          </button>
-          <button onClick={() => runAll("sync")} disabled={!!running} style={S.buttonGhost} title="Discover devices and mirror rooms/zones for every provider">
+          </Button>
+          <Button variant="ghost" onClick={() => runAll("sync")} disabled={!!running} title="Discover devices and mirror rooms/zones for every provider">
             {running === "sync" ? "Syncing…" : "Sync all"}
-          </button>
-          <button
+          </Button>
+          <Button variant="ghost"
             onClick={() => runAll("prune-sync")}
             disabled={!!running}
-            style={S.buttonGhost}
             title="Force-prune devices providers no longer report, then discover + sync — across all providers"
           >
             {running === "prune-sync" ? "Pruning…" : "Prune + Sync all"}
-          </button>
+          </Button>
         </div>
       )}
 
@@ -193,12 +193,11 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
           />
         </div>
       ) : (
-        <button
-          onClick={() => setShowAdd(true)}
-          style={{ ...S.button, marginTop: "1.5rem" }}
+        <Button
+          onClick={() => setShowAdd(true)} style={{ marginTop: "1.5rem" }}
         >
           + Add Provider
-        </button>
+        </Button>
       )}
 
       <ExpandedLanSection />
@@ -269,9 +268,9 @@ function ExpandedLanSection() {
           style={{ ...S.input, flex: 1 }}
           spellCheck={false}
         />
-        <button onClick={save} disabled={saving} style={S.button}>
+        <Button onClick={save} disabled={saving}>
           {saving ? "Saving…" : "Save"}
-        </button>
+        </Button>
       </div>
       {msg && (
         <span
@@ -384,18 +383,16 @@ function ApiKeysSection({ dialogs }: { dialogs: Dialogs }) {
             {fresh.key}
           </code>
           <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
-            <button
-              onClick={() => navigator.clipboard?.writeText(fresh.key)}
-              style={{ ...S.buttonGhost, padding: "0.3rem 0.6rem", fontSize: "0.78rem" }}
+            <Button variant="ghost"
+              onClick={() => navigator.clipboard?.writeText(fresh.key)} style={{ padding: "0.3rem 0.6rem", fontSize: "0.78rem" }}
             >
               Copy
-            </button>
-            <button
-              onClick={() => setFresh(null)}
-              style={{ ...S.buttonGhost, padding: "0.3rem 0.6rem", fontSize: "0.78rem" }}
+            </Button>
+            <Button variant="ghost"
+              onClick={() => setFresh(null)} style={{ padding: "0.3rem 0.6rem", fontSize: "0.78rem" }}
             >
               Done
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -420,12 +417,11 @@ function ApiKeysSection({ dialogs }: { dialogs: Dialogs }) {
                 {k.last_used ? ` · last used ${k.last_used}` : " · never used"}
               </div>
             </div>
-            <button
-              onClick={() => revoke(k)}
-              style={{ ...S.buttonDanger, padding: "0.3rem 0.7rem", fontSize: "0.78rem" }}
+            <Button variant="danger"
+              onClick={() => revoke(k)} style={{ padding: "0.3rem 0.7rem", fontSize: "0.78rem" }}
             >
               Revoke
-            </button>
+            </Button>
           </div>
         ))}
       </div>
@@ -438,9 +434,9 @@ function ApiKeysSection({ dialogs }: { dialogs: Dialogs }) {
           placeholder="New key name (e.g. Home Assistant)"
           style={{ ...S.input, flex: 1 }}
         />
-        <button onClick={create} disabled={creating || !name.trim()} style={S.button}>
+        <Button onClick={create} disabled={creating || !name.trim()}>
           {creating ? "Creating…" : "Create key"}
-        </button>
+        </Button>
       </div>
     </section>
   );
@@ -513,25 +509,23 @@ function ProviderCard({
           </div>
         </div>
         <div style={{ display: "flex", gap: "0.5rem", flexShrink: 0, flexWrap: "wrap" }}>
-          <button onClick={handleDiscover} disabled={discovering} style={S.buttonGhost}>
+          <Button variant="ghost" onClick={handleDiscover} disabled={discovering}>
             {discovering ? "…" : "Discover"}
-          </button>
-          <button
+          </Button>
+          <Button variant="ghost"
             onClick={handleImport}
             disabled={importing}
             title="Sync this provider's rooms/zones into Bifrost Rooms"
-            style={S.buttonGhost}
           >
             {importing ? "…" : "Sync"}
-          </button>
-          <button
+          </Button>
+          <Button variant="ghost"
             onClick={() => setEditingCreds((v) => !v)}
             title="Reconfigure this provider's IP and credentials"
-            style={S.buttonGhost}
           >
             {editingCreds ? "Close" : "Edit"}
-          </button>
-          <button onClick={onRemove} style={S.buttonDanger}>Remove</button>
+          </Button>
+          <Button variant="danger" onClick={onRemove}>Remove</Button>
         </div>
       </div>
       <label
@@ -662,14 +656,13 @@ function EditCredentialsForm({
                 autoComplete={field.kind === "password" ? "new-password" : "off"}
               />
               {isHueAppKey && (
-                <button
+                <Button variant="ghost"
                   type="button"
                   onClick={handlePair}
                   disabled={pairing || !(credentials.bridge_ip ?? "").trim()}
-                  style={S.buttonGhost}
                 >
                   {pairing ? "Pairing…" : "Pair"}
-                </button>
+                </Button>
               )}
             </div>
             {isHueAppKey && pairMsg && (
@@ -682,10 +675,10 @@ function EditCredentialsForm({
       })}
       {error && <p style={{ color: "var(--bf-rose)", margin: 0, fontSize: "0.875rem" }}>{error}</p>}
       <div style={{ display: "flex", gap: "0.5rem" }}>
-        <button type="submit" style={S.button} disabled={saving}>
+        <Button type="submit" disabled={saving}>
           {saving ? "Saving…" : "Save"}
-        </button>
-        <button type="button" onClick={onCancel} style={S.buttonGhost}>Cancel</button>
+        </Button>
+        <Button variant="ghost" type="button" onClick={onCancel}>Cancel</Button>
       </div>
     </form>
   );
@@ -825,29 +818,24 @@ function AddProviderForm({
 
       {selected?.supports_discovery && (
         <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
-          <button
+          <Button variant="ghost"
             type="button"
             onClick={handleScan}
             disabled={scanning}
-            style={S.buttonGhost}
           >
             {scanning ? "Scanning network…" : "Scan network for devices"}
-          </button>
+          </Button>
           {found.map((d) => (
-            <button
+            <Button variant="ghost"
               key={d.host}
               type="button"
               onClick={() => applyFound(d)}
-              title={`Use ${d.host}`}
-              style={{
-                ...S.buttonGhost,
-                textAlign: "left",
+              title={`Use ${d.host}`} style={{ textAlign: "left",
                 fontSize: "0.82rem",
-                borderColor: ACCENT,
-              }}
+                borderColor: ACCENT }}
             >
               {d.label ? `${d.label} · ${d.host}` : d.host}
-            </button>
+            </Button>
           ))}
           {scanned && found.length === 0 && (
             <span style={{ color: "var(--bf-dim)", fontSize: "0.78rem" }}>
@@ -885,14 +873,13 @@ function AddProviderForm({
                 autoComplete={field.kind === "password" ? "new-password" : "off"}
               />
               {isHueAppKey && (
-                <button
+                <Button variant="ghost"
                   type="button"
                   onClick={handlePair}
                   disabled={pairing || !(credentials.bridge_ip ?? "").trim()}
-                  style={S.buttonGhost}
                 >
                   {pairing ? "Pairing…" : "Pair"}
-                </button>
+                </Button>
               )}
             </div>
             {isHueAppKey && pairMsg && (
@@ -912,12 +899,12 @@ function AddProviderForm({
       {error && <p style={{ color: "var(--bf-rose)", margin: 0, fontSize: "0.875rem" }}>{error}</p>}
 
       <div style={{ display: "flex", gap: "0.5rem" }}>
-        <button type="submit" style={S.button} disabled={loading || types.length === 0}>
+        <Button type="submit" disabled={loading || types.length === 0}>
           {loading ? "Adding…" : "Add"}
-        </button>
-        <button type="button" onClick={onCancel} style={S.buttonGhost}>
+        </Button>
+        <Button variant="ghost" type="button" onClick={onCancel}>
           Cancel
-        </button>
+        </Button>
       </div>
     </form>
   );

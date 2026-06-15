@@ -4,6 +4,7 @@
 
 import { useState } from "react";
 import { ACCENT, S } from "../styles";
+import { Button } from "./controls";
 import { LightEditor } from "./LightEditor";
 import { Modal } from "./dialogs";
 import type { PaletteScene } from "../api";
@@ -239,26 +240,22 @@ export function SceneEditor({
     >
       <div style={{ display: "flex", flexWrap: "wrap", gap: "0.25rem" }}>
         {SCENE_PRESETS.map((p) => (
-          <button
+          <Button variant="ghost"
             key={p.name}
             onClick={() => {
               setName(p.name);
               setBrightness(p.brightness);
               setPalette([...p.palette]);
             }}
-            title={`Preset: ${p.palette.join(" ")} @ ${p.brightness}%`}
-            style={{
-              ...S.buttonGhost,
-              padding: "0.2rem 0.45rem",
+            title={`Preset: ${p.palette.join(" ")} @ ${p.brightness}%`} style={{ padding: "0.2rem 0.45rem",
               fontSize: "0.72rem",
               display: "inline-flex",
               alignItems: "center",
-              gap: "0.35rem",
-            }}
+              gap: "0.35rem" }}
           >
             <SceneSwatch palette={p.palette} width={18} height={10} />
             {p.name}
-          </button>
+          </Button>
         ))}
       </div>
 
@@ -329,12 +326,11 @@ export function SceneEditor({
           </span>
         ))}
         {palette.length < 6 && (
-          <button
-            onClick={() => setPalette((prev) => [...prev, "#ffffff"])}
-            style={{ ...S.buttonGhost, padding: "0.15rem 0.45rem", fontSize: "0.75rem" }}
+          <Button variant="ghost"
+            onClick={() => setPalette((prev) => [...prev, "#ffffff"])} style={{ padding: "0.15rem 0.45rem", fontSize: "0.75rem" }}
           >
             +
-          </button>
+          </Button>
         )}
       </div>
       <span style={{ fontSize: "0.68rem", color: "#555" }}>
@@ -342,20 +338,18 @@ export function SceneEditor({
       </span>
 
       <div style={{ display: "flex", gap: "0.4rem" }}>
-        <button
+        <Button
           onClick={save}
-          disabled={saving || !name.trim()}
-          style={{ ...S.button, padding: "0.35rem 0.7rem", fontSize: "0.78rem" }}
+          disabled={saving || !name.trim()} style={{ padding: "0.35rem 0.7rem", fontSize: "0.78rem" }}
         >
           {saving ? "Saving…" : "Save scene"}
-        </button>
+        </Button>
         {onCancel && (
-          <button
-            onClick={onCancel}
-            style={{ ...S.buttonGhost, padding: "0.35rem 0.7rem", fontSize: "0.78rem" }}
+          <Button variant="ghost"
+            onClick={onCancel} style={{ padding: "0.35rem 0.7rem", fontSize: "0.78rem" }}
           >
             Cancel
-          </button>
+          </Button>
         )}
       </div>
 

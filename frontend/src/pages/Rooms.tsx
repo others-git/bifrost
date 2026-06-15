@@ -28,6 +28,7 @@ import { PageHeader } from "../components/PageHeader";
 import { Select } from "../components/Select";
 import { useViewport } from "../useViewport";
 import { ACCENT, S } from "../styles";
+import { Button } from "../components/controls";
 
 export function RoomsPage() {
   const { isMobile } = useViewport();
@@ -125,9 +126,9 @@ export function RoomsPage() {
           />
         </div>
       ) : (
-        <button onClick={() => setShowAdd(true)} style={{ ...S.button, marginTop: "1rem" }}>
+        <Button onClick={() => setShowAdd(true)} style={{ marginTop: "1rem" }}>
           + Add Room
-        </button>
+        </Button>
       )}
       {dialogs.element}
     </div>
@@ -243,20 +244,18 @@ function RoomCard({
         )}
         <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
           {!isMobile && mergeSelect}
-          <button
-            onClick={() => setEditingDevices((v) => !v)}
-            style={{ ...S.buttonGhost, ...(editingDevices ? { borderColor: ACCENT, color: ACCENT } : {}) }}
+          <Button variant="ghost"
+            onClick={() => setEditingDevices((v) => !v)} style={{ ...(editingDevices ? { borderColor: ACCENT, color: ACCENT } : {}) }}
           >
             Devices
-          </button>
-          <button
+          </Button>
+          <Button variant="ghost"
             onClick={async () => { await setRoomEnabled(room.id, !room.enabled); await onChanged(); }}
             title={room.enabled ? "Hide this room from the Dashboard and Floor Plan" : "Show this room again"}
-            style={S.buttonGhost}
           >
             {room.enabled ? "Disable" : "Enable"}
-          </button>
-          <button onClick={onRemove} style={S.buttonDanger}>Remove</button>
+          </Button>
+          <Button variant="danger" onClick={onRemove}>Remove</Button>
         </div>
       </div>
 
@@ -392,12 +391,12 @@ function RoomEditForm({
       </div>
 
       <div style={{ display: "flex", gap: "0.5rem" }}>
-        <button type="submit" style={S.buttonAccent} disabled={saving}>
+        <Button variant="accent" type="submit" disabled={saving}>
           {saving ? "Saving…" : submitLabel}
-        </button>
-        <button type="button" onClick={onCancel} style={S.buttonGhost}>
+        </Button>
+        <Button variant="ghost" type="button" onClick={onCancel}>
           Cancel
-        </button>
+        </Button>
       </div>
     </form>
   );

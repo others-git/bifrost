@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { login } from "../api";
 import { S } from "../styles";
+import { Button } from "../components/controls";
 
 export function LoginPage({ onSuccess }: { onSuccess: () => void }) {
   const [password, setPassword] = useState("");
@@ -31,9 +32,9 @@ export function LoginPage({ onSuccess }: { onSuccess: () => void }) {
           required
         />
         {error && <p style={{ color: "#f66", margin: 0, fontSize: "0.875rem" }}>{error}</p>}
-        <button type="submit" style={S.button} disabled={loading}>
+        <Button type="submit" disabled={loading}>
           {loading ? "Signing in…" : "Sign in"}
-        </button>
+        </Button>
       </form>
     </div>
   );

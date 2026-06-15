@@ -11,7 +11,7 @@ import {
   type Room,
   type RoomAudioMember,
 } from "../api";
-import { S } from "../styles";
+import { Button } from "./controls";
 import { alpha } from "../theme";
 
 const ACCENT = "#a78bfa";
@@ -175,13 +175,12 @@ export function RoomAudioEditor({
           </div>
         );
       })}
-      <button
+      <Button variant="accent"
         onClick={save}
-        disabled={saving}
-        style={{ ...S.buttonAccent, alignSelf: "flex-start", marginTop: "0.3rem", borderColor: ACCENT, color: ACCENT }}
+        disabled={saving} style={{ alignSelf: "flex-start", marginTop: "0.3rem", borderColor: ACCENT, color: ACCENT }}
       >
         {saving ? "Saving…" : "Save audio"}
-      </button>
+      </Button>
     </div>
   );
 }

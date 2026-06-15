@@ -20,6 +20,7 @@ import { PageHeader } from "../components/PageHeader";
 import { Select } from "../components/Select";
 import { useViewport } from "../useViewport";
 import { S } from "../styles";
+import { Button } from "../components/controls";
 
 export function ScenesPage() {
   const { isMobile } = useViewport();
@@ -86,18 +87,14 @@ export function ScenesPage() {
                 onCancel={() => setCreating(false)}
               />
             ) : (
-              <button
-                onClick={() => setCreating(true)}
-                style={{
-                  ...S.buttonGhost,
-                  width: "100%",
+              <Button variant="ghost"
+                onClick={() => setCreating(true)} style={{ width: "100%",
                   padding: "1.2rem",
                   borderStyle: "dashed",
-                  color: "var(--bf-dim)",
-                }}
+                  color: "var(--bf-dim)" }}
               >
                 + New scene
-              </button>
+              </Button>
             )}
             {scenes.length === 0 && !creating && (
               <span style={{ color: "var(--bf-faint)", fontSize: "0.8rem" }}>
@@ -152,13 +149,12 @@ function SceneCard({
           options={rooms.map((r) => ({ value: r.id, label: r.name }))}
           style={{ flex: 1 }}
         />
-        <button
+        <Button variant="ghost"
           onClick={onDelete}
-          title="Delete scene"
-          style={{ ...S.buttonGhost, padding: "0 0.6rem", color: "#c77", borderColor: "#5a3636" }}
+          title="Delete scene" style={{ padding: "0 0.6rem", color: "#c77", borderColor: "#5a3636" }}
         >
           ×
-        </button>
+        </Button>
       </div>
     </div>
   );

@@ -21,7 +21,7 @@ import {
   type Room,
 } from "../api";
 import { SelectRow } from "./SelectRow";
-import { S } from "../styles";
+import { Button } from "./controls";
 
 // Lights/power rows use SelectRow's default sky accent; speakers use violet to
 // match the Audio page.
@@ -255,12 +255,12 @@ export function RoomDevicesPanel({
       </Section>
 
       <div style={{ display: "flex", gap: "0.5rem", position: "sticky", bottom: 0 }}>
-        <button onClick={save} disabled={saving} style={S.buttonAccent}>
+        <Button variant="accent" onClick={save} disabled={saving}>
           {saving ? "Saving…" : "Save"}
-        </button>
-        <button onClick={onCancel} style={S.buttonGhost}>
+        </Button>
+        <Button variant="ghost" onClick={onCancel}>
           Cancel
-        </button>
+        </Button>
       </div>
     </div>
   );

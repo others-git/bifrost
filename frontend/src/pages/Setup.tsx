@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { postSetup } from "../api";
 import { S } from "../styles";
+import { Button } from "../components/controls";
 
 export function SetupPage({ onComplete }: { onComplete: () => void }) {
   const [password, setPassword] = useState("");
@@ -45,9 +46,9 @@ export function SetupPage({ onComplete }: { onComplete: () => void }) {
           required
         />
         {error && <p style={{ color: "#f66", margin: 0, fontSize: "0.875rem" }}>{error}</p>}
-        <button type="submit" style={S.button} disabled={loading}>
+        <Button type="submit" disabled={loading}>
           {loading ? "Setting up…" : "Set password"}
-        </button>
+        </Button>
       </form>
     </div>
   );
