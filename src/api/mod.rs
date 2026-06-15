@@ -1,3 +1,4 @@
+pub mod ai_endpoints;
 pub mod apikeys;
 pub mod audio;
 pub mod auth;
@@ -116,6 +117,7 @@ pub(crate) async fn set_device_enabled(
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
+        .nest("/ai-endpoints", ai_endpoints::router())
         .nest("/api-keys", apikeys::router())
         .nest("/audio", audio::router())
         .nest("/auth", auth::router())

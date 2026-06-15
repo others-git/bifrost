@@ -21,9 +21,10 @@
   never forked per view. Detail in the M27 section.
 
 **Flagship — native voice (big, multi-phase):**
-- **M23 — Native voice: command control** *(P1 shipped: grammar + `/api/voice/command`)* —
-  remaining: STT (`/api/voice/listen`), LLM fallback over MCP tool schemas, tablet PTT,
-  wake word. Pluggable local/OSS models, degrades to grammar.
+- **M23 — Native voice: command control** *(P1 + P2 backend shipped: grammar +
+  `/api/voice/command`; pluggable model-role config (`ai_endpoints`) + STT
+  `/api/voice/listen`)* — remaining: LLM fallback over MCP tool schemas, tablet PTT
+  + AI-endpoints Settings UI, wake word. Pluggable local/OSS models, degrades to grammar.
 - **M24 — Talk mode: conversation & live translator** *(not started)* — WSS streaming
   pipeline (`/api/voice/stream`); the headline use case is a live two-party translator.
 
@@ -602,7 +603,7 @@ when the source powers on, where the receiver enumerates one. A future big MCP w
 *Full specs for the open backlog listed at the top. (M26 detail is near the top,
 right after M25.)*
 
-## Milestone 23 — Native voice: command control — NOT STARTED (flagship)
+## Milestone 23 — Native voice: command control — IN PROGRESS (flagship; P1 + P2 backend shipped)
 
 Bifrost owns its **own voice pipeline** rather than handing off to Home Assistant —
 because we have first-class providers, voice should drive them directly. A
@@ -622,10 +623,15 @@ conversation / live translation is its own milestone — see **M24**.)
   (built-in grammar). STT/LLM/TTS are optional upgrades; one being down never mutes
   the hub.
 
-**Pluggable model roles** (config mirrors providers — an `ai_endpoints` table, one row
-per role: `base_url` + `model` + optional encrypted `api_key` + enabled; Settings CRUD
-with a per-row **Test**). All are **OpenAI-compatible HTTP** so Ollama / llama.cpp /
-faster-whisper / LocalAI / the user's own *whisperr* all work unchanged:
+**Pluggable model roles** *(backend shipped)* — config mirrors providers: an
+`ai_endpoints` table (migration 0030), one row per role (`base_url` + `model` +
+optional **encrypted** `api_key` + enabled), with session CRUD at
+`/api/ai-endpoints/{role}` and a per-row **Test** (`POST …/test` → `GET {base_url}/models`
+reachability probe). `api::ai_endpoints::endpoint_for` is the shared accessor the
+pipeline reads; an unconfigured/disabled role just means that capability is absent
+(grammar control over `/command` keeps working). *Remaining: the Settings CRUD **UI**.*
+All roles are **OpenAI-compatible HTTP** so Ollama / llama.cpp / faster-whisper /
+LocalAI / the user's own *whisperr* all work unchanged:
 - `transcription` — STT (`POST {base_url}/audio/transcriptions`, multipart).
 - `chat` — NLU / conversation (`POST {base_url}/chat/completions`, tool-calling).
 - `tts` — speech out (`POST {base_url}/audio/speech`), optional.
@@ -687,7 +693,12 @@ tests. Color/brightness on a room touch **lights only** (don't power the room's 
   grammar/MCP use.
 - [x] **`POST /api/voice/command { text, context? }`** → `{ ok, said, clauses }` — the
   pure text→action seam, fully unit-testable (no audio). **(P1 — shipped.)**
-- [ ] **`POST /api/voice/listen` (audio)** → transcription role → command pipeline.
+- [x] **`POST /api/voice/listen` (audio)** → transcription role → command pipeline.
+  **(P2 — shipped.)** Multipart `file` (+ optional `room`) → the configured
+  `transcription` endpoint (`POST {base_url}/audio/transcriptions`) → the same
+  `run_command` seam as `/command`; returns `{ transcript, ok, said, clauses }`.
+  Degrades to a clear 503 when no transcription model is configured. wiremock
+  (`transcribe`) + integration (`/listen` → STT mock → drives the device).
 - [ ] **Tablet PTT UI** (push-to-talk) — the spike ingress; record → POST → show result.
 
 ### Cross-cutting
@@ -710,9 +721,10 @@ tests. Color/brightness on a room touch **lights only** (don't power the room's 
 - [ ] **Spoken confirmation** via the optional `tts` role (a short `said` read aloud).
 
 ### Phasing
-P1 grammar + `/api/voice/command` seam (+ tests) · P2 STT role + `/api/voice/listen` +
-tablet PTT + client room context · P3 LLM fallback over MCP tool schemas · P4
-conversation modal (+ optional disk persistence) · P5 wake word + optional spoken `tts`.
+P1 grammar + `/api/voice/command` seam (+ tests) **✓** · P2 STT role + `/api/voice/listen`
+**(backend ✓)** + tablet PTT + client room context · P3 LLM fallback over MCP tool
+schemas · P4 conversation modal (+ optional disk persistence) · P5 wake word + optional
+spoken `tts`.
 
 ### Open questions
 - TTS voice/lang selection surface (per client? per command?).

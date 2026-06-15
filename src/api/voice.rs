@@ -15,6 +15,7 @@
 //! speaker grouping, read/queries and anaphora are fast-follows.
 
 use crate::AppState;
+use crate::api::ai_endpoints::AiEndpoint;
 use crate::api::audio::{SetAudioOutcome, apply_audio_command};
 use crate::api::auth::require_session;
 use crate::api::lights::{SetLightOutcome, apply_light_state};
@@ -25,7 +26,7 @@ use crate::models::audio::{AudioCommand, AudioState, TransportCmd};
 use crate::models::{Color, LightState};
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Multipart, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::post,
@@ -33,9 +34,12 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new().route("/command", post(command_handler))
+    Router::new()
+        .route("/command", post(command_handler))
+        .route("/listen", post(listen_handler))
 }
 
 #[derive(Deserialize)]
@@ -70,6 +74,15 @@ struct ClauseResult {
     said: String,
 }
 
+/// `/listen` response: the recognized transcript (handy for the conversation
+/// modal / debugging mis-hears) plus the flattened command result.
+#[derive(Serialize)]
+struct ListenResponse {
+    transcript: String,
+    #[serde(flatten)]
+    result: CommandResponse,
+}
+
 async fn command_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -80,6 +93,118 @@ async fn command_handler(
     }
     let ctx = req.context.unwrap_or_default();
     Json(run_command(&state, &req.text, ctx.room.as_deref()).await).into_response()
+}
+
+/// `POST /api/voice/listen` (M23 P2) — the audio ingress. Accepts a multipart
+/// upload with an audio `file` (and optional `room` context), transcribes it via
+/// the configured `transcription` model role, then runs the recognized text
+/// through the **same** [`run_command`] seam as `/command`. Degrades with a clear
+/// 503 when no transcription endpoint is configured (grammar control over
+/// `/command` keeps working regardless).
+async fn listen_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let mut audio: Option<(String, Vec<u8>)> = None;
+    let mut room: Option<String> = None;
+    loop {
+        match multipart.next_field().await {
+            Ok(Some(field)) => match field.name() {
+                Some("file") | Some("audio") => {
+                    let filename = field.file_name().unwrap_or("audio.wav").to_string();
+                    match field.bytes().await {
+                        Ok(b) => audio = Some((filename, b.to_vec())),
+                        Err(_) => {
+                            return (StatusCode::BAD_REQUEST, "couldn't read the audio field")
+                                .into_response();
+                        }
+                    }
+                }
+                Some("room") | Some("context") => {
+                    room = field.text().await.ok().filter(|s| !s.trim().is_empty());
+                }
+                _ => {}
+            },
+            Ok(None) => break,
+            Err(_) => return (StatusCode::BAD_REQUEST, "malformed multipart body").into_response(),
+        }
+    }
+
+    let Some((filename, bytes)) = audio else {
+        return (StatusCode::BAD_REQUEST, "missing audio 'file' field").into_response();
+    };
+
+    let Some(ep) = crate::api::ai_endpoints::endpoint_for(&state, "transcription").await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no transcription model is configured (set one under AI endpoints)",
+        )
+            .into_response();
+    };
+
+    let text = match transcribe(&ep, filename, bytes).await {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::BAD_GATEWAY, e).into_response(),
+    };
+
+    let result = run_command(&state, &text, room.as_deref()).await;
+    Json(ListenResponse {
+        transcript: text,
+        result,
+    })
+    .into_response()
+}
+
+/// POST audio to an OpenAI-compatible `/audio/transcriptions` endpoint and
+/// return the recognized text. The timeout is generous because CPU-only STT of a
+/// few seconds of speech can take a while.
+async fn transcribe(ep: &AiEndpoint, filename: String, bytes: Vec<u8>) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let part = reqwest::multipart::Part::bytes(bytes).file_name(filename);
+    let form = reqwest::multipart::Form::new()
+        .text("model", ep.model.clone())
+        .part("file", part);
+    let mut req = client
+        .post(format!("{}/audio/transcriptions", ep.base_url))
+        .multipart(form);
+    if let Some(k) = &ep.api_key {
+        req = req.bearer_auth(k);
+    }
+    let resp = req.send().await.map_err(|e| {
+        if e.is_connect() {
+            "couldn't reach the transcription endpoint".to_string()
+        } else if e.is_timeout() {
+            "the transcription endpoint timed out".to_string()
+        } else {
+            e.to_string()
+        }
+    })?;
+    if !resp.status().is_success() {
+        return Err(format!("transcription endpoint returned {}", resp.status()));
+    }
+    #[derive(Deserialize)]
+    struct Transcription {
+        #[serde(default)]
+        text: String,
+    }
+    let body: Transcription = resp
+        .json()
+        .await
+        .map_err(|_| "transcription endpoint returned an unexpected body".to_string())?;
+    let text = body.text.trim().to_string();
+    if text.is_empty() {
+        return Err("the transcription was empty".to_string());
+    }
+    Ok(text)
 }
 
 /// Parse `text` into clauses and execute each. Shared seam: STT (P2) and any
@@ -1757,5 +1882,66 @@ mod tests {
             parse("flibbertigibbet the wozzle").into_iter().next(),
             Some(Clause::Unparsed { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn transcribe_posts_multipart_and_returns_text() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/audio/transcriptions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "text": "turn off the office" })),
+            )
+            .mount(&server)
+            .await;
+
+        let ep = AiEndpoint {
+            base_url: server.uri(),
+            model: "whisper-1".into(),
+            api_key: None,
+        };
+        let text = transcribe(&ep, "clip.wav".into(), b"RIFFfake".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(text, "turn off the office");
+
+        // The server received a multipart POST carrying our file part.
+        let reqs = server.received_requests().await.unwrap();
+        let ct = reqs[0]
+            .headers
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(ct.starts_with("multipart/form-data"), "got: {ct}");
+    }
+
+    #[tokio::test]
+    async fn transcribe_errors_on_empty_text() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/audio/transcriptions"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "text": "  " })),
+            )
+            .mount(&server)
+            .await;
+        let ep = AiEndpoint {
+            base_url: server.uri(),
+            model: "whisper-1".into(),
+            api_key: None,
+        };
+        assert!(
+            transcribe(&ep, "c.wav".into(), vec![1, 2, 3])
+                .await
+                .is_err()
+        );
     }
 }

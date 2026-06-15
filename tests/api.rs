@@ -6603,3 +6603,262 @@ async fn discover_with_prune_removes_devices_no_longer_reported() {
         "stale device pruned: {ids:?}"
     );
 }
+
+// ── AI endpoints config + voice /listen (M23 P2) ─────────────────────────────
+
+#[tokio::test]
+async fn ai_endpoints_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/ai-endpoints")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn ai_endpoints_crud_roundtrip_redacts_key() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Empty to start.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/ai-endpoints", &cookie))
+        .await
+        .unwrap();
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body.as_array().unwrap().len(), 0);
+
+    // Create the transcription role with a key.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/ai-endpoints/transcription",
+            &cookie,
+            r#"{"base_url":"http://localhost:9000/v1","model":"whisper-1","api_key":"sk-secret"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["has_key"], true);
+    assert!(body.get("api_key").is_none(), "key must never be returned");
+
+    // List shows it, key redacted to has_key.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/ai-endpoints", &cookie))
+        .await
+        .unwrap();
+    let body = helpers::response_json(resp).await;
+    let arr = body.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["role"], "transcription");
+    assert_eq!(arr[0]["base_url"], "http://localhost:9000/v1");
+    assert_eq!(arr[0]["has_key"], true);
+    assert!(arr[0].get("api_key").is_none());
+
+    // Delete.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_delete(
+            "/api/ai-endpoints/transcription",
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = app
+        .oneshot(helpers::authed_get("/api/ai-endpoints", &cookie))
+        .await
+        .unwrap();
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body.as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn ai_endpoints_put_rejects_unknown_role() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/ai-endpoints/bogus",
+            &cookie,
+            r#"{"base_url":"http://x:1/v1","model":"m"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn ai_endpoints_put_rejects_non_http_base_url() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/ai-endpoints/chat",
+            &cookie,
+            r#"{"base_url":"localhost:1234","model":"llama"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn ai_endpoints_test_probes_models_endpoint() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{ "id": "whisper-1" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    app.clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/ai-endpoints/transcription",
+            &cookie,
+            &format!(r#"{{"base_url":"{}","model":"whisper-1"}}"#, server.uri()),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(helpers::authed_post(
+            "/api/ai-endpoints/transcription/test",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["ok"], true, "{body}");
+}
+
+/// Build a minimal multipart/form-data body with one audio `file` part.
+fn multipart_audio(boundary: &str, bytes: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"clip.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    body
+}
+
+#[tokio::test]
+async fn voice_listen_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let boundary = "BIFROSTTEST";
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/voice/listen")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(multipart_audio(boundary, b"FAKE")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn voice_listen_without_transcription_endpoint_is_503() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let boundary = "BIFROSTTEST";
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/voice/listen")
+        .header(header::COOKIE, cookie.split(';').next().unwrap())
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(multipart_audio(boundary, b"FAKE")))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn voice_listen_transcribes_then_drives_the_light() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // STT endpoint that "hears" a command targeting the seeded light.
+    let stt = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/audio/transcriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "text": "bifrost, turn off test light"
+        })))
+        .mount(&stt)
+        .await;
+
+    let bridge = wled_mock().await;
+    let (app, _light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Configure the transcription role to point at the STT mock.
+    app.clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/ai-endpoints/transcription",
+            &cookie,
+            &format!(r#"{{"base_url":"{}","model":"whisper-1"}}"#, stt.uri()),
+        ))
+        .await
+        .unwrap();
+
+    let boundary = "BIFROSTTEST";
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/voice/listen")
+        .header(header::COOKIE, cookie.split(';').next().unwrap())
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(multipart_audio(boundary, b"RIFFfakeaudio")))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["transcript"], "bifrost, turn off test light");
+    assert_eq!(body["ok"], true, "{body}");
+
+    // The recognized command reached the light's provider.
+    let requests = bridge.received_requests().await.unwrap();
+    assert!(
+        requests.iter().any(|r| r.url.path() == "/json/state"),
+        "transcribed command never drove the device"
+    );
+}

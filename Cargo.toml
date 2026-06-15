@@ -1,6 +1,6 @@
 [package]
 name = "bifrost"
-version = "0.16.2"
+version = "0.17.0"
 edition = "2024"
 
 [lib]
@@ -16,12 +16,12 @@ path = "src/main.rs"
 tokio = { version = "1", features = ["full"] }
 
 # web framework
-axum = { version = "0.8", features = ["ws", "macros"] }
+axum = { version = "0.8", features = ["ws", "macros", "multipart"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream", "multipart"], default-features = false }
 
 # serialization
 serde = { version = "1", features = ["derive"] }

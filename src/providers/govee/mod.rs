@@ -44,6 +44,14 @@ fn sku_cache() -> &'static tokio::sync::RwLock<
     CACHE.get_or_init(|| tokio::sync::RwLock::new(std::collections::HashMap::new()))
 }
 
+/// Clear the process-wide SKU cache. Tests only — the cache is keyed by
+/// `base_url`, and wiremock reuses ephemeral ports across tests, so a stale entry
+/// from a prior (dropped) mock server could otherwise satisfy a fresh lookup.
+#[cfg(test)]
+async fn clear_sku_cache() {
+    sku_cache().write().await.clear();
+}
+
 impl GoveeProvider {
     pub fn new(api_key: impl AsRef<str>) -> Result<Self> {
         Self::new_with_base(api_key, BASE_URL)
@@ -607,9 +615,11 @@ mod tests {
 
     #[tokio::test]
     async fn repeated_commands_resolve_sku_with_a_single_device_list_fetch() {
-        // The SKU cache is keyed by base_url, so this test's unique mock URI is
-        // isolated from others. Two separate commands must hit /user/devices
-        // only once — the second is served from cache (the "laggy controls" fix).
+        // Drop any cache entry inherited from a prior test whose dropped mock
+        // server happened to be reassigned this test's ephemeral port.
+        clear_sku_cache().await;
+        // Two separate commands must hit /user/devices only once — the second is
+        // served from the process-wide cache (the "laggy controls" fix).
         let server = MockServer::start().await;
         mount_control_mocks(&server).await;
 
