@@ -52,15 +52,13 @@ impl GoveeProvider {
 
     /// Fetch the account's device list (shared by discovery and SKU lookup).
     async fn fetch_devices(&self) -> Result<Vec<GoveeDevice>> {
-        let resp: GoveeResponse<GoveeDeviceList> = self
-            .client
-            .get(format!("{}/user/devices", self.base_url))
-            .send()
-            .await
-            .context("Govee devices request failed")?
-            .error_for_status()?
-            .json()
-            .await?;
+        let resp: GoveeResponse<GoveeDeviceList> =
+            send_retrying(self.client.get(format!("{}/user/devices", self.base_url)))
+                .await
+                .context("Govee devices request failed")?
+                .error_for_status()?
+                .json()
+                .await?;
 
         if resp.code != 200 {
             bail!("Govee API error {}: {}", resp.code, resp.message);
@@ -96,6 +94,59 @@ impl GoveeProvider {
     pub fn new_for_test(base_url: impl Into<String>, api_key: impl AsRef<str>) -> Result<Self> {
         Self::new_with_base(api_key, base_url)
     }
+}
+
+/// Send a request, retrying on rate-limit (429) and transient/server errors.
+///
+/// Govee's cloud is aggressively rate-limited (~10 req/s; per-device limits too),
+/// so a burst on app launch or a sync/prune sweep would otherwise fail outright
+/// with 429 — the reported "flaky on launch / laggy controls". Back off and
+/// retry a few times, honouring `Retry-After` when the server sends it.
+async fn send_retrying(req: reqwest::RequestBuilder) -> reqwest::Result<reqwest::Response> {
+    const MAX_RETRIES: u32 = 3;
+    let mut attempt = 0u32;
+    loop {
+        // JSON / empty bodies are always cloneable; unwrap is safe here.
+        let this = req
+            .try_clone()
+            .expect("Govee request body must be cloneable");
+        match this.send().await {
+            Ok(resp) => {
+                let retryable = resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    || resp.status().is_server_error();
+                if retryable && attempt < MAX_RETRIES {
+                    let wait = retry_after(&resp).unwrap_or_else(|| backoff(attempt));
+                    attempt += 1;
+                    tokio::time::sleep(wait).await;
+                    continue;
+                }
+                return Ok(resp);
+            }
+            // Transient transport errors (timeout / connect) also get a retry.
+            Err(e) if attempt < MAX_RETRIES && (e.is_timeout() || e.is_connect()) => {
+                attempt += 1;
+                tokio::time::sleep(backoff(attempt)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Exponential backoff: ~250ms, 500ms, 1s.
+fn backoff(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_millis(250u64 << attempt.min(3))
+}
+
+/// The server's `Retry-After` (whole seconds), if present and parseable.
+fn retry_after(resp: &reqwest::Response) -> Option<std::time::Duration> {
+    resp.headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(std::time::Duration::from_secs)
 }
 
 // ── Wire types ─────────────────────────────────────────────────────────────
@@ -307,15 +358,15 @@ impl LightProvider for GoveeProvider {
                 }
             });
 
-            let resp: GoveeResponse<Value> = self
-                .client
-                .post(format!("{}/device/control", self.base_url))
-                .json(&body)
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
+            let resp: GoveeResponse<Value> = send_retrying(
+                self.client
+                    .post(format!("{}/device/control", self.base_url))
+                    .json(&body),
+            )
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
 
             if resp.code != 200 {
                 bail!("Govee control error {}: {}", resp.code, resp.message);
@@ -332,15 +383,15 @@ impl LightProvider for GoveeProvider {
             "payload": { "sku": sku, "device": provider_id }
         });
 
-        let resp: GoveeResponse<GoveeStateData> = self
-            .client
-            .post(format!("{}/device/state", self.base_url))
-            .json(&body)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let resp: GoveeResponse<GoveeStateData> = send_retrying(
+            self.client
+                .post(format!("{}/device/state", self.base_url))
+                .json(&body),
+        )
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
 
         if resp.code != 200 {
             bail!("Govee state error {}: {}", resp.code, resp.message);
@@ -704,6 +755,44 @@ mod tests {
             .mount(&server)
             .await;
 
+        assert!(mock_provider(&server).await.discover().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn discover_retries_after_a_rate_limit() {
+        // Govee answers 429 on the first hit (a launch/sync burst), then 200.
+        // The provider should back off (Retry-After: 0 here) and succeed, not fail.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/devices"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "0"))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user/devices"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(device_list_response()))
+            .mount(&server)
+            .await;
+
+        let lights = mock_provider(&server).await.discover().await.unwrap();
+        assert!(
+            !lights.is_empty(),
+            "discover should recover after a 429 retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_gives_up_after_persistent_rate_limit() {
+        // Always 429 — after the bounded retries, surface the error rather than
+        // hanging or looping forever.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/devices"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "0"))
+            .mount(&server)
+            .await;
         assert!(mock_provider(&server).await.discover().await.is_err());
     }
 }
