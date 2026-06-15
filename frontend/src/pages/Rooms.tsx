@@ -24,6 +24,7 @@ import { RoomVolumeStrip } from "../components/RoomAudio";
 import { RoomDevicesPanel } from "../components/RoomDevices";
 import { SelectRow } from "../components/SelectRow";
 import { useDialogs } from "../components/dialogs";
+import { PageHeader } from "../components/PageHeader";
 import { useViewport } from "../useViewport";
 import { ACCENT, S } from "../styles";
 
@@ -64,16 +65,20 @@ export function RoomsPage() {
 
   return (
     <div style={{ padding: isMobile ? "1rem 0.85rem" : "2rem", maxWidth: 760, margin: "0 auto" }}>
-      <h2 style={{ margin: "0 0 0.4rem", fontSize: "1.2rem", color: "#ccc" }}>Rooms</h2>
-      <p style={{ color: "#666", fontSize: "0.8rem", margin: "0 0 1rem", maxWidth: 560 }}>
-        A room combines synced provider rooms/zones (links) with the devices it controls —
-        lights, speakers, and power devices. Use the <strong>Devices</strong> button to configure
-        membership, or <strong>Sync</strong> on a provider (Settings) to refresh links.
-      </p>
+      <PageHeader
+        title="Rooms"
+        description={
+          <>
+            A room combines synced provider rooms/zones (links) with the devices it controls —
+            lights, speakers, and power devices. Use the <strong>Devices</strong> button to configure
+            membership, or <strong>Sync</strong> on a provider (Settings) to refresh links.
+          </>
+        }
+      />
 
       <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
         {rooms.length === 0 && !showAdd && (
-          <p style={{ color: "#666", margin: 0 }}>
+          <p style={{ color: "var(--bf-faint)", margin: 0 }}>
             No rooms yet. Sync a provider, paint one in the planner, or add one here.
           </p>
         )}
@@ -93,8 +98,8 @@ export function RoomsPage() {
       </div>
 
       {showAdd ? (
-        <div style={{ ...S.card, border: "1px solid #333", marginTop: "1rem" }}>
-          <h3 style={{ margin: "0 0 0.25rem", fontSize: "1rem", color: "#ccc" }}>New room</h3>
+        <div style={{ ...S.card, border: "1px solid var(--bf-border)", marginTop: "1rem" }}>
+          <h3 style={{ margin: "0 0 0.25rem", fontSize: "1rem", color: "var(--bf-dim)" }}>New room</h3>
           <RoomEditForm
             lights={lights}
             providerGroups={providerGroups}
@@ -201,7 +206,7 @@ function RoomCard({
           </span>
         )}
       </div>
-      <div style={{ color: "#888", fontSize: "0.8rem", marginTop: "0.25rem", display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+      <div style={{ color: "var(--bf-dim)", fontSize: "0.8rem", marginTop: "0.25rem", display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
         <span>{room.light_ids.length} light{room.light_ids.length !== 1 ? "s" : ""}</span>
         {speakers > 0 && <span>· {speakers} speaker{speakers !== 1 ? "s" : ""}</span>}
         {powerCount > 0 && <span>· {powerCount} power</span>}
@@ -209,7 +214,7 @@ function RoomCard({
           <span
             key={l.provider_group_id}
             title={l.domain === "audio" ? "Synced audio room/zone" : "Synced provider room/zone"}
-            style={{ border: "1px solid #333", borderRadius: 4, padding: "0 0.35rem", color: "#9a9", fontSize: "0.72rem" }}
+            style={{ border: "1px solid var(--bf-border)", borderRadius: 4, padding: "0 0.35rem", color: "#9a9", fontSize: "0.72rem" }}
           >
             {l.domain === "audio" ? "♪" : "⇄"} {l.name}
           </span>
@@ -337,15 +342,15 @@ function RoomEditForm({
 
       {providerGroups.some((pg) => pg.domain === "light") && (
         <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
-          <span style={{ fontSize: "0.875rem", color: "#aaa" }}>
-            Linked provider rooms <span style={{ color: "#666" }}>(membership syncs automatically)</span>
+          <span style={{ fontSize: "0.875rem", color: "var(--bf-dim)" }}>
+            Linked provider rooms <span style={{ color: "var(--bf-faint)" }}>(membership syncs automatically)</span>
           </span>
           {providerGroups
             .filter((pg) => pg.domain === "light")
             .map((pg) => (
               <SelectRow key={pg.id} checked={links.has(pg.id)} onToggle={() => toggleSet(setLinks, pg.id)}>
                 ⇄ {pg.name}
-                <span style={{ color: "#666", fontSize: "0.75rem" }}>
+                <span style={{ color: "var(--bf-faint)", fontSize: "0.75rem" }}>
                   {pg.light_ids.length} light{pg.light_ids.length !== 1 ? "s" : ""}
                 </span>
               </SelectRow>
@@ -355,15 +360,15 @@ function RoomEditForm({
 
       {providerGroups.some((pg) => pg.domain === "audio") && (
         <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
-          <span style={{ fontSize: "0.875rem", color: "#aaa" }}>
-            Linked audio rooms/zones <span style={{ color: "#666" }}>(adds the room's speakers)</span>
+          <span style={{ fontSize: "0.875rem", color: "var(--bf-dim)" }}>
+            Linked audio rooms/zones <span style={{ color: "var(--bf-faint)" }}>(adds the room's speakers)</span>
           </span>
           {providerGroups
             .filter((pg) => pg.domain === "audio")
             .map((pg) => (
               <SelectRow key={pg.id} checked={links.has(pg.id)} onToggle={() => toggleSet(setLinks, pg.id)}>
                 ♪ {pg.name}
-                <span style={{ color: "#666", fontSize: "0.75rem" }}>
+                <span style={{ color: "var(--bf-faint)", fontSize: "0.75rem" }}>
                   {pg.audio_device_ids.length} device{pg.audio_device_ids.length !== 1 ? "s" : ""}
                 </span>
               </SelectRow>
@@ -372,7 +377,7 @@ function RoomEditForm({
       )}
 
       <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
-        <span style={{ fontSize: "0.875rem", color: "#aaa" }}>Direct lights</span>
+        <span style={{ fontSize: "0.875rem", color: "var(--bf-dim)" }}>Direct lights</span>
         {lights.map((l) => {
           const viaLink = linkedLightIds.has(l.id);
           return (
@@ -383,7 +388,7 @@ function RoomEditForm({
               onToggle={() => toggleSet(setDirect, l.id)}
             >
               {l.name}
-              {viaLink && <span style={{ fontSize: "0.72rem", color: "#777" }}>(via link)</span>}
+              {viaLink && <span style={{ fontSize: "0.72rem", color: "var(--bf-faint)" }}>(via link)</span>}
             </SelectRow>
           );
         })}
@@ -406,5 +411,5 @@ const labelStyle: React.CSSProperties = {
   flexDirection: "column",
   gap: "0.3rem",
   fontSize: "0.875rem",
-  color: "#aaa",
+  color: "var(--bf-dim)",
 };

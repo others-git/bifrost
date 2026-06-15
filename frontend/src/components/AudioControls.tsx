@@ -20,9 +20,9 @@ import { DisableRow } from "./PowerFlyout";
 import { BifrostRemote } from "./BifrostRemote";
 import { useViewport } from "../useViewport";
 import { sheetStyle } from "./sheet";
+import { T, domain, color, radius, font, alpha } from "../theme";
 
-const ACCENT = "#a78bfa"; // violet — audio's accent
-const T = { text: "#eae4d6", dim: "#97907e", faint: "#6b6557", cardBorder: "#2c2922" };
+const ACCENT = domain.audio; // violet — audio's accent
 
 export const KIND_LABEL: Record<string, string> = {
   receiver: "Receiver",
@@ -178,7 +178,7 @@ export function AudioControls({
         <div style={{ borderTop: `1px solid ${T.cardBorder}`, paddingTop: "0.6rem" }}>
           <button
             onClick={toggleFavorites}
-            style={{ background: "none", border: "none", color: T.dim, cursor: "pointer", fontSize: "0.74rem", letterSpacing: "0.08em", textTransform: "uppercase", padding: 0, display: "flex", alignItems: "center", gap: "0.35rem" }}
+            style={{ background: "none", border: "none", color: T.dim, cursor: "pointer", fontFamily: font.display, fontSize: "0.74rem", letterSpacing: "0.14em", textTransform: "uppercase", padding: 0, display: "flex", alignItems: "center", gap: "0.35rem" }}
           >
             ♥ Favorites <span style={{ fontSize: "0.6rem" }}>{favOpen ? "▲" : "▼"}</span>
           </button>
@@ -237,7 +237,7 @@ export function TransportButton({
         height: size,
         borderRadius: "50%",
         border: `1px solid ${big ? ACCENT : T.cardBorder}`,
-        background: big ? `${ACCENT}22` : "rgba(255,255,255,0.04)",
+        background: big ? `${alpha(ACCENT, 0.13)}` : "rgba(255,255,255,0.04)",
         color: big ? "#fff" : T.dim,
         cursor: "pointer",
         fontSize: big ? (compact ? "1rem" : "1.2rem") : compact ? "0.82rem" : "0.95rem",
@@ -387,11 +387,11 @@ export function AudioEditor({
               visibility: pos ? "visible" : "hidden",
               zIndex: 60,
               width: 260,
-              background: "#1c1c20",
-              border: "1px solid #333",
-              borderRadius: 14,
+              background: color.surface,
+              border: `1px solid ${color.hairline}`,
+              borderRadius: radius.frame,
               padding: "0.9rem",
-              boxShadow: "0 8px 30px rgba(0,0,0,0.6)",
+              boxShadow: "0 12px 34px rgba(0,0,0,0.7)",
               display: "flex",
               flexDirection: "column",
               gap: "0.7rem",
@@ -427,8 +427,8 @@ export function AudioEditor({
             width: "100%",
             padding: "0.55rem",
             borderRadius: 10,
-            border: `1px solid ${ACCENT}55`,
-            background: `${ACCENT}14`,
+            border: `1px solid ${alpha(ACCENT, 0.33)}`,
+            background: `${alpha(ACCENT, 0.08)}`,
             color: T.text,
             cursor: "pointer",
             fontSize: "0.85rem",

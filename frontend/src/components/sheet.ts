@@ -1,7 +1,9 @@
 import type { CSSProperties } from "react";
+import { color, radius, glass } from "../theme";
 
-/** Full-width bottom-sheet styling for fly-outs on phones, where an anchored
- * popover doesn't fit. Slides up from the bottom edge with a rounded top. */
+/** Full-width bottom-sheet styling for fly-outs on compact viewports, where an
+ * anchored popover doesn't fit. Frosted gothic glass that slides up from the
+ * bottom edge with a rounded, gold-hairline top — matching the live cards. */
 export const sheetStyle: CSSProperties = {
   position: "fixed",
   left: 0,
@@ -11,12 +13,15 @@ export const sheetStyle: CSSProperties = {
   maxHeight: "85vh",
   overflowY: "auto",
   zIndex: 60,
-  background: "#1c1c20",
-  borderTop: "1px solid #333",
-  borderRadius: "16px 16px 0 0",
+  background: glass.background,
+  backdropFilter: glass.backdropFilter,
+  WebkitBackdropFilter: glass.WebkitBackdropFilter,
+  borderTop: `1px solid ${color.hairline}`,
+  borderRadius: `${radius.frame}px ${radius.frame}px 0 0`,
   padding: "0.9rem",
   paddingBottom: "calc(0.9rem + env(safe-area-inset-bottom))",
-  boxShadow: "0 -8px 30px rgba(0,0,0,0.6)",
+  boxShadow: "0 -10px 34px rgba(0,0,0,0.7)",
+  color: color.text,
   display: "flex",
   flexDirection: "column",
   gap: "0.7rem",

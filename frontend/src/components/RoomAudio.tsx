@@ -12,6 +12,7 @@ import {
   type RoomAudioMember,
 } from "../api";
 import { S } from "../styles";
+import { alpha } from "../theme";
 
 const ACCENT = "#a78bfa";
 
@@ -78,7 +79,7 @@ export function RoomVolumeStrip({ room, devices }: { room: Room; devices: AudioD
         onChange={(e) => commitVolume(Number(e.target.value))}
         style={{ flex: 1, accentColor: ACCENT }}
       />
-      <span style={{ fontSize: "0.68rem", color: "#777", width: 22, textAlign: "right" }}>{volume}</span>
+      <span style={{ fontSize: "0.68rem", color: "var(--bf-faint)", width: 22, textAlign: "right" }}>{volume}</span>
     </div>
   );
 }
@@ -119,7 +120,7 @@ export function RoomAudioEditor({
   }
 
   if (devices.length === 0) {
-    return <span style={{ fontSize: "0.8rem", color: "#666" }}>No audio devices discovered yet.</span>;
+    return <span style={{ fontSize: "0.8rem", color: "var(--bf-faint)" }}>No audio devices discovered yet.</span>;
   }
 
   return (
@@ -133,14 +134,14 @@ export function RoomAudioEditor({
             style={{
               borderRadius: 8,
               border: `1px solid ${isMember ? ACCENT : "transparent"}`,
-              background: isMember ? `${ACCENT}1f` : "rgba(255,255,255,0.02)",
+              background: isMember ? `${alpha(ACCENT, 0.12)}` : "rgba(255,255,255,0.02)",
               padding: "0.5rem 0.6rem",
               display: "flex",
               flexDirection: "column",
               gap: "0.45rem",
             }}
           >
-            <label style={{ display: "flex", alignItems: "center", gap: "0.6rem", fontSize: "0.9rem", color: "#ddd", cursor: "pointer", minHeight: 26 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: "0.6rem", fontSize: "0.9rem", color: "var(--bf-dim)", cursor: "pointer", minHeight: 26 }}>
               <input
                 type="checkbox"
                 checked={isMember}
@@ -157,7 +158,7 @@ export function RoomAudioEditor({
             </label>
             {isMember && (
               <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                <span style={{ fontSize: "0.72rem", color: "#999", width: 40 }}>offset</span>
+                <span style={{ fontSize: "0.72rem", color: "var(--bf-dim)", width: 40 }}>offset</span>
                 <input
                   type="range"
                   min={-50}
@@ -166,7 +167,7 @@ export function RoomAudioEditor({
                   onChange={(e) => setDraft((prev) => new Map(prev).set(d.id, Number(e.target.value)))}
                   style={{ flex: 1, accentColor: ACCENT }}
                 />
-                <span style={{ fontSize: "0.72rem", color: "#999", width: 34, textAlign: "right" }}>
+                <span style={{ fontSize: "0.72rem", color: "var(--bf-dim)", width: 34, textAlign: "right" }}>
                   {off! > 0 ? `+${off}` : off}%
                 </span>
               </div>

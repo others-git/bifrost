@@ -34,20 +34,9 @@ import {
   type Room,
 } from "../api";
 import { Glyph, GLYPH_OPTIONS, powerKindGlyph, audioKindGlyph } from "../components/glyphs";
+import { PageHeader, SectionLabel } from "../components/PageHeader";
 import { useViewport } from "../useViewport";
-
-const ACCENT = "#38bdf8"; // sky — the app's default accent
-
-const T = {
-  text: "#eae4d6",
-  dim: "#97907e",
-  faint: "#6b6557",
-  card: "#1d1c18",
-  cardOff: "#171613",
-  cardBorder: "#2c2922",
-  good: "#5fb87a",
-  bad: "#c2603f",
-};
+import { T, ACCENT, alpha } from "../theme";
 
 type Domain = "light" | "audio" | "power";
 
@@ -274,7 +263,7 @@ function AnchoredPanel({
         zIndex: 61,
         maxHeight: "60vh",
         overflowY: "auto",
-        borderRadius: "16px 16px 0 0",
+        borderRadius: "3px 3px 0 0",
         padding: "0.6rem 0.6rem calc(1.2rem + env(safe-area-inset-bottom))",
       }
     : {
@@ -930,7 +919,7 @@ function MergedCompanion({
         padding: "0.45rem 0.7rem",
         fontSize: "0.78rem",
         color: T.faint,
-        borderLeft: `2px solid ${ACCENT}55`,
+        borderLeft: `2px solid ${alpha(ACCENT, 0.33)}`,
         marginLeft: "0.4rem",
       }}
     >
@@ -1105,36 +1094,26 @@ export function DevicesPage() {
 
   return (
     <div style={{ padding: isMobile ? "1.2rem 1rem 2rem" : "2rem 2.5rem" }}>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "baseline",
-          justifyContent: "space-between",
-          gap: "1rem",
-          marginBottom: "0.3rem",
-        }}
-      >
-        <h2 style={{ margin: 0, fontSize: "1.4rem", color: T.text }}>Devices</h2>
-        <button
-          onClick={() => refresh()}
-          style={{
-            padding: "0.35rem 0.8rem",
-            borderRadius: 8,
-            border: `1px solid ${T.cardBorder}`,
-            background: "transparent",
-            color: T.dim,
-            cursor: "pointer",
-            fontSize: "0.8rem",
-          }}
-        >
-          Refresh
-        </button>
-      </div>
-      <p style={{ margin: "0 0 1.4rem", color: T.faint, fontSize: "0.85rem", maxWidth: 560 }}>
-        Every device Bifrost has imported, of every kind. This is where you
-        enable/disable a device and pin a glyph (click its icon). Live control
-        lives on the Control, Audio, and Rooms pages.
-      </p>
+      <PageHeader
+        title="Devices"
+        description="Every device Bifrost has imported, of every kind. This is where you enable/disable a device and pin a glyph (click its icon). Live control lives on the Control, Audio, and Rooms pages."
+        actions={
+          <button
+            onClick={() => refresh()}
+            style={{
+              padding: "0.35rem 0.8rem",
+              borderRadius: 8,
+              border: `1px solid ${T.cardBorder}`,
+              background: "transparent",
+              color: T.dim,
+              cursor: "pointer",
+              fontSize: "0.8rem",
+            }}
+          >
+            Refresh
+          </button>
+        }
+      />
 
       {loading ? (
         <div style={{ color: T.faint, fontSize: "0.9rem" }}>Loading…</div>
@@ -1164,19 +1143,10 @@ export function DevicesPage() {
           const companions = group.filter((d) => d.companionOf);
           return (
             <section key={domain} style={{ marginBottom: "1.8rem" }}>
-              <h3
-                style={{
-                  margin: "0 0 0.7rem",
-                  fontSize: "0.8rem",
-                  fontWeight: 600,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.06em",
-                  color: T.dim,
-                }}
-              >
+              <SectionLabel style={{ marginBottom: "0.7rem" }}>
                 {title}
                 <span style={{ color: T.faint, fontWeight: 400 }}> · {visible.length}</span>
-              </h3>
+              </SectionLabel>
               <div
                 style={{
                   display: "grid",

@@ -38,6 +38,7 @@ import { RoomVolumeStrip } from "../components/RoomAudio";
 import { SceneButton, SceneModal } from "../components/scenes";
 import { Modal, useDialogs } from "../components/dialogs";
 import { ACCENT, S } from "../styles";
+import { alpha } from "../theme";
 
 type Tool = "view" | "floor" | "wall" | "erase" | "place" | "room" | "paint";
 
@@ -477,9 +478,9 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
         style={{
           padding: "0.28rem 0.5rem",
           borderRadius: 6,
-          border: `1px solid ${active ? ACCENT : "#3a3a3a"}`,
-          background: active ? `${ACCENT}1a` : "transparent",
-          color: active ? ACCENT : "#bbb",
+          border: `1px solid ${active ? ACCENT : "#2a2030"}`,
+          background: active ? `${alpha(ACCENT, 0.10)}` : "transparent",
+          color: active ? ACCENT : "var(--bf-dim)",
           cursor: "pointer",
           fontSize: "0.8rem",
           textAlign: "left",
@@ -493,7 +494,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
   return (
     <div style={{ padding: "1.5rem 2rem" }}>
       {/* Plan tabs */}
-      <div style={{ display: "flex", alignItems: "center", gap: "0.1rem", marginBottom: "0.9rem", borderBottom: "1px solid #262626", flexWrap: "wrap" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "0.1rem", marginBottom: "0.9rem", borderBottom: "1px solid #221c24", flexWrap: "wrap" }}>
         {plans.map((p) => {
           const active = p.id === planId;
           return (
@@ -501,12 +502,12 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
               key={p.id}
               onClick={() => setPlanId(p.id)}
               style={{
-                background: active ? "#1b1b1f" : "transparent",
+                background: active ? "#17151b" : "transparent",
                 border: "none",
                 borderTopLeftRadius: 6,
                 borderTopRightRadius: 6,
                 borderBottom: `2px solid ${active ? ACCENT : "transparent"}`,
-                color: active ? ACCENT : "#999",
+                color: active ? ACCENT : "var(--bf-dim)",
                 cursor: "pointer",
                 padding: "0.45rem 0.9rem",
                 fontSize: "0.85rem",
@@ -520,7 +521,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
         <button
           onClick={() => setShowNewPlan(true)}
           title="New floor plan"
-          style={{ background: "transparent", border: "none", color: "#777", cursor: "pointer", padding: "0.45rem 0.8rem", fontSize: "0.85rem" }}
+          style={{ background: "transparent", border: "none", color: "var(--bf-faint)", cursor: "pointer", padding: "0.45rem 0.8rem", fontSize: "0.85rem" }}
         >
           + New
         </button>
@@ -547,7 +548,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
       )}
 
       {!plan ? (
-        <p style={{ color: "#666" }}>
+        <p style={{ color: "var(--bf-faint)" }}>
           No floor plans yet. Create one, paint your layout, then place your lights on it.
         </p>
       ) : (
@@ -564,7 +565,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
               <RailLabel>Place</RailLabel>
               {toolButton("place")}
               {tool === "place" && (
-                <div style={{ display: "flex", flexDirection: "column", gap: "0.15rem", marginLeft: "0.15rem", paddingLeft: "0.4rem", borderLeft: `2px solid ${ACCENT}55` }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.15rem", marginLeft: "0.15rem", paddingLeft: "0.4rem", borderLeft: `2px solid ${alpha(ACCENT, 0.33)}` }}>
                   {(["light", "audio"] as PlaceCategory[]).map((cat) => (
                     <button
                       key={cat}
@@ -572,9 +573,9 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                       style={{
                         padding: "0.22rem 0.4rem",
                         borderRadius: 5,
-                        border: `1px solid ${placeCategory === cat ? ACCENT : "#333"}`,
-                        background: placeCategory === cat ? `${ACCENT}1a` : "transparent",
-                        color: placeCategory === cat ? ACCENT : "#999",
+                        border: `1px solid ${placeCategory === cat ? ACCENT : "#2a2030"}`,
+                        background: placeCategory === cat ? `${alpha(ACCENT, 0.10)}` : "transparent",
+                        color: placeCategory === cat ? ACCENT : "var(--bf-dim)",
                         cursor: "pointer",
                         fontSize: "0.72rem",
                         textAlign: "left",
@@ -587,7 +588,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
               )}
               <RailLabel>Color</RailLabel>
               {toolButton("paint")}
-              <span style={{ color: "#666", fontSize: "0.68rem", marginTop: "0.5rem", lineHeight: 1.3 }}>
+              <span style={{ color: "var(--bf-faint)", fontSize: "0.68rem", marginTop: "0.5rem", lineHeight: 1.3 }}>
                 {TOOLS.find((t) => t.id === tool)?.hint}
               </span>
             </div>
@@ -636,7 +637,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
 
             {tool === "place" && placeCategory === "light" && (
               <div style={{ width: 220, flexShrink: 0 }}>
-                <h3 style={{ margin: "0 0 0.5rem", fontSize: "0.9rem", color: "#aaa" }}>Lights</h3>
+                <h3 style={{ margin: "0 0 0.5rem", fontSize: "0.9rem", color: "var(--bf-dim)" }}>Lights</h3>
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
                   {lights.map((l) => {
                     const sel = selected?.kind === "light" && selected.id === l.id;
@@ -657,7 +658,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                     );
                   })}
                   {lights.length === 0 && (
-                    <span style={{ color: "#666", fontSize: "0.8rem" }}>No lights discovered yet.</span>
+                    <span style={{ color: "var(--bf-faint)", fontSize: "0.8rem" }}>No lights discovered yet.</span>
                   )}
                 </div>
               </div>
@@ -665,7 +666,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
 
             {tool === "place" && placeCategory === "audio" && (
               <div style={{ width: 220, flexShrink: 0 }}>
-                <h3 style={{ margin: "0 0 0.5rem", fontSize: "0.9rem", color: "#aaa" }}>Speakers</h3>
+                <h3 style={{ margin: "0 0 0.5rem", fontSize: "0.9rem", color: "var(--bf-dim)" }}>Speakers</h3>
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
                   {[...audioById.values()].map((d) => {
                     const sel = selected?.kind === "audio" && selected.id === d.id;
@@ -686,7 +687,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                     );
                   })}
                   {audioById.size === 0 && (
-                    <span style={{ color: "#666", fontSize: "0.8rem" }}>No audio devices discovered yet.</span>
+                    <span style={{ color: "var(--bf-faint)", fontSize: "0.8rem" }}>No audio devices discovered yet.</span>
                   )}
                 </div>
               </div>
@@ -694,7 +695,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
 
             {tool === "paint" && (
               <div style={{ width: 220, flexShrink: 0, display: "flex", flexDirection: "column", gap: "0.6rem" }}>
-                <h3 style={{ margin: 0, fontSize: "0.9rem", color: "#aaa" }}>Brush</h3>
+                <h3 style={{ margin: 0, fontSize: "0.9rem", color: "var(--bf-dim)" }}>Brush</h3>
                 {(() => {
                   const [bh, bs] = hexToHs(paintColor);
                   return (
@@ -706,7 +707,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                     />
                   );
                 })()}
-                <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.75rem", color: "#888" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.75rem", color: "var(--bf-dim)" }}>
                   <input
                     type="range"
                     min={1}
@@ -717,7 +718,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                   />
                   <span style={{ width: 36, textAlign: "right" }}>{paintBrightness}%</span>
                 </label>
-                <span style={{ color: "#666", fontSize: "0.75rem" }}>
+                <span style={{ color: "var(--bf-faint)", fontSize: "0.75rem" }}>
                   Brush across lights on the plan to apply. Save the result as a
                   room scene with “Save current” in View mode.
                 </span>
@@ -776,8 +777,8 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                 position: "fixed",
                 left: popover.px,
                 top: popover.py,
-                background: "#1c1c1c",
-                border: "1px solid #333",
+                background: "#19171d",
+                border: "1px solid #2a2030",
                 borderRadius: 8,
                 padding: "0.5rem",
                 zIndex: 10,
@@ -797,13 +798,13 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                       setEditor({ kind: "light", id: p.light_id, anchor: { x: popover.px, y: popover.py } });
                       setPopover(null);
                     }}
-                    style={{ ...S.buttonGhost, fontSize: "0.8rem", textAlign: "left", color: on ? ACCENT : "#888" }}
+                    style={{ ...S.buttonGhost, fontSize: "0.8rem", textAlign: "left", color: on ? ACCENT : "var(--bf-dim)" }}
                   >
                     {on ? "● " : "○ "}{light ? lightLabel(light) : p.light_id}
                   </button>
                 );
               })}
-              <button onClick={() => setPopover(null)} style={{ ...S.buttonGhost, fontSize: "0.75rem", color: "#666" }}>
+              <button onClick={() => setPopover(null)} style={{ ...S.buttonGhost, fontSize: "0.75rem", color: "var(--bf-faint)" }}>
                 Close
               </button>
             </div>
@@ -955,11 +956,11 @@ function NewPlanDialog({
         autoFocus
         style={S.input}
       />
-      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.875rem", color: "#aaa" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.875rem", color: "var(--bf-dim)" }}>
         {dimInput(width, setWidth)}
         ×
         {dimInput(height, setHeight)}
-        <span style={{ color: "#666", fontSize: "0.78rem" }}>feet — one tile per foot, max 128</span>
+        <span style={{ color: "var(--bf-faint)", fontSize: "0.78rem" }}>feet — one tile per foot, max 128</span>
       </div>
       <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end", marginTop: "0.25rem" }}>
         <button onClick={onClose} style={S.buttonGhost}>Cancel</button>
@@ -983,7 +984,7 @@ function RailLabel({ children }: { children: React.ReactNode }) {
         textTransform: "uppercase",
         marginTop: "0.45rem",
         paddingTop: "0.3rem",
-        borderTop: "1px solid #232323",
+        borderTop: "1px solid #23202a",
       }}
     >
       {children}
@@ -1027,8 +1028,8 @@ function RoomController({
 
   return (
     <div style={{ width: 250, flexShrink: 0, display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-      <h3 style={{ margin: 0, fontSize: "0.9rem", color: "#aaa" }}>Rooms</h3>
-      <span style={{ color: "#666", fontSize: "0.72rem", marginTop: "-0.2rem" }}>
+      <h3 style={{ margin: 0, fontSize: "0.9rem", color: "var(--bf-dim)" }}>Rooms</h3>
+      <span style={{ color: "var(--bf-faint)", fontSize: "0.72rem", marginTop: "-0.2rem" }}>
         Click a room to set its color, brightness &amp; scenes.
       </span>
 
@@ -1076,7 +1077,7 @@ function RoomController({
               <span style={{ fontWeight: 600, fontSize: "0.88rem", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {room.name}
               </span>
-              <span style={{ color: "#666", fontSize: "0.72rem", whiteSpace: "nowrap" }}>
+              <span style={{ color: "var(--bf-faint)", fontSize: "0.72rem", whiteSpace: "nowrap" }}>
                 {count} light{count !== 1 ? "s" : ""}
               </span>
               <Switch
@@ -1177,7 +1178,7 @@ function RoomEditorPanel({
 }) {
   return (
     <div style={{ width: 220, flexShrink: 0, display: "flex", flexDirection: "column", gap: "0.4rem" }}>
-      <h3 style={{ margin: "0 0 0.2rem", fontSize: "0.9rem", color: "#aaa" }}>Rooms</h3>
+      <h3 style={{ margin: "0 0 0.2rem", fontSize: "0.9rem", color: "var(--bf-dim)" }}>Rooms</h3>
       {rooms.map((r, i) => (
         <div key={r.id} style={{ display: "flex", gap: "0.3rem", alignItems: "center" }}>
           <button
@@ -1192,7 +1193,7 @@ function RoomEditorPanel({
             }}
           >
             {r.name}
-            <span style={{ color: "#666", marginLeft: "0.4rem" }}>{r.tiles.size}</span>
+            <span style={{ color: "var(--bf-faint)", marginLeft: "0.4rem" }}>{r.tiles.size}</span>
           </button>
           <button onClick={() => onRename(r.id)} title="Rename" style={{ ...S.buttonGhost, padding: "0.3rem 0.5rem" }}>✎</button>
           <button onClick={() => onDelete(r.id)} title="Delete" style={{ ...S.buttonGhost, padding: "0.3rem 0.5rem", color: "#866" }}>×</button>
@@ -1200,7 +1201,7 @@ function RoomEditorPanel({
       ))}
       <button onClick={onCreate} style={S.buttonGhost}>+ New room</button>
       {rooms.length > 0 && !selectedRoom && (
-        <span style={{ color: "#666", fontSize: "0.75rem" }}>Select a room, then paint its tiles.</span>
+        <span style={{ color: "var(--bf-faint)", fontSize: "0.75rem" }}>Select a room, then paint its tiles.</span>
       )}
     </div>
   );
@@ -1220,6 +1221,15 @@ function distToSegment(px: number, py: number, x1: number, y1: number, x2: numbe
 
 const AUDIO_HEX = "#a78bfa";
 
+/** Resolve a theme CSS variable to a concrete colour for canvas drawing. The 2D
+ * context can't read `var(--bf-*)`, so we look the value up off <html> at draw
+ * time (falling back to a literal if the variable isn't set). This is what lets
+ * the canvas re-theme along with the rest of the app. */
+function cssHex(name: string, fallback: string): string {
+  const val = getComputedStyle(document.documentElement).getPropertyValue(`--bf-${name}`).trim();
+  return val || fallback;
+}
+
 function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
   ctx.beginPath();
   if (typeof ctx.roundRect === "function") ctx.roundRect(x, y, w, h, r);
@@ -1234,7 +1244,7 @@ function drawBulbBase(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: 
   const bh = r * 0.7;
   const bx = cx - bw / 2;
   const by = cy + r * 0.72;
-  ctx.fillStyle = "#2b2b30";
+  ctx.fillStyle = "#23202a";
   ctx.strokeStyle = "rgba(0,0,0,0.55)";
   ctx.lineWidth = 1;
   roundRectPath(ctx, bx, by, bw, bh, Math.max(1, r * 0.18));
@@ -1252,7 +1262,7 @@ function drawBulbBase(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: 
 
 /** Speaker: a tall cabinet with a tweeter + woofer. */
 function drawSpeakerIcon(ctx: CanvasRenderingContext2D, cx: number, cy: number, s: number) {
-  ctx.strokeStyle = AUDIO_HEX;
+  ctx.strokeStyle = cssHex("violet", AUDIO_HEX);
   ctx.fillStyle = "rgba(167,139,250,0.16)";
   ctx.lineWidth = Math.max(1, s * 0.07);
   const w = s * 0.66, h = s;
@@ -1270,7 +1280,7 @@ function drawSpeakerIcon(ctx: CanvasRenderingContext2D, cx: number, cy: number, 
 
 /** Receiver: a wide flat chassis with a display slot and two knobs. */
 function drawReceiverIcon(ctx: CanvasRenderingContext2D, cx: number, cy: number, s: number) {
-  ctx.strokeStyle = AUDIO_HEX;
+  ctx.strokeStyle = cssHex("violet", AUDIO_HEX);
   ctx.fillStyle = "rgba(167,139,250,0.16)";
   ctx.lineWidth = Math.max(1, s * 0.07);
   const w = s * 1.15, h = s * 0.62;
@@ -1385,11 +1395,11 @@ function PlanCanvas({
     const ctx = canvas.getContext("2d")!;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
-    ctx.fillStyle = "#0d0d0f";
+    ctx.fillStyle = "#0b0a0e";
     ctx.fillRect(0, 0, cssW, cssH);
 
     // Floor tiles
-    ctx.fillStyle = "#1d2129";
+    ctx.fillStyle = "#15131a";
     for (const k of tiles) {
       const [x, y] = k.split(",").map(Number);
       ctx.fillRect(ox + x * cell, oy + y * cell, cell, cell);
@@ -1474,7 +1484,7 @@ function PlanCanvas({
         run.lineTo(ox + pts[i][0] * cell, oy + pts[i][1] * cell);
       }
       const st = statesById.get(p.light_id);
-      let color = "#3a3d45";
+      let color = "#2a2433";
       if (st?.on) {
         if (st.color) {
           const [rr, gg, bb] = xyToRgb(st.color.x, st.color.y, Math.max(st.color.brightness, 0.25));
@@ -1513,7 +1523,7 @@ function PlanCanvas({
 
       const states = group.map((g) => statesById.get(g.light_id));
       const lit = states.find((s) => s?.on);
-      let fill = "#3a3d45";
+      let fill = "#2a2433";
       if (lit) {
         if (lit.color) {
           const [rr, gg, bb] = xyToRgb(lit.color.x, lit.color.y, Math.max(lit.color.brightness, 0.25));
@@ -1570,7 +1580,7 @@ function PlanCanvas({
     const hx = ox + gridW * cell;
     const hy = oy + gridH * cell;
     if (pendingSize) {
-      ctx.strokeStyle = ACCENT;
+      ctx.strokeStyle = cssHex("cyan", "#38bdf8");
       ctx.lineWidth = 1.5;
       ctx.setLineDash([5, 4]);
       ctx.strokeRect(ox, oy, gridW * cell, gridH * cell);
@@ -1578,17 +1588,17 @@ function PlanCanvas({
       ctx.font = "600 12px 'Inter Variable', system-ui";
       ctx.textAlign = "right";
       ctx.textBaseline = "bottom";
-      ctx.fillStyle = ACCENT;
+      ctx.fillStyle = cssHex("cyan", "#38bdf8");
       ctx.fillText(`${gridW} × ${gridH}`, hx - 12, hy - 6);
     }
-    ctx.fillStyle = pendingSize ? ACCENT : "#555";
-    ctx.strokeStyle = "#0d0d0f";
+    ctx.fillStyle = pendingSize ? cssHex("cyan", "#38bdf8") : cssHex("faint", "#6f6772");
+    ctx.strokeStyle = "#0b0a0e";
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.arc(hx, hy, 7, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
-    ctx.fillStyle = "#0d0d0f";
+    ctx.fillStyle = "#0b0a0e";
     ctx.font = "700 9px 'Inter Variable', system-ui";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
@@ -1892,7 +1902,7 @@ function PlanCanvas({
           height: "calc(100vh - 250px)",
           minHeight: 360,
           borderRadius: 10,
-          border: "1px solid #262626",
+          border: "1px solid #221c24",
           touchAction: "none",
           cursor: tool === "view" ? "grab" : "crosshair",
           display: "block",

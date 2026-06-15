@@ -51,12 +51,12 @@ function Section({
 }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
-      <span style={{ fontSize: "0.8rem", color: "#bbb", fontWeight: 600 }}>
+      <span style={{ fontSize: "0.8rem", color: "var(--bf-dim)", fontWeight: 600 }}>
         {title}
-        {hint && <span style={{ color: "#666", fontWeight: 400 }}> {hint}</span>}
+        {hint && <span style={{ color: "var(--bf-faint)", fontWeight: 400 }}> {hint}</span>}
       </span>
       {isEmpty ? (
-        <span style={{ fontSize: "0.78rem", color: "#666", padding: "0.2rem 0" }}>{empty}</span>
+        <span style={{ fontSize: "0.78rem", color: "var(--bf-faint)", padding: "0.2rem 0" }}>{empty}</span>
       ) : (
         <div
           style={{
@@ -140,7 +140,7 @@ export function RoomDevicesPanel({
   return (
     <div
       style={{
-        borderTop: "1px solid #2a2a2a",
+        borderTop: "1px solid var(--bf-surfaceHi)",
         paddingTop: "0.7rem",
         marginTop: "0.2rem",
         display: "flex",
@@ -158,7 +158,7 @@ export function RoomDevicesPanel({
               onToggle={() => setLinks((s) => toggle(s, pg.id))}
             >
               {pg.domain === "audio" ? "♪" : "⇄"} {pg.name}
-              <span style={{ color: "#666", fontSize: "0.75rem" }}>{groupSummary(pg)}</span>
+              <span style={{ color: "var(--bf-faint)", fontSize: "0.75rem" }}>{groupSummary(pg)}</span>
             </SelectRow>
           ))}
         </Section>
@@ -175,7 +175,7 @@ export function RoomDevicesPanel({
               onToggle={() => setDirectLights((s) => toggle(s, l.id))}
             >
               {l.name}
-              {viaLink && <span style={{ fontSize: "0.72rem", color: "#777" }}>(via link)</span>}
+              {viaLink && <span style={{ fontSize: "0.72rem", color: "var(--bf-faint)" }}>(via link)</span>}
             </SelectRow>
           );
         })}
@@ -203,7 +203,7 @@ export function RoomDevicesPanel({
                 gap: "0.4rem",
               }}
             >
-              <label style={{ display: "flex", alignItems: "center", gap: "0.6rem", fontSize: "0.9rem", color: "#ddd", cursor: "pointer", minHeight: 30 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: "0.6rem", fontSize: "0.9rem", color: "var(--bf-dim)", cursor: "pointer", minHeight: 30 }}>
                 <input
                   type="checkbox"
                   checked={isMember}
@@ -221,7 +221,7 @@ export function RoomDevicesPanel({
               </label>
               {isMember && (
                 <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                  <span style={{ fontSize: "0.72rem", color: "#999", width: 40 }}>offset</span>
+                  <span style={{ fontSize: "0.72rem", color: "var(--bf-dim)", width: 40 }}>offset</span>
                   <input
                     type="range"
                     min={-50}
@@ -230,7 +230,7 @@ export function RoomDevicesPanel({
                     onChange={(e) => setAudio((prev) => new Map(prev).set(d.id, Number(e.target.value)))}
                     style={{ flex: 1, accentColor: AUDIO_ACCENT }}
                   />
-                  <span style={{ fontSize: "0.72rem", color: "#999", width: 34, textAlign: "right" }}>
+                  <span style={{ fontSize: "0.72rem", color: "var(--bf-dim)", width: 34, textAlign: "right" }}>
                     {off! > 0 ? `+${off}` : off}%
                   </span>
                 </div>
@@ -249,7 +249,7 @@ export function RoomDevicesPanel({
         {powerDevices.map((p) => (
           <SelectRow key={p.id} checked={power.has(p.id)} onToggle={() => setPower((s) => toggle(s, p.id))}>
             {p.name}
-            <span style={{ color: "#666", fontSize: "0.72rem" }}>{p.kind}</span>
+            <span style={{ color: "var(--bf-faint)", fontSize: "0.72rem" }}>{p.kind}</span>
           </SelectRow>
         ))}
       </Section>

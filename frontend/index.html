@@ -8,7 +8,7 @@
     <link rel="apple-touch-icon" href="/icon-192.png" />
     <!-- PWA: installable, app-like full-screen shell -->
     <link rel="manifest" href="/manifest.webmanifest" />
-    <meta name="theme-color" content="#0f0f0f" />
+    <meta name="theme-color" content="#09080b" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -22,8 +22,15 @@
            small sizes used throughout the UI. */
         font-weight: 450;
         font-size: 16.5px;
-        background: #0f0f0f;
-        color: #f0f0f0;
+        /* Theme-driven canvas: a faint warm candlelight glow up top over the
+           deepest surface. Values are CSS vars set by applyTheme(); the literal
+           fallbacks are the default (Candlelit Cathedral) so the very first paint,
+           before the bundle runs, is already correct — no flash. */
+        background:
+          radial-gradient(110% 70% at 50% -12%, var(--bf-candle, #17120b) 0%, transparent 48%),
+          var(--bf-void, #09080b);
+        background-attachment: fixed;
+        color: #ece6f0;
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
         text-rendering: optimizeLegibility;
@@ -55,6 +62,37 @@
           border-radius: 50%;
           background: #eaeaea;
         }
+      }
+
+      /* Film-grain over the whole canvas — a faint stone/parchment tooth so the
+         gothic-black never reads as flat digital fill. Tiled fractal noise,
+         fixed, non-interactive, overlay-blended at low opacity. */
+      body::after {
+        content: "";
+        position: fixed;
+        inset: 0;
+        z-index: 200;
+        pointer-events: none;
+        opacity: 0.04;
+        mix-blend-mode: overlay;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+      }
+
+      /* Staggered card reveal on load — rise + fade. Per-card delay is set inline
+         (animation-delay) so a room grid blooms in sequence, like candles lit one
+         by one rather than all at once. */
+      @keyframes bifrost-rise {
+        from {
+          opacity: 0;
+          transform: translateY(12px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+      .bifrost-card {
+        animation: bifrost-rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
       }
 
       /* Slow diagonal drift shared by the nav backdrop and the brand wordmark.
@@ -103,7 +141,7 @@
         transition: --fa 0.3s ease;
       }
       @media (prefers-reduced-motion: reduce) {
-        .bifrost-aurora, .bifrost-brand { animation: none; }
+        .bifrost-aurora, .bifrost-brand, .bifrost-card { animation: none; }
         .bifrost-brand { transition: none; }
       }
     </style>

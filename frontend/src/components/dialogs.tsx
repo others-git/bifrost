@@ -4,12 +4,14 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { S } from "../styles";
+import { color, font } from "../theme";
 
 const overlay: CSSProperties = {
   position: "fixed",
   inset: 0,
-  background: "rgba(0,0,0,0.55)",
-  backdropFilter: "blur(2px)",
+  background: "rgba(7,4,11,0.62)",
+  backdropFilter: "blur(3px)",
+  WebkitBackdropFilter: "blur(3px)",
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
@@ -49,16 +51,16 @@ export function Modal({
           maxWidth: "calc(100vw - 2rem)",
           maxHeight: "calc(100vh - 2rem)",
           overflowY: "auto",
-          border: "1px solid #2e2e2e",
-          boxShadow: "0 12px 40px rgba(0,0,0,0.6)",
+          border: `1px solid ${color.hairline}`,
+          boxShadow: "0 16px 44px rgba(0,0,0,0.7)",
         }}
       >
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h3 style={{ margin: 0, fontSize: "1rem", color: "#eee" }}>{title}</h3>
+          <h3 style={{ margin: 0, fontSize: "1.02rem", fontFamily: font.display, letterSpacing: "0.03em", color: color.text }}>{title}</h3>
           <button
             onClick={onClose}
             aria-label="Close"
-            style={{ background: "none", border: "none", color: "#777", cursor: "pointer", fontSize: "1.2rem", lineHeight: 1, padding: "0 0.2rem" }}
+            style={{ background: "none", border: "none", color: color.faint, cursor: "pointer", fontSize: "1.2rem", lineHeight: 1, padding: "0 0.2rem" }}
           >
             ×
           </button>
@@ -148,7 +150,7 @@ function DialogHost({ req, done }: { req: DialogRequest; done: () => void }) {
   return (
     <Modal title={req.title} onClose={cancel}>
       {req.message && (
-        <div style={{ color: "#aaa", fontSize: "0.875rem", lineHeight: 1.45 }}>{req.message}</div>
+        <div style={{ color: color.dim, fontSize: "0.875rem", lineHeight: 1.45 }}>{req.message}</div>
       )}
       {req.kind === "prompt" && (
         <input
@@ -172,7 +174,7 @@ function DialogHost({ req, done }: { req: DialogRequest; done: () => void }) {
           onClick={submit}
           autoFocus={req.kind !== "prompt"}
           disabled={req.kind === "prompt" && !value.trim()}
-          style={danger ? { ...S.buttonDanger, background: "#a33", color: "#fff" } : S.button}
+          style={danger ? { ...S.buttonDanger, background: color.rose, color: "#160a0e", fontWeight: 700 } : S.button}
         >
           {confirmLabel}
         </button>

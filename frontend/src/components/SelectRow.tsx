@@ -3,12 +3,13 @@
 // room light/link/speaker pickers.
 
 import type { ReactNode } from "react";
+import { color, radius, alpha } from "../theme";
 
 export function SelectRow({
   checked,
   onToggle,
   disabled,
-  accent = "#38bdf8",
+  accent = color.cyan,
   children,
 }: {
   checked: boolean;
@@ -24,11 +25,11 @@ export function SelectRow({
         alignItems: "center",
         gap: "0.6rem",
         padding: "0.55rem 0.6rem",
-        borderRadius: 8,
+        borderRadius: radius.sm,
         minHeight: 42,
         border: `1px solid ${checked ? accent : "transparent"}`,
-        background: checked ? `${accent}1f` : "rgba(255,255,255,0.02)",
-        color: disabled ? "#666" : "#ddd",
+        background: checked ? `${alpha(accent, 0.13)}` : color.surfaceOff,
+        color: disabled ? color.faint : color.text,
         cursor: disabled ? "default" : "pointer",
         fontSize: "0.9rem",
       }}

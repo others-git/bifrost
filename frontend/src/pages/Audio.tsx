@@ -14,26 +14,17 @@ import {
 } from "../api";
 import { AudioControls, KIND_LABEL, PowerButton } from "../components/AudioControls";
 import { SelectRow } from "../components/SelectRow";
+import { PageHeader } from "../components/PageHeader";
 import { useViewport } from "../useViewport";
+import { T, domain, alpha } from "../theme";
 
-const ACCENT = "#a78bfa"; // violet — audio's counterpart to the lamps' warm glow
+const ACCENT = domain.audio; // violet — audio's counterpart to the lamps' glow
 
 /** Devices to show on the Audio control surface: drop de-dup **shadows** (a
  * duplicate of a native device — e.g. a Sonos also imported via HA) and disabled
  * devices. Both are managed on the Devices page, not controlled here. */
 const controllable = (list: AudioDevice[]) =>
   list.filter((d) => !d.shadowed_by && !d.companion_of && d.enabled !== false);
-
-const T = {
-  text: "#eae4d6",
-  dim: "#97907e",
-  faint: "#6b6557",
-  panel: "linear-gradient(176deg, #1a1916 0%, #141311 100%)",
-  panelBorder: "#2b2822",
-  card: "#1d1c18",
-  cardOff: "#171613",
-  cardBorder: "#2c2922",
-};
 
 export function AudioPage() {
   const [devices, setDevices] = useState<AudioDevice[]>([]);
@@ -121,35 +112,10 @@ export function AudioPage() {
 
   return (
     <div style={{ padding: isMobile ? "1rem 0.85rem" : "2rem", maxWidth: 1020, margin: "0 auto", color: T.text }}>
-      <header style={{ marginBottom: "1.4rem" }}>
-        <div style={{ display: "flex", alignItems: "baseline", gap: "0.9rem" }}>
-          <h1
-            style={{
-              margin: 0,
-              fontSize: "1rem",
-              textTransform: "uppercase",
-              letterSpacing: "0.22em",
-              fontWeight: 700,
-            }}
-          >
-            Audio
-          </h1>
-          {devices.length > 0 && (
-            <span style={{ fontSize: "0.78rem", color: T.dim }}>
-              {devices.length} device{devices.length !== 1 ? "s" : ""}
-            </span>
-          )}
-        </div>
-        <div
-          aria-hidden
-          style={{
-            marginTop: "0.7rem",
-            height: 1,
-            background:
-              "linear-gradient(90deg, rgba(167,139,250,0.6), rgba(56,189,248,0.25) 55%, transparent)",
-          }}
-        />
-      </header>
+      <PageHeader
+        title="Audio"
+        status={devices.length > 0 ? `${devices.length} device${devices.length !== 1 ? "s" : ""}` : undefined}
+      />
 
       {loading ? (
         <p style={{ color: T.faint }}>Loading…</p>
@@ -246,7 +212,7 @@ function AudioDeviceCard({
     <section
       style={{
         background: s.power || playing ? T.panel : T.cardOff,
-        border: `1px solid ${s.power || playing ? `${ACCENT}55` : T.cardBorder}`,
+        border: `1px solid ${s.power || playing ? `${alpha(ACCENT, 0.33)}` : T.cardBorder}`,
         borderRadius: 14,
         overflow: "hidden",
         opacity: offline ? 0.5 : 1,
@@ -291,7 +257,7 @@ function AudioDeviceCard({
               padding: "0.25rem 0.5rem",
               borderRadius: 7,
               border: `1px solid ${groupOpen ? ACCENT : T.cardBorder}`,
-              background: groupOpen ? `${ACCENT}1f` : "transparent",
+              background: groupOpen ? `${alpha(ACCENT, 0.12)}` : "transparent",
               color: groupOpen ? ACCENT : T.dim,
               cursor: "pointer",
               fontSize: "0.72rem",
@@ -356,9 +322,9 @@ function GroupPanel({
   return (
     <div
       style={{
-        border: `1px solid ${ACCENT}44`,
+        border: `1px solid ${alpha(ACCENT, 0.27)}`,
         borderRadius: 10,
-        background: `${ACCENT}0d`,
+        background: `${alpha(ACCENT, 0.05)}`,
         padding: "0.6rem 0.7rem",
         marginBottom: "0.8rem",
         display: "flex",

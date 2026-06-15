@@ -7,6 +7,7 @@ import { createPortal } from "react-dom";
 import { rgbToHex } from "../api";
 import { useViewport } from "../useViewport";
 import { sheetStyle } from "./sheet";
+import { color, radius } from "../theme";
 
 // ── HSV color math (h in degrees, s/v in 0..1) ──────────────────────────────
 
@@ -223,8 +224,8 @@ export function BrightnessBar({
         width,
         height,
         borderRadius: width / 2,
-        border: "1px solid #333",
-        background: `linear-gradient(to bottom, ${hex}, #15151a)`,
+        border: `1px solid ${color.border}`,
+        background: `linear-gradient(to bottom, ${hex}, ${color.surfaceOff})`,
         touchAction: "none",
         cursor: "pointer",
         flexShrink: 0,
@@ -530,11 +531,11 @@ export function LightEditor({
               top: pos?.top ?? 0,
               visibility: pos ? "visible" : "hidden",
               zIndex: 60,
-              background: "#1c1c20",
-              border: "1px solid #333",
-              borderRadius: 14,
+              background: color.surface,
+              border: `1px solid ${color.hairline}`,
+              borderRadius: radius.frame,
               padding: "0.9rem",
-              boxShadow: "0 8px 30px rgba(0,0,0,0.6)",
+              boxShadow: "0 12px 34px rgba(0,0,0,0.7)",
               display: "flex",
               flexDirection: "column",
               gap: "0.7rem",
@@ -595,7 +596,7 @@ export function LightEditor({
       )}
 
       {onToggle && (
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid #2a2a2e", paddingTop: "0.6rem" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--bf-border)", paddingTop: "0.6rem" }}>
           <span style={{ fontSize: "0.8rem", color: "#999" }}>Power</span>
           <button
             onClick={onToggle}

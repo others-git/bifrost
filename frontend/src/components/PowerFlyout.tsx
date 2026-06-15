@@ -8,8 +8,9 @@ import type { PowerDevice } from "../api";
 import { Glyph, powerKindGlyph } from "./glyphs";
 import { sheetStyle } from "./sheet";
 import { useViewport } from "../useViewport";
+import { color, radius, alpha } from "../theme";
 
-const ACCENT = "#38bdf8";
+const ACCENT = color.cyan;
 
 const KIND_LABEL: Record<string, string> = {
   switch: "Switch",
@@ -86,11 +87,11 @@ export function PowerFlyout({
               visibility: pos ? "visible" : "hidden",
               zIndex: 60,
               width: 240,
-              background: "#1c1c20",
-              border: "1px solid #333",
-              borderRadius: 14,
+              background: color.surface,
+              border: `1px solid ${color.hairline}`,
+              borderRadius: radius.frame,
               padding: "0.9rem",
-              boxShadow: "0 8px 30px rgba(0,0,0,0.6)",
+              boxShadow: "0 12px 34px rgba(0,0,0,0.7)",
               display: "flex",
               flexDirection: "column",
               gap: "0.8rem",
@@ -98,14 +99,14 @@ export function PowerFlyout({
       }
     >
       <div style={{ display: "flex", alignItems: "center", gap: "0.7rem" }}>
-        <span style={{ color: on ? ACCENT : "#888", flexShrink: 0 }}>
+        <span style={{ color: on ? ACCENT : "var(--bf-dim)", flexShrink: 0 }}>
           <Glyph name={device.glyph ?? powerKindGlyph(device.kind)} size={24} />
         </span>
         <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontWeight: 600, fontSize: "0.95rem", color: "#eee", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          <div style={{ fontWeight: 600, fontSize: "0.95rem", color: "var(--bf-text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {device.name}
           </div>
-          <div style={{ fontSize: "0.7rem", color: "#6b6557" }}>
+          <div style={{ fontSize: "0.7rem", color: "var(--bf-faint)" }}>
             {KIND_LABEL[device.kind] ?? device.kind}
             {offline && <span style={{ color: "#c2603f" }}> · offline</span>}
           </div>
@@ -113,7 +114,7 @@ export function PowerFlyout({
         <button
           onClick={onClose}
           aria-label="Close"
-          style={{ background: "none", border: "none", color: "#777", cursor: "pointer", fontSize: "1.15rem", lineHeight: 1, padding: 0 }}
+          style={{ background: "none", border: "none", color: "var(--bf-faint)", cursor: "pointer", fontSize: "1.15rem", lineHeight: 1, padding: 0 }}
         >
           ×
         </button>
@@ -133,7 +134,7 @@ export function PowerFlyout({
           background: on
             ? "linear-gradient(180deg, rgba(56,189,248,0.28), rgba(56,189,248,0.08))"
             : "rgba(255,255,255,0.05)",
-          color: on ? "#dff3ff" : "#bbb",
+          color: on ? "#dff3ff" : "var(--bf-dim)",
           cursor: offline ? "not-allowed" : "pointer",
           opacity: offline ? 0.5 : 1,
           fontSize: "0.9rem",
@@ -179,7 +180,7 @@ export function DisableRow({
         isCompact
           ? {
               background: "rgba(255,255,255,0.04)",
-              border: `1px solid ${tone}55`,
+              border: `1px solid ${alpha(tone, 0.33)}`,
               borderRadius: 10,
               color: tone,
               cursor: "pointer",

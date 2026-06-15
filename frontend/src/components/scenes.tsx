@@ -32,7 +32,7 @@ export const SCENE_PRESETS: ScenePreset[] = [
 /** CSS background for a scene's palette: a smooth wash for one color, a left-to-
  *  right gradient across many. Empty palette (brightness-only) reads as neutral. */
 export function paletteGradient(palette: string[]): string {
-  if (palette.length === 0) return "linear-gradient(135deg, #2b2b2b, #1c1c1c)";
+  if (palette.length === 0) return "linear-gradient(135deg, var(--bf-surfaceHi), var(--bf-surface))";
   if (palette.length === 1) {
     const c = palette[0];
     return `linear-gradient(135deg, color-mix(in srgb, ${c} 88%, #fff), ${c} 55%, color-mix(in srgb, ${c} 78%, #000))`;
@@ -130,7 +130,7 @@ export function SceneModal({
       </p>
 
       {scenes.length === 0 ? (
-        <p style={{ color: "#777", fontSize: "0.85rem", margin: "0 0 0.8rem" }}>
+        <p style={{ color: "var(--bf-faint)", fontSize: "0.85rem", margin: "0 0 0.8rem" }}>
           No scenes yet — save this room's current colors below, or build one on the Scenes page.
         </p>
       ) : (
@@ -233,7 +233,7 @@ export function SceneEditor({
         display: "flex",
         flexDirection: "column",
         gap: "0.45rem",
-        borderTop: "1px solid #2a2a2a",
+        borderTop: "1px solid var(--bf-surfaceHi)",
         paddingTop: "0.5rem",
       }}
     >
@@ -278,7 +278,7 @@ export function SceneEditor({
           alignItems: "center",
           gap: "0.5rem",
           fontSize: "0.75rem",
-          color: "#888",
+          color: "var(--bf-dim)",
         }}
       >
         Brightness
@@ -294,7 +294,7 @@ export function SceneEditor({
       </label>
 
       <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", flexWrap: "wrap" }}>
-        <span style={{ fontSize: "0.75rem", color: "#888" }}>Palette</span>
+        <span style={{ fontSize: "0.75rem", color: "var(--bf-dim)" }}>Palette</span>
         {palette.map((c, i) => (
           <span key={i} style={{ display: "inline-flex", alignItems: "center" }}>
             <button

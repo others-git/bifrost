@@ -10,6 +10,7 @@ import { RoomsPage } from "./pages/Rooms";
 import { FloorPlanPage } from "./pages/FloorPlan";
 import { SettingsPage } from "./pages/Settings";
 import { S } from "./styles";
+import { color, font, navAurora as NAV_AURORA, alpha } from "./theme";
 import { useViewport } from "./useViewport";
 import { useAutoReloadOnNewBuild } from "./useAutoReload";
 
@@ -90,7 +91,7 @@ export function App() {
 
   if (page === "loading") {
     return (
-      <div style={{ ...S.center, color: "#555", fontSize: "0.9rem" }}>Loading…</div>
+      <div style={{ ...S.center, color: color.faint, fontSize: "0.9rem" }}>Loading…</div>
     );
   }
   if (page === "setup") return <SetupPage onComplete={() => setPage("login")} />;
@@ -112,8 +113,8 @@ export function App() {
         display: "flex",
         flexDirection: isCompact ? "column" : "row",
         minHeight: "100vh",
-        background: "#111",
-        color: "#f0f0f0",
+        background: "transparent",
+        color: color.text,
       }}
     >
       {isCompact ? (
@@ -139,7 +140,7 @@ export function App() {
         {page === "rooms" && <RoomsPage />}
         {page === "plan" &&
           (isMobile ? (
-            <div style={{ padding: "3rem 1.2rem", textAlign: "center", color: "#888" }}>
+            <div style={{ padding: "3rem 1.2rem", textAlign: "center", color: color.dim }}>
               The Floor Plan is available on a larger screen.
             </div>
           ) : (
@@ -173,9 +174,8 @@ function MobileTopBar({
         justifyContent: "flex-end",
         gap: "0.6rem",
         padding: "calc(0.5rem + env(safe-area-inset-top)) 0.9rem 0.5rem",
-        borderBottom: "1px solid #1c2430",
-        backgroundImage:
-          "linear-gradient(135deg, #10131a 0%, #0f1a22 22%, #161326 48%, #0e1f28 74%, #10131a 100%)",
+        borderBottom: `1px solid ${color.hairline}`,
+        backgroundImage: NAV_AURORA,
         position: "sticky",
         top: 0,
         zIndex: 30,
@@ -193,13 +193,13 @@ function MobileTopBar({
         }}
       >
         <Brand fontSize="1.05rem" />
-        {title && <span style={{ fontSize: "0.85rem", color: "#8b93a1" }}>{title}</span>}
+        {title && <span style={{ fontSize: "0.85rem", fontFamily: font.display, letterSpacing: "0.08em", color: color.dim }}>{title}</span>}
       </div>
-      {version && <span style={{ fontSize: "0.65rem", color: "#5d6878" }}>v{version}</span>}
+      {version && <span style={{ fontSize: "0.65rem", color: color.faint }}>v{version}</span>}
       <button
         onClick={onLogout}
         aria-label="Sign out"
-        style={{ background: "none", border: "none", color: "#6b7585", cursor: "pointer", fontSize: "1.1rem", padding: "0.2rem 0.3rem" }}
+        style={{ background: "none", border: "none", color: color.faint, cursor: "pointer", fontSize: "1.1rem", padding: "0.2rem 0.3rem" }}
       >
         ⏻
       </button>
@@ -226,8 +226,10 @@ function BottomNav({
         bottom: 0,
         zIndex: 40,
         display: "flex",
-        borderTop: "1px solid #1c2430",
-        background: "#0d1117",
+        borderTop: `1px solid ${color.hairline}`,
+        background: "rgba(13,8,16,0.86)",
+        backdropFilter: "blur(12px)",
+        WebkitBackdropFilter: "blur(12px)",
         paddingBottom: "env(safe-area-inset-bottom)",
       }}
     >
@@ -248,7 +250,8 @@ function BottomNav({
               padding: "0.5rem 0.2rem",
               background: "none",
               border: "none",
-              color: active ? "#9adcff" : "#7c8595",
+              color: active ? color.cyan : color.faint,
+              textShadow: active ? `0 0 12px ${alpha(color.cyan, 0.53)}` : undefined,
               cursor: "pointer",
             }}
           >
@@ -295,11 +298,10 @@ function NavTray({
         flexShrink: 0,
         display: "flex",
         flexDirection: "column",
-        borderRight: "1px solid #1c2430",
-        // Deep aurora tints (indigo / teal / violet) drifting diagonally —
+        borderRight: `1px solid ${color.hairline}`,
+        // Deep aurora tints (aubergine / oxblood / violet) drifting diagonally —
         // the .bifrost-aurora class pans this oversized gradient slowly.
-        backgroundImage:
-          "linear-gradient(135deg, #10131a 0%, #0f1a22 22%, #161326 48%, #0e1f28 74%, #10131a 100%)",
+        backgroundImage: NAV_AURORA,
         padding: "0.75rem 0.5rem",
         gap: "0.25rem",
         transition: "width 0.15s ease",
@@ -322,7 +324,7 @@ function NavTray({
       >
         <Brand compact={collapsed} fontSize="1.15rem" />
         {!collapsed && version && (
-          <span style={{ fontSize: "0.7rem", color: "#5d6878" }}>v{version}</span>
+          <span style={{ fontSize: "0.7rem", color: color.faint }}>v{version}</span>
         )}
       </div>
 
@@ -339,12 +341,13 @@ function NavTray({
               gap: "0.65rem",
               padding: collapsed ? "0.55rem 0" : "0.55rem 0.6rem",
               justifyContent: collapsed ? "center" : "flex-start",
-              background: active ? "rgba(125,211,252,0.09)" : "none",
+              background: active ? "rgba(56,189,248,0.10)" : "none",
               border: "none",
               borderRadius: 8,
-              boxShadow: active ? "inset 2px 0 0 0 rgba(125,211,252,0.75)" : "none",
-              color: active ? "#9adcff" : "#8b93a1",
-              fontWeight: active ? 700 : 400,
+              boxShadow: active ? `inset 2px 0 0 0 ${color.cyan}` : "none",
+              color: active ? color.cyan : color.dim,
+              letterSpacing: "0.02em",
+              fontWeight: active ? 700 : 500,
               fontSize: "0.9rem",
               cursor: "pointer",
               whiteSpace: "nowrap",
@@ -374,7 +377,7 @@ function NavTray({
           background: "none",
           border: "none",
           borderRadius: 8,
-          color: "#6b7585",
+          color: color.faint,
           fontSize: "0.9rem",
           cursor: "pointer",
           whiteSpace: "nowrap",
@@ -394,9 +397,9 @@ function NavTray({
           justifyContent: "center",
           padding: "0.45rem 0",
           background: "none",
-          border: "1px solid #232c3a",
+          border: `1px solid ${color.border}`,
           borderRadius: 8,
-          color: "#6b7585",
+          color: color.faint,
           fontSize: "0.85rem",
           cursor: "pointer",
         }}

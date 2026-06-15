@@ -18,15 +18,7 @@ import {
   type RemoteState,
 } from "../api";
 import { useViewport } from "../useViewport";
-
-const ACCENT = "#38bdf8";
-const T = {
-  text: "#eae4d6",
-  dim: "#97907e",
-  faint: "#6b6557",
-  border: "#33333b",
-  surface: "rgba(255,255,255,0.05)",
-};
+import { T, ACCENT, alpha } from "../theme";
 
 export function BifrostRemote({
   remoteId,
@@ -120,7 +112,7 @@ export function BifrostRemote({
               display: "grid",
               placeItems: "center",
               fontSize: "0.95rem",
-              background: on ? `${ACCENT}1f` : "rgba(255,255,255,0.05)",
+              background: on ? `${alpha(ACCENT, 0.12)}` : "rgba(255,255,255,0.05)",
               color: on ? ACCENT : T.dim,
             }}
           >
@@ -176,7 +168,7 @@ export function BifrostRemote({
             width: 74,
             height: 74,
             borderRadius: "50%",
-            border: `1px solid ${ACCENT}66`,
+            border: `1px solid ${alpha(ACCENT, 0.40)}`,
             background: "radial-gradient(circle at 50% 35%, rgba(56,189,248,0.22), rgba(56,189,248,0.05))",
             color: "#fff",
             fontWeight: 700,
@@ -232,7 +224,7 @@ export function BifrostRemote({
                       minHeight: 66,
                       borderRadius: 12,
                       border: `1px solid ${active ? ACCENT : T.border}`,
-                      background: active ? `${ACCENT}1a` : T.surface,
+                      background: active ? `${alpha(ACCENT, 0.10)}` : T.surface,
                       color: T.text,
                       cursor: "pointer",
                       display: "flex",
@@ -363,7 +355,7 @@ function Key({
         height: 46,
         borderRadius: 13,
         border: `1px solid ${active ? ACCENT : T.border}`,
-        background: active ? `${ACCENT}1f` : T.surface,
+        background: active ? `${alpha(ACCENT, 0.12)}` : T.surface,
         color: active ? "#fff" : T.text,
         cursor: "pointer",
         fontSize: "1.1rem",

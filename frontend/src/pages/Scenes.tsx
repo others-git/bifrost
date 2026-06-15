@@ -16,6 +16,7 @@ import {
 } from "../api";
 import { SceneEditor, SceneSwatch } from "../components/scenes";
 import { useDialogs } from "../components/dialogs";
+import { PageHeader } from "../components/PageHeader";
 import { useViewport } from "../useViewport";
 import { ACCENT, S } from "../styles";
 
@@ -51,15 +52,10 @@ export function ScenesPage() {
 
   return (
     <div style={{ padding: isMobile ? "1rem 0.85rem" : "1.5rem 2rem", maxWidth: 1100, margin: "0 auto" }}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: "0.75rem", marginBottom: "1rem" }}>
-        <h1 style={{ margin: 0, fontSize: "1.4rem" }}>Scenes</h1>
-        <span style={{ color: "#666", fontSize: "0.85rem" }}>
-          Reusable color &amp; brightness presets you can apply to any room
-        </span>
-      </div>
+      <PageHeader title="Scenes" status="Reusable color & brightness presets you can apply to any room" />
 
       {loading ? (
-        <p style={{ color: "#666" }}>Loading…</p>
+        <p style={{ color: "var(--bf-faint)" }}>Loading…</p>
       ) : (
         <div
           style={{
@@ -96,14 +92,14 @@ export function ScenesPage() {
                   width: "100%",
                   padding: "1.2rem",
                   borderStyle: "dashed",
-                  color: "#888",
+                  color: "var(--bf-dim)",
                 }}
               >
                 + New scene
               </button>
             )}
             {scenes.length === 0 && !creating && (
-              <span style={{ color: "#666", fontSize: "0.8rem" }}>
+              <span style={{ color: "var(--bf-faint)", fontSize: "0.8rem" }}>
                 No scenes yet — create one, or save a room's current look from the Lights page.
               </span>
             )}
@@ -143,7 +139,7 @@ function SceneCard({
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "0.5rem" }}>
         <span style={{ fontWeight: 600 }}>{scene.name}</span>
         {scene.brightness != null && (
-          <span style={{ color: "#666", fontSize: "0.75rem" }}>{Math.round(scene.brightness)}%</span>
+          <span style={{ color: "var(--bf-faint)", fontSize: "0.75rem" }}>{Math.round(scene.brightness)}%</span>
         )}
       </div>
       <div style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
@@ -210,9 +206,9 @@ function RoomPicker({
           width: "100%",
           padding: "0.4rem 0.6rem",
           borderRadius: 8,
-          border: `1px solid ${open ? ACCENT : "#3a3a3a"}`,
-          background: "#161616",
-          color: disabled ? "#666" : "#ddd",
+          border: `1px solid ${open ? ACCENT : "var(--bf-border)"}`,
+          background: "var(--bf-surfaceOff)",
+          color: disabled ? "var(--bf-faint)" : "var(--bf-dim)",
           fontSize: "0.8rem",
           cursor: disabled ? "default" : "pointer",
           transition: "border-color 0.15s",
@@ -224,7 +220,7 @@ function RoomPicker({
         <span
           aria-hidden
           style={{
-            color: "#888",
+            color: "var(--bf-dim)",
             fontSize: "0.7rem",
             transform: open ? "rotate(180deg)" : "none",
             transition: "transform 0.15s",
@@ -246,7 +242,7 @@ function RoomPicker({
             overflowY: "auto",
             padding: 4,
             borderRadius: 10,
-            border: "1px solid #333",
+            border: "1px solid var(--bf-border)",
             background: "#1d1d1d",
             boxShadow: "0 10px 30px rgba(0,0,0,0.6)",
           }}

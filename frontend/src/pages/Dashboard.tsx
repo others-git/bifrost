@@ -29,27 +29,16 @@ import {
 import { AudioEditor } from "../components/AudioControls";
 import { Glyph, powerKindGlyph, audioKindGlyph } from "../components/glyphs";
 import { hexToRgb, LightEditor, type LightControlChange } from "../components/LightEditor";
+import { T, font, glassCard, radius, color, glow, alpha } from "../theme";
+import { CornerFiligree } from "../components/ornament";
+import { PageHeader } from "../components/PageHeader";
 import { DisableRow, PowerFlyout } from "../components/PowerFlyout";
 import { SceneButton, SceneModal } from "../components/scenes";
 import { useDialogs, type Dialogs } from "../components/dialogs";
 import { useViewport } from "../useViewport";
 
-// ── Lamplight theme ──────────────────────────────────────────────────────────
-const T = {
-  text: "#eae4d6",
-  dim: "#97907e",
-  faint: "#6b6557",
-  accent: "#38bdf8",
-  audio: "#a78bfa",
-  panel: "linear-gradient(176deg, #1a1916 0%, #141311 100%)",
-  panelBorder: "#2b2822",
-  card: "#1d1c18",
-  cardOff: "#171613",
-  cardBorder: "#2c2922",
-  hairline: "#242118",
-};
-
 const label: React.CSSProperties = {
+  fontFamily: font.display,
   textTransform: "uppercase",
   letterSpacing: "0.14em",
   fontWeight: 700,
@@ -168,27 +157,10 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
 
   return (
     <div style={{ padding: isMobile ? "1rem 0.85rem" : isCompact ? "1.1rem 1rem" : "2rem", maxWidth: 1100, margin: "0 auto", color: T.text }}>
-      <header style={{ marginBottom: isCompact ? "0.9rem" : "1.4rem" }}>
-        <div style={{ display: "flex", alignItems: "baseline", gap: "0.9rem" }}>
-          <h1 style={{ ...label, margin: 0, fontSize: "1rem", letterSpacing: "0.22em", color: T.text }}>
-            Control
-          </h1>
-          {localLights.length > 0 && (
-            <span style={{ fontSize: "0.78rem", color: T.dim }}>
-              {onCount} of {localLights.length} lights on
-            </span>
-          )}
-        </div>
-        <div
-          aria-hidden
-          style={{
-            marginTop: "0.7rem",
-            height: 1,
-            background:
-              "linear-gradient(90deg, rgba(56,189,248,0.55), rgba(167,139,250,0.3) 35%, rgba(244,114,182,0.18) 70%, transparent)",
-          }}
-        />
-      </header>
+      <PageHeader
+        title="Control"
+        status={localLights.length > 0 ? `${onCount} of ${localLights.length} lights on` : undefined}
+      />
 
       {empty ? (
         <div style={{ textAlign: "center", padding: "4rem 0", color: T.faint }}>
@@ -328,12 +300,13 @@ function RoomGrid({
 
   return (
     <div style={{ columnCount: isMobile ? 1 : 2, columnGap: "1.1rem" }}>
-      {roomSections.map(({ room, lights, power, audio }) => (
-        <RoomBox key={room.id} name={room.name} roomId={room.id} lights={lights} power={power} audio={audio} {...common} />
+      {roomSections.map(({ room, lights, power, audio }, i) => (
+        <RoomBox key={room.id} index={i} name={room.name} roomId={room.id} lights={lights} power={power} audio={audio} {...common} />
       ))}
-      {leftoverSections.map(([providerId, sectionLights]) => (
+      {leftoverSections.map(([providerId, sectionLights], i) => (
         <RoomBox
           key={providerId}
+          index={roomSections.length + i}
           name={
             roomSections.length > 0
               ? `${providerName.get(providerId) ?? "Other"} · no room`
@@ -389,10 +362,12 @@ function groupedAudio(audio: AudioDevice[]): { coordinator: AudioDevice; members
   return entries;
 }
 
-/** A room: framed box with a gradient ridge from its lit lights, a header with
+/** A room: framed plate whose gold corner filigree breathes its lit lights'
+ * colors (brass when off), a header with
  * room-wide light controls (color/brightness cascade + scenes + on/off), and a
  * row of one glyph button per member device. Each device opens its own fly-out. */
 function RoomBox({
+  index = 0,
   name,
   roomId,
   lights,
@@ -410,6 +385,7 @@ function RoomBox({
   onChanged,
   receiverNameFor,
 }: {
+  index?: number;
   name: string;
   roomId?: string;
   lights: Light[];
@@ -455,13 +431,6 @@ function RoomBox({
   const avgBrightness = lit.length
     ? Math.round(lit.reduce((sum, l) => sum + (l.last_state?.brightness ?? 100), 0) / lit.length)
     : 100;
-
-  const ridge =
-    hexes.length > 1
-      ? `linear-gradient(90deg, ${hexes.map((h, i) => `${h} ${Math.round((i / (hexes.length - 1)) * 100)}%`).join(", ")})`
-      : hexes.length === 1
-        ? `linear-gradient(90deg, ${hexes[0]}, ${hexes[0]}33)`
-        : "linear-gradient(90deg, rgba(56,189,248,0.35), transparent 70%)";
 
   function cascade(change: LightControlChange) {
     if (!roomId) return;
@@ -544,18 +513,23 @@ function RoomBox({
 
   return (
     <section
+      className="bifrost-card"
       style={{
         breakInside: "avoid",
         marginBottom: "1.1rem",
-        background: roomId ? T.panel : "transparent",
-        border: `1px solid ${roomId ? T.panelBorder : T.hairline}`,
-        borderStyle: roomId ? "solid" : "dashed",
-        borderRadius: 16,
+        position: "relative",
         overflow: "hidden",
-        boxShadow: roomId ? "inset 0 1px 0 rgba(255,255,255,0.035)" : "none",
+        animationDelay: `${Math.min(index, 8) * 60}ms`,
+        ...(roomId
+          ? glassCard
+          : {
+              background: "transparent",
+              border: `1px dashed ${T.hairline}`,
+              borderRadius: radius.frame,
+            }),
       }}
     >
-      <div aria-hidden style={{ height: 2, background: ridge, opacity: anyOn ? 0.9 : 0.5 }} />
+      {roomId && <CornerFiligree colors={hexes} />}
 
       <header
         ref={tuneRef}
@@ -700,14 +674,19 @@ function GlyphButton({
         flexShrink: 0,
         display: "grid",
         placeItems: "center",
-        borderRadius: 12,
+        borderRadius: radius.md,
         cursor: "pointer",
         color: on ? accent : T.dim,
+        // On: lit niche — accent top-light over glass + outer neon bloom. Off: a
+        // recessed gothic niche with a faint gold-hairline edge.
         background: on
-          ? `radial-gradient(120% 120% at 50% 0%, ${accent}22, transparent 60%), ${T.card}`
-          : T.cardOff,
-        border: `1px solid ${active ? T.accent : on ? `${accent}55` : T.cardBorder}`,
-        boxShadow: on ? `0 0 20px -8px ${accent}` : "inset 0 1px 0 rgba(255,255,255,0.03)",
+          ? `radial-gradient(130% 130% at 50% 0%, ${alpha(accent, 0.19)}, transparent 62%), ${color.surface}`
+          : color.surfaceOff,
+        border: `1px solid ${active ? color.cyan : on ? `${alpha(accent, 0.40)}` : color.hairline}`,
+        boxShadow: on
+          ? `${glow(accent, 22)}, inset 0 0 16px -9px ${accent}`
+          : "inset 0 1px 0 rgba(236,230,240,0.04), inset 0 0 18px -13px #000",
+        textShadow: on ? `0 0 12px ${alpha(accent, 0.67)}` : undefined,
         opacity: offline ? 0.4 : 1,
         transition: "color 0.2s, background 0.2s, border-color 0.2s, box-shadow 0.2s",
       }}

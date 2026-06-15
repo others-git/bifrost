@@ -25,6 +25,8 @@ import {
   type ProviderType,
 } from "../api";
 import { useDialogs, type Dialogs } from "../components/dialogs";
+import { PageHeader, SectionLabel } from "../components/PageHeader";
+import { ThemeSwitcher } from "../components/ThemeSwitcher";
 import { useViewport } from "../useViewport";
 import { ACCENT, S } from "../styles";
 
@@ -119,10 +121,17 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
 
   return (
     <div style={{ padding: isMobile ? "1rem 0.85rem" : "2rem", maxWidth: 720, margin: "0 auto" }}>
-      <h2 style={{ margin: "0 0 1.5rem", fontSize: "1.2rem", color: "#ccc" }}>Providers</h2>
+      <PageHeader title="Settings" />
+
+      <SectionLabel style={{ marginBottom: "0.8rem" }}>Appearance</SectionLabel>
+      <div style={{ marginBottom: "2rem" }}>
+        <ThemeSwitcher />
+      </div>
+
+      <SectionLabel style={{ marginBottom: "1.1rem" }}>Providers</SectionLabel>
 
       {toast && (
-        <div style={{ background: "#1e3a1e", border: "1px solid #2a5a2a", borderRadius: 8, padding: "0.6rem 1rem", marginBottom: "1rem", color: "#8f8", fontSize: "0.875rem" }}>
+        <div style={{ background: "#1e3a1e", border: "1px solid #2a5a2a", borderRadius: 8, padding: "0.6rem 1rem", marginBottom: "1rem", color: "var(--bf-good)", fontSize: "0.875rem" }}>
           {toast}
         </div>
       )}
@@ -148,7 +157,7 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
 
       <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
         {providers.length === 0 && !showAdd && (
-          <p style={{ color: "#666", margin: 0 }}>No providers configured.</p>
+          <p style={{ color: "var(--bf-faint)", margin: 0 }}>No providers configured.</p>
         )}
         {providers.map((p) => (
           <ProviderCard
@@ -242,8 +251,8 @@ function ExpandedLanSection() {
 
   return (
     <div style={{ marginTop: "2rem" }}>
-      <h2 style={{ margin: "0 0 0.4rem", fontSize: "1.2rem", color: "#ccc" }}>Expanded-LAN scan</h2>
-      <p style={{ color: "#888", fontSize: "0.85rem", margin: "0 0 0.75rem", maxWidth: 560 }}>
+      <SectionLabel style={{ marginBottom: "0.4rem" }}>Expanded-LAN scan</SectionLabel>
+      <p style={{ color: "var(--bf-dim)", fontSize: "0.85rem", margin: "0 0 0.75rem", maxWidth: 560 }}>
         By default, <strong>Scan network</strong> only searches Bifrost's own subnet. If Bifrost
         runs in a container on a different network than your devices (e.g. bridged Docker), list the
         device LAN(s) here as <code>/24</code> networks and the scan will reach across to them. Only
@@ -269,7 +278,7 @@ function ExpandedLanSection() {
             display: "block",
             marginTop: "0.5rem",
             fontSize: "0.8rem",
-            color: msg.startsWith("✓") ? "#4d4" : "#fa0",
+            color: msg.startsWith("✓") ? "var(--bf-good)" : "#fa0",
           }}
         >
           {msg}
@@ -340,8 +349,8 @@ function ApiKeysSection({ dialogs }: { dialogs: Dialogs }) {
 
   return (
     <section style={{ marginTop: "2.5rem" }}>
-      <h2 style={{ margin: "0 0 0.4rem", fontSize: "1.2rem", color: "#ccc" }}>API keys</h2>
-      <p style={{ margin: "0 0 1rem", color: "#777", fontSize: "0.85rem" }}>
+      <SectionLabel style={{ marginBottom: "0.4rem" }}>API keys</SectionLabel>
+      <p style={{ margin: "0 0 1rem", color: "var(--bf-faint)", fontSize: "0.85rem" }}>
         Grant other apps full access to your lights and rooms via the public{" "}
         <code style={{ color: "#9ab" }}>/api/v1</code> API. Send the key as{" "}
         <code style={{ color: "#9ab" }}>Authorization: Bearer &lt;key&gt;</code>.
@@ -357,7 +366,7 @@ function ApiKeysSection({ dialogs }: { dialogs: Dialogs }) {
             marginBottom: "1rem",
           }}
         >
-          <div style={{ fontSize: "0.8rem", color: "#8f8", marginBottom: "0.4rem" }}>
+          <div style={{ fontSize: "0.8rem", color: "var(--bf-good)", marginBottom: "0.4rem" }}>
             Copy “{fresh.name}” now — it won't be shown again.
           </div>
           <code
@@ -391,7 +400,7 @@ function ApiKeysSection({ dialogs }: { dialogs: Dialogs }) {
       )}
 
       <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", marginBottom: "1rem" }}>
-        {keys.length === 0 && <p style={{ color: "#666", margin: 0, fontSize: "0.85rem" }}>No keys yet.</p>}
+        {keys.length === 0 && <p style={{ color: "var(--bf-faint)", margin: 0, fontSize: "0.85rem" }}>No keys yet.</p>}
         {keys.map((k) => (
           <div
             key={k.id}
@@ -405,7 +414,7 @@ function ApiKeysSection({ dialogs }: { dialogs: Dialogs }) {
           >
             <div style={{ minWidth: 0 }}>
               <div style={{ fontWeight: 600, fontSize: "0.9rem" }}>{k.name}</div>
-              <div style={{ color: "#777", fontSize: "0.74rem" }}>
+              <div style={{ color: "var(--bf-faint)", fontSize: "0.74rem" }}>
                 <code>{k.prefix}…</code>
                 {k.last_used ? ` · last used ${k.last_used}` : " · never used"}
               </div>
@@ -494,7 +503,7 @@ function ProviderCard({
         <div style={{ minWidth: 0 }}>
           <div style={{ fontWeight: 600 }}>{provider.name}</div>
           <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.25rem" }}>
-            <span style={{ color: "#888", fontSize: "0.8rem" }}>
+            <span style={{ color: "var(--bf-dim)", fontSize: "0.8rem" }}>
               {provider.type_name}
               {provider.domain === "audio" ? " · Audio" : ""}
               {provider.domain === "integration" ? " · Integration" : ""}
@@ -534,7 +543,7 @@ function ProviderCard({
           style={{ width: 16, height: 16, marginTop: 1, accentColor: ACCENT, flexShrink: 0, cursor: "pointer" }}
         />
         <span>
-          <strong style={{ color: provider.prune ? ACCENT : "#bbb", fontWeight: 600 }}>Prune on discover</strong>
+          <strong style={{ color: provider.prune ? ACCENT : "var(--bf-dim)", fontWeight: 600 }}>Prune on discover</strong>
           {" — "}
           {provider.prune
             ? "the next discover removes devices this provider no longer reports (and drops them from rooms)."
@@ -622,7 +631,7 @@ function EditCredentialsForm({
   }
 
   return (
-    <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: "0.6rem", borderTop: "1px solid #2a2a2a", paddingTop: "0.75rem" }}>
+    <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: "0.6rem", borderTop: "1px solid var(--bf-surfaceHi)", paddingTop: "0.75rem" }}>
       {!decryptable && (
         <p style={{ color: "#fa0", margin: 0, fontSize: "0.8rem" }}>
           The stored credentials couldn't be read (the encryption secret may have changed).
@@ -663,14 +672,14 @@ function EditCredentialsForm({
               )}
             </div>
             {isHueAppKey && pairMsg && (
-              <span style={{ fontSize: "0.78rem", color: pairMsg.startsWith("✓") ? "#4d4" : "#fa0" }}>
+              <span style={{ fontSize: "0.78rem", color: pairMsg.startsWith("✓") ? "var(--bf-good)" : "#fa0" }}>
                 {pairMsg}
               </span>
             )}
           </label>
         );
       })}
-      {error && <p style={{ color: "#f66", margin: 0, fontSize: "0.875rem" }}>{error}</p>}
+      {error && <p style={{ color: "var(--bf-rose)", margin: 0, fontSize: "0.875rem" }}>{error}</p>}
       <div style={{ display: "flex", gap: "0.5rem" }}>
         <button type="submit" style={S.button} disabled={saving}>
           {saving ? "Saving…" : "Save"}
@@ -685,10 +694,10 @@ function StatusBadge({ state }: { state: string }) {
   // "ready" = an on-demand provider (e.g. Sonos) with no persistent connection
   // but fully operational — green, like connected.
   const color =
-    state === "connected" || state === "ok" || state === "ready" ? "#4d4"
+    state === "connected" || state === "ok" || state === "ready" ? "var(--bf-good)"
     : state === "connecting" || state === "reconnecting" ? "#fa0"
-    : state === "failed" ? "#f44"
-    : "#666";
+    : state === "failed" ? "var(--bf-rose)"
+    : "var(--bf-faint)";
   const label = state === "ready" ? "ready" : state;
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem", fontSize: "0.75rem", color }}>
@@ -780,8 +789,8 @@ function AddProviderForm({
   }
 
   return (
-    <form onSubmit={submit} style={{ ...S.card, border: "1px solid #333" }}>
-      <h3 style={{ margin: 0, fontSize: "1rem", color: "#ccc" }}>Add Provider</h3>
+    <form onSubmit={submit} style={{ ...S.card, border: "1px solid var(--bf-border)" }}>
+      <h3 style={{ margin: 0, fontSize: "1rem", color: "var(--bf-dim)" }}>Add Provider</h3>
 
       <label style={labelStyle}>
         <span>Name</span>
@@ -859,7 +868,7 @@ function AddProviderForm({
             </button>
           ))}
           {scanned && found.length === 0 && (
-            <span style={{ color: "#888", fontSize: "0.78rem" }}>
+            <span style={{ color: "var(--bf-dim)", fontSize: "0.78rem" }}>
               No devices found. Make sure they're powered on and on the same network
               (auto-detect needs host networking in Docker).
             </span>
@@ -877,10 +886,10 @@ function AddProviderForm({
               {field.required && <span style={{ color: ACCENT }}> *</span>}
             </span>
             {!isHueAppKey && field.hint && (
-              <span style={{ color: "#666", fontSize: "0.78rem" }}>{field.hint}</span>
+              <span style={{ color: "var(--bf-faint)", fontSize: "0.78rem" }}>{field.hint}</span>
             )}
             {isHueAppKey && (
-              <span style={{ color: "#666", fontSize: "0.78rem" }}>
+              <span style={{ color: "var(--bf-faint)", fontSize: "0.78rem" }}>
                 Press the link button on the bridge, then click Pair — or paste a key manually.
               </span>
             )}
@@ -908,7 +917,7 @@ function AddProviderForm({
               <span
                 style={{
                   fontSize: "0.78rem",
-                  color: pairMsg.startsWith("✓") ? "#4d4" : "#fa0",
+                  color: pairMsg.startsWith("✓") ? "var(--bf-good)" : "#fa0",
                 }}
               >
                 {pairMsg}
@@ -918,7 +927,7 @@ function AddProviderForm({
         );
       })}
 
-      {error && <p style={{ color: "#f66", margin: 0, fontSize: "0.875rem" }}>{error}</p>}
+      {error && <p style={{ color: "var(--bf-rose)", margin: 0, fontSize: "0.875rem" }}>{error}</p>}
 
       <div style={{ display: "flex", gap: "0.5rem" }}>
         <button type="submit" style={S.button} disabled={loading || types.length === 0}>
@@ -937,5 +946,5 @@ const labelStyle: React.CSSProperties = {
   flexDirection: "column",
   gap: "0.3rem",
   fontSize: "0.875rem",
-  color: "#aaa",
+  color: "var(--bf-dim)",
 };
