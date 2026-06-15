@@ -17,11 +17,11 @@
 //! - `POST   /api/ai-endpoints/{role}/test` — probe reachability (`GET /models`).
 
 use crate::AppState;
-use crate::api::auth::require_session;
+use crate::api::auth::Session;
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
 };
@@ -125,13 +125,7 @@ fn valid_base_url(s: &str) -> bool {
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
-async fn list_endpoints(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+async fn list_endpoints(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
     let rows = sqlx::query(
         "SELECT role, base_url, model, api_key, enabled FROM ai_endpoints ORDER BY role",
     )
@@ -155,13 +149,10 @@ async fn list_endpoints(
 
 async fn put_endpoint(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(role): Path<String>,
     Json(req): Json<PutEndpoint>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     if !ROLES.contains(&role.as_str()) {
         return (
             StatusCode::NOT_FOUND,
@@ -246,12 +237,9 @@ async fn put_endpoint(
 
 async fn delete_endpoint(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(role): Path<String>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     let _ = sqlx::query("DELETE FROM ai_endpoints WHERE role = ?")
         .bind(&role)
         .execute(&state.db)
@@ -267,12 +255,9 @@ struct TestResult {
 
 async fn test_endpoint(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(role): Path<String>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     // Test the *stored* config (enabled or not), so a row can be verified before
     // it's switched on.
     let Some(ep) = load(&state, &role, false).await else {

@@ -10,7 +10,7 @@
 
 use crate::AppState;
 use crate::api::audio::{SetAudioOutcome, apply_audio_command};
-use crate::api::auth::require_session;
+use crate::api::auth::Session;
 use crate::api::lights::build_provider;
 use crate::api::power::{SetPowerOutcome, apply_power_state};
 use crate::models::LightState;
@@ -18,7 +18,7 @@ use crate::models::audio::AudioCommand;
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post, put},
 };
@@ -402,11 +402,7 @@ pub(crate) async fn list_public_rooms(state: &AppState) -> Vec<PublicRoom> {
 
 // ── Handlers ────────────────────────────────────────────────────────────────
 
-async fn list_rooms(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
+async fn list_rooms(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
     let rooms = match sqlx::query("SELECT id, name, enabled FROM rooms ORDER BY created_at")
         .fetch_all(&state.db)
         .await
@@ -481,13 +477,10 @@ struct SetRoomEnabledRequest {
 /// Plan, and the public API, but kept (and re-enableable) in Settings.
 async fn set_room_enabled(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<SetRoomEnabledRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     if !room_exists(&state, &id).await {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -520,13 +513,10 @@ struct RoomAudioInput {
 /// group devices via room_links.
 async fn set_room_audio_devices(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<SetRoomAudioRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     if !room_exists(&state, &id).await {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -578,13 +568,10 @@ struct RoomAudioStateRequest {
 /// each device's per-room offset to the volume (clamped 0–100).
 async fn set_room_audio_state(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<RoomAudioStateRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     let members = effective_audio_members(&state, &id).await;
     if members.is_empty() {
         return StatusCode::NOT_FOUND.into_response();
@@ -644,14 +631,7 @@ async fn group_member_ids(state: &AppState, group_id: &str, table: &str, col: &s
     .collect()
 }
 
-async fn list_provider_groups(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
+async fn list_provider_groups(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
     let rows = sqlx::query(
         "SELECT pg.id, pg.provider_id, pg.provider_group_id, pg.name, p.provider_type
          FROM provider_groups pg JOIN providers p ON p.id = pg.provider_id
@@ -707,12 +687,9 @@ struct CreateRoomRequest {
 
 async fn create_room(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Json(req): Json<CreateRoomRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     if req.name.trim().is_empty() {
         return (StatusCode::UNPROCESSABLE_ENTITY, "room name is required").into_response();
     }
@@ -754,13 +731,9 @@ async fn create_room(
 
 async fn remove_room(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     let _ = sqlx::query("DELETE FROM rooms WHERE id = ?")
         .bind(&id)
         .execute(&state.db)
@@ -781,13 +754,10 @@ struct MergeRequest {
 /// INSERT OR IGNORE).
 async fn merge_rooms(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<MergeRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     if req.source_room_id == id {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -859,13 +829,10 @@ struct SetLightsRequest {
 /// Replace the room's DIRECT lights (linked members are unaffected).
 async fn set_direct_lights(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<SetLightsRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     if !room_exists(&state, &id).await {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -893,13 +860,10 @@ struct SetRoomPowerRequest {
 /// Replace the room's power-device membership.
 async fn set_room_power_devices(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<SetRoomPowerRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     if !room_exists(&state, &id).await {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -946,13 +910,10 @@ struct SetLinksRequest {
 /// Replace the room's provider-group links.
 async fn set_links(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<SetLinksRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     if !room_exists(&state, &id).await {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -1220,14 +1181,10 @@ async fn apply_room_power(state: &AppState, room_id: &str, on: bool) -> (usize, 
 
 async fn set_room_state(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(new_state): Json<LightState>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     let members = effective_members(&state, &id).await;
     let (applied, failed) = apply_room_state(&state, &id, &new_state, members).await;
     if applied == 0 && failed == 0 {
@@ -1243,12 +1200,9 @@ async fn set_room_state(
 
 async fn apply_scene(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path((room_id, scene_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     match crate::api::palette_scenes::apply_scene_to_room(&state, &scene_id, &room_id).await {
         Some((applied, failed)) => {
             Json(serde_json::json!({ "applied": applied, "failed": failed })).into_response()

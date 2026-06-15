@@ -8,7 +8,7 @@
 //! drives a room to a saved look.
 
 use crate::AppState;
-use crate::api::auth::require_session;
+use crate::api::auth::Session;
 use crate::api::lights::build_provider;
 use crate::api::rooms::{
     apply_uniform_state, effective_member_ids, effective_members, room_exists,
@@ -17,7 +17,7 @@ use crate::models::{Color, LightState};
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post},
 };
@@ -295,10 +295,7 @@ pub(crate) async fn apply_scene_to_room(
 
 // ── Handlers (session-authenticated; thin wrappers over the services) ────────
 
-async fn list_handler(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+async fn list_handler(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
     match list_scenes(&state).await {
         Ok(scenes) => Json(scenes).into_response(),
         Err(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -316,12 +313,9 @@ struct CreateSceneRequest {
 
 async fn create_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Json(req): Json<CreateSceneRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     let input = NewScene {
         name: req.name,
         brightness: req.brightness,
@@ -341,12 +335,9 @@ async fn create_handler(
 
 async fn remove_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     delete_scene(&state, &id).await;
     StatusCode::NO_CONTENT.into_response()
 }
@@ -358,13 +349,10 @@ struct FromRoomRequest {
 
 async fn create_from_room_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(room_id): Path<String>,
     Json(req): Json<FromRoomRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     match create_scene_from_room(&state, &room_id, &req.name).await {
         Ok(scene_id) => (
             StatusCode::CREATED,

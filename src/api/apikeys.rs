@@ -9,7 +9,7 @@
 //! Bearer-token check the public API uses.
 
 use crate::AppState;
-use crate::api::auth::require_session;
+use crate::api::auth::Session;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -113,11 +113,7 @@ struct ApiKeyInfo {
     last_used: Option<String>,
 }
 
-async fn list_keys(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
+async fn list_keys(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
     match sqlx::query(
         "SELECT id, name, prefix, created_at, last_used FROM api_keys ORDER BY created_at",
     )
@@ -150,12 +146,9 @@ struct CreateKeyRequest {
 
 async fn create_key(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Json(req): Json<CreateKeyRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     if req.name.trim().is_empty() {
         return (StatusCode::UNPROCESSABLE_ENTITY, "key name is required").into_response();
     }
@@ -183,13 +176,9 @@ async fn create_key(
 
 async fn revoke_key(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     let _ = sqlx::query("DELETE FROM api_keys WHERE id = ?")
         .bind(&id)
         .execute(&state.db)

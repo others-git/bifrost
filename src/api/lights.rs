@@ -1,10 +1,10 @@
 use crate::AppState;
-use crate::api::auth::require_session;
+use crate::api::auth::Session;
 use crate::models::LightState;
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::IntoResponse,
     routing::get,
 };
@@ -223,10 +223,7 @@ pub(crate) fn set_light_status(outcome: SetLightOutcome) -> StatusCode {
 
 // ── Handlers (session-authenticated; thin wrappers over the services) ────────
 
-async fn list_lights(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+async fn list_lights(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
     match list_all_lights(&state).await {
         Ok(lights) => Json(lights).into_response(),
         Err(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -235,12 +232,9 @@ async fn list_lights(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
 
 async fn get_light(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     match get_light_by_id(&state, &id).await {
         Ok(Some(light)) => Json(light).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
@@ -250,25 +244,19 @@ async fn get_light(
 
 async fn set_light_state(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(new_state): Json<LightState>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     set_light_status(apply_light_state(&state, &id, &new_state).await).into_response()
 }
 
 async fn set_light_enabled(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<crate::api::SetEnabledRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     crate::api::set_device_enabled(&state, "lights", &id, req.enabled)
         .await
         .into_response()
@@ -276,13 +264,10 @@ async fn set_light_enabled(
 
 async fn set_light_glyph(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<crate::api::SetGlyphRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     crate::api::set_device_glyph(&state, "lights", &id, req.glyph)
         .await
         .into_response()
@@ -290,13 +275,10 @@ async fn set_light_glyph(
 
 async fn set_light_shadow(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<crate::api::SetShadowRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     crate::api::dedup::set_device_shadow(&state, "lights", &id, req.shadowed_by)
         .await
         .into_response()
@@ -304,13 +286,10 @@ async fn set_light_shadow(
 
 async fn set_light_room(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<crate::api::SetRoomRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     crate::api::rooms::set_device_room(
         &state,
         "lights",

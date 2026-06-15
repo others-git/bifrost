@@ -13,12 +13,12 @@
 //! [`crate::api::dedup`]-adjacent pairing ([`reconcile_remote_pairings`]).
 
 use crate::AppState;
-use crate::api::auth::require_session;
+use crate::api::auth::Session;
 use crate::models::remote::{RemoteCommand, RemoteState};
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::IntoResponse,
     routing::{get, post, put},
 };
@@ -425,24 +425,15 @@ pub(crate) async fn list_remotes(state: &AppState) -> Vec<RemoteDeviceRow> {
 
 // ── Handlers (session-authenticated) ─────────────────────────────────────────
 
-async fn list_devices_handler(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+async fn list_devices_handler(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
     Json(list_remotes(&state).await).into_response()
 }
 
 async fn get_device_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     match read_remote_state(&state, &id).await {
         Some(s) => Json(s).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
@@ -460,24 +451,18 @@ pub(crate) fn remote_status(outcome: RemoteOutcome) -> StatusCode {
 
 async fn command_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(cmd): Json<RemoteCommand>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     remote_status(apply_remote_command(&state, &id, &cmd).await).into_response()
 }
 
 async fn list_apps_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     Json(list_remote_apps(&state, &id).await).into_response()
 }
 
@@ -490,13 +475,10 @@ struct PinAppRequest {
 
 async fn pin_app_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<PinAppRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     set_app_pin(&state, &id, &req.package, req.pinned)
         .await
         .into_response()
@@ -504,13 +486,10 @@ async fn pin_app_handler(
 
 async fn set_enabled_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<crate::api::SetEnabledRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     crate::api::set_device_enabled(&state, "remote_devices", &id, req.enabled)
         .await
         .into_response()
@@ -518,13 +497,10 @@ async fn set_enabled_handler(
 
 async fn set_glyph_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<crate::api::SetGlyphRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     crate::api::set_device_glyph(&state, "remote_devices", &id, req.glyph)
         .await
         .into_response()

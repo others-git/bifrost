@@ -1,11 +1,11 @@
 use crate::AppState;
-use crate::api::auth::require_session;
+use crate::api::auth::Session;
 use crate::api::lights::build_provider;
 use crate::connection::ConnectionStatus;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post, put},
 };
@@ -38,13 +38,9 @@ pub fn router() -> Router<Arc<AppState>> {
 /// "found nothing" is the honest UX. 404 only when the type has no discoverer.
 async fn scan_network(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(provider_type): Path<String>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     let Some(discoverer) = state.registry.discoverer(&provider_type) else {
         return (
             StatusCode::NOT_FOUND,
@@ -77,10 +73,7 @@ async fn scan_network(
 
 // ── List available provider types (for the setup UI) ───────────────────────
 
-async fn list_types(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+async fn list_types(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
     Json(state.registry.all_types()).into_response()
 }
 
@@ -101,14 +94,7 @@ struct ProviderRow {
     created_at: String,
 }
 
-async fn list_providers(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
+async fn list_providers(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
     match sqlx::query(
         "SELECT id, provider_type, name, enabled, prune, created_at FROM providers ORDER BY created_at",
     )
@@ -161,13 +147,9 @@ pub struct AddProviderRequest {
 
 async fn add_provider(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Json(req): Json<AddProviderRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     let is_audio = state.registry.is_known_audio(&req.provider_type);
     if !state.registry.is_known(&req.provider_type) && !is_audio {
         return (
@@ -258,13 +240,9 @@ struct ProviderConfig {
 /// prefill the IP/host without the user re-typing everything.
 async fn provider_config(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     let row = sqlx::query("SELECT provider_type, name, credentials FROM providers WHERE id = ?")
         .bind(&id)
         .fetch_optional(&state.db)
@@ -327,14 +305,10 @@ struct UpdateCredentialsRequest {
 /// (and therefore all lights, scenes, groups, and plan placements) intact.
 async fn update_credentials(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<UpdateCredentialsRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     let row = sqlx::query("SELECT provider_type, credentials FROM providers WHERE id = ?")
         .bind(&id)
         .fetch_optional(&state.db)
@@ -421,13 +395,9 @@ async fn update_credentials(
 
 async fn remove_provider(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     state.connections.lock().await.stop(&id);
 
     let _ = sqlx::query("DELETE FROM providers WHERE id = ?")
@@ -444,13 +414,9 @@ async fn remove_provider(
 
 async fn provider_status(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     let state_lock = state.connections.lock().await.get_state_lock(&id);
 
     if let Some(lock) = state_lock {
@@ -519,11 +485,20 @@ async fn refresh_group_members(
             "power_device_id",
         ),
     };
+    // One transaction for the rebuild: a DELETE plus a lookup+insert per member
+    // is otherwise N+1 separate WAL commits on every sync.
+    let mut tx = match state.db.begin().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("refresh_group_members: begin failed: {e}");
+            return;
+        }
+    };
     let _ = sqlx::query(&format!(
         "DELETE FROM {member_table} WHERE provider_group_id = ?"
     ))
     .bind(mirror_id)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await;
     for device_id in member_device_ids {
         if let Ok(Some(r)) = sqlx::query(&format!(
@@ -531,7 +506,7 @@ async fn refresh_group_members(
         ))
         .bind(provider_row_id)
         .bind(device_id)
-        .fetch_optional(&state.db)
+        .fetch_optional(&mut *tx)
         .await
         {
             let _ = sqlx::query(&format!(
@@ -539,9 +514,12 @@ async fn refresh_group_members(
             ))
             .bind(mirror_id)
             .bind(r.get::<String, _>("id"))
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await;
         }
+    }
+    if let Err(e) = tx.commit().await {
+        tracing::error!("refresh_group_members: commit failed: {e}");
     }
 }
 
@@ -554,13 +532,9 @@ async fn refresh_group_members(
 /// - mirrors that vanished from the provider are removed (links cascade)
 async fn sync_groups(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     let row = sqlx::query(
         "SELECT provider_type, credentials FROM providers WHERE id = ? AND enabled = 1",
     )
@@ -821,16 +795,8 @@ struct HuePairRequest {
     bridge_ip: String,
 }
 
-async fn hue_pair(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(req): Json<HuePairRequest>,
-) -> impl IntoResponse {
+async fn hue_pair(_: Session, Json(req): Json<HuePairRequest>) -> impl IntoResponse {
     use crate::providers::hue::pairing::{self, PairOutcome};
-
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
 
     // Default to HTTPS: the Bridge Pro only serves the `/api` pairing endpoint
     // over HTTPS and redirects plain HTTP, which downgrades our POST to a GET
@@ -879,13 +845,10 @@ struct SetPruneRequest {
 /// Set a provider's "prune stale devices on discover" preference.
 async fn set_prune(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<SetPruneRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     match sqlx::query("UPDATE providers SET prune = ? WHERE id = ?")
         .bind(i64::from(req.prune))
         .bind(&id)
@@ -909,14 +872,10 @@ struct DiscoverQuery {
 
 async fn discover(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Query(q): Query<DiscoverQuery>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     let row = sqlx::query(
         "SELECT provider_type, credentials, prune FROM providers WHERE id = ? AND enabled = 1",
     )
@@ -965,29 +924,37 @@ async fn discover(
                 return StatusCode::BAD_GATEWAY.into_response();
             }
         };
-        for light in &lights {
-            let light_id = light.id.to_string();
-            let caps = serde_json::to_string(&light.capabilities).unwrap_or_default();
-            let state_json = serde_json::to_string(&light.state).unwrap_or_default();
-            let _ = sqlx::query(
-                "INSERT INTO lights (id, provider_id, device_id, name, capabilities, last_state, last_seen, hw_id)
-                 VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)
-                 ON CONFLICT (provider_id, device_id)
-                 DO UPDATE SET name        = excluded.name,
-                               capabilities = excluded.capabilities,
-                               last_state  = excluded.last_state,
-                               last_seen   = excluded.last_seen,
-                               hw_id       = excluded.hw_id",
-            )
-            .bind(&light_id)
-            .bind(&id)
-            .bind(&light.provider_id)
-            .bind(&light.name)
-            .bind(&caps)
-            .bind(&state_json)
-            .bind(&light.hw_id)
-            .execute(&state.db)
-            .await;
+        // One transaction for the whole batch: in WAL mode each loose INSERT is
+        // its own commit/fsync, so a bridge with dozens of bulbs paid dozens of
+        // round-trips. Begin failure falls back to no-op (discovery just reports 0).
+        if let Ok(mut tx) = state.db.begin().await {
+            for light in &lights {
+                let light_id = light.id.to_string();
+                let caps = serde_json::to_string(&light.capabilities).unwrap_or_default();
+                let state_json = serde_json::to_string(&light.state).unwrap_or_default();
+                let _ = sqlx::query(
+                    "INSERT INTO lights (id, provider_id, device_id, name, capabilities, last_state, last_seen, hw_id)
+                     VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)
+                     ON CONFLICT (provider_id, device_id)
+                     DO UPDATE SET name        = excluded.name,
+                                   capabilities = excluded.capabilities,
+                                   last_state  = excluded.last_state,
+                                   last_seen   = excluded.last_seen,
+                                   hw_id       = excluded.hw_id",
+                )
+                .bind(&light_id)
+                .bind(&id)
+                .bind(&light.provider_id)
+                .bind(&light.name)
+                .bind(&caps)
+                .bind(&state_json)
+                .bind(&light.hw_id)
+                .execute(&mut *tx)
+                .await;
+            }
+            if let Err(e) = tx.commit().await {
+                tracing::error!("discover: commit failed: {e}");
+            }
         }
         discovered += lights.len();
     }

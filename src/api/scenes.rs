@@ -1,13 +1,13 @@
 //! Scenes: named snapshots of light states, applied all at once.
 
 use crate::AppState;
-use crate::api::auth::require_session;
+use crate::api::auth::Session;
 use crate::api::lights::build_provider;
 use crate::models::LightState;
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post},
 };
@@ -31,11 +31,7 @@ struct SceneRow {
     lights: i64,
 }
 
-async fn list_scenes(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
+async fn list_scenes(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
     match sqlx::query(
         "SELECT s.id, s.name, s.created_at, COUNT(e.light_id) AS lights
          FROM scenes s LEFT JOIN scene_entries e ON e.scene_id = s.id
@@ -70,12 +66,9 @@ struct CreateSceneRequest {
 /// Snapshot the current `last_state` of every light into a new scene.
 async fn create_scene(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Json(req): Json<CreateSceneRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     if req.name.trim().is_empty() {
         return (StatusCode::UNPROCESSABLE_ENTITY, "scene name is required").into_response();
     }
@@ -127,13 +120,9 @@ async fn create_scene(
 
 async fn remove_scene(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     let _ = sqlx::query("DELETE FROM scenes WHERE id = ?")
         .bind(&id)
         .execute(&state.db)
@@ -154,14 +143,10 @@ struct ActivateRequest {
 /// An optional body `{light_ids: [...]}` restricts which entries apply.
 async fn activate_scene(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     body: Option<Json<ActivateRequest>>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     let filter = body.and_then(|Json(b)| b.light_ids);
 
     let entries = match sqlx::query(

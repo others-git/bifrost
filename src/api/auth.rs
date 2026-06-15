@@ -2,8 +2,8 @@ use crate::AppState;
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use axum::{
     Json, Router,
-    extract::State,
-    http::{HeaderMap, StatusCode, header},
+    extract::{FromRequestParts, State},
+    http::{HeaderMap, StatusCode, header, request::Parts},
     response::IntoResponse,
     routing::post,
 };
@@ -110,6 +110,28 @@ pub async fn require_session(state: &Arc<AppState>, headers: &HeaderMap) -> Opti
     .ok()??;
 
     Some(row.get("id"))
+}
+
+/// Request extractor that admits only an authenticated session, rejecting with
+/// `401` before the handler body runs. Replaces the repeated
+/// `if require_session(&state, &headers).await.is_none() { return 401 }` guard:
+/// a session-only handler takes `_: Session`, and public routes simply omit it.
+/// (Need the session id in a handler? Call [`require_session`] directly.)
+pub struct Session;
+
+impl FromRequestParts<Arc<AppState>> for Session {
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        if require_session(state, &parts.headers).await.is_some() {
+            Ok(Session)
+        } else {
+            Err(StatusCode::UNAUTHORIZED)
+        }
+    }
 }
 
 fn extract_session(headers: &HeaderMap) -> Option<String> {

@@ -9,12 +9,12 @@
 //! `reachable: false` instead of erroring the whole request.
 
 use crate::AppState;
-use crate::api::auth::require_session;
+use crate::api::auth::Session;
 use crate::models::power::{PowerKind, PowerState};
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::IntoResponse,
     routing::{get, put},
 };
@@ -277,6 +277,11 @@ pub(crate) async fn discover_power_devices(
         StatusCode::BAD_GATEWAY
     })?;
 
+    // Batch the upserts in one transaction (one WAL commit, not one per device).
+    let mut tx = state.db.begin().await.map_err(|e| {
+        tracing::error!("discover_power_devices: begin failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     for device in &devices {
         let state_json = serde_json::to_string(&device.state).unwrap_or_default();
         let _ = sqlx::query(
@@ -296,21 +301,19 @@ pub(crate) async fn discover_power_devices(
         .bind(kind_str(device.kind))
         .bind(&state_json)
         .bind(&device.hw_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await;
     }
+    tx.commit().await.map_err(|e| {
+        tracing::error!("discover_power_devices: commit failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     Ok(devices.len())
 }
 
 // ── Handlers (session-authenticated) ─────────────────────────────────────────
 
-async fn list_devices_handler(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+async fn list_devices_handler(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
     match list_all_power_devices(&state).await {
         Ok(devices) => Json(devices).into_response(),
         Err(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -319,12 +322,9 @@ async fn list_devices_handler(
 
 async fn get_device_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     match get_power_device_live(&state, &id).await {
         Ok(Some(device)) => Json(device).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
@@ -334,25 +334,19 @@ async fn get_device_handler(
 
 async fn set_device_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(cmd): Json<PowerCommand>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     set_power_status(apply_power_state(&state, &id, cmd.on).await).into_response()
 }
 
 async fn set_enabled_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<crate::api::SetEnabledRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     crate::api::set_device_enabled(&state, "power_devices", &id, req.enabled)
         .await
         .into_response()
@@ -360,13 +354,10 @@ async fn set_enabled_handler(
 
 async fn set_glyph_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<crate::api::SetGlyphRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     crate::api::set_device_glyph(&state, "power_devices", &id, req.glyph)
         .await
         .into_response()
@@ -374,13 +365,10 @@ async fn set_glyph_handler(
 
 async fn set_shadow_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<crate::api::SetShadowRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     crate::api::dedup::set_device_shadow(&state, "power_devices", &id, req.shadowed_by)
         .await
         .into_response()
@@ -388,13 +376,10 @@ async fn set_shadow_handler(
 
 async fn set_room_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<crate::api::SetRoomRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     crate::api::rooms::set_device_room(
         &state,
         "power_devices",

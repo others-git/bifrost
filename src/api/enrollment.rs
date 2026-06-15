@@ -11,14 +11,8 @@
 
 use crate::AppState;
 use crate::api::apikeys::mint_api_key;
-use crate::api::auth::require_session;
-use axum::{
-    Json, Router,
-    extract::State,
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
-    routing::post,
-};
+use crate::api::auth::Session;
+use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::post};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -51,11 +45,7 @@ struct EnrollmentToken {
 
 /// `POST /api/enrollment` (session) — mint a pairing token. Opportunistically
 /// prunes expired/used tokens so the table stays tiny.
-async fn create_token(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
+async fn create_token(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
     let _ = sqlx::query(
         "DELETE FROM enrollment_tokens WHERE expires_at < datetime('now') OR used_at IS NOT NULL",
     )

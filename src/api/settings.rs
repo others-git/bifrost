@@ -9,14 +9,8 @@
 //! subnet regardless.
 
 use crate::AppState;
-use crate::api::auth::require_session;
-use axum::{
-    Json, Router,
-    extract::State,
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
-    routing::get,
-};
+use crate::api::auth::Session;
+use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::net::Ipv4Addr;
@@ -83,10 +77,7 @@ pub(crate) async fn expanded_subnets(state: &AppState) -> Vec<Ipv4Addr> {
         .collect()
 }
 
-async fn get_settings(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+async fn get_settings(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
     let raw: String = sqlx::query("SELECT scan_subnets FROM config WHERE id = 1")
         .fetch_optional(&state.db)
         .await
@@ -108,13 +99,9 @@ async fn get_settings(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
 
 async fn put_settings(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Json(req): Json<Settings>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     if req.expanded_lan_scan.len() > MAX_SUBNETS {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,

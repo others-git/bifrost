@@ -1,9 +1,9 @@
 use crate::AppState;
-use crate::api::auth::require_session;
+use crate::api::auth::Session;
 use axum::{
     Router,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::sse::{Event, KeepAlive, Sse},
     routing::get,
 };
@@ -22,13 +22,9 @@ pub fn router() -> Router<Arc<AppState>> {
 
 async fn sse_events(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
 ) -> Result<Sse<impl stream::Stream<Item = Result<Event, Infallible>> + Send + 'static>, StatusCode>
 {
-    if require_session(&state, &headers).await.is_none() {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
     let (receivers, audio_receivers, power_receivers) = {
         let connections = state.connections.lock().await;
         (

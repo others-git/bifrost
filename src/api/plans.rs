@@ -5,11 +5,11 @@
 //! centre or an edge. Several lights may share a mount (cluster).
 
 use crate::AppState;
-use crate::api::auth::require_session;
+use crate::api::auth::Session;
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::IntoResponse,
     routing::{get, put},
 };
@@ -146,11 +146,7 @@ struct PlanDetail {
 
 // ── Handlers ────────────────────────────────────────────────────────────────
 
-async fn list_plans(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
+async fn list_plans(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
     match sqlx::query(
         "SELECT p.id, p.name, p.width, p.height, p.created_at, COUNT(l.light_id) AS lights
          FROM floor_plans p LEFT JOIN plan_lights l ON l.plan_id = p.id
@@ -188,12 +184,9 @@ struct CreatePlanRequest {
 
 async fn create_plan(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Json(req): Json<CreatePlanRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     if req.name.trim().is_empty() {
         return (StatusCode::UNPROCESSABLE_ENTITY, "plan name is required").into_response();
     }
@@ -224,13 +217,9 @@ async fn create_plan(
 
 async fn get_plan(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     let plan = match sqlx::query("SELECT id, name, width, height FROM floor_plans WHERE id = ?")
         .bind(&id)
         .fetch_optional(&state.db)
@@ -350,13 +339,9 @@ async fn load_rooms(state: &AppState, plan_id: &str) -> Vec<Room> {
 
 async fn remove_plan(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     let _ = sqlx::query("DELETE FROM floor_plans WHERE id = ?")
         .bind(&id)
         .execute(&state.db)
@@ -374,14 +359,10 @@ struct SetLayoutRequest {
 /// Replace the plan's full layout (tiles + walls) — one editor save.
 async fn set_layout(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<SetLayoutRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     let Some((width, height)) = plan_dims(&state, &id).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -477,13 +458,10 @@ struct SetSizeRequest {
 /// walls, light placements, room-region tiles) is pruned.
 async fn set_size(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<SetSizeRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
     if !(1..=MAX_DIM).contains(&req.width) || !(1..=MAX_DIM).contains(&req.height) {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -567,14 +545,10 @@ struct SetLightsRequest {
 /// Replace all light placements on the plan.
 async fn set_lights(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<SetLightsRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     let Some((width, height)) = plan_dims(&state, &id).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -660,14 +634,10 @@ struct SetAudioRequest {
 /// Replace all audio-device placements on the plan (point placements only).
 async fn set_audio_placements(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<SetAudioRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     let Some((width, height)) = plan_dims(&state, &id).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -748,14 +718,10 @@ struct SetRoomsRequest {
 /// Lights placed inside a region are ADDED to its Room on save (never removed).
 async fn set_rooms(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: Session,
     Path(id): Path<String>,
     Json(req): Json<SetRoomsRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     let Some((width, height)) = plan_dims(&state, &id).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
