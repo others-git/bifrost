@@ -14,6 +14,7 @@ import { S } from "./styles";
 import { color, font, navAurora as NAV_AURORA, alpha } from "./theme";
 import { useViewport } from "./useViewport";
 import { useAutoReloadOnNewBuild } from "./useAutoReload";
+import { VoiceFeedback } from "./components/VoiceFeedback";
 
 /** Pages reachable from the nav tray. */
 type NavPage = "dashboard" | "audio" | "devices" | "scenes" | "rooms" | "plan" | "settings";
@@ -151,6 +152,10 @@ export function App() {
       </main>
 
       {isCompact && <BottomNav page={page} onNavigate={navigate} showPlan={!isMobile} />}
+
+      {/* Wake-word feedback overlay — driven by the kiosk app via
+          window.bifrostVoice. Non-blocking; present on every signed-in page. */}
+      <VoiceFeedback />
     </div>
   );
 }

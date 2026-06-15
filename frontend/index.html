@@ -140,9 +140,24 @@
         filter: drop-shadow(0 0 2px rgba(125, 211, 252, 0.25));
         transition: --fa 0.3s ease;
       }
+      /* Voice feedback (wake-word → listening overlay). The mic indicator
+         breathes while active; the screen-edge glow pulses so it reads from
+         across the room on a wall tablet. */
+      @keyframes bifrost-voice-pulse {
+        0%, 100% { transform: scale(1); opacity: 1; }
+        50%      { transform: scale(1.18); opacity: 0.78; }
+      }
+      @keyframes bifrost-voice-glow {
+        0%, 100% { opacity: 0.55; }
+        50%      { opacity: 1; }
+      }
+      .bifrost-voice-pulse { animation: bifrost-voice-pulse 1.3s ease-in-out infinite; }
+      .bifrost-voice-edge  { animation: bifrost-voice-glow 1.6s ease-in-out infinite; }
+
       @media (prefers-reduced-motion: reduce) {
         .bifrost-aurora, .bifrost-brand, .bifrost-card { animation: none; }
         .bifrost-brand { transition: none; }
+        .bifrost-voice-pulse, .bifrost-voice-edge { animation: none; }
       }
     </style>
   </head>
