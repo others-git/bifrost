@@ -21,9 +21,27 @@ pub struct GoveeProvider {
     client: Client,
     /// Base URL for the API; overridden in tests to point at a wiremock server.
     base_url: String,
-    /// device id → SKU, fetched lazily. Control and state requests REQUIRE
-    /// the device's SKU in the payload; without it the API answers 400.
-    sku_cache: tokio::sync::OnceCell<std::collections::HashMap<String, String>>,
+}
+
+/// Process-wide `base_url → (device id → SKU)` cache. Control and state
+/// requests REQUIRE the device's SKU (the API answers 400 without it), but the
+/// SKU isn't in a control payload, so it must be resolved from the device list.
+///
+/// The provider is **rebuilt on every control request** (`build_provider`), so a
+/// per-instance cache never survived — each command first paid a full
+/// `GET /user/devices` round-trip, the reported "laggy controls". A device's SKU
+/// is immutable, so caching it for the life of the process is safe. Keying by
+/// `base_url` lets production (constant `BASE_URL`) share one cache across every
+/// rebuilt provider while tests (each a unique mock URI) stay isolated.
+fn sku_cache() -> &'static tokio::sync::RwLock<
+    std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+> {
+    static CACHE: std::sync::OnceLock<
+        tokio::sync::RwLock<
+            std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+        >,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| tokio::sync::RwLock::new(std::collections::HashMap::new()))
 }
 
 impl GoveeProvider {
@@ -46,7 +64,6 @@ impl GoveeProvider {
         Ok(Self {
             client,
             base_url: base_url.into(),
-            sku_cache: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -69,23 +86,31 @@ impl GoveeProvider {
             .unwrap_or_default())
     }
 
-    /// The SKU for a device — required by control/state payloads.
-    /// Cached per provider instance (one devices call, then free).
+    /// The SKU for a device — required by control/state payloads. Served from
+    /// the process-wide [`sku_cache`]; on a miss, one device-list fetch
+    /// populates every device's SKU so subsequent commands are round-trip-free.
     async fn sku_for(&self, device_id: &str) -> Result<String> {
-        let map = self
-            .sku_cache
-            .get_or_try_init(|| async {
-                let devices = self.fetch_devices().await?;
-                Ok::<_, anyhow::Error>(
-                    devices
-                        .into_iter()
-                        .map(|d| (d.device, d.sku))
-                        .collect::<std::collections::HashMap<_, _>>(),
-                )
-            })
-            .await?;
-        map.get(device_id)
+        if let Some(sku) = sku_cache()
+            .read()
+            .await
+            .get(&self.base_url)
+            .and_then(|m| m.get(device_id))
             .cloned()
+        {
+            return Ok(sku);
+        }
+        let devices = self.fetch_devices().await?;
+        {
+            let mut cache = sku_cache().write().await;
+            let entry = cache.entry(self.base_url.clone()).or_default();
+            for d in &devices {
+                entry.insert(d.device.clone(), d.sku.clone());
+            }
+        }
+        devices
+            .into_iter()
+            .find(|d| d.device == device_id)
+            .map(|d| d.sku)
             .ok_or_else(|| anyhow::anyhow!("unknown Govee device '{device_id}'"))
     }
 
@@ -578,6 +603,32 @@ mod tests {
         // Two control requests: power + brightness.
         let bodies = control_bodies(&server).await;
         assert_eq!(bodies.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn repeated_commands_resolve_sku_with_a_single_device_list_fetch() {
+        // The SKU cache is keyed by base_url, so this test's unique mock URI is
+        // isolated from others. Two separate commands must hit /user/devices
+        // only once — the second is served from cache (the "laggy controls" fix).
+        let server = MockServer::start().await;
+        mount_control_mocks(&server).await;
+
+        let on = LightState {
+            on: true,
+            ..Default::default()
+        };
+        let provider = mock_provider(&server).await;
+        provider.set_state("AA:BB:CC:DD:EE:FF", &on).await.unwrap();
+        provider.set_state("AA:BB:CC:DD:EE:FF", &on).await.unwrap();
+
+        let device_list_fetches = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path() == "/user/devices")
+            .count();
+        assert_eq!(device_list_fetches, 1, "SKU lookup must be cached");
     }
 
     #[tokio::test]
