@@ -180,6 +180,62 @@ async fn health_reports_version_and_uptime() {
     assert!(body["uptime_secs"].is_u64());
 }
 
+#[tokio::test]
+async fn instance_endpoint_is_stable_within_a_process_and_unauthenticated() {
+    let app = helpers::test_app().await;
+    let get = || {
+        app.clone().oneshot(
+            Request::builder()
+                .uri("/api/instance")
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+
+    let r1 = get().await.unwrap();
+    assert_eq!(r1.status(), StatusCode::OK); // no auth required — kiosk polls pre-login
+    let b1 = helpers::response_json(r1).await;
+    assert_eq!(b1["version"], env!("CARGO_PKG_VERSION"));
+    let id = b1["instance_id"].as_str().unwrap().to_string();
+    assert!(!id.is_empty(), "instance_id should be a non-empty nonce");
+
+    // Same process → same id, so a steady client never spuriously reloads.
+    let b2 = helpers::response_json(get().await.unwrap()).await;
+    assert_eq!(b2["instance_id"], id);
+}
+
+#[tokio::test]
+async fn instance_id_differs_across_processes() {
+    // A restart/redeploy mints a fresh id — the signal the kiosk reloads on.
+    let a = helpers::response_json(
+        helpers::test_app()
+            .await
+            .oneshot(
+                Request::builder()
+                    .uri("/api/instance")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    let b = helpers::response_json(
+        helpers::test_app()
+            .await
+            .oneshot(
+                Request::builder()
+                    .uri("/api/instance")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_ne!(a["instance_id"], b["instance_id"]);
+}
+
 // ── Auth ────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -5221,6 +5277,40 @@ async fn voice_command_without_session_returns_401() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn voice_command_accepts_bearer_api_key() {
+    // The headless wall-tablet voice satellite has no session — it authenticates
+    // with a `bfr_` Bearer key like any /api/v1 client. The voice seam must
+    // accept it and drive the device just as a session would.
+    let bridge = wled_mock().await;
+    let (app, _light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "tablet").await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/voice/command")
+                .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"text":"bifrost, turn off test light"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["ok"], true, "bearer-authed command failed: {body}");
+
+    let requests = bridge.received_requests().await.unwrap();
+    assert!(
+        requests.iter().any(|r| r.url.path() == "/json/state"),
+        "no set_state call reached the device"
+    );
 }
 
 #[tokio::test]

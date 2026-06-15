@@ -22,6 +22,11 @@ pub struct AppState {
     pub registry: ProviderRegistry,
     pub connections: Mutex<ConnectionRegistry>,
     pub started_at: std::time::Instant,
+    /// A fresh random id minted once per process start. Clients poll
+    /// `GET /api/instance`; a changed value means the server was redeployed, so
+    /// the kiosk reloads to pick up the new build. Catches **any** restart —
+    /// including backend-only redeploys that leave the frontend bundle unchanged.
+    pub instance_id: String,
     cipher: Aes256Gcm,
 }
 
@@ -33,6 +38,7 @@ impl AppState {
             registry,
             connections: Mutex::new(ConnectionRegistry::new()),
             started_at: std::time::Instant::now(),
+            instance_id: uuid::Uuid::new_v4().to_string(),
         }
     }
 

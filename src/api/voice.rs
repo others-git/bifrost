@@ -16,6 +16,7 @@
 
 use crate::AppState;
 use crate::api::ai_endpoints::AiEndpoint;
+use crate::api::apikeys::require_api_key;
 use crate::api::audio::{SetAudioOutcome, apply_audio_command};
 use crate::api::auth::require_session;
 use crate::api::lights::{SetLightOutcome, apply_light_state};
@@ -83,12 +84,22 @@ struct ListenResponse {
     result: CommandResponse,
 }
 
+/// Voice endpoints accept **either** an authenticated browser session (the
+/// Dashboard / conversation modal) **or** a `bfr_` Bearer API key — the same
+/// auth `/api/v1` takes. The latter is what the headless wall-tablet voice
+/// satellite uses: it has no login cookie, so it drives the voice seam with a
+/// minted key like any other public-API client.
+async fn voice_authed(state: &Arc<AppState>, headers: &HeaderMap) -> bool {
+    require_session(state, headers).await.is_some()
+        || require_api_key(state, headers).await.is_some()
+}
+
 async fn command_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<CommandRequest>,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
+    if !voice_authed(&state, &headers).await {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let ctx = req.context.unwrap_or_default();
@@ -106,7 +117,7 @@ async fn listen_handler(
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    if require_session(&state, &headers).await.is_none() {
+    if !voice_authed(&state, &headers).await {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 

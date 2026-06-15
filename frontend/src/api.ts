@@ -273,6 +273,13 @@ export async function getHealth(): Promise<{ ok: boolean; version: string; uptim
   return res.json();
 }
 
+/** Per-process build nonce — changes on every server restart/redeploy. */
+export async function getInstance(): Promise<{ instance_id: string; version: string } | null> {
+  const res = await fetch(`/api/instance?_=${Date.now()}`, { cache: "no-store" });
+  if (!res.ok) return null;
+  return res.json();
+}
+
 export async function getSetupStatus(): Promise<{ setup_complete: boolean }> {
   const res = await fetch("/api/setup/status");
   return res.json();

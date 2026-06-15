@@ -23,7 +23,9 @@
 **Flagship — native voice (big, multi-phase):**
 - **M23 — Native voice: command control** *(P1 + P2 backend shipped: grammar +
   `/api/voice/command`; pluggable model-role config (`ai_endpoints`) + STT
-  `/api/voice/listen`)* — remaining: LLM fallback over MCP tool schemas, tablet PTT
+  `/api/voice/listen`; voice seam now also Bearer-keyed like `/api/v1` so the
+  headless wall-tablet satellite can drive it without a session — documented in
+  `API.md`)* — remaining: LLM fallback over MCP tool schemas, tablet PTT
   + AI-endpoints Settings UI, wake word. Pluggable local/OSS models, degrades to grammar.
 - **M24 — Talk mode: conversation & live translator** *(not started)* — WSS streaming
   pipeline (`/api/voice/stream`); the headline use case is a live two-party translator.

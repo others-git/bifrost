@@ -136,6 +136,24 @@ pub fn router() -> Router<Arc<AppState>> {
         .nest("/v1", v1::router())
         .nest("/voice", voice::router())
         .route("/health", get(health))
+        .route("/instance", get(instance))
+}
+
+#[derive(Serialize)]
+struct InstanceResponse {
+    /// Random per-process id; changes on every server restart/redeploy.
+    instance_id: String,
+    version: &'static str,
+}
+
+/// Cheap, unauthenticated liveness/build nonce for clients to poll. Unlike
+/// [`health`] it touches no DB or connection locks, so it's safe to hit often
+/// (the kiosk polls it to self-reload after a redeploy).
+async fn instance(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(InstanceResponse {
+        instance_id: state.instance_id.clone(),
+        version: env!("CARGO_PKG_VERSION"),
+    })
 }
 
 #[derive(Serialize)]

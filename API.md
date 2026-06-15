@@ -365,6 +365,44 @@ could not be reached.
 Keys are managed with a browser session, not with another key — a leaked key
 cannot mint more keys: `GET/POST /api/api-keys`, `DELETE /api/api-keys/{id}`.
 
+## Voice control (`/api/voice`)
+
+Natural-language command endpoints, gated by the **same Bearer API keys** as
+`/api/v1` (a browser session also works, for the web conversation modal). This is
+the contract the headless wall-tablet **voice satellite** uses — it has no login
+cookie, so it sends a minted `bfr_` key like any other public-API client.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/voice/command` | Run a **text** command through the native grammar (HA-Assist fallback) |
+| `POST` | `/api/voice/listen` | Upload **audio**; server transcribes (configured STT) then runs it |
+
+`/api/voice/command` — JSON in, JSON out:
+
+```bash
+curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"text":"bifrost, turn off the office", "context":{"room":"office"}}' \
+  http://bifrost.local:3000/api/voice/command
+```
+
+```jsonc
+// request
+{ "text": "...", "context": { "room": "<id-or-name>" } }  // context optional; room disambiguates bare references
+// response
+{ "ok": true, "said": "Turned off the office.", "clauses": [ { "heard": "...", "ok": true, "said": "..." } ] }
+```
+
+`/api/voice/listen` — `multipart/form-data` with an audio `file` field (and an
+optional `room` text field). Returns the same shape plus the recognized
+`transcript`. Returns `503` when no transcription model is configured (so text
+control over `/command` never depends on STT being up):
+
+```bash
+curl -X POST -H "Authorization: Bearer $KEY" \
+  -F file=@utterance.wav -F room=office \
+  http://bifrost.local:3000/api/voice/listen
+```
+
 ## MCP endpoint (`/mcp`)
 
 Bifrost embeds a [Model Context Protocol](https://modelcontextprotocol.io)
