@@ -5601,6 +5601,52 @@ async fn mcp_set_light_unknown_name_lists_available() {
 // ── Voice command seam (M23 P1) ──────────────────────────────────────────────
 
 #[tokio::test]
+async fn voice_vocabulary_requires_auth() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/voice/vocabulary")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn voice_vocabulary_lists_command_words_and_device_names() {
+    // The kiosk biases its on-device recognizer to this list. It must include
+    // the grammar's command words AND the home's device-name words (so "test
+    // light" is recognizable and not misheard).
+    let bridge = wled_mock().await;
+    let (app, _light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/voice/vocabulary", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    let words: Vec<String> = body["words"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w.as_str().unwrap().to_string())
+        .collect();
+    for w in ["turn", "off", "lights", "brightness"] {
+        assert!(words.iter().any(|x| x == w), "missing command word '{w}'");
+    }
+    // "test light" → tokenized into the vocabulary.
+    assert!(
+        words.iter().any(|x| x == "test"),
+        "device-name word missing from vocabulary: {words:?}"
+    );
+}
+
+#[tokio::test]
 async fn voice_command_without_session_returns_401() {
     let app = helpers::test_app_with_password().await;
     let resp = app

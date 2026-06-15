@@ -15,7 +15,10 @@ export type VoiceState = "idle" | "listening" | "thinking" | "speaking" | "error
 declare global {
   interface Window {
     bifrostVoice?: {
-      setState: (state: VoiceState) => void;
+      // `detail` (optional) overrides the default message for the state — used
+      // to surface a specific failure reason on `error`, e.g. an auth problem
+      // ("Voice not authorized — pair this device").
+      setState: (state: VoiceState, detail?: string) => void;
       partial: (text: string) => void;
     };
   }
@@ -29,18 +32,19 @@ const META: Record<Exclude<VoiceState, "idle">, { label: string; color: string }
 };
 
 // Failsafe: if the kiosk app dies mid-utterance and never sends `idle`, the
-// overlay clears itself rather than getting stuck on screen. `error` clears
-// faster since the app normally moves off it quickly.
+// overlay clears itself rather than getting stuck on screen. `error` lingers a
+// few seconds so a failure reason (e.g. an auth problem) is readable.
 const AUTO_IDLE_MS: Record<Exclude<VoiceState, "idle">, number> = {
   listening: 15000,
   thinking: 20000,
   speaking: 30000,
-  error: 4000,
+  error: 6000,
 };
 
 export function VoiceFeedback() {
   const [state, setState] = useState<VoiceState>("idle");
   const [partial, setPartial] = useState("");
+  const [detail, setDetail] = useState<string | null>(null);
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -49,16 +53,17 @@ export function VoiceFeedback() {
       idleTimer.current = null;
     };
     window.bifrostVoice = {
-      setState: (next) => {
+      setState: (next, det) => {
         clearIdle();
         setState(next);
+        setDetail(det ?? null);
         if (next === "idle") setPartial("");
         else {
-          const ms = AUTO_IDLE_MS[next];
           idleTimer.current = setTimeout(() => {
             setState("idle");
             setPartial("");
-          }, ms);
+            setDetail(null);
+          }, AUTO_IDLE_MS[next]);
         }
       },
       partial: (text) => setPartial(text),
@@ -71,6 +76,9 @@ export function VoiceFeedback() {
 
   if (state === "idle") return null;
   const { label, color: c } = META[state];
+  // A caller-supplied detail (e.g. the auth-failure reason) replaces the default
+  // label so the user sees *why* it failed, not just "Didn't catch that".
+  const message = detail ?? label;
 
   return (
     <div
@@ -122,9 +130,9 @@ export function VoiceFeedback() {
         </span>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: "0.9rem", fontWeight: 600, fontFamily: font.display, letterSpacing: "0.03em", color: c }}>
-            {label}
+            {message}
           </div>
-          {partial && state !== "error" && (
+          {state !== "error" && (partial || state === "listening") && (
             <div
               style={{
                 fontSize: "0.82rem",
@@ -135,7 +143,9 @@ export function VoiceFeedback() {
                 maxWidth: "min(70vw, 400px)",
               }}
             >
-              {partial}
+              {/* During the post-wake capture window (listening, no transcript
+                  yet) invite the command; once they speak, show the transcript. */}
+              {partial || "Say a command…"}
             </div>
           )}
         </div>

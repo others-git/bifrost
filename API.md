@@ -426,6 +426,7 @@ cookie, so it sends a minted `bfr_` key like any other public-API client.
 |---|---|---|
 | `POST` | `/api/voice/command` | Run a **text** command through the native grammar (HA-Assist fallback) |
 | `POST` | `/api/voice/listen` | Upload **audio**; server transcribes (configured STT) then runs it |
+| `GET` | `/api/voice/vocabulary` | `{ words: [...] }` — the command-grammar keywords plus every enabled room/device/scene name (tokenized). A device with on-device STT (the wall tablet) biases its recognizer to this list so in-domain words aren't misheard. |
 
 `/api/voice/command` — JSON in, JSON out:
 

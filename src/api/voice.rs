@@ -30,7 +30,7 @@ use axum::{
     extract::{Multipart, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::post,
+    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -41,6 +41,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/command", post(command_handler))
         .route("/listen", post(listen_handler))
+        .route("/vocabulary", get(vocabulary_handler))
 }
 
 #[derive(Deserialize)]
@@ -167,6 +168,200 @@ async fn listen_handler(
     Json(ListenResponse {
         transcript: text,
         result,
+    })
+    .into_response()
+}
+
+/// Command-grammar keywords the speech recognizer should always know — the
+/// verbs, modifiers, colors, and numbers [`parse`] understands — independent of
+/// the home's device names. The kiosk fetches these plus the room/device/scene
+/// names (tokenized below) and biases its on-device recognizer to them, so
+/// in-domain words aren't misheard ("lights" → "lloyds"). Keep roughly in step
+/// with the grammar; extra words are harmless, the point is coverage.
+const COMMAND_WORDS: &[&str] = &[
+    "turn",
+    "on",
+    "off",
+    "make",
+    "set",
+    "change",
+    "put",
+    "switch",
+    "toggle",
+    "dim",
+    "brighten",
+    "brighter",
+    "dimmer",
+    "darker",
+    "bright",
+    "brightness",
+    "up",
+    "down",
+    "to",
+    "by",
+    "percent",
+    "louder",
+    "quieter",
+    "volume",
+    "mute",
+    "unmute",
+    "silence",
+    "a",
+    "bit",
+    "little",
+    "lot",
+    "ton",
+    "way",
+    "slightly",
+    "half",
+    "full",
+    "max",
+    "maximum",
+    "minimum",
+    "all",
+    "everything",
+    "here",
+    "in",
+    "the",
+    "and",
+    "then",
+    "play",
+    "pause",
+    "stop",
+    "resume",
+    "next",
+    "previous",
+    "skip",
+    "back",
+    "scene",
+    "mode",
+    "activate",
+    "light",
+    "lights",
+    "lamp",
+    "lamps",
+    "color",
+    "colour",
+    "temperature",
+    "red",
+    "green",
+    "blue",
+    "white",
+    "orange",
+    "yellow",
+    "purple",
+    "violet",
+    "pink",
+    "magenta",
+    "cyan",
+    "teal",
+    "lime",
+    "amber",
+    "gold",
+    "warm",
+    "soft",
+    "neutral",
+    "cool",
+    "daylight",
+    "dark",
+    "deep",
+    "pale",
+    "pastel",
+    "baby",
+    "dull",
+    "muted",
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+    "twenty",
+    "thirty",
+    "forty",
+    "fifty",
+    "sixty",
+    "seventy",
+    "eighty",
+    "ninety",
+    "hundred",
+    "bifrost",
+    "hey",
+    "ok",
+    "okay",
+    "please",
+    // Wake-word homophones: the small Vosk model has no "bifrost" entry and
+    // hears the wake word as "by frost"/"buy frost"/etc. Including these tokens
+    // lets a constrained on-device grammar still emit a rendering the client's
+    // wake matcher maps back — keeping the wake word recognizable.
+    "frost",
+    "buy",
+    "be",
+    "bi",
+    "frosch",
+];
+
+/// Split a room/device/scene name into lowercase word tokens, dropping pure
+/// numbers (the grammar handles those as number words) and single letters.
+fn name_words(name: &str, out: &mut std::collections::BTreeSet<String>) {
+    for tok in name.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+        let t = tok.trim().to_lowercase();
+        if t.len() >= 2 && t.chars().any(|ch| ch.is_ascii_alphabetic()) {
+            out.insert(t);
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct Vocabulary {
+    words: Vec<String>,
+}
+
+/// `GET /api/voice/vocabulary` — the word list the kiosk biases its on-device
+/// speech recognizer to: the command grammar's keywords plus every enabled room,
+/// device, and scene name (tokenized). Constraining recognition to this domain
+/// cuts mishears dramatically. Same auth as the rest of the voice seam (Bearer
+/// key or session).
+async fn vocabulary_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !voice_authed(&state, &headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let mut words: std::collections::BTreeSet<String> =
+        COMMAND_WORDS.iter().map(|w| (*w).to_string()).collect();
+    for ent in rooms(&state).await {
+        name_words(&ent.name, &mut words);
+    }
+    for ent in lights(&state).await {
+        name_words(&ent.name, &mut words);
+    }
+    for ent in audio(&state).await {
+        name_words(&ent.name, &mut words);
+    }
+    for ent in power(&state).await {
+        name_words(&ent.name, &mut words);
+    }
+    for ent in scenes(&state).await {
+        name_words(&ent.name, &mut words);
+    }
+    Json(Vocabulary {
+        words: words.into_iter().collect(),
     })
     .into_response()
 }
