@@ -1,16 +1,219 @@
 # Bifrost — Implementation Plan
 
-## Active Milestone — Home Assistant as a high-class integration
+> **How this file is laid out:** open work first (this section), then the shipped
+> one-liner log, then full detail — open specs, then completed-milestone archives,
+> then reference (goals / out-of-scope / invariants). Milestone numbers are stable
+> labels, **not** sequential by date (done & open are interleaved).
 
-Make HA a first-class integration that surfaces *real* devices cleanly and is
-controllable by name (UI + voice/MCP). Recently landed: multi-domain HA (lights,
-power, audio/TV), the **entity-registry primary-entity filter** (one-shot WS,
-drops `config` sub-entities), **per-provider pruning** + global Discover/Sync/
-Prune+Sync, source/app switching, device enable/disable, the Control page. **Up
-next:** play named content on the TV (the voice north-star — `media_player.play_media`
-vs delegating to HA Assist), then WebSocket `subscribe_events` push and HA
-device-registry grouping. Open items live under *Open milestones* below; the
-per-milestone detail is in **M19**.
+## Open milestones — what's left
+
+**Next up (small, scoped):**
+- **M26 — Composite (merged) devices** *(draft)* — merge *complementary* same-device
+  entities into one capability-routed device (the BRAVIA "two media_players" problem:
+  one has now-playing, the other the remote). Distinct from de-dup, which is for
+  *equivalent* copies. Detail below.
+
+**Flagship — native voice (big, multi-phase):**
+- **M23 — Native voice: command control** *(P1 shipped: grammar + `/api/voice/command`)* —
+  remaining: STT (`/api/voice/listen`), LLM fallback over MCP tool schemas, tablet PTT,
+  wake word. Pluggable local/OSS models, degrades to grammar.
+- **M24 — Talk mode: conversation & live translator** *(not started)* — WSS streaming
+  pipeline (`/api/voice/stream`); the headline use case is a live two-party translator.
+
+**Feature backlog:**
+- **M12.2 — Music services (real Spotify & friends)** *(not started)* — OAuth music-service
+  domain that targets an audio device (Spotify Connect).
+- **M15 — Scenes capture full device state (audio-aware)** *(not started)* — snapshot
+  audio source/volume too, not just lights.
+- **M17 — Floor plan on mobile** *(deferred)* — view/control + touch drafting on phones.
+- **M18 — Matter device support** *(not started, spike-gated)* — Bifrost as a Matter
+  controller for Wi-Fi lights/plugs.
+
+**Deferred items inside shipped milestones:**
+- **Richer HA domains as their own type** — `climate.*` / `cover.*` / `lock.*` (M19).
+- **De-dup Phase 2 — fuzzy heuristics** — confirmation-gated name/area match (M21).
+- **Receiver power-off / input-restore arbitration** — ref-count active sources (M22).
+
+**Open follow-ups (from shipped milestones):**
+- [ ] **Onkyo NET preset enumeration** (M12) — needs the receiver's undocumented HTTP API.
+
+**Capability-parity gaps (tracked)** — native capabilities HA exposes that we must build
+natively (de-dup makes the native device canonical, so the capability must live there):
+- [ ] **Sonos `source` / `source_list`** — derive current-source from the AVTransport URI
+  scheme; selectable Line-In / TV via `SetAVTransportURI` + favorites. Detail in the M21
+  archive below.
+
+---
+
+## M25 — Remote control + `BifrostRemote` — DONE (in tree, unreleased)
+
+A generic, reusable **virtual-remote** surface for TVs (Android TV today, any
+provider that exposes a remote later). A new **`remote` device domain**, paired
+to its TV, drives D-pad/keys + app launch; the frontend `BifrostRemote` renders a
+smart-remote with dynamic app buttons. See the phase breakdown below (kept current
+as each phase lands).
+
+**Grounding (HA Android TV Remote, probed live):** per TV, the integration adds a
+`remote.<tv>` entity (`current_activity` = foreground app package; `supported_features: 4`)
+and a paired `media_player.<tv>` (`app_id`/`app_name`). Control via the `remote`
+domain services — `send_command { command, hold_secs }` (keycodes: `DPAD_*`,
+`BUTTON_A/B/X/Y`, `BACK/HOME/MENU/INFO/GUIDE/SETTINGS/SEARCH/ASSIST/POWER`, `0-9`,
+media/volume/channel, `text:<str>`), `turn_on { activity }` (launch app by Play
+Store package **or** deep-link URL), `turn_off`/`toggle`. No installed-app
+enumeration (`activity_list` empty) → Bifrost tracks recents + lets the user pin.
+`media_player.play_media { media_content_type: app|url|channel }` is a second
+launch path that also feeds the "play named content" north-star.
+
+**Deferred (was the prior 'next'):** richer HA domains (`climate`/`cover`/`lock`),
+HA device-registry grouping, and the Sonos `source`/`source_list` parity gap —
+now future milestones / the parity-gaps list below. **M19 is DONE** (multi-domain
+HA, push, power live state, Tier B HA-Assist fallback).
+
+### M25 phases (all shipped to tree)
+
+Decisions (settled): a **standalone `remote` device domain** (`models::remote`),
+each remote **paired** to its TV (`media_player`) by hardware id; app buttons are
+**recents (auto, from `current_activity`) ∪ user-pinned**. The `BifrostRemote`
+frontend is provider-agnostic; the HA Android TV Remote is the first backend.
+
+**Phase 1 — `remote` domain + HA `RemoteProvider` — DONE:**
+- [x] `models::remote` — `RemoteDevice` (lean: `on` + `current_app`) + canonical
+  `RemoteKey` enum (Up/Down/Left/Right/Select/Back/Home/Menu/VolUp/VolDown/Mute/
+  PlayPause/Next/Previous/Power) + `RemoteCommand` tagged union (key/text/
+  launch_app/power); providers map keys to their native command.
+- [x] `RemoteProvider` trait + `RemoteProviderFactory`; registry wiring
+  (`register_remote`/`build_remote`/`is_known_remote`/`remote_factories`),
+  `/api/providers/{id}/discover` **additive** over remote + prune.
+- [x] HA impl (`HaRemoteFactory`): `discover` (`remote.*`), `get_state`
+  (`current_activity`), `send_key` → `remote.send_command` (canonical→Android
+  keycode), `send_text` → `text:<str>`, `launch_app` → `remote.turn_on
+  { activity }`, `set_power` → `turn_on`/`turn_off`.
+- [x] Migration `0027_remote_devices` (enabled/glyph/hw_id/`paired_audio_id`).
+  Wiremock tests (discover/send_key/launch_app/mapping/factory) + integration
+  (401 + discover→list→command).
+- [x] **Early from P2:** `api::remote` session routes (`/api/remote/devices`,
+  `…/{id}` live read, `…/{id}/command`, enable/glyph) + the service layer
+  (`apply_remote_command`/`read_remote_state`/`list_remotes`); auto-pairing
+  `reconcile_remote_pairings` (match remote↔TV audio by `hw_id`, prefer TV kind)
+  runs after every discovery.
+
+**Phase 2 — public surfaces (`v1` + MCP) — DONE:**
+- [x] `/api/v1/remote/devices` (+ `/{id}` live read, `/{id}/command`), Bearer, over
+  the shared service fns; documented in `API.md` (command tagged union + keys).
+- [x] MCP tools `list_remotes` / `press_remote_key` / `launch_app` (name-resolved,
+  key parsed from canonical string); documented in `MCP.md`. Session routes +
+  `hw_id` pairing already landed in P1. Integration tests: session, `v1` (401 +
+  command), discover→list→command.
+
+**Phase 3 — app tracking (recents + pinned) — DONE:**
+- [x] `remote_apps` store (migration `0028`: package/name/pinned/last_seen).
+  Recents recorded from `current_activity` on every live read
+  (`record_app_seen`, no-op for non-package activities); `list_remote_apps`
+  returns **pinned-first then recents**; pin/unpin via `PUT …/{id}/apps/pin`
+  (`set_app_pin`, inserts a never-seen package so it can be added pre-launch);
+  `app_display_name` package→friendly-name registry (Netflix/YouTube/Prime/
+  Disney+/…). Session routes `GET …/{id}/apps` + `PUT …/{id}/apps/pin`.
+  Integration test `remote_apps_record_recents_pin_and_order` (recents + 401 +
+  pin/unpin + ordering). **Icons** are a frontend package→glyph map (P4), not
+  stored in the DB.
+
+**Phase 4 — `BifrostRemote` frontend — DONE:**
+- [x] `components/BifrostRemote.tsx` — provider-agnostic remote: D-pad + select,
+  back/home/menu, power, volume (±/mute), transport (prev/play-pause/next), and
+  dynamic **app buttons** (pinned ∪ recents from `getRemoteApps`, tap to launch,
+  ☆/★ to pin; current app highlighted). Live state poll for power/current-app.
+  Full-width bottom sheet on compact, centred modal on desktop. `api.ts` remote
+  types + fns (`getRemoteDevices`/`getRemoteState`/`sendRemoteCommand`/
+  `getRemoteApps`/`setRemoteAppPin`). The TV's `AudioEditor` fly-out (used by
+  Control **and** Floor Plan) gets a **📺 Remote** button when a remote is paired
+  to that TV (`paired_audio_id`), opening the overlay; the fly-out's outside-click
+  is suppressed while the remote is up. `tsc` + `vite build` clean.
+
+**M25 is feature-complete** (all 4 phases). Ships with the next release bump.
+
+---
+
+## M26 — Composite (merged) devices — draft (not started)
+
+One physical device can surface as several Bifrost
+devices with **complementary** (not equivalent) capabilities. Real case: a Sony
+BRAVIA appears as two HA `media_player` entities — the **BRAVIA integration**
+(now-playing/media + discrete HDMI sources, but no `device_class` → mis-classed
+"Speaker") and the **Android-TV Remote** (`current_activity`/app + the paired
+remote, but no media metadata). Neither is a superset, so today the user sets two
+cards and each is half-right.
+
+**Merge ≠ de-dup.** Keep both relationships:
+- **De-dup (shadow)** — for *equivalent* copies (native Hue ⊇ HA-Hue): hide the
+  lesser, native wins, lossless. Unchanged.
+- **Merge (composite)** — for *complementary* copies of one physical device:
+  **union** the capabilities and route each to the backing that actually has it.
+  Shadowing here is a capability loss, which is why this milestone exists.
+
+**Precedent (this is a generalization, not a new paradigm):** M22 receiver
+binding already does capability-routed splitting + overlaid reads
+(`AudioCommand::split_for_receiver`: volume/mute→receiver, power/source/transport
+→source; source read overlays receiver volume/mute), and the remote↔TV pairing
+(`paired_audio_id`) already links one logical device across domains.
+
+**Target UX (user's words):** each physical device shows **once** on the control
+panel; click the TV → **all** related controls + activity + remote in one place.
+
+Field routing for the BRAVIA case:
+
+| Capability | Backing |
+|---|---|
+| Now-playing / transport | the media-reporting entity (BRAVIA integration) |
+| Current app + launch + D-pad/keys | the Android-TV entity (via the paired remote) |
+| Volume / mute / power | whichever supports it (precedence: primary, else companion) |
+| Source list | **union** of both |
+
+### M26 phases (draft)
+
+- [x] **Phase 1 — model + service — DONE.** `audio_devices.companion_of`
+  (migration `0029`) links a secondary entity to a **primary**. Read merge
+  (`merge_companion_into`): now-playing / source / `source_list` ∪ / **the
+  companion's receiver binding** overlaid onto the primary, capabilities unioned;
+  companions stay listed (marked) and merge into their primary in
+  `list_all_devices` + `get_device_live`. Write routing (`route_across_backings`,
+  pure + unit-tested): **volume/mute → a receiver-bound backing** (the agreed
+  precedence — a receiver wins, not "primary-first"), transport → the playback
+  owner, source → the inputs backing, power → primary; each part applied via
+  `apply_with_receiver` so the M22 receiver split still runs (no recursion).
+  `set_audio_companion` (self/chain/unknown/shadowed guards) + session & `/v1`
+  routes; `API.md` documented. Routing unit tests + CRUD/validation/401
+  integration test. *(Remote `paired_audio_id` re-point: deferred to P4 — the
+  remote already surfaces via the TV's fly-out.)*
+- [x] **Phase 2 — honest classification — DONE.** `audio_kind`
+  (`src/providers/ha/mod.rs`) now also classifies **TV** when the entity reports
+  a running app (`app_id`/`app_name`), not just `device_class == tv` — fixes the
+  mis-classed-Speaker bug. Unit-tested. (The paired-`remote.*` signal + auto-
+  suggested merges fold into P3.)
+- [x] **Phase 3 — link UI — DONE.** Devices page: a **⧉ "Merge into…"** control on
+  audio cards (`MergePicker` → `setAudioCompanion`); merged companions collapse
+  under their primary (`MergedCompanion` row, "merged into X — controls combined")
+  with an **Unmerge** action. The lossless counterpart to "mark as duplicate"
+  (the lossy shadow link was deliberately *not* shipped). *(Auto-suggested matches
+  deferred — manual link only, no silent merges.)*
+- [x] **Phase 4 — control surface — DONE.** Companions drop from control like
+  shadows: backend room-audio-member + voice queries gain `companion_of IS NULL`;
+  the Audio page filters them; the Devices page collapses them. The merged
+  **primary** carries the union (now-playing + volume→receiver + source +
+  transport) via the Phase-1 read-merge, and the 📺 remote already surfaces via
+  the TV's fly-out — so one card has everything.
+
+**M26 is feature-complete** (Phases 1–4). The BRAVIA merges into one TV with
+nothing hidden. *(Future, not blocking: auto-suggested merges from kind+area;
+Floor-Plan was already covered by the shared `AudioEditor`.)*
+
+### Decisions settled while building
+
+- Capability precedence: **volume/mute → a receiver-bound backing** (a receiver
+  wins over the primary — the key correction), transport → the playback owner,
+  source → the inputs backing, power → the primary.
+- Auto-detect heuristic (HA area + normalized name + TV-ish kind → *suggest*,
+  require manual confirm) — don't over-reach.
+- Cross-domain scope: audio merge + the existing remote pairing only, for now.
 
 ## Goals
 
@@ -46,21 +249,29 @@ A self-hosted Rust smart home hub that is:
 | 16 — Mobile / PWA | Responsive SPA via `useViewport()` (`isMobile` ≤640px, tablets get desktop); bottom tab bar, bottom-sheet fly-outs, compact 2-up cards, enlarged tap targets; installable PWA; Floor Plan hidden on phones (→ M17) |
 | 20 — Control page + device enable/disable | **Control** page (renamed from "Lights"): whole-home, **two-column** rooms on desktop (CSS columns; single column on mobile), each room a row of **glyph buttons** — one per member device (light/power/audio), type-glyph not name — each opening its **own fly-out** (`LightEditor` / `PowerFlyout` / `AudioEditor`) showing the full name. Shared `components/glyphs.tsx`. **Device enable/disable** across all domains: migration `0022` adds `enabled` to lights/audio_devices/power_devices; a disabled device stays tracked + a room member but gets **no commands** (control lookups skip it → 404) and drops from room control (effective members for lights; client-side on Control for power/audio). `PUT /api/{lights,audio/devices,power/devices}/{id}/enabled`; disable in each fly-out + the Devices page. |
 | 19 — Home Assistant ("high-class" provider) | `providers::ha` — one adapter (`base_url` + long-lived token), shown under an **"Integration"** add-provider category, that surfaces multiple HA device domains from one provider row. **Lights**: `light.*` → Bifrost lights + **HA Areas → Rooms** via the shared Sync flow. **Power**: new lean `models::power` domain (switch/fan/plug → `PowerKind` glyph, on/off only) wired end-to-end on the backend — multi-domain registry (`register_power`), additive discover, `power_devices` table (migration 0019), `api::power` + `/api/v1/power` + MCP tools. REST poll (30s). HA `media_player`/audio still **on hold**. Remaining: power live-polling/frontend/room-membership. See [Milestone 19 detail](#milestone-19--home-assistant-high-class-provider) |
+| 21 — Cross-provider de-dup | Hardware-id (`mac:`) matching **shadows** the HA copy under the native one (native wins); manual link/unlink as the no-hw_id fallback. Phase 1 shipped (Phase 2 fuzzy heuristics deferred). Detail in archive below. |
+| 22 — Receiver binding | Source devices (TV/streamer/console) **bind** to an AV receiver that owns their volume/mute; powering a source on wakes + switches the receiver to its input. Onkyo single-connection `OnkyoLink`. Phases 1+2 shipped. Detail in archive below. |
+| 25 — Remote control + `BifrostRemote` | `remote` device domain + HA Android-TV provider; session/`v1`/MCP surfaces; TV pairing by `hw_id`; app recents/pins; the `BifrostRemote` frontend. Feature-complete in tree (unreleased). Detail above. |
 
 ### Open follow-ups from shipped milestones
 
-- [ ] **Sonos SSDP discovery without a seed IP** (M10, deferred — seed-host
-  fan-out already covers whole households).
+- [x] **Sonos SSDP discovery without a seed IP** (M10) — **already shipped**: the
+  add-provider **Scan network** button runs `SsdpDiscovery` (ZonePlayer
+  `M-SEARCH` → `LOCATION` host), auto-fills the seed, and the household fans out.
+  No seed IP needs to be known.
 - [x] **MCP `list_audio_favorites` / `play_audio_favorite`** (M12) — shipped as
   embedded MCP tools in M11. Tracked in [MCP.md](MCP.md).
 - [ ] **Onkyo NET presets** (M12, deferred) — eISCP exposes service *selection*
   (`NSV`) but not preset *enumeration*; needs the receiver's undocumented HTTP API.
-- [ ] **Onkyo room/zone wrapping** (M13) — `discover_groups` left default-empty
-  (its `main`/`zone2` names aren't room names); add when there's a real need.
 
 ---
 
-## Milestone 19 — Home Assistant ("high-class" provider) — IN PROGRESS
+# Completed — milestone detail (archive)
+
+*Shipped milestones, kept for reference/grep. Skip unless you need the deep
+history; the one-liner log above is the index. (M25 detail is at the top.)*
+
+## Milestone 19 — Home Assistant ("high-class" provider) — DONE
 
 One adapter (`providers::ha`) that surfaces *any* HA integration as Bifrost
 devices and mirrors HA's structure into Bifrost — so Bifrost becomes a fast,
@@ -142,17 +353,21 @@ shape stays honest.
   members (power-only, routed so a bound source still wakes its receiver) **and**
   its power-device members — previously room on/off was lights-only. Light-less
   rooms (only switches/speakers) are now controllable. Covered by an integration test.
-- [ ] **Power: remaining wiring** — live polling into the event pipeline (state
-  currently refreshes on a 30s poll + live GET, not pushed). Best done with the
-  generic push channel from the **WebSocket push** item (today only Hue SSE +
-  light polling emit `LightEvent`s; power needs its own event path). Provider-list
-  `domain` label still shows "light" for HA (cosmetic).
-- [ ] **Richer domains as their own type**, when their state surface justifies it:
-  `climate.*` (setpoint/mode/current temp), `cover.*` (position), `lock.*`. Each
-  is a new domain (model + control surface + UI), grouped where applicable.
-- [ ] **WebSocket push** (`references/ha_websocket_api.md`): a `subscribe_events`
-  push manager for `state_changed`, for instant updates instead of 30s polling.
-  Needs a generic light push channel (today only Hue SSE + polling exist).
+- [x] **Power: live push wired** — `HaPushManager` emits `PowerEvent`s onto a new
+  power pipeline (`power_db_writer_task` → `power_devices.last_state`; SSE
+  `power_state`, consumed on the Dashboard). Provider-list `domain` label already
+  reads "Integration" for HA via `ui_domain` (the earlier "light" note was stale).
+- [ ] **Richer domains as their own type** *(deferred past M19 — its own future
+  milestone)*, when their state surface justifies it: `climate.*` (setpoint/mode/
+  current temp), `cover.*` (position), `lock.*`. Each is a new domain (model +
+  control surface + UI), grouped where applicable.
+- [x] **WebSocket push** (`references/ha_websocket_api.md`): `HaPushManager` keeps
+  one persistent `subscribe_events`/`state_changed` WebSocket open
+  (`ConnectionMode::HaPush`, built from the concrete `HaProvider` like Hue's SSE)
+  and fans each change onto the light / audio / **power** pipelines via
+  `HaProvider::push_events` + `classify_push` — instant updates instead of 30 s
+  polling. Mock-WS + classify unit tests; reconnection owned by the manager with
+  the shared backoff.
 - [x] **Audio domain (media_player → TVs/speakers)**: `HaAudioFactory` registered
   via the multi-domain path, so HA `media_player.*` (the Android TV, speakers)
   surface as audio devices with power/volume/mute/source/transport on the Audio
@@ -178,21 +393,21 @@ shape stays honest.
   audio API/`v1`/MCP and a source dropdown on the Audio device card; switch by
   sending the name as `source` (the existing `select_source` path). Generic across
   providers (Onkyo/Sonos can populate it later for free). Wiremock + UI.
-- [ ] **Play named content — Tier B (the voice north-star, filed for later)**:
-  "play Bob's Burgers on the bedroom TV" — launching a *specific title* inside an
-  app, beyond switching to it. Brittle/app-specific (deep-link URLs via
-  `media_player.play_media`, or `browse_media` over WebSocket). Design fork:
-  Bifrost resolves content itself, **or** delegate the NL media intent to **HA
-  Assist** (`conversation.process`) and let HA resolve it (preferred — fits the
-  Whisperr voice pipeline, reuses HA's media resolution). A TV is more than audio
-  (app launch/video) — may warrant its own media domain. **Decide the fork before
-  building.**
+- [x] **Play named content — Tier B (the voice north-star)**: "play Bob's Burgers
+  on the bedroom TV" — launching a *specific title* inside an app. **Fork decided:
+  native-first, HA-Assist fallback.** Bifrost's deterministic grammar (`api::voice`)
+  parses what it can; any clause it can't (the brittle, app-specific long tail) is
+  delegated to **HA Assist** — `HaProvider::converse` → `POST /api/conversation/
+  process`, returning `(speech, ok)` from `response.speech.plain.speech` /
+  `response_type`. The fallback fires per-`Unparsed`-clause in `run_command`
+  (`ha_assist_fallback`), so a configured HA resolves and acts on the intent while
+  no-HA installs keep the native "didn't understand". Reuses HA's media resolution
+  across all integrations; wiremock (`converse`) + integration (`voice` → Assist)
+  tests. *Future, if needed:* a dedicated media domain for richer TV control
+  (browse, deep-link `media_player.play_media`) — a TV is more than audio.
 - [x] **De-dup (Phase 1)** — see [Milestone 21](#milestone-21--cross-provider-de-dup).
   A device imported both natively and via HA no longer shows twice: matched by
   hardware id, the native copy wins and the HA copy is shadowed.
-- [ ] **Device registry import** (optional): HA *devices* (grouping multiple
-  entities) beyond Areas, if entity-flat import proves insufficient. Phase 1 of
-  de-dup already fetches the device registry, so the join data is in hand.
 
 ---
 
@@ -332,7 +547,10 @@ when the source powers on, where the receiver enumerates one. A future big MCP w
   arbitration (when the *last* bound source powers off). Needs design (ref-counting
   active sources per receiver).
 
-# Open milestones
+# Open — milestone detail
+
+*Full specs for the open backlog listed at the top. (M26 detail is near the top,
+right after M25.)*
 
 ## Milestone 23 — Native voice: command control — NOT STARTED (flagship)
 

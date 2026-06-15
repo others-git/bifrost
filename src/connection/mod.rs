@@ -5,7 +5,9 @@
 //! reconnect, polling fallback during outages, and periodic health checks.
 
 use crate::models::audio::AudioEvent;
+use crate::models::power::PowerState;
 use crate::models::{LightCapabilities, LightState, LightStatePatch};
+use crate::providers::ha::{HaProvider, HaPushEvent};
 use crate::providers::hue::HueProvider;
 use crate::providers::{AudioProvider, LightProvider};
 use anyhow::Result;
@@ -66,6 +68,15 @@ pub struct LightEvent {
     /// Lets stale capability flags (e.g. Hue `color_rgb`) self-heal on the next poll.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<LightCapabilities>,
+}
+
+/// A power-device state update broadcast on the event pipeline. Power state is
+/// just `on` (+ reachability), so — unlike lights — it's a full snapshot, not a
+/// patch. Emitted today only by the HA push manager.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PowerEvent {
+    pub device_id: String,
+    pub state: PowerState,
 }
 
 pub struct HueConnectionManager {
@@ -470,6 +481,120 @@ async fn audio_db_writer_task(
     }
 }
 
+// ── Home Assistant multi-domain push manager ─────────────────────────────────
+
+/// Keeps one persistent `subscribe_events` WebSocket open to Home Assistant and
+/// fans each `state_changed` onto the right per-domain pipeline (light / audio /
+/// power), so all of HA's device domains stay live from a single connection.
+/// Owns reconnection with the shared backoff (the only re-opener of the stream),
+/// mirroring `AudioPushManager`.
+pub struct HaPushManager {
+    provider: HaProvider,
+    pub state: Arc<RwLock<ConnectionState>>,
+    pub light_events: broadcast::Sender<LightEvent>,
+    pub audio_events: broadcast::Sender<AudioEvent>,
+    pub power_events: broadcast::Sender<PowerEvent>,
+}
+
+impl HaPushManager {
+    fn new(provider: HaProvider) -> Self {
+        Self {
+            provider,
+            state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
+            light_events: broadcast::channel(256).0,
+            audio_events: broadcast::channel(256).0,
+            power_events: broadcast::channel(256).0,
+        }
+    }
+
+    pub async fn run(self: Arc<Self>) {
+        info!("HA push manager starting");
+        let mut attempt: u32 = 0;
+        loop {
+            *self.state.write().await = ConnectionState::Connecting;
+            match self.provider.push_events().await {
+                Ok(mut rx) => {
+                    attempt = 0;
+                    let since = Instant::now();
+                    *self.state.write().await = ConnectionState::Connected {
+                        since,
+                        last_event: since,
+                    };
+                    info!("HA push channel connected");
+                    while let Some(event) = rx.recv().await {
+                        self.dispatch(event);
+                        *self.state.write().await = ConnectionState::Connected {
+                            since,
+                            last_event: Instant::now(),
+                        };
+                    }
+                    warn!("HA push channel closed");
+                }
+                Err(e) => warn!("HA push connect failed: {e:#}"),
+            }
+
+            let delay = backoff_delay(attempt);
+            attempt += 1;
+            *self.state.write().await = ConnectionState::Reconnecting {
+                attempt,
+                retry_at: Instant::now() + delay,
+            };
+            tokio::time::sleep(delay).await;
+        }
+    }
+
+    /// Route one classified push event to its domain channel. Send errors (no
+    /// subscribers) are ignored — the DB writers below are the durable sink.
+    fn dispatch(&self, event: HaPushEvent) {
+        match event {
+            HaPushEvent::Light { device_id, state } => {
+                let _ = self.light_events.send(LightEvent {
+                    device_id,
+                    patch: LightStatePatch::from_full(&state),
+                    // Push carries live state, not capabilities; leave stored caps
+                    // untouched (they self-heal on the next discovery).
+                    capabilities: None,
+                });
+            }
+            HaPushEvent::Audio(event) => {
+                let _ = self.audio_events.send(event);
+            }
+            HaPushEvent::Power { device_id, state } => {
+                let _ = self.power_events.send(PowerEvent { device_id, state });
+            }
+        }
+    }
+}
+
+/// Writes pushed power events to `power_devices.last_state`. Full snapshots, so
+/// this replaces rather than merges (power state is just `on` + reachability).
+async fn power_db_writer_task(
+    mut rx: broadcast::Receiver<PowerEvent>,
+    provider_row_id: String,
+    db: SqlitePool,
+) {
+    loop {
+        match rx.recv().await {
+            Ok(event) => {
+                let state_json = serde_json::to_string(&event.state).unwrap_or_default();
+                let _ = sqlx::query(
+                    "UPDATE power_devices SET last_state = ?, last_seen = datetime('now')
+                     WHERE provider_id = ? AND device_id = ?",
+                )
+                .bind(&state_json)
+                .bind(&provider_row_id)
+                .bind(&event.device_id)
+                .execute(&db)
+                .await;
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                warn!("power event db writer lagged by {n} events");
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
 // ── Connection registry ─────────────────────────────────────────────────────
 
 /// One managed connection (SSE, polling, or audio push): its observable state,
@@ -477,8 +602,10 @@ async fn audio_db_writer_task(
 struct ConnectionEntry {
     state: Arc<RwLock<ConnectionState>>,
     events: broadcast::Sender<LightEvent>,
-    /// Present only for audio push managers.
+    /// Present for audio push managers and the HA multi-domain push manager.
     audio_events: Option<broadcast::Sender<AudioEvent>>,
+    /// Present only for the HA multi-domain push manager.
+    power_events: Option<broadcast::Sender<PowerEvent>>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -516,6 +643,7 @@ impl ConnectionRegistry {
                 state,
                 events,
                 audio_events: None,
+                power_events: None,
                 tasks: vec![sse_task, db_task],
             },
         );
@@ -541,6 +669,7 @@ impl ConnectionRegistry {
                 state,
                 events,
                 audio_events: None,
+                power_events: None,
                 tasks: vec![poll_task, db_task],
             },
         );
@@ -568,7 +697,42 @@ impl ConnectionRegistry {
                 state,
                 events,
                 audio_events: Some(audio_events),
+                power_events: None,
                 tasks: vec![push_task, db_task],
+            },
+        );
+    }
+
+    /// Spawn the HA multi-domain push loop and a DB writer per domain (light /
+    /// audio / power) for the given provider. One WebSocket keeps every HA device
+    /// domain live, so this entry carries the light, audio, **and** power channels.
+    pub fn start_ha_push(&mut self, provider_id: String, provider: HaProvider, db: SqlitePool) {
+        let mgr = Arc::new(HaPushManager::new(provider));
+        let state = Arc::clone(&mgr.state);
+        let events = mgr.light_events.clone();
+        let audio_events = mgr.audio_events.clone();
+        let power_events = mgr.power_events.clone();
+
+        let push_task = tokio::spawn(Arc::clone(&mgr).run());
+        let light_db = tokio::spawn(db_writer_task(events.subscribe(), db.clone()));
+        let audio_db = tokio::spawn(audio_db_writer_task(
+            audio_events.subscribe(),
+            provider_id.clone(),
+            db.clone(),
+        ));
+        let power_db = tokio::spawn(power_db_writer_task(
+            power_events.subscribe(),
+            provider_id.clone(),
+            db,
+        ));
+        self.entries.insert(
+            provider_id,
+            ConnectionEntry {
+                state,
+                events,
+                audio_events: Some(audio_events),
+                power_events: Some(power_events),
+                tasks: vec![push_task, light_db, audio_db, power_db],
             },
         );
     }
@@ -599,6 +763,20 @@ impl ConnectionRegistry {
             .iter()
             .filter_map(|(id, e)| {
                 e.audio_events
+                    .as_ref()
+                    .map(|tx| (id.clone(), tx.subscribe()))
+            })
+            .collect()
+    }
+
+    /// Subscribe to every power push channel, tagged with its provider row id
+    /// (so SSE consumers can match `power_devices` rows). Only the HA push
+    /// manager emits power events today. Used by the SSE endpoint.
+    pub fn subscribe_all_power(&self) -> Vec<(String, broadcast::Receiver<PowerEvent>)> {
+        self.entries
+            .iter()
+            .filter_map(|(id, e)| {
+                e.power_events
                     .as_ref()
                     .map(|tx| (id.clone(), tx.subscribe()))
             })

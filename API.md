@@ -171,6 +171,7 @@ provider-native synced playback group (see below).
 | `POST` | `/api/v1/audio/devices/{id}/group` | Join this speaker into a group (body below) |
 | `POST` | `/api/v1/audio/devices/{id}/ungroup` | Remove this speaker from its group |
 | `PUT` | `/api/v1/audio/devices/{id}/receiver` | Bind this source to a receiver (body below) |
+| `PUT` | `/api/v1/audio/devices/{id}/companion` | Merge this entity into a primary as its companion (body below) |
 
 `PUT …/state` takes a **sparse command** — only the fields present are applied:
 
@@ -216,6 +217,28 @@ receiver. Stored on the source.
 
 Responses: `204` success, `404` unknown source device, `422` invalid binding
 (self-binding, unknown receiver, or a receiver that is itself bound).
+
+#### Merge a duplicate device (composite)
+
+One physical device can surface as several entities with **complementary**
+capabilities (e.g. a smart TV's two `media_player` views — one carries
+now-playing, the other the apps). Merge the secondary into a **primary** as its
+companion: the companion is hidden from control, but its state and controls are
+**routed/overlaid** onto the primary — nothing is lost (unlike a hidden
+duplicate). `volume`/`mute` route to whichever backing is receiver-bound,
+`transport` to the one reporting playback, `source` to the one with inputs, and
+`power` to the primary; the merged read fills now-playing / sources / the
+receiver binding from the companion.
+
+```json
+// PUT …/{id}/companion
+{
+  "primary_id": "<audio device id>"   // null to unmerge
+}
+```
+
+Responses: `204` success, `404` unknown device, `422` invalid (self-merge, an
+unknown/companion/shadowed primary, or a device that is itself a primary).
 
 #### Favorites
 
@@ -287,6 +310,45 @@ glyph) and is one of `switch | outlet | fan | toggle | generic`.
 
 `PUT …/state` responds `204` on success, `404` unknown device, `502` if the
 device could not be reached.
+
+### Remotes
+
+A virtual smart-remote for a TV / streamer (Android TV Remote via Home Assistant
+today). State is `on` plus the foreground app (`current_app`, a package id).
+`paired_audio_id` links the remote to its TV's audio device when they share
+hardware.
+
+```json
+{
+  "id": "9a1b…",
+  "provider_id": "c09e…",
+  "device_id": "remote.bedroom_tv",
+  "name": "Bedroom TV",
+  "state": { "on": true, "current_app": "com.netflix.ninja", "reachable": true },
+  "enabled": true,
+  "paired_audio_id": "7c3d…"
+}
+```
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/remote/devices` | All remotes (cached state) |
+| `GET` | `/api/v1/remote/devices/{id}` | One remote — live read, refreshes the cache |
+| `POST` | `/api/v1/remote/devices/{id}/command` | Send a command (see below) |
+
+The command body is a tagged union — exactly one variant:
+
+```json
+{ "key": { "key": "select", "hold_secs": 0.0 } }   // canonical key press
+{ "text": { "text": "hello" } }                      // type literal text
+{ "launch_app": { "activity": "com.netflix.ninja" } } // package id OR deep-link URL
+{ "power": { "on": true } }                          // power on/off
+```
+
+Canonical keys: `up`, `down`, `left`, `right`, `select`, `back`, `home`, `menu`,
+`volume_up`, `volume_down`, `mute`, `play_pause`, `next`, `previous`, `power`.
+`POST …/command` responds `204` on success, `404` unknown remote, `502` if it
+could not be reached.
 
 ## Status codes
 

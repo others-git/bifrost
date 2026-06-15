@@ -13,8 +13,8 @@ use crate::api::apikeys::require_api_key;
 use crate::api::audio::{
     GroupRequest, PlayFavoriteRequest, apply_audio_command, favorites_response, get_device_live,
     group_devices, group_response, list_all_devices, list_device_favorites, play_device_favorite,
-    play_favorite_response, set_audio_receiver, set_audio_status, set_receiver_status,
-    ungroup_device,
+    play_favorite_response, set_audio_companion, set_audio_receiver, set_audio_status,
+    set_companion_status, set_receiver_status, ungroup_device,
 };
 use crate::api::lights::{apply_light_state, get_light_by_id, list_all_lights, set_light_status};
 use crate::api::palette_scenes::{
@@ -26,8 +26,10 @@ use crate::api::power::{
     PowerCommand, apply_power_state, get_power_device_live, list_all_power_devices,
     set_power_status,
 };
+use crate::api::remote::{apply_remote_command, list_remotes, read_remote_state, remote_status};
 use crate::api::rooms::{apply_room_state, effective_members, list_public_rooms};
 use crate::models::LightState;
+use crate::models::remote::RemoteCommand;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -60,9 +62,13 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/audio/devices/{id}/group", post(group_audio))
         .route("/audio/devices/{id}/ungroup", post(ungroup_audio))
         .route("/audio/devices/{id}/receiver", put(set_receiver_audio))
+        .route("/audio/devices/{id}/companion", put(set_companion_audio))
         .route("/power/devices", get(list_power))
         .route("/power/devices/{id}", get(get_power))
         .route("/power/devices/{id}/state", put(set_power))
+        .route("/remote/devices", get(list_remote))
+        .route("/remote/devices/{id}", get(get_remote))
+        .route("/remote/devices/{id}/command", post(remote_command))
 }
 
 /// Shared 401 guard. Returns `Err(401)` when the Bearer key is missing/invalid.
@@ -330,6 +336,18 @@ async fn set_receiver_audio(
     set_receiver_status(set_audio_receiver(&state, &id, req.receiver_id, req.receiver_source).await)
 }
 
+async fn set_companion_audio(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<crate::api::SetCompanionRequest>,
+) -> impl IntoResponse {
+    if let Err(s) = auth(&state, &headers).await {
+        return s.into_response();
+    }
+    set_companion_status(set_audio_companion(&state, &id, req.primary_id).await)
+}
+
 // ── Power devices ──────────────────────────────────────────────────────────────
 
 async fn list_power(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
@@ -367,4 +385,37 @@ async fn set_power(
         return s.into_response();
     }
     set_power_status(apply_power_state(&state, &id, cmd.on).await).into_response()
+}
+
+async fn list_remote(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(s) = auth(&state, &headers).await {
+        return s.into_response();
+    }
+    Json(list_remotes(&state).await).into_response()
+}
+
+async fn get_remote(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(s) = auth(&state, &headers).await {
+        return s.into_response();
+    }
+    match read_remote_state(&state, &id).await {
+        Some(s) => Json(s).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn remote_command(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(cmd): Json<RemoteCommand>,
+) -> impl IntoResponse {
+    if let Err(s) = auth(&state, &headers).await {
+        return s.into_response();
+    }
+    remote_status(apply_remote_command(&state, &id, &cmd).await).into_response()
 }

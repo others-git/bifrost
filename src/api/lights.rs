@@ -108,6 +108,44 @@ pub(crate) enum SetLightOutcome {
     Db,
 }
 
+/// Whether a light command is **pure power** (on/off only, no lighting
+/// attributes). `Some(on)` ⇒ persist by flipping only `on`, preserving the
+/// stored colour/brightness the device keeps across a power cycle; `None` ⇒ a
+/// full attribute write. Shared by the single-light and room fan-out paths.
+pub(crate) fn pure_power(s: &LightState) -> Option<bool> {
+    (s.brightness.is_none() && s.color.is_none() && s.color_temp_mirek.is_none()).then_some(s.on)
+}
+
+/// Persist a light's state after a successful command. For a pure power command
+/// only `on` is updated (see [`pure_power`]); otherwise the full state is
+/// written. `COALESCE` covers a light with no prior `last_state`.
+pub(crate) async fn persist_light_state(
+    db: &sqlx::SqlitePool,
+    light_id: &str,
+    full_json: &str,
+    pure_power: Option<bool>,
+) {
+    if let Some(on) = pure_power {
+        let _ = sqlx::query(
+            "UPDATE lights SET last_state = json_set(COALESCE(last_state, ?), '$.on', json(?)), \
+             last_seen = datetime('now') WHERE id = ?",
+        )
+        .bind(full_json)
+        .bind(if on { "true" } else { "false" })
+        .bind(light_id)
+        .execute(db)
+        .await;
+    } else {
+        let _ = sqlx::query(
+            "UPDATE lights SET last_state = ?, last_seen = datetime('now') WHERE id = ?",
+        )
+        .bind(full_json)
+        .bind(light_id)
+        .execute(db)
+        .await;
+    }
+}
+
 /// Send `new_state` to the light's provider and cache it as `last_state`.
 pub(crate) async fn apply_light_state(
     state: &AppState,
@@ -149,13 +187,7 @@ pub(crate) async fn apply_light_state(
     match provider.set_state(&device_id, new_state).await {
         Ok(()) => {
             if let Ok(state_json) = serde_json::to_string(new_state) {
-                let _ = sqlx::query(
-                    "UPDATE lights SET last_state = ?, last_seen = datetime('now') WHERE id = ?",
-                )
-                .bind(&state_json)
-                .bind(id)
-                .execute(&state.db)
-                .await;
+                persist_light_state(&state.db, id, &state_json, pure_power(new_state)).await;
             }
             SetLightOutcome::Ok
         }

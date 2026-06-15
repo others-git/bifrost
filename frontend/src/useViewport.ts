@@ -7,7 +7,13 @@
 
 import { useSyncExternalStore } from "react";
 
-export const BREAKPOINTS = { mobile: 640, tablet: 1024 };
+// `tablet` covers landscape smart-display fixtures too — a Nest Hub Max is
+// 1280×800, so the cap is 1280 (not 1024) or those revert to the desktop layout.
+export const BREAKPOINTS = { mobile: 640, tablet: 1280 };
+// Touch devices a little wider than the width cap (a landscape Surface, a large
+// kiosk tablet) are still fixtures, so a coarse pointer up to this width counts
+// as compact even though a fine-pointer laptop at the same width would not.
+const COARSE_TABLET_MAX = 1366;
 
 function useMedia(query: string, serverValue = false): boolean {
   return useSyncExternalStore(
@@ -25,11 +31,12 @@ export interface Viewport {
   /** Phone-width: ≤ 640px. Reserved for phone-only behaviour (e.g. hiding the
    * Floor Plan). For general layout, prefer `isCompact`. */
   isMobile: boolean;
-  /** Tablet: 641–1024px. Gets the compact (mobile) chrome, not desktop. */
+  /** Tablet / smart-display fixture: 641–1280px, plus wider touch screens.
+   * Gets the compact (mobile) chrome, not desktop. */
   isTablet: boolean;
-  /** ≥ 1025px. */
+  /** Above the tablet range with a fine pointer (a real desktop/laptop). */
   isDesktop: boolean;
-  /** Phones + tablets (≤ 1024px). The primary layout switch: compact chrome,
+  /** Phones + tablets/fixtures. The primary layout switch: compact chrome,
    * touch sheets, stacked cards. Tablets are control fixtures, so they share
    * the mobile layout. */
   isCompact: boolean;
@@ -37,9 +44,14 @@ export interface Viewport {
 
 export function useViewport(): Viewport {
   const isMobile = useMedia(`(max-width: ${BREAKPOINTS.mobile}px)`);
-  const isTablet = useMedia(
+  const isTabletWidth = useMedia(
     `(min-width: ${BREAKPOINTS.mobile + 1}px) and (max-width: ${BREAKPOINTS.tablet}px)`,
   );
+  // A coarse (touch) pointer on a fixture-sized screen beyond the width cap.
+  const isCoarseTablet = useMedia(
+    `(pointer: coarse) and (min-width: ${BREAKPOINTS.tablet + 1}px) and (max-width: ${COARSE_TABLET_MAX}px)`,
+  );
+  const isTablet = !isMobile && (isTabletWidth || isCoarseTablet);
   return {
     isMobile,
     isTablet,

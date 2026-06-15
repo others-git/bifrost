@@ -1022,6 +1022,21 @@ async fn discover(
         }
     }
 
+    // Remote domain (TV / streamer remotes — HA Android TV today).
+    if state.registry.is_known_remote(&provider_type) {
+        match crate::api::remote::discover_remote_devices(
+            &state,
+            &id,
+            &provider_type,
+            &credentials_enc,
+        )
+        .await
+        {
+            Ok(n) => discovered += n,
+            Err(status) => return status.into_response(),
+        }
+    }
+
     // Prune devices no longer reported — but never on an empty result (a likely
     // transient failure shouldn't wipe a provider's devices).
     let mut pruned = 0u64;
@@ -1035,10 +1050,15 @@ async fn discover(
         if state.registry.is_known_audio(&provider_type) {
             pruned += prune_stale(&state, &id, "audio_devices", &prune_before).await;
         }
+        if state.registry.is_known_remote(&provider_type) {
+            pruned += prune_stale(&state, &id, "remote_devices", &prune_before).await;
+        }
     }
 
     // Collapse any device now reachable both natively and via this integration.
     crate::api::dedup::reconcile_duplicates(&state).await;
+    // Pair each TV remote to the TV's audio device (shared hardware id).
+    crate::api::remote::reconcile_remote_pairings(&state).await;
 
     Json(DiscoverResponse { discovered, pruned }).into_response()
 }

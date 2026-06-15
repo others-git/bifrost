@@ -61,6 +61,9 @@ All tools below are served natively from `src/api/mcp.rs`.
 | `bind_receiver` | `set_audio_receiver` | bind a source (TV/streamer) to a receiver that owns its volume + the input to switch to on power-on; omit `receiver` to unbind. *"route the living room TV's sound through the AV receiver on the Game input."* |
 | `list_power_devices` | `list_all_power_devices` | switches / plugs / fans / toggles with on/off state + kind |
 | `set_power` | `apply_power_state` | turn a power device on/off, by id or name. *"turn off the porch switch."* |
+| `list_remotes` | `list_remotes` | TVs / streamers with on state + current foreground app |
+| `press_remote_key` | `apply_remote_command` (key) | press a canonical key (up/down/…/select/back/home/play_pause/power), by id or name. *"go back on the bedroom TV."* |
+| `launch_app` | `apply_remote_command` (launch_app) | open an app by Play Store package id or deep-link URL. *"open Netflix on the bedroom TV."* |
 
 ## Target tools — not yet built
 

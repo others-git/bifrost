@@ -147,6 +147,18 @@ pub fn start_manager_for(
                 Err(e) => tracing::error!("failed to build provider {provider_id}: {e:#}"),
             }
         }
+        Some(ConnectionMode::HaPush) => {
+            // HA pushes every device domain over one WebSocket; build the concrete
+            // provider directly (like the Sse arm builds HueProvider) so the push
+            // manager can fan state_changed onto the light/audio/power pipelines.
+            match providers::ha::HaProvider::from_credentials(creds_json) {
+                Ok(provider) => {
+                    tracing::info!("starting HA push manager for provider {provider_id}");
+                    connections.start_ha_push(provider_id.to_string(), provider, state.db.clone());
+                }
+                Err(e) => tracing::error!("failed to build HA provider {provider_id}: {e:#}"),
+            }
+        }
         Some(ConnectionMode::Poll { interval_secs }) => {
             match state.registry.build(provider_type, creds_json) {
                 Ok(provider) => {

@@ -24,8 +24,10 @@ use crate::api::palette_scenes::{
     SceneError, apply_scene_to_room, create_scene_from_room, list_scenes, parse_hex_color,
 };
 use crate::api::power::{SetPowerOutcome, apply_power_state, list_all_power_devices};
+use crate::api::remote::{RemoteOutcome, apply_remote_command, list_remotes};
 use crate::api::rooms::{apply_room_state, effective_members, list_public_rooms};
 use crate::models::audio::{AudioCommand, AudioFavorite, TransportCmd};
+use crate::models::remote::{RemoteCommand, RemoteKey};
 use crate::models::{Color, LightState};
 use axum::{
     extract::{Request, State},
@@ -220,6 +222,24 @@ pub struct SetPowerRequest {
     pub device: String,
     /// Desired power: true = on, false = off.
     pub on: bool,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct PressRemoteKeyRequest {
+    /// Remote/TV id, or a case-insensitive name/substring (e.g. "Bedroom TV").
+    pub device: String,
+    /// One canonical key: up, down, left, right, select, back, home, menu,
+    /// volume_up, volume_down, mute, play_pause, next, previous, power.
+    pub key: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct LaunchAppRequest {
+    /// Remote/TV id, or a case-insensitive name/substring (e.g. "Bedroom TV").
+    pub device: String,
+    /// App to launch: a Play Store package id (`com.netflix.ninja`) or a
+    /// deep-link URL (`https://www.youtube.com/watch?v=…`).
+    pub app: String,
 }
 
 // ── Tools ────────────────────────────────────────────────────────────────────
@@ -582,6 +602,58 @@ impl BifrostMcp {
     }
 
     #[tool(
+        description = "List the home's remotes (TVs / streamers controllable by a virtual remote), with on state and current foreground app."
+    )]
+    async fn list_remotes(&self) -> Result<CallToolResult, ErrorData> {
+        Ok(ok_json(serde_json::json!(list_remotes(&self.state).await)))
+    }
+
+    #[tool(
+        description = "Press a remote/TV key. `key` is one of: up, down, left, right, select, back, home, menu, volume_up, volume_down, mute, play_pause, next, previous, power. Device resolved by id or name."
+    )]
+    async fn press_remote_key(
+        &self,
+        Parameters(req): Parameters<PressRemoteKeyRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let remotes = named_remotes(&self.state).await?;
+        let id = match resolve("remote", &req.device, &remotes) {
+            Ok(id) => id,
+            Err(e) => return Ok(e),
+        };
+        let key: RemoteKey = match serde_json::from_value(serde_json::json!(req.key)) {
+            Ok(k) => k,
+            Err(_) => return Ok(fail(format!("unknown remote key '{}'", req.key))),
+        };
+        let cmd = RemoteCommand::Key {
+            key,
+            hold_secs: None,
+        };
+        Ok(remote_outcome(
+            apply_remote_command(&self.state, &id, &cmd).await,
+        ))
+    }
+
+    #[tool(
+        description = "Launch an app on a TV by Play Store package id (com.netflix.ninja) or a deep-link URL. Device resolved by id or name. E.g. 'open Netflix on the bedroom TV'."
+    )]
+    async fn launch_app(
+        &self,
+        Parameters(req): Parameters<LaunchAppRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let remotes = named_remotes(&self.state).await?;
+        let id = match resolve("remote", &req.device, &remotes) {
+            Ok(id) => id,
+            Err(e) => return Ok(e),
+        };
+        let cmd = RemoteCommand::LaunchApp {
+            activity: req.app.clone(),
+        };
+        Ok(remote_outcome(
+            apply_remote_command(&self.state, &id, &cmd).await,
+        ))
+    }
+
+    #[tool(
         description = "Bind a source audio device (a TV / streamer / console) to an AV receiver that owns its volume: afterwards volume/mute for the source route to the receiver, and powering the source on switches the receiver to the given input. Omit `receiver` to unbind. E.g. 'route the living room TV's sound through the AV receiver on the Game input.'"
     )]
     async fn bind_receiver(
@@ -725,6 +797,25 @@ async fn named_power(state: &AppState) -> Result<Vec<Named>, ErrorData> {
         "power devices",
     )
     .await
+}
+
+async fn named_remotes(state: &AppState) -> Result<Vec<Named>, ErrorData> {
+    named_query(
+        state,
+        "SELECT id, name FROM remote_devices WHERE enabled = 1 ORDER BY name",
+        "remotes",
+    )
+    .await
+}
+
+/// Map a remote control outcome to an MCP tool result.
+fn remote_outcome(outcome: RemoteOutcome) -> CallToolResult {
+    match outcome {
+        RemoteOutcome::Ok => ok_text("ok"),
+        RemoteOutcome::NotFound => fail("remote not found or its provider is disabled"),
+        RemoteOutcome::ProviderError => fail("the remote could not be reached"),
+        RemoteOutcome::Db => fail("database error sending remote command"),
+    }
 }
 
 async fn named_scenes(state: &AppState) -> Result<Vec<Named>, ErrorData> {

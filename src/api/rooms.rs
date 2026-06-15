@@ -303,7 +303,7 @@ pub(crate) async fn effective_audio_members(
          FROM audio_devices d
          LEFT JOIN room_audio_devices rad
            ON rad.room_id = ?1 AND rad.audio_device_id = d.id
-         WHERE d.shadowed_by IS NULL AND d.id IN (
+         WHERE d.shadowed_by IS NULL AND d.companion_of IS NULL AND d.id IN (
              SELECT audio_device_id FROM room_audio_devices WHERE room_id = ?1
              UNION
              SELECT pga.audio_device_id
@@ -1083,6 +1083,11 @@ pub(crate) async fn apply_uniform_state(
     let mut applied = 0usize;
     let mut failed = 0usize;
     let state_json = serde_json::to_string(new_state).unwrap_or_default();
+    // A pure on/off command (no lighting attributes) must NOT clobber the stored
+    // colour/brightness — the device keeps them across a power cycle, so we only
+    // flip `on`. Otherwise a power-on would wipe the colour and the UI would
+    // re-sync to a colourless default. (Shared with the single-light path.)
+    let pure_power = crate::api::lights::pure_power(new_state);
 
     // Native group calls first — one Hue grouped_light PUT replaces N per-light PUTs.
     for chunk in native_chunks(state, room_id).await {
@@ -1097,12 +1102,12 @@ pub(crate) async fn apply_uniform_state(
             Ok(true) => {
                 for light_id in &chunk.light_ids {
                     covered.insert(light_id.clone());
-                    let _ = sqlx::query(
-                        "UPDATE lights SET last_state = ?, last_seen = datetime('now') WHERE id = ?",
+                    crate::api::lights::persist_light_state(
+                        &state.db,
+                        light_id,
+                        &state_json,
+                        pure_power,
                     )
-                    .bind(&state_json)
-                    .bind(light_id)
-                    .execute(&state.db)
                     .await;
                 }
                 applied += chunk.light_ids.len();
@@ -1149,12 +1154,12 @@ pub(crate) async fn apply_uniform_state(
         jobs.push(async move {
             match provider.set_state(&m.device_id, &target).await {
                 Ok(()) => {
-                    let _ = sqlx::query(
-                        "UPDATE lights SET last_state = ?, last_seen = datetime('now') WHERE id = ?",
+                    crate::api::lights::persist_light_state(
+                        &db,
+                        &m.light_id,
+                        &target_json,
+                        pure_power,
                     )
-                    .bind(&target_json)
-                    .bind(&m.light_id)
-                    .execute(&db)
                     .await;
                     true
                 }

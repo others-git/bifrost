@@ -9,6 +9,7 @@ pub mod palette_scenes;
 pub mod plans;
 pub mod power;
 pub mod providers;
+pub mod remote;
 pub mod rooms;
 pub mod scenes;
 pub mod settings;
@@ -56,6 +57,13 @@ pub(crate) struct SetReceiverRequest {
     pub receiver_id: Option<String>,
     #[serde(default)]
     pub receiver_source: Option<String>,
+}
+
+/// M26 composite: merge this audio entity into `primary_id` as its companion, or
+/// unmerge with `null`.
+#[derive(Deserialize)]
+pub(crate) struct SetCompanionRequest {
+    pub primary_id: Option<String>,
 }
 
 /// Set (or clear) a device row's glyph override. `table` is a fixed per-domain
@@ -118,6 +126,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .nest("/power", power::router())
         .nest("/provider-groups", rooms::provider_groups_router())
         .nest("/providers", providers::router())
+        .nest("/remote", remote::router())
         .nest("/rooms", rooms::router())
         .nest("/scenes", scenes::router())
         .nest("/settings", settings::router())

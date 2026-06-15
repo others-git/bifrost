@@ -22,7 +22,7 @@ const ACCENT = "#a78bfa"; // violet — audio's counterpart to the lamps' warm g
  * duplicate of a native device — e.g. a Sonos also imported via HA) and disabled
  * devices. Both are managed on the Devices page, not controlled here. */
 const controllable = (list: AudioDevice[]) =>
-  list.filter((d) => !d.shadowed_by && d.enabled !== false);
+  list.filter((d) => !d.shadowed_by && !d.companion_of && d.enabled !== false);
 
 const T = {
   text: "#eae4d6",

@@ -1680,6 +1680,73 @@ async fn set_room_state_fans_out_to_direct_members() {
 }
 
 #[tokio::test]
+async fn room_power_cycle_preserves_light_color() {
+    // Regression: toggling a room off then on is a *pure power* command and must
+    // not wipe the stored colour — the device keeps it across a power cycle, so
+    // the UI must re-sync to the real colour, not a colourless default.
+    let device = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&device.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let body = format!(r#"{{"name":"R","light_ids":["{light_id}"]}}"#);
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post("/api/rooms", &cookie, &body))
+        .await
+        .unwrap();
+    let room_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Drive the light to a known colour.
+    let cresp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/lights/{light_id}"),
+            &cookie,
+            r##"{"on":true,"brightness":60,"color":{"x":0.64,"y":0.33,"brightness":0.6}}"##,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cresp.status(), StatusCode::NO_CONTENT);
+
+    // Power the room off, then back on — both pure-power commands.
+    for on in ["false", "true"] {
+        let resp = app
+            .clone()
+            .oneshot(helpers::authed_json(
+                "PUT",
+                &format!("/api/rooms/{room_id}/state"),
+                &cookie,
+                &format!(r#"{{"on":{on}}}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // The stored colour must survive the off→on cycle (and `on` is back to true).
+    let resp = app
+        .oneshot(helpers::authed_get("/api/lights", &cookie))
+        .await
+        .unwrap();
+    let lights = helpers::response_json(resp).await;
+    let light = lights
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["id"] == light_id.as_str())
+        .expect("light present");
+    assert_eq!(light["last_state"]["on"], true, "{light}");
+    assert!(
+        (light["last_state"]["color"]["x"].as_f64().unwrap() - 0.64).abs() < 1e-6,
+        "colour was wiped by the power cycle: {light}"
+    );
+}
+
+#[tokio::test]
 async fn set_room_state_unknown_room_returns_404() {
     let app = helpers::test_app_with_password().await;
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
@@ -3173,6 +3240,11 @@ async fn audio_routes_require_session() {
             "/api/audio/devices/some-id/receiver",
             r#"{"receiver_id":"x"}"#,
         ),
+        (
+            "PUT",
+            "/api/audio/devices/some-id/companion",
+            r#"{"primary_id":"x"}"#,
+        ),
     ] {
         let resp = app
             .clone()
@@ -3373,6 +3445,104 @@ async fn audio_receiver_binding_crud_and_validation() {
     let dev = helpers::response_json(resp).await;
     assert!(dev["receiver_id"].is_null());
     assert!(dev["receiver_source"].is_null());
+}
+
+#[tokio::test]
+async fn audio_companion_link_crud_and_validation() {
+    let (port_a, _) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let (port_b, _) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let primary = add_onkyo_device(&app, &cookie, port_a, "TV", &[]).await;
+    let companion = add_onkyo_device(
+        &app,
+        &cookie,
+        port_b,
+        "TV speaker",
+        std::slice::from_ref(&primary),
+    )
+    .await;
+
+    // (401 for this route is covered by the parameterized unauth table above.)
+
+    // A device can't be its own companion.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/audio/devices/{companion}/companion"),
+            &cookie,
+            &format!(r#"{{"primary_id":"{companion}"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Unknown primary is rejected.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/audio/devices/{companion}/companion"),
+            &cookie,
+            r#"{"primary_id":"does-not-exist"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Merge companion → primary.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/audio/devices/{companion}/companion"),
+            &cookie,
+            &format!(r#"{{"primary_id":"{primary}"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // The link is recorded on the companion.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/audio/devices", &cookie))
+        .await
+        .unwrap();
+    let list = helpers::response_json(resp).await;
+    let comp = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == companion)
+        .unwrap();
+    assert_eq!(comp["companion_of"], primary);
+
+    // No chains: merging into a device that is itself a companion is rejected.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/audio/devices/{primary}/companion"),
+            &cookie,
+            &format!(r#"{{"primary_id":"{companion}"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Unmerge.
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/audio/devices/{companion}/companion"),
+            &cookie,
+            r#"{"primary_id":null}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 }
 
 #[tokio::test]
@@ -4967,6 +5137,56 @@ async fn voice_command_resolves_light_by_name_and_drives_provider() {
 }
 
 #[tokio::test]
+async fn voice_falls_back_to_ha_assist_for_unparsed_commands() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // An HA mock that answers the Assist conversation endpoint.
+    let ha = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/conversation/process"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "response": {
+                "speech": { "plain": { "speech": "Playing Bob's Burgers on the TV." } },
+                "response_type": "action_done"
+            }
+        })))
+        .mount(&ha)
+        .await;
+
+    let (app, _prov_id) = helpers::test_app_with_ha(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // A media-launch intent the native grammar can't parse → delegated to HA.
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "POST",
+            "/api/voice/command",
+            &cookie,
+            r#"{"text":"play Bob's Burgers on the TV"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["ok"], true, "{body}");
+    assert!(
+        body["said"]
+            .as_str()
+            .unwrap()
+            .contains("Playing Bob's Burgers"),
+        "expected HA Assist speech, got {body}"
+    );
+
+    let reqs = ha.received_requests().await.unwrap();
+    assert!(
+        reqs.iter()
+            .any(|r| r.url.path() == "/api/conversation/process"),
+        "the unparsed command did not reach HA Assist"
+    );
+}
+
+#[tokio::test]
 async fn voice_command_unknown_target_reports_not_found() {
     let bridge = wled_mock().await;
     let (app, _light_id) = helpers::test_app_with_light(&bridge.uri()).await;
@@ -5193,6 +5413,285 @@ async fn discover_ha_populates_power_devices_with_kinds() {
         .unwrap();
     assert_eq!(fan["kind"], "fan");
     assert_eq!(fan["state"]["on"], false);
+}
+
+async fn ha_remote_mock() -> wiremock::MockServer {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let entity = serde_json::json!(
+        { "entity_id": "remote.bedroom_tv", "state": "on",
+          "attributes": { "friendly_name": "Bedroom TV",
+                          "current_activity": "com.netflix.ninja", "supported_features": 4 } }
+    );
+    Mock::given(method("GET"))
+        .and(path("/api/states"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([entity.clone()])))
+        .mount(&server)
+        .await;
+    // Single-entity live read (used by GET /remote/devices/{id}).
+    Mock::given(method("GET"))
+        .and(path("/api/states/remote.bedroom_tv"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(entity))
+        .mount(&server)
+        .await;
+    for svc in ["send_command", "turn_on", "turn_off"] {
+        Mock::given(method("POST"))
+            .and(path(format!("/api/services/remote/{svc}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+    }
+    server
+}
+
+#[tokio::test]
+async fn remote_devices_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/remote/devices")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn discover_ha_populates_remotes_then_command_drives_service() {
+    let ha = ha_remote_mock().await;
+    let (app, prov_id) = helpers::test_app_with_ha(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/providers/{prov_id}/discover"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(helpers::response_json(resp).await["discovered"], 1);
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/remote/devices", &cookie))
+        .await
+        .unwrap();
+    let remotes = helpers::response_json(resp).await;
+    let remote = &remotes.as_array().unwrap()[0];
+    assert_eq!(remote["device_id"], "remote.bedroom_tv");
+    assert_eq!(remote["state"]["current_app"], "com.netflix.ninja");
+    let remote_id = remote["id"].as_str().unwrap().to_string();
+
+    // Send a canonical key; it must reach HA's remote.send_command.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "POST",
+            &format!("/api/remote/devices/{remote_id}/command"),
+            &cookie,
+            r#"{"key":{"key":"select"}}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let reqs = ha.received_requests().await.unwrap();
+    assert!(
+        reqs.iter()
+            .any(|r| r.url.path() == "/api/services/remote/send_command"),
+        "the key press did not reach HA send_command"
+    );
+}
+
+#[tokio::test]
+async fn remote_apps_record_recents_pin_and_order() {
+    let ha = ha_remote_mock().await;
+    let (app, prov_id) = helpers::test_app_with_ha(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    app.clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/providers/{prov_id}/discover"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let remotes = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/remote/devices", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let remote_id = remotes.as_array().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // The apps list is session-gated like every other remote route.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/remote/devices/{remote_id}/apps"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // A live read of one device records its foreground app as a "recent".
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get(
+            &format!("/api/remote/devices/{remote_id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let apps = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get(
+                &format!("/api/remote/devices/{remote_id}/apps"),
+                &cookie,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let arr = apps.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["package"], "com.netflix.ninja");
+    assert_eq!(arr[0]["name"], "Netflix"); // friendly name from the registry
+    assert_eq!(arr[0]["pinned"], false);
+    assert!(arr[0]["last_seen"].is_string());
+
+    // Pinning a never-seen package inserts it; pinned apps sort first.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/remote/devices/{remote_id}/apps/pin"),
+            &cookie,
+            r#"{"package":"com.disney.disneyplus","pinned":true}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let apps = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get(
+                &format!("/api/remote/devices/{remote_id}/apps"),
+                &cookie,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let arr = apps.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["package"], "com.disney.disneyplus"); // pinned first
+    assert_eq!(arr[0]["name"], "Disney+");
+    assert_eq!(arr[0]["pinned"], true);
+    assert_eq!(arr[1]["package"], "com.netflix.ninja");
+
+    // Unpinning leaves it tracked as a recent (still listed, no longer pinned).
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/remote/devices/{remote_id}/apps/pin"),
+            &cookie,
+            r#"{"package":"com.disney.disneyplus","pinned":false}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let apps = helpers::response_json(
+        app.oneshot(helpers::authed_get(
+            &format!("/api/remote/devices/{remote_id}/apps"),
+            &cookie,
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    let arr = apps.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert!(arr.iter().all(|a| a["pinned"] == false));
+}
+
+#[tokio::test]
+async fn v1_remote_requires_bearer_and_drives_command() {
+    let ha = ha_remote_mock().await;
+    let (app, prov_id) = helpers::test_app_with_ha(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // No bearer → 401.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/remote/devices")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    app.clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/providers/{prov_id}/discover"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let key = create_api_key(&app, &cookie, "k").await;
+
+    let resp = app
+        .clone()
+        .oneshot(bearer_get("/api/v1/remote/devices", &key))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let remotes = helpers::response_json(resp).await;
+    let remote_id = remotes.as_array().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .oneshot(bearer_json(
+            "POST",
+            &format!("/api/v1/remote/devices/{remote_id}/command"),
+            &key,
+            r#"{"launch_app":{"activity":"com.netflix.ninja"}}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let reqs = ha.received_requests().await.unwrap();
+    assert!(
+        reqs.iter()
+            .any(|r| r.url.path() == "/api/services/remote/turn_on"),
+        "launch_app did not reach HA remote.turn_on"
+    );
 }
 
 #[tokio::test]

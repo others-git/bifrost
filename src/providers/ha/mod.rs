@@ -43,14 +43,15 @@
 //!   basis for grouping a device's entities (the deferred device-registry import).
 
 use crate::models::audio::{
-    AudioCapabilities, AudioCommand, AudioDevice, AudioDeviceKind, AudioState, NowPlaying,
-    PlayState, TransportCmd,
+    AudioCapabilities, AudioCommand, AudioDevice, AudioDeviceKind, AudioEvent, AudioState,
+    NowPlaying, PlayState, TransportCmd,
 };
 use crate::models::power::{PowerDevice, PowerKind, PowerState};
+use crate::models::remote::{RemoteDevice, RemoteKey, RemoteState};
 use crate::models::{Color, Light, LightCapabilities, LightState, Provider};
 use crate::providers::{
     AudioProvider, AudioProviderFactory, CredentialField, FieldKind, LightProvider, PowerProvider,
-    PowerProviderFactory, ProviderFactory, ProviderGroup,
+    PowerProviderFactory, ProviderFactory, ProviderGroup, RemoteProvider, RemoteProviderFactory,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
@@ -67,6 +68,7 @@ use uuid::Uuid;
 
 const LIGHT_PREFIX: &str = "light.";
 const MEDIA_PREFIX: &str = "media_player.";
+const REMOTE_PREFIX: &str = "remote.";
 /// HA entity domains that map onto Bifrost's strictly-on/off `PowerDevice`.
 /// `homeassistant.turn_on`/`turn_off` works uniformly across all of them.
 const POWER_PREFIXES: &[&str] = &["switch.", "fan.", "input_boolean."];
@@ -668,10 +670,18 @@ fn audio_capabilities(attrs: &Value) -> AudioCapabilities {
 
 fn audio_kind(attrs: &Value) -> AudioDeviceKind {
     match attr_str(attrs, "device_class").as_deref() {
-        Some("tv") => AudioDeviceKind::Tv,
-        Some("receiver") => AudioDeviceKind::Receiver,
-        _ => AudioDeviceKind::Speaker,
+        Some("tv") => return AudioDeviceKind::Tv,
+        Some("receiver") => return AudioDeviceKind::Receiver,
+        _ => {}
     }
+    // Many smart-TV integrations (e.g. Sony BRAVIA) don't set `device_class`, so
+    // they'd fall through to "Speaker". But a `media_player` that reports a
+    // running app (`app_id`/`app_name`) is a TV / streamer, not a speaker — a
+    // speaker never runs named apps. Use that as the fallback TV signal.
+    if attr_str(attrs, "app_id").is_some() || attr_str(attrs, "app_name").is_some() {
+        return AudioDeviceKind::Tv;
+    }
+    AudioDeviceKind::Speaker
 }
 
 fn entity_to_audio(e: HaEntity, hw_id: Option<String>) -> AudioDevice {
@@ -928,6 +938,274 @@ impl PowerProvider for HaProvider {
     }
 }
 
+// ── WebSocket push (state_changed) ──────────────────────────────────────────
+
+/// One pushed state change off the HA `state_changed` subscription, already
+/// classified into the Bifrost device domain it belongs to. The push manager
+/// fans these onto the per-domain event pipelines (light / audio / power), so a
+/// single HA WebSocket keeps **all three** domains live instead of 30 s polling.
+#[derive(Debug, Clone)]
+pub enum HaPushEvent {
+    Light {
+        device_id: String,
+        state: LightState,
+    },
+    Audio(AudioEvent),
+    Power {
+        device_id: String,
+        state: PowerState,
+    },
+}
+
+/// Map one HA entity (the `new_state` of a `state_changed` event) to its domain
+/// event, or `None` for entity domains Bifrost doesn't track.
+fn classify_push(e: HaEntity) -> Option<HaPushEvent> {
+    let id = e.entity_id.clone();
+    if id.starts_with(LIGHT_PREFIX) {
+        Some(HaPushEvent::Light {
+            device_id: id,
+            state: parse_light_state(&e),
+        })
+    } else if id.starts_with(MEDIA_PREFIX) {
+        Some(HaPushEvent::Audio(AudioEvent {
+            device_id: id,
+            state: parse_audio_state(&e),
+        }))
+    } else if POWER_PREFIXES.iter().any(|p| id.starts_with(p)) {
+        Some(HaPushEvent::Power {
+            device_id: id,
+            state: parse_power_state(&e),
+        })
+    } else {
+        None
+    }
+}
+
+impl HaProvider {
+    /// Forward a natural-language command to **HA Assist**
+    /// (`POST /api/conversation/process`) and return its spoken response plus
+    /// whether HA acted successfully (`response_type` is not `error`).
+    ///
+    /// This is the voice pipeline's long-tail fallback: Bifrost's native grammar
+    /// handles what it can deterministically, and anything it can't — notably
+    /// "play <named content> on the <TV>" — is delegated to HA, which resolves
+    /// and acts on it (reusing HA's media resolution across all integrations).
+    pub async fn converse(&self, text: &str) -> Result<(String, bool)> {
+        let resp = self
+            .client
+            .post(format!("{}/api/conversation/process", self.base_url))
+            .json(&json!({ "text": text }))
+            .send()
+            .await
+            .context("HA conversation request failed")?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        let speech = resp
+            .pointer("/response/speech/plain/speech")
+            .and_then(Value::as_str)
+            .unwrap_or("Okay.")
+            .to_string();
+        let ok = resp
+            .pointer("/response/response_type")
+            .and_then(Value::as_str)
+            != Some("error");
+        Ok((speech, ok))
+    }
+
+    /// Open a persistent WebSocket, authenticate, and `subscribe_events` to
+    /// `state_changed`, returning a stream of classified per-domain push events.
+    ///
+    /// Mirrors the audio push pattern (Onkyo's `event_stream`): the handshake
+    /// runs synchronously so a connect/auth failure is surfaced as `Err` (the
+    /// manager backs off), then a spawned task pumps frames until the socket
+    /// drops — at which point the sender closes and the manager reconnects. This
+    /// method does **not** own reconnection; the push manager does.
+    pub async fn push_events(&self) -> Result<tokio::sync::mpsc::Receiver<HaPushEvent>> {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let url = self.ws_url();
+        let (mut ws, _) = tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio_tungstenite::connect_async(url.as_str()),
+        )
+        .await
+        .context("HA WebSocket connect timed out")?
+        .with_context(|| format!("HA WebSocket connect to {url} failed"))?;
+
+        // auth handshake (same as the registry fetch).
+        let _ = ws_next_json(&mut ws).await?;
+        ws.send(Message::text(
+            json!({ "type": "auth", "access_token": self.token }).to_string(),
+        ))
+        .await?;
+        let auth = ws_next_json(&mut ws).await?;
+        if auth.get("type").and_then(Value::as_str) != Some("auth_ok") {
+            bail!("HA WebSocket auth rejected: {auth}");
+        }
+
+        // Subscribe to state changes; expect the `result`/`success` ack.
+        ws.send(Message::text(
+            json!({ "id": 1, "type": "subscribe_events", "event_type": "state_changed" })
+                .to_string(),
+        ))
+        .await?;
+        let ack = ws_next_json(&mut ws).await?;
+        if ack.get("type").and_then(Value::as_str) == Some("result")
+            && ack.get("success").and_then(Value::as_bool) != Some(true)
+        {
+            bail!("HA subscribe_events rejected: {ack}");
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<HaPushEvent>(128);
+        tokio::spawn(async move {
+            loop {
+                let v = match ws.next().await {
+                    Some(Ok(Message::Text(t))) => match serde_json::from_str::<Value>(t.as_str()) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    },
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                    // Close, error, non-text, or stream end → drop the sender so
+                    // the manager sees the channel close and reconnects.
+                    _ => break,
+                };
+                if v.get("type").and_then(Value::as_str) != Some("event") {
+                    continue;
+                }
+                // `state_changed` carries `event.data.new_state` (null on removal).
+                let new_state = v.pointer("/event/data/new_state");
+                let Some(new_state) = new_state.filter(|s| !s.is_null()) else {
+                    continue;
+                };
+                let Ok(entity) = serde_json::from_value::<HaEntity>(new_state.clone()) else {
+                    continue;
+                };
+                if let Some(event) = classify_push(entity)
+                    && tx.send(event).await.is_err()
+                {
+                    return; // consumer dropped
+                }
+            }
+        });
+        Ok(rx)
+    }
+}
+
+// ── Remote mapping ─────────────────────────────────────────────────────────────
+
+/// Map a canonical Bifrost [`RemoteKey`] to the Android TV Remote keycode HA's
+/// `remote.send_command` expects (see the androidtv_remote integration docs).
+fn remote_key_command(key: RemoteKey) -> &'static str {
+    match key {
+        RemoteKey::Up => "DPAD_UP",
+        RemoteKey::Down => "DPAD_DOWN",
+        RemoteKey::Left => "DPAD_LEFT",
+        RemoteKey::Right => "DPAD_RIGHT",
+        RemoteKey::Select => "DPAD_CENTER",
+        RemoteKey::Back => "BACK",
+        RemoteKey::Home => "HOME",
+        RemoteKey::Menu => "MENU",
+        RemoteKey::VolumeUp => "VOLUME_UP",
+        RemoteKey::VolumeDown => "VOLUME_DOWN",
+        RemoteKey::Mute => "MUTE",
+        RemoteKey::PlayPause => "MEDIA_PLAY_PAUSE",
+        RemoteKey::Next => "MEDIA_NEXT",
+        RemoteKey::Previous => "MEDIA_PREVIOUS",
+        RemoteKey::Power => "POWER",
+    }
+}
+
+fn parse_remote_state(e: &HaEntity) -> RemoteState {
+    RemoteState {
+        on: e.state == "on",
+        current_app: attr_str(&e.attributes, "current_activity"),
+        reachable: Some(e.state != "unavailable"),
+    }
+}
+
+fn entity_to_remote(e: HaEntity, hw_id: Option<String>) -> RemoteDevice {
+    let state = parse_remote_state(&e);
+    RemoteDevice {
+        id: Uuid::new_v4(),
+        name: friendly_name(&e.entity_id, &e.attributes),
+        provider_id: e.entity_id.clone(),
+        state,
+        hw_id,
+    }
+}
+
+// ── RemoteProvider impl ─────────────────────────────────────────────────────────
+
+#[async_trait]
+impl RemoteProvider for HaProvider {
+    fn name(&self) -> &str {
+        "homeassistant"
+    }
+
+    async fn discover(&self) -> Result<Vec<RemoteDevice>> {
+        let reg = self.entity_registry().await;
+        let hw = self.entity_hw_ids().await;
+        Ok(self
+            .get_states()
+            .await?
+            .into_iter()
+            .filter(|e| e.entity_id.starts_with(REMOTE_PREFIX) && keep_entity(&reg, &e.entity_id))
+            .map(|e| {
+                let hw_id = hw.get(&e.entity_id).cloned();
+                entity_to_remote(e, hw_id)
+            })
+            .collect())
+    }
+
+    async fn get_state(&self, device_id: &str) -> Result<RemoteState> {
+        Ok(parse_remote_state(&self.get_entity(device_id).await?))
+    }
+
+    async fn send_key(
+        &self,
+        device_id: &str,
+        key: RemoteKey,
+        hold_secs: Option<f32>,
+    ) -> Result<()> {
+        let mut data = json!({ "command": remote_key_command(key) });
+        if let Some(secs) = hold_secs {
+            data["hold_secs"] = json!(secs);
+        }
+        self.call_service("remote", "send_command", device_id, data)
+            .await
+    }
+
+    async fn send_text(&self, device_id: &str, text: &str) -> Result<()> {
+        // The Android TV Remote integration types literal text via `text:<str>`.
+        self.call_service(
+            "remote",
+            "send_command",
+            device_id,
+            json!({ "command": format!("text:{text}") }),
+        )
+        .await
+    }
+
+    async fn launch_app(&self, device_id: &str, activity: &str) -> Result<()> {
+        // `remote.turn_on { activity }` accepts a Play Store package id or a
+        // deep-link URL and brings that app to the foreground.
+        self.call_service(
+            "remote",
+            "turn_on",
+            device_id,
+            json!({ "activity": activity }),
+        )
+        .await
+    }
+
+    async fn set_power(&self, device_id: &str, on: bool) -> Result<()> {
+        let svc = if on { "turn_on" } else { "turn_off" };
+        self.call_service("remote", svc, device_id, json!({})).await
+    }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn normalise_base_url(raw: &str) -> String {
@@ -997,10 +1275,11 @@ impl ProviderFactory for HaLightFactory {
     fn credentials_schema(&self) -> &'static [CredentialField] {
         HA_CREDENTIALS
     }
-    /// HA is a local instance with no cloud rate limit, so poll faster than the
-    /// cloud-conservative default for a more responsive feel (until WS push lands).
+    /// HA pushes state over its `subscribe_events` WebSocket, so the runtime
+    /// keeps one persistent connection (`HaPushManager`) live across all of HA's
+    /// device domains instead of polling each on an interval.
     fn connection_mode(&self) -> crate::providers::ConnectionMode {
-        crate::providers::ConnectionMode::Poll { interval_secs: 30 }
+        crate::providers::ConnectionMode::HaPush
     }
     /// HA isn't a single-device-domain provider — it's a platform adapter that
     /// can surface many device kinds — so it's filed under "Integrations" in the
@@ -1044,6 +1323,25 @@ impl PowerProviderFactory for HaPowerFactory {
         "Home Assistant"
     }
     fn build(&self, credentials_json: &str) -> Result<Box<dyn PowerProvider>> {
+        Ok(Box::new(HaProvider::from_credentials(credentials_json)?))
+    }
+    fn credentials_schema(&self) -> &'static [CredentialField] {
+        HA_CREDENTIALS
+    }
+}
+
+/// Remote side of the HA adapter (`remote.*` — Android TV / streamer remotes).
+/// Registered with `register_remote(...)` alongside the other HA factories.
+pub struct HaRemoteFactory;
+
+impl RemoteProviderFactory for HaRemoteFactory {
+    fn provider_type(&self) -> &'static str {
+        "ha"
+    }
+    fn display_name(&self) -> &'static str {
+        "Home Assistant"
+    }
+    fn build(&self, credentials_json: &str) -> Result<Box<dyn RemoteProvider>> {
         Ok(Box::new(HaProvider::from_credentials(credentials_json)?))
     }
     fn credentials_schema(&self) -> &'static [CredentialField] {
@@ -1218,6 +1516,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn audio_kind_uses_app_signal_when_device_class_absent() {
+        // `device_class` wins when present.
+        assert_eq!(
+            audio_kind(&json!({ "device_class": "tv" })),
+            AudioDeviceKind::Tv
+        );
+        assert_eq!(
+            audio_kind(&json!({ "device_class": "receiver" })),
+            AudioDeviceKind::Receiver
+        );
+        // No `device_class`, but a running app → TV (e.g. Sony BRAVIA, which
+        // doesn't set device_class but reports `app_name`/`app_id`).
+        assert_eq!(
+            audio_kind(&json!({ "app_name": "YouTube" })),
+            AudioDeviceKind::Tv
+        );
+        assert_eq!(
+            audio_kind(&json!({ "app_id": "com.netflix.ninja" })),
+            AudioDeviceKind::Tv
+        );
+        // Plain media, no app → a speaker.
+        assert_eq!(
+            audio_kind(&json!({ "media_title": "Some Song" })),
+            AudioDeviceKind::Speaker
+        );
+    }
+
     #[tokio::test]
     async fn set_audio_volume_calls_volume_set_with_fraction() {
         let server = MockServer::start().await;
@@ -1345,6 +1671,89 @@ mod tests {
         assert_eq!(body["entity_id"], "fan.bedroom");
     }
 
+    fn remote_entity() -> Value {
+        json!({
+            "entity_id": "remote.bedroom_tv",
+            "state": "on",
+            "attributes": {
+                "friendly_name": "Bedroom TV",
+                "current_activity": "com.netflix.ninja",
+                "activity_list": [],
+                "supported_features": 4
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn discover_remote_maps_entities_with_current_app() {
+        let server = MockServer::start().await;
+        mount_states(&server, json!([remote_entity(), light_entity()])).await;
+
+        let p = HaProvider::new_for_test(server.uri()).unwrap();
+        let remotes = RemoteProvider::discover(&p).await.unwrap();
+
+        // Only the remote.* entity maps (the light is excluded).
+        assert_eq!(remotes.len(), 1);
+        assert_eq!(remotes[0].provider_id, "remote.bedroom_tv");
+        assert_eq!(remotes[0].name, "Bedroom TV");
+        assert!(remotes[0].state.on);
+        assert_eq!(
+            remotes[0].state.current_app.as_deref(),
+            Some("com.netflix.ninja")
+        );
+    }
+
+    #[tokio::test]
+    async fn send_key_calls_send_command_with_mapped_keycode() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/services/remote/send_command"))
+            .and(body_string_contains("DPAD_CENTER"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let p = HaProvider::new_for_test(server.uri()).unwrap();
+        RemoteProvider::send_key(&p, "remote.bedroom_tv", RemoteKey::Select, None)
+            .await
+            .unwrap();
+
+        let reqs = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["entity_id"], "remote.bedroom_tv");
+        assert_eq!(body["command"], "DPAD_CENTER");
+    }
+
+    #[tokio::test]
+    async fn launch_app_calls_turn_on_with_activity() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/services/remote/turn_on"))
+            .and(body_string_contains("com.netflix.ninja"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let p = HaProvider::new_for_test(server.uri()).unwrap();
+        RemoteProvider::launch_app(&p, "remote.bedroom_tv", "com.netflix.ninja")
+            .await
+            .unwrap();
+
+        let reqs = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["activity"], "com.netflix.ninja");
+    }
+
+    #[test]
+    fn remote_key_mapping_covers_navigation_and_media() {
+        assert_eq!(remote_key_command(RemoteKey::Up), "DPAD_UP");
+        assert_eq!(remote_key_command(RemoteKey::Back), "BACK");
+        assert_eq!(remote_key_command(RemoteKey::PlayPause), "MEDIA_PLAY_PAUSE");
+        assert_eq!(remote_key_command(RemoteKey::Power), "POWER");
+    }
+
     #[tokio::test]
     async fn discover_groups_power_maps_areas_with_power_members() {
         let server = MockServer::start().await;
@@ -1377,6 +1786,11 @@ mod tests {
         );
         assert!(
             HaPowerFactory
+                .build(r#"{"base_url":"http://ha.local:8123","token":"abc"}"#)
+                .is_ok()
+        );
+        assert!(
+            HaRemoteFactory
                 .build(r#"{"base_url":"http://ha.local:8123","token":"abc"}"#)
                 .is_ok()
         );
@@ -1478,5 +1892,181 @@ mod tests {
             keep_entity(&reg, "switch.anything"),
             "no registry → unfiltered"
         );
+    }
+
+    #[test]
+    fn classify_push_routes_each_domain_and_ignores_others() {
+        let light = HaEntity {
+            entity_id: "light.kitchen".into(),
+            state: "on".into(),
+            attributes: json!({ "brightness": 255 }),
+        };
+        assert!(matches!(
+            classify_push(light),
+            Some(HaPushEvent::Light { device_id, .. }) if device_id == "light.kitchen"
+        ));
+
+        let media = HaEntity {
+            entity_id: "media_player.tv".into(),
+            state: "playing".into(),
+            attributes: json!({ "volume_level": 0.5 }),
+        };
+        match classify_push(media) {
+            Some(HaPushEvent::Audio(ev)) => {
+                assert_eq!(ev.device_id, "media_player.tv");
+                assert_eq!(ev.state.volume, 50);
+            }
+            other => panic!("expected audio, got {other:?}"),
+        }
+
+        let fan = HaEntity {
+            entity_id: "fan.bedroom".into(),
+            state: "on".into(),
+            attributes: json!({}),
+        };
+        assert!(matches!(
+            classify_push(fan),
+            Some(HaPushEvent::Power { state, .. }) if state.on
+        ));
+
+        // A sensor is not a Bifrost device domain — dropped.
+        let sensor = HaEntity {
+            entity_id: "sensor.temp".into(),
+            state: "21".into(),
+            attributes: json!({}),
+        };
+        assert!(classify_push(sensor).is_none());
+    }
+
+    /// A mock HA WebSocket for the push path: greets, accepts auth, acks the
+    /// `subscribe_events` request, then emits the given `state_changed` events.
+    async fn spawn_mock_ha_push_ws(events: Vec<Value>) -> u16 {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            ws.send(Message::text(r#"{"type":"auth_required"}"#))
+                .await
+                .unwrap();
+            let _ = ws.next().await; // auth
+            ws.send(Message::text(r#"{"type":"auth_ok"}"#))
+                .await
+                .unwrap();
+            let _ = ws.next().await; // subscribe_events
+            ws.send(Message::text(
+                json!({ "id": 1, "type": "result", "success": true }).to_string(),
+            ))
+            .await
+            .unwrap();
+            for new_state in events {
+                let frame = json!({
+                    "type": "event",
+                    "event": { "event_type": "state_changed", "data": { "new_state": new_state } }
+                });
+                ws.send(Message::text(frame.to_string())).await.unwrap();
+            }
+            // Hold the socket so the consumer reads everything before it closes.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn push_events_streams_classified_state_changes() {
+        let port = spawn_mock_ha_push_ws(vec![
+            json!({ "entity_id": "light.kitchen", "state": "on",
+                    "attributes": { "brightness": 255 } }),
+            json!({ "entity_id": "switch.porch", "state": "on", "attributes": {} }),
+            // Removed entity (new_state null) must be skipped, not panic.
+            Value::Null,
+        ])
+        .await;
+
+        let p = HaProvider::new_for_test(format!("http://127.0.0.1:{port}")).unwrap();
+        let mut rx = p.push_events().await.unwrap();
+
+        let first = rx.recv().await.expect("a light event");
+        assert!(matches!(
+            first,
+            HaPushEvent::Light { device_id, state } if device_id == "light.kitchen" && state.on
+        ));
+        let second = rx.recv().await.expect("a power event");
+        assert!(matches!(
+            second,
+            HaPushEvent::Power { device_id, state } if device_id == "switch.porch" && state.on
+        ));
+    }
+
+    #[tokio::test]
+    async fn converse_returns_assist_speech_and_success() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/conversation/process"))
+            .and(body_string_contains("play Bob"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "response": {
+                    "speech": { "plain": { "speech": "Playing Bob's Burgers on the TV." } },
+                    "response_type": "action_done"
+                },
+                "conversation_id": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let p = HaProvider::new_for_test(server.uri()).unwrap();
+        let (speech, ok) = p.converse("play Bob's Burgers on the TV").await.unwrap();
+        assert_eq!(speech, "Playing Bob's Burgers on the TV.");
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    async fn converse_reports_error_response_type_as_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/conversation/process"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "response": {
+                    "speech": { "plain": { "speech": "Sorry, I couldn't find that." } },
+                    "response_type": "error"
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let p = HaProvider::new_for_test(server.uri()).unwrap();
+        let (speech, ok) = p.converse("play nonsense").await.unwrap();
+        assert_eq!(speech, "Sorry, I couldn't find that.");
+        assert!(!ok, "an error response_type is not a success");
+    }
+
+    #[tokio::test]
+    async fn push_events_errors_when_auth_rejected() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            ws.send(Message::text(r#"{"type":"auth_required"}"#))
+                .await
+                .unwrap();
+            let _ = ws.next().await;
+            ws.send(Message::text(r#"{"type":"auth_invalid"}"#))
+                .await
+                .unwrap();
+        });
+
+        let p = HaProvider::new_for_test(format!("http://127.0.0.1:{port}")).unwrap();
+        let err = p.push_events().await.unwrap_err();
+        assert!(err.to_string().contains("auth rejected"), "{err}");
     }
 }

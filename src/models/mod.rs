@@ -1,5 +1,6 @@
 pub mod audio;
 pub mod power;
+pub mod remote;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

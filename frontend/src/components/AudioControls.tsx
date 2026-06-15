@@ -8,13 +8,16 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   getAudioFavorites,
+  getRemoteDevices,
   playAudioFavorite,
   setAudioState,
   type AudioCommand,
   type AudioDevice,
   type AudioFavorite,
+  type RemoteDevice,
 } from "../api";
 import { DisableRow } from "./PowerFlyout";
+import { BifrostRemote } from "./BifrostRemote";
 import { useViewport } from "../useViewport";
 import { sheetStyle } from "./sheet";
 
@@ -316,6 +319,23 @@ export function AudioEditor({
   const cap = device.capabilities;
   const offline = device.state.reachable === false;
 
+  // A TV may have a paired remote (M24) — surface a button into `BifrostRemote`.
+  const [pairedRemote, setPairedRemote] = useState<RemoteDevice | null>(null);
+  const [remoteOpen, setRemoteOpen] = useState(false);
+  const remoteOpenRef = useRef(false);
+  remoteOpenRef.current = remoteOpen;
+
+  useEffect(() => {
+    if (device.kind !== "tv") return;
+    let alive = true;
+    getRemoteDevices().then((rs) => {
+      if (alive) setPairedRemote(rs.find((r) => r.paired_audio_id === device.id && r.enabled) ?? null);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [device.kind, device.id]);
+
   useLayoutEffect(() => {
     if (isCompact) return; // bottom sheet on phones — no anchor math
     const panel = panelRef.current;
@@ -334,10 +354,11 @@ export function AudioEditor({
 
   useEffect(() => {
     const onDown = (e: PointerEvent) => {
+      if (remoteOpenRef.current) return; // the remote overlay owns clicks while open
       if (panelRef.current && !panelRef.current.contains(e.target as Node)) onClose();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape" && !remoteOpenRef.current) onClose();
     };
     const t = setTimeout(() => document.addEventListener("pointerdown", onDown), 0);
     window.addEventListener("keydown", onKey);
@@ -395,10 +416,39 @@ export function AudioEditor({
           </button>
         </div>
       </div>
+      {pairedRemote && !offline && (
+        <button
+          onClick={() => setRemoteOpen(true)}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: "0.5rem",
+            width: "100%",
+            padding: "0.55rem",
+            borderRadius: 10,
+            border: `1px solid ${ACCENT}55`,
+            background: `${ACCENT}14`,
+            color: T.text,
+            cursor: "pointer",
+            fontSize: "0.85rem",
+          }}
+        >
+          <span style={{ fontSize: "1rem" }}>📺</span> Remote
+        </button>
+      )}
       {offline ? (
         <div style={{ fontSize: "0.8rem", color: "#c66" }}>Device offline.</div>
       ) : (
         <AudioControls device={device} onLocalPatch={onLocalPatch} receiverName={receiverName} />
+      )}
+      {remoteOpen && pairedRemote && (
+        <BifrostRemote
+          remoteId={pairedRemote.id}
+          name={device.name}
+          initialOn={device.state.power}
+          onClose={() => setRemoteOpen(false)}
+        />
       )}
       {onSetEnabled && (
         <DisableRow

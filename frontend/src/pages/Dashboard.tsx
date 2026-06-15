@@ -85,7 +85,8 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
     getAudioDevices().then(setAudioDevices);
   }, [lights]);
 
-  // Real-time state: light_state (Hue SSE) and audio_state (Onkyo push).
+  // Real-time state: light_state (Hue SSE), audio_state (Onkyo push), and
+  // power_state (HA WebSocket push).
   useEffect(() => {
     const es = new EventSource("/api/events");
     es.addEventListener("light_state", (raw) => {
@@ -106,6 +107,20 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
         state: AudioDevice["state"];
       };
       setAudioDevices((prev) =>
+        prev.map((d) =>
+          d.provider_id === ev.provider_id && d.device_id === ev.device_id
+            ? { ...d, state: ev.state }
+            : d,
+        ),
+      );
+    });
+    es.addEventListener("power_state", (raw) => {
+      const ev = JSON.parse((raw as MessageEvent).data) as {
+        provider_id: string;
+        device_id: string;
+        state: PowerDevice["state"];
+      };
+      setPowerDevices((prev) =>
         prev.map((d) =>
           d.provider_id === ev.provider_id && d.device_id === ev.device_id
             ? { ...d, state: ev.state }

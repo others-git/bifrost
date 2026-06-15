@@ -102,10 +102,16 @@ async fn run_command(state: &AppState, text: &str, context_room: Option<&str>) -
                 ok: true,
                 said: "Okay.".into(),
             },
-            Clause::Unparsed { heard } => ClauseResult {
-                said: format!("I didn't understand \"{heard}\"."),
-                heard,
-                ok: false,
+            // Native grammar couldn't parse this clause. Fall back to HA Assist
+            // (the long tail — e.g. "play <title> on the TV"); if no HA provider
+            // is configured or it errors, report the original miss.
+            Clause::Unparsed { heard } => match ha_assist_fallback(state, &heard).await {
+                Some((said, ok)) => ClauseResult { heard, ok, said },
+                None => ClauseResult {
+                    said: format!("I didn't understand \"{heard}\"."),
+                    heard,
+                    ok: false,
+                },
             },
         });
     }
@@ -119,6 +125,27 @@ async fn run_command(state: &AppState, text: &str, context_room: Option<&str>) -
         ok,
         said,
         clauses: results,
+    }
+}
+
+/// Delegate an utterance the native grammar couldn't parse to HA Assist. Returns
+/// `Some((spoken_response, succeeded))` when an HA provider is configured and
+/// reachable, or `None` when there's no HA provider or the call fails (so the
+/// caller keeps the native "didn't understand" response). Native-first, HA-fallback.
+async fn ha_assist_fallback(state: &AppState, text: &str) -> Option<(String, bool)> {
+    let row = sqlx::query("SELECT credentials FROM providers WHERE provider_type = 'ha' LIMIT 1")
+        .fetch_optional(&state.db)
+        .await
+        .ok()??;
+    let creds_enc: String = row.get("credentials");
+    let creds = state.decrypt_credentials(&creds_enc).ok()?;
+    let provider = crate::providers::ha::HaProvider::from_credentials(&creds).ok()?;
+    match provider.converse(text).await {
+        Ok(result) => Some(result),
+        Err(e) => {
+            tracing::debug!("HA Assist fallback failed: {e:#}");
+            None
+        }
     }
 }
 
@@ -623,7 +650,7 @@ async fn resolve_audio_target(
 async fn lone_room_audio(state: &AppState, room_id: &str) -> Option<(String, String)> {
     let rows = sqlx::query(
         "SELECT a.id, a.name FROM audio_devices a
-         WHERE a.shadowed_by IS NULL AND a.enabled = 1 AND a.id IN (
+         WHERE a.shadowed_by IS NULL AND a.companion_of IS NULL AND a.enabled = 1 AND a.id IN (
              SELECT audio_device_id FROM room_audio_devices WHERE room_id = ?1
          )",
     )
@@ -708,7 +735,7 @@ async fn power(state: &AppState) -> Vec<Ent> {
 async fn audio(state: &AppState) -> Vec<Ent> {
     ents(
         state,
-        "SELECT id, name FROM audio_devices WHERE enabled = 1 AND shadowed_by IS NULL ORDER BY name",
+        "SELECT id, name FROM audio_devices WHERE enabled = 1 AND shadowed_by IS NULL AND companion_of IS NULL ORDER BY name",
     )
     .await
 }

@@ -13,6 +13,7 @@ use discovery::DeviceDiscovery;
 
 use crate::models::audio::{AudioCommand, AudioDevice, AudioEvent, AudioFavorite, AudioState};
 use crate::models::power::{PowerDevice, PowerState};
+use crate::models::remote::{RemoteDevice, RemoteKey, RemoteState};
 use crate::models::{Light, LightState};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -211,6 +212,38 @@ pub trait PowerProviderFactory: Send + Sync {
     fn credentials_schema(&self) -> &'static [CredentialField];
 }
 
+/// A virtual remote control for a TV / streamer. Like `PowerProvider`, a
+/// `provider_type` may register this **in addition to** its other domains (HA
+/// serves lights + power + audio + remote from one row). Providers map Bifrost's
+/// canonical [`RemoteKey`] to their native command vocabulary.
+#[async_trait]
+pub trait RemoteProvider: Send + Sync {
+    fn name(&self) -> &str;
+    async fn discover(&self) -> Result<Vec<RemoteDevice>>;
+    async fn get_state(&self, device_id: &str) -> Result<RemoteState>;
+    /// Press one canonical key, optionally as a long-press (`hold_secs`).
+    async fn send_key(&self, device_id: &str, key: RemoteKey, hold_secs: Option<f32>)
+    -> Result<()>;
+    /// Type literal text into the focused field. Default: unsupported.
+    async fn send_text(&self, _device_id: &str, _text: &str) -> Result<()> {
+        anyhow::bail!("this remote does not support text input")
+    }
+    /// Launch an app by package id or deep-link URL.
+    async fn launch_app(&self, device_id: &str, activity: &str) -> Result<()>;
+    async fn set_power(&self, device_id: &str, on: bool) -> Result<()>;
+}
+
+/// Factory for one remote provider type (see [`PowerProviderFactory`] for the
+/// multi-domain registration pattern).
+pub trait RemoteProviderFactory: Send + Sync {
+    fn provider_type(&self) -> &'static str;
+    fn display_name(&self) -> &'static str {
+        self.provider_type()
+    }
+    fn build(&self, credentials_json: &str) -> Result<Box<dyn RemoteProvider>>;
+    fn credentials_schema(&self) -> &'static [CredentialField];
+}
+
 // ── Credential schema (for the setup UI) ───────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -241,6 +274,11 @@ pub enum ConnectionMode {
     Sse,
     /// Periodic state polling via `PollingManager`.
     Poll { interval_secs: u64 },
+    /// Multi-domain push via Home Assistant's `subscribe_events` WebSocket,
+    /// managed by `HaPushManager` — keeps lights, audio, and power live from one
+    /// connection (replacing the per-domain poll). Built directly from the
+    /// concrete `HaProvider` (like `Sse` is from `HueProvider`).
+    HaPush,
 }
 
 /// Default polling cadence. Conservative enough for cloud APIs with daily
@@ -297,6 +335,7 @@ pub struct ProviderRegistry {
     factories: HashMap<&'static str, Box<dyn ProviderFactory>>,
     audio_factories: HashMap<&'static str, Box<dyn AudioProviderFactory>>,
     power_factories: HashMap<&'static str, Box<dyn PowerProviderFactory>>,
+    remote_factories: HashMap<&'static str, Box<dyn RemoteProviderFactory>>,
 }
 
 impl ProviderRegistry {
@@ -305,6 +344,7 @@ impl ProviderRegistry {
             factories: HashMap::new(),
             audio_factories: HashMap::new(),
             power_factories: HashMap::new(),
+            remote_factories: HashMap::new(),
         }
     }
 
@@ -341,6 +381,30 @@ impl ProviderRegistry {
     /// Returns true if `provider_type` serves the power domain.
     pub fn is_known_power(&self, provider_type: &str) -> bool {
         self.power_factories.contains_key(provider_type)
+    }
+
+    /// Register the remote domain for a provider type (multi-domain, like
+    /// `register_power`).
+    pub fn register_remote<F: RemoteProviderFactory + 'static>(&mut self, factory: F) {
+        self.remote_factories
+            .insert(factory.provider_type(), Box::new(factory));
+    }
+
+    /// Build a live remote provider from a type string + decrypted credentials JSON.
+    pub fn build_remote(
+        &self,
+        provider_type: &str,
+        credentials_json: &str,
+    ) -> Result<Box<dyn RemoteProvider>> {
+        self.remote_factories
+            .get(provider_type)
+            .ok_or_else(|| anyhow!("unknown remote provider type: {provider_type}"))?
+            .build(credentials_json)
+    }
+
+    /// Returns true if `provider_type` serves the remote domain.
+    pub fn is_known_remote(&self, provider_type: &str) -> bool {
+        self.remote_factories.contains_key(provider_type)
     }
 
     /// Build a live audio provider from a type string + decrypted credentials JSON.
@@ -530,6 +594,7 @@ pub fn default_registry() -> ProviderRegistry {
     r.register(ha::HaLightFactory);
     r.register_power(ha::HaPowerFactory);
     r.register_audio(ha::HaAudioFactory);
+    r.register_remote(ha::HaRemoteFactory);
     r.register_audio(onkyo::OnkyoProviderFactory);
     r.register_audio(sonos::SonosProviderFactory);
     r
@@ -691,14 +756,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn ha_polls_faster_than_the_cloud_default() {
+    fn ha_uses_websocket_push_not_polling() {
         let reg = default_registry();
-        match reg.connection_mode("ha") {
-            Some(ConnectionMode::Poll { interval_secs }) => {
-                assert!(interval_secs < DEFAULT_POLL_INTERVAL_SECS);
-            }
-            other => panic!("expected HA to poll, got {other:?}"),
-        }
+        assert_eq!(
+            reg.connection_mode("ha"),
+            Some(ConnectionMode::HaPush),
+            "HA keeps one subscribe_events WebSocket live instead of polling"
+        );
     }
 
     #[test]

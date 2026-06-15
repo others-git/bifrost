@@ -29,11 +29,12 @@ async fn sse_events(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    let (receivers, audio_receivers) = {
+    let (receivers, audio_receivers, power_receivers) = {
         let connections = state.connections.lock().await;
         (
             connections.subscribe_all(),
             connections.subscribe_all_audio(),
+            connections.subscribe_all_power(),
         )
     };
 
@@ -68,6 +69,25 @@ async fn sse_events(
                     }))
                     .unwrap_or_default();
                     Ok::<Event, Infallible>(Event::default().event("audio_state").data(data))
+                })
+                .boxed(),
+        );
+    }
+
+    // Power push events: full snapshots tagged with the provider row id so the
+    // frontend can match its power_devices rows.
+    for (provider_id, rx) in power_receivers {
+        streams.push(
+            BroadcastStream::new(rx)
+                .filter_map(|r| std::future::ready(r.ok()))
+                .map(move |event| {
+                    let data = serde_json::to_string(&serde_json::json!({
+                        "provider_id": provider_id,
+                        "device_id": event.device_id,
+                        "state": event.state,
+                    }))
+                    .unwrap_or_default();
+                    Ok::<Event, Infallible>(Event::default().event("power_state").data(data))
                 })
                 .boxed(),
         );

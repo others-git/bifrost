@@ -26,6 +26,7 @@ import {
   setAudioRoom,
   setPowerRoom,
   setAudioReceiver,
+  setAudioCompanion,
   type Light,
   type AudioDevice,
   type PowerDevice,
@@ -70,6 +71,10 @@ interface Item {
   shadowedBy: string | null;
   /** true = an automatic hardware match (authoritative); false = a manual link. */
   shadowAuto: boolean;
+  /** Audio only (M26): when set, this entity is MERGED into that primary device
+   * id as its companion — hidden from control, but its capabilities are routed to
+   * the primary (not discarded, unlike shadowedBy). */
+  companionOf: string | null;
   /** Directly-assigned room id, or null (room links aren't reflected here). */
   roomId: string | null;
   /** Audio only: the device kind, so a source (TV/speaker/zone) can be bound to
@@ -110,6 +115,7 @@ function lightItem(l: Light): Item {
     offline: l.last_state?.reachable === false,
     shadowedBy: l.shadowed_by ?? null,
     shadowAuto: l.shadow_auto === true,
+    companionOf: null,
     roomId: l.room_id ?? null,
   };
 }
@@ -128,6 +134,7 @@ function audioItem(a: AudioDevice): Item {
     offline: a.state?.reachable === false,
     shadowedBy: a.shadowed_by ?? null,
     shadowAuto: a.shadow_auto === true,
+    companionOf: a.companion_of ?? null,
     roomId: a.room_id ?? null,
     audioKind: a.kind,
     receiverId: a.receiver_id ?? null,
@@ -150,6 +157,7 @@ function powerItem(p: PowerDevice): Item {
     togglePower: true,
     shadowedBy: p.shadowed_by ?? null,
     shadowAuto: p.shadow_auto === true,
+    companionOf: null,
     roomId: p.room_id ?? null,
   };
 }
@@ -547,20 +555,25 @@ function DeviceCard({
   item,
   rooms,
   audioDevices,
+  mergeCandidates,
   onToggle,
   onSetEnabled,
   onSetGlyph,
   onSetRoom,
   onSetReceiver,
+  onMerge,
 }: {
   item: Item;
   rooms: Room[];
   audioDevices: AudioDevice[];
+  /** M26: other visible same-domain devices this audio entity could merge into. */
+  mergeCandidates: Item[];
   onToggle: (next: boolean) => void;
   onSetEnabled: (enabled: boolean) => void;
   onSetGlyph: (glyph: string | null) => void;
   onSetRoom: (roomId: string | null) => void;
   onSetReceiver: (receiverId: string | null, receiverSource: string | null) => void;
+  onMerge: (primaryId: string) => void;
 }) {
   const offline = item.offline;
   const disabled = !item.enabled;
@@ -572,9 +585,11 @@ function DeviceCard({
   const [picking, setPicking] = useState(false);
   const [roomPicking, setRoomPicking] = useState(false);
   const [receiverPicking, setReceiverPicking] = useState(false);
+  const [mergePicking, setMergePicking] = useState(false);
   const glyphBtnRef = useRef<HTMLButtonElement>(null);
   const roomBtnRef = useRef<HTMLButtonElement>(null);
   const receiverBtnRef = useRef<HTMLButtonElement>(null);
+  const mergeBtnRef = useRef<HTMLButtonElement>(null);
   const { isCompact } = useViewport();
   const roomName = item.roomId ? (rooms.find((r) => r.id === item.roomId)?.name ?? null) : null;
   // A source device (TV/streamer/console — any audio that isn't itself a
@@ -583,15 +598,17 @@ function DeviceCard({
   const boundReceiver = item.receiverId
     ? (audioDevices.find((a) => a.id === item.receiverId)?.name ?? null)
     : null;
+  // When expanded, wrap at word boundaries — never mid-word (`anywhere` shreds a
+  // name into single letters once the column is narrow).
   const clamp: React.CSSProperties = expanded
-    ? { whiteSpace: "normal", overflowWrap: "anywhere" }
+    ? { whiteSpace: "normal", overflowWrap: "break-word", wordBreak: "normal" }
     : { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
   return (
     <div
       style={{
         display: "flex",
         alignItems: "center",
-        gap: "0.85rem",
+        gap: "0.7rem",
         padding: "0.85rem 1rem",
         borderRadius: 12,
         background: on ? T.card : T.cardOff,
@@ -673,6 +690,17 @@ function DeviceCard({
         </div>
       </div>
 
+      {/* Action cluster: tight internal gap + fixed width so it never crushes
+          the name (the cause of the per-letter wrapping). */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "0.4rem",
+          flexShrink: 0,
+          marginLeft: "auto",
+        }}
+      >
       {isAudioSource && (
         <>
           <button
@@ -713,6 +741,44 @@ function DeviceCard({
                 if (!rid) setReceiverPicking(false);
               }}
               onClose={() => setReceiverPicking(false)}
+            />
+          )}
+        </>
+      )}
+
+      {item.domain === "audio" && mergeCandidates.length > 0 && (
+        <>
+          <button
+            ref={mergeBtnRef}
+            onClick={() => setMergePicking((v) => !v)}
+            title="Merge into another device (same physical device — combines controls, nothing hidden)"
+            style={{
+              flexShrink: 0,
+              width: 34,
+              height: 34,
+              borderRadius: 9,
+              display: "grid",
+              placeItems: "center",
+              color: ACCENT,
+              background: "rgba(56,189,248,0.08)",
+              border: `1px solid ${T.cardBorder}`,
+              cursor: "pointer",
+              fontSize: "1rem",
+              lineHeight: 1,
+            }}
+          >
+            ⧉
+          </button>
+          {mergePicking && (
+            <MergePicker
+              anchor={mergeBtnRef.current}
+              isCompact={isCompact}
+              candidates={mergeCandidates}
+              onPick={(primaryId) => {
+                onMerge(primaryId);
+                setMergePicking(false);
+              }}
+              onClose={() => setMergePicking(false)}
             />
           )}
         </>
@@ -785,6 +851,7 @@ function DeviceCard({
           )}
         </>
       )}
+      </div>
     </div>
   );
 }
@@ -840,6 +907,104 @@ function HiddenDuplicate({
         </button>
       )}
     </div>
+  );
+}
+
+/// An audio entity merged into a primary device (M26 composite) — collapsed, with
+/// its controls routed to the primary (lossless, unlike a hidden duplicate).
+function MergedCompanion({
+  item,
+  primary,
+  onUnmerge,
+}: {
+  item: Item;
+  primary: string | undefined;
+  onUnmerge: () => void;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "0.6rem",
+        padding: "0.45rem 0.7rem",
+        fontSize: "0.78rem",
+        color: T.faint,
+        borderLeft: `2px solid ${ACCENT}55`,
+        marginLeft: "0.4rem",
+      }}
+    >
+      <span style={{ color: T.faint, display: "grid", placeItems: "center", opacity: 0.7 }}>
+        <Glyph name={item.glyph ?? item.defaultGlyph} size={16} />
+      </span>
+      <span style={{ color: T.dim }}>{item.name}</span>
+      <span>— merged into{primary ? ` ${primary}` : " another device"} (controls combined)</span>
+      <button
+        onClick={onUnmerge}
+        title="Unmerge — show this device on its own again"
+        style={{
+          marginLeft: "auto",
+          background: "none",
+          border: `1px solid ${T.cardBorder}`,
+          borderRadius: 7,
+          color: T.dim,
+          cursor: "pointer",
+          fontSize: "0.72rem",
+          padding: "0.2rem 0.5rem",
+        }}
+      >
+        Unmerge
+      </button>
+    </div>
+  );
+}
+
+/// Pick a primary to MERGE this audio entity into (M26) — its controls route to
+/// that device. The lossless counterpart to "mark as duplicate" (shadow).
+function MergePicker({
+  anchor,
+  isCompact,
+  candidates,
+  onPick,
+  onClose,
+}: {
+  anchor: HTMLElement | null;
+  isCompact: boolean;
+  candidates: Item[];
+  onPick: (primaryId: string) => void;
+  onClose: () => void;
+}) {
+  const rowStyle: React.CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    gap: "0.5rem",
+    width: "100%",
+    textAlign: "left",
+    background: "transparent",
+    border: "none",
+    borderRadius: 8,
+    color: T.text,
+    cursor: "pointer",
+    fontSize: isCompact ? "0.95rem" : "0.82rem",
+    padding: isCompact ? "0.7rem 0.6rem" : "0.45rem 0.5rem",
+  };
+  return (
+    <AnchoredPanel anchor={anchor} isCompact={isCompact} onClose={onClose}>
+      <div style={{ color: T.dim, fontSize: "0.78rem", padding: "0.3rem 0.6rem 0.4rem" }}>
+        Merge into… (same physical device — combines controls)
+      </div>
+      {candidates.length === 0 ? (
+        <div style={{ color: T.faint, fontSize: "0.78rem", padding: "0.2rem 0.6rem 0.5rem" }}>
+          No other audio devices to merge into.
+        </div>
+      ) : (
+        candidates.map((c) => (
+          <button key={c.id} style={rowStyle} onClick={() => onPick(c.id)}>
+            {c.name}
+          </button>
+        ))
+      )}
+    </AnchoredPanel>
   );
 }
 
@@ -925,6 +1090,17 @@ export function DevicesPage() {
     await SET_SHADOW[item.domain](item.id, null);
   }
 
+  // M26: merge an audio entity into a primary as its companion (lossless — its
+  // controls route to the primary), or unmerge.
+  async function setCompanion(item: Item, primaryId: string) {
+    setItems((prev) => prev.map((d) => (d.id === item.id ? { ...d, companionOf: primaryId } : d)));
+    await setAudioCompanion(item.id, primaryId);
+  }
+  async function unmerge(item: Item) {
+    setItems((prev) => prev.map((d) => (d.id === item.id ? { ...d, companionOf: null } : d)));
+    await setAudioCompanion(item.id, null);
+  }
+
   const byId = new Map(items.map((d) => [d.id, d] as const));
 
   return (
@@ -980,9 +1156,12 @@ export function DevicesPage() {
         SECTIONS.map(({ domain, title }) => {
           const group = items.filter((d) => d.domain === domain);
           if (group.length === 0) return null;
-          // Duplicates collapse: a shadowed device hides under its canonical one.
-          const visible = group.filter((d) => !d.shadowedBy);
+          // Duplicates collapse under their canonical (shadow, lossy); merged
+          // companions (M26, lossless) collapse under their primary. Both drop
+          // from the visible grid.
+          const visible = group.filter((d) => !d.shadowedBy && !d.companionOf);
           const shadowed = group.filter((d) => d.shadowedBy);
+          const companions = group.filter((d) => d.companionOf);
           return (
             <section key={domain} style={{ marginBottom: "1.8rem" }}>
               <h3
@@ -1001,7 +1180,14 @@ export function DevicesPage() {
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: isMobile ? "1fr" : "repeat(auto-fill, minmax(280px, 1fr))",
+                  // Phones: one column. Everything else: cards at least 360px so
+                  // the glyph + name + action cluster fit on one row without
+                  // crushing the name; `min(100%, …)` keeps a single card from
+                  // overflowing a narrow viewport. 280px was too tight on desktop
+                  // too (the power cards' toggle + buttons left no room for names).
+                  gridTemplateColumns: isMobile
+                    ? "1fr"
+                    : "repeat(auto-fill, minmax(min(100%, 360px), 1fr))",
                   gap: "0.7rem",
                 }}
               >
@@ -1011,11 +1197,13 @@ export function DevicesPage() {
                     item={d}
                     rooms={rooms}
                     audioDevices={audioDevices}
+                    mergeCandidates={visible.filter((s) => s.id !== d.id)}
                     onToggle={(next) => toggle(d, next)}
                     onSetEnabled={(en) => setEnabled(d, en)}
                     onSetGlyph={(g) => setGlyph(d, g)}
                     onSetRoom={(r) => setRoom(d, r)}
                     onSetReceiver={(rid, rsrc) => setReceiver(d, rid, rsrc)}
+                    onMerge={(primaryId) => setCompanion(d, primaryId)}
                   />
                 ))}
               </div>
@@ -1027,6 +1215,18 @@ export function DevicesPage() {
                       item={d}
                       canonical={d.shadowedBy ? byId.get(d.shadowedBy)?.name : undefined}
                       onUnlink={() => unlink(d)}
+                    />
+                  ))}
+                </div>
+              )}
+              {companions.length > 0 && (
+                <div style={{ marginTop: "0.7rem" }}>
+                  {companions.map((d) => (
+                    <MergedCompanion
+                      key={d.id}
+                      item={d}
+                      primary={d.companionOf ? byId.get(d.companionOf)?.name : undefined}
+                      onUnmerge={() => unmerge(d)}
                     />
                   ))}
                 </div>

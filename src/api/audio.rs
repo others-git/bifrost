@@ -34,6 +34,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/devices/{id}/shadow", put(set_shadow_handler))
         .route("/devices/{id}/room", put(set_room_handler))
         .route("/devices/{id}/receiver", put(set_receiver_handler))
+        .route("/devices/{id}/companion", put(set_companion_handler))
 }
 
 async fn set_receiver_handler(
@@ -46,6 +47,18 @@ async fn set_receiver_handler(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     set_receiver_status(set_audio_receiver(&state, &id, req.receiver_id, req.receiver_source).await)
+}
+
+async fn set_companion_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<crate::api::SetCompanionRequest>,
+) -> impl IntoResponse {
+    if require_session(&state, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    set_companion_status(set_audio_companion(&state, &id, req.primary_id).await)
 }
 
 async fn set_enabled_handler(
@@ -127,7 +140,7 @@ pub(crate) struct PlayFavoriteRequest {
 
 // ── Wire shape ───────────────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct AudioDeviceRow {
     pub id: String,
     pub provider_id: String,
@@ -159,6 +172,11 @@ pub(crate) struct AudioDeviceRow {
     /// The receiver input to select when this source becomes active; `None` =
     /// leave the receiver's input alone.
     pub receiver_source: Option<String>,
+    /// M26 composite: the PRIMARY audio device id this entity merges into, if it
+    /// is a companion (a complementary view of the same physical device). `None`
+    /// = standalone. A companion is hidden from control; its state/controls merge
+    /// into the primary (unlike `shadowed_by`, which discards them).
+    pub companion_of: Option<String>,
 }
 
 fn row_to_device(r: sqlx::sqlite::SqliteRow) -> AudioDeviceRow {
@@ -182,7 +200,58 @@ fn row_to_device(r: sqlx::sqlite::SqliteRow) -> AudioDeviceRow {
         room_id: r.get("room_id"),
         receiver_id: r.get("receiver_id"),
         receiver_source: r.get("receiver_source"),
+        companion_of: r.get("companion_of"),
     }
+}
+
+/// M26: overlay a companion's complementary state onto its primary — fill
+/// now-playing, source/source-list, and **surface the companion's receiver
+/// binding** where the primary lacks them, and union the offered capabilities.
+/// The receiver volume overlay (run afterwards) then shows the receiver's volume
+/// on the merged binding. Nothing is hidden — the union lives on the primary.
+fn merge_companion_into(primary: &mut AudioDeviceRow, companion: &AudioDeviceRow) {
+    if primary.state.now_playing.is_none() {
+        primary
+            .state
+            .now_playing
+            .clone_from(&companion.state.now_playing);
+    }
+    if primary.state.source.is_none() {
+        primary.state.source.clone_from(&companion.state.source);
+    }
+    for s in &companion.state.source_list {
+        if !primary.state.source_list.contains(s) {
+            primary.state.source_list.push(s.clone());
+        }
+    }
+    // A receiver binding on the companion takes volume-control precedence.
+    if primary.receiver_id.is_none() {
+        primary.receiver_id.clone_from(&companion.receiver_id);
+        primary
+            .receiver_source
+            .clone_from(&companion.receiver_source);
+    }
+    primary.capabilities.transport |= companion.capabilities.transport;
+    primary.capabilities.sources |= companion.capabilities.sources;
+    primary.capabilities.favorites |= companion.capabilities.favorites;
+    primary.capabilities.now_playing |= companion.capabilities.now_playing;
+}
+
+/// The companion rows (M26) merged into `primary_id`, if any.
+async fn load_companions(state: &AppState, primary_id: &str) -> Vec<AudioDeviceRow> {
+    sqlx::query(
+        "SELECT id, provider_id, device_id, name, kind, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto, receiver_id, receiver_source, companion_of,
+                (SELECT room_id FROM room_audio_devices WHERE audio_device_id = audio_devices.id LIMIT 1) AS room_id
+         FROM audio_devices WHERE companion_of = ?",
+    )
+    .bind(primary_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| tracing::error!("db error loading companions: {e}"))
+    .unwrap_or_default()
+    .into_iter()
+    .map(row_to_device)
+    .collect()
 }
 
 // ── Services (shared with /api/v1) ───────────────────────────────────────────
@@ -198,7 +267,7 @@ pub(crate) fn build_audio_provider(
 
 pub(crate) async fn list_all_devices(state: &AppState) -> Result<Vec<AudioDeviceRow>, ()> {
     let mut devices: Vec<AudioDeviceRow> = sqlx::query(
-        "SELECT id, provider_id, device_id, name, kind, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto, receiver_id, receiver_source,
+        "SELECT id, provider_id, device_id, name, kind, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto, receiver_id, receiver_source, companion_of,
                 (SELECT room_id FROM room_audio_devices WHERE audio_device_id = audio_devices.id LIMIT 1) AS room_id
          FROM audio_devices ORDER BY name",
     )
@@ -208,6 +277,24 @@ pub(crate) async fn list_all_devices(state: &AppState) -> Result<Vec<AudioDevice
     .into_iter()
     .map(row_to_device)
     .collect();
+
+    // M26: merge each companion's complementary state into its primary, before
+    // the receiver overlay (so a companion's receiver binding shows the receiver's
+    // volume on the merged card). Companions stay in the list (marked
+    // `companion_of`); control surfaces hide them, the inventory collapses them.
+    let companions: Vec<AudioDeviceRow> = devices
+        .iter()
+        .filter(|d| d.companion_of.is_some())
+        .cloned()
+        .collect();
+    for c in &companions {
+        if let Some(primary) = devices
+            .iter_mut()
+            .find(|p| c.companion_of.as_deref() == Some(p.id.as_str()))
+        {
+            merge_companion_into(primary, c);
+        }
+    }
 
     // A bound source shows its receiver's volume/mute (the receiver owns volume),
     // mirroring `get_device_live`. The receiver is in this same list, so overlay
@@ -236,7 +323,7 @@ pub(crate) async fn get_device_live(
     let row = sqlx::query(
         "SELECT a.id, a.provider_id, a.device_id, a.name, a.kind, a.capabilities,
                 a.last_state, a.last_seen, a.enabled, a.glyph, a.hw_id, a.shadowed_by, a.shadow_auto,
-                a.receiver_id, a.receiver_source,
+                a.receiver_id, a.receiver_source, a.companion_of,
                 (SELECT room_id FROM room_audio_devices WHERE audio_device_id = a.id LIMIT 1) AS room_id,
                 p.provider_type, p.credentials
          FROM audio_devices a JOIN providers p ON a.provider_id = p.id
@@ -275,6 +362,13 @@ pub(crate) async fn get_device_live(
             tracing::error!("failed to build audio provider: {e:#}");
             device.state.reachable = Some(false);
         }
+    }
+
+    // M26: overlay companions' complementary state (now-playing, sources, and
+    // their receiver binding) onto this primary — before the receiver overlay,
+    // so a companion's binding shows the receiver's volume here too.
+    for companion in load_companions(state, &device.id).await {
+        merge_companion_into(&mut device, &companion);
     }
 
     // For a bound source the receiver owns volume/mute, so show the receiver's
@@ -376,16 +470,213 @@ pub(crate) fn set_receiver_status(outcome: SetReceiverOutcome) -> axum::response
     }
 }
 
+pub(crate) enum SetCompanionOutcome {
+    Ok,
+    NotFound,
+    BadRequest(String),
+    Db,
+}
+
+/// M26: merge an audio entity into a **primary** as its companion (the link is
+/// stored on the companion as `companion_of`), or unmerge with `primary_id =
+/// None`. Unlike a shadow, the companion's capabilities are routed/overlaid onto
+/// the primary, not discarded. Rejects self-merge, an unknown/companion/shadowed
+/// primary, and merging a device that is itself a primary (no chains).
+pub(crate) async fn set_audio_companion(
+    state: &AppState,
+    id: &str,
+    primary_id: Option<String>,
+) -> SetCompanionOutcome {
+    if let Some(pid) = &primary_id {
+        if pid == id {
+            return SetCompanionOutcome::BadRequest("a device cannot be its own companion".into());
+        }
+        match sqlx::query("SELECT companion_of, shadowed_by FROM audio_devices WHERE id = ?")
+            .bind(pid)
+            .fetch_optional(&state.db)
+            .await
+        {
+            Ok(Some(r)) => {
+                if r.get::<Option<String>, _>("companion_of").is_some() {
+                    return SetCompanionOutcome::BadRequest(
+                        "that device is itself merged into another; pick a standalone primary"
+                            .into(),
+                    );
+                }
+                if r.get::<Option<String>, _>("shadowed_by").is_some() {
+                    return SetCompanionOutcome::BadRequest(
+                        "that device is a hidden duplicate".into(),
+                    );
+                }
+            }
+            Ok(None) => return SetCompanionOutcome::BadRequest("unknown primary device".into()),
+            Err(e) => {
+                tracing::error!("db error validating companion primary: {e}");
+                return SetCompanionOutcome::Db;
+            }
+        }
+        // The companion must not itself be a primary of other devices (no chains).
+        match sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM audio_devices WHERE companion_of = ?",
+        )
+        .bind(id)
+        .fetch_one(&state.db)
+        .await
+        {
+            Ok(n) if n > 0 => {
+                return SetCompanionOutcome::BadRequest(
+                    "this device already has companions merged into it".into(),
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!("db error checking companion chain: {e}");
+                return SetCompanionOutcome::Db;
+            }
+        }
+    }
+    match sqlx::query("UPDATE audio_devices SET companion_of = ? WHERE id = ?")
+        .bind(&primary_id)
+        .bind(id)
+        .execute(&state.db)
+        .await
+    {
+        Ok(r) if r.rows_affected() > 0 => SetCompanionOutcome::Ok,
+        Ok(_) => SetCompanionOutcome::NotFound,
+        Err(e) => {
+            tracing::error!("db error setting companion link: {e}");
+            SetCompanionOutcome::Db
+        }
+    }
+}
+
+pub(crate) fn set_companion_status(outcome: SetCompanionOutcome) -> axum::response::Response {
+    match outcome {
+        SetCompanionOutcome::Ok => StatusCode::NO_CONTENT.into_response(),
+        SetCompanionOutcome::NotFound => StatusCode::NOT_FOUND.into_response(),
+        SetCompanionOutcome::BadRequest(m) => (StatusCode::UNPROCESSABLE_ENTITY, m).into_response(),
+        SetCompanionOutcome::Db => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 /// Route a command for an audio device, honouring an M22 receiver binding: a
 /// bound source sends `volume`/`mute` to its receiver (and switches the receiver
 /// input on power-on) while keeping `power`/`source`/`transport` on itself.
 /// Unbound devices apply the command directly. Shared by session, `/v1`, and MCP
 /// so every surface routes identically.
+/// One backing entity of a composite device (M26), for command routing.
+struct Backing {
+    id: String,
+    capabilities: AudioCapabilities,
+    /// This backing routes its volume/mute to a receiver (M22 binding).
+    receiver_bound: bool,
+    /// This backing is the one actively reporting playback.
+    has_now_playing: bool,
+}
+
+/// Route an `AudioCommand` across a composite's backings (`backings[0]` is the
+/// primary), per the M26 rules:
+/// - **volume / mute → a receiver-bound backing** (so it reaches the receiver),
+///   else the primary;
+/// - **transport → the backing controlling playback** (now-playing, then any
+///   with transport), else the primary;
+/// - **source/app → the backing with selectable inputs**, else the primary;
+/// - **power → the primary**.
+///
+/// Returns `(backing_id, sub-command)` for each non-empty target. Each part is
+/// then applied via [`apply_with_receiver`], which does that backing's own
+/// receiver split — so a receiver-bound backing's volume reaches its receiver.
+fn route_across_backings(cmd: &AudioCommand, backings: &[Backing]) -> Vec<(String, AudioCommand)> {
+    let primary_id = backings[0].id.clone();
+    let pick = |pred: fn(&Backing) -> bool| -> String {
+        backings
+            .iter()
+            .find(|b| pred(b))
+            .map_or_else(|| primary_id.clone(), |b| b.id.clone())
+    };
+    let mut parts: std::collections::BTreeMap<String, AudioCommand> =
+        std::collections::BTreeMap::new();
+    if cmd.volume.is_some() || cmd.mute.is_some() {
+        let e = parts.entry(pick(|b| b.receiver_bound)).or_default();
+        e.volume = cmd.volume;
+        e.mute = cmd.mute;
+    }
+    if cmd.transport.is_some() {
+        let target = backings
+            .iter()
+            .find(|b| b.capabilities.transport && b.has_now_playing)
+            .or_else(|| backings.iter().find(|b| b.capabilities.transport))
+            .map_or_else(|| primary_id.clone(), |b| b.id.clone());
+        parts.entry(target).or_default().transport = cmd.transport;
+    }
+    if cmd.source.is_some() {
+        parts
+            .entry(pick(|b| b.capabilities.sources))
+            .or_default()
+            .source = cmd.source.clone();
+    }
+    if cmd.power.is_some() {
+        parts.entry(primary_id).or_default().power = cmd.power;
+    }
+    parts.into_iter().filter(|(_, c)| !c.is_empty()).collect()
+}
+
+/// The composite's backings (primary first, then companions), or just `[id]`
+/// when `id` has no companions. Each carries the capability/binding facts the
+/// router needs.
+async fn load_composite_backings(state: &AppState, id: &str) -> Vec<Backing> {
+    let rows = sqlx::query(
+        "SELECT id, capabilities, receiver_id, last_state, (id = ?) AS is_primary
+         FROM audio_devices
+         WHERE id = ? OR companion_of = ?
+         ORDER BY is_primary DESC, name",
+    )
+    .bind(id)
+    .bind(id)
+    .bind(id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| tracing::error!("db error loading composite backings: {e}"))
+    .unwrap_or_default();
+    rows.into_iter()
+        .map(|r| {
+            let state: Option<AudioState> = r
+                .get::<Option<String>, _>("last_state")
+                .and_then(|s| serde_json::from_str(&s).ok());
+            Backing {
+                id: r.get("id"),
+                capabilities: serde_json::from_str(&r.get::<String, _>("capabilities"))
+                    .unwrap_or_default(),
+                receiver_bound: r.get::<Option<String>, _>("receiver_id").is_some(),
+                has_now_playing: state.is_some_and(|s| s.now_playing.is_some()),
+            }
+        })
+        .collect()
+}
+
+/// Apply a command to a device. If `id` is a composite **primary** (has
+/// companions merged in), route each field to the backing that owns it (M26);
+/// otherwise drive the single device directly (with its own receiver split).
 pub(crate) async fn apply_audio_command(
     state: &AppState,
     id: &str,
     cmd: &AudioCommand,
 ) -> SetAudioOutcome {
+    let backings = load_composite_backings(state, id).await;
+    if backings.len() <= 1 {
+        return apply_with_receiver(state, id, cmd).await;
+    }
+    for (backing_id, sub) in route_across_backings(cmd, &backings) {
+        match apply_with_receiver(state, &backing_id, &sub).await {
+            SetAudioOutcome::Ok => {}
+            other => return other,
+        }
+    }
+    SetAudioOutcome::Ok
+}
+
+/// Drive one device, routing its volume/mute to a bound receiver (M22) if any.
+async fn apply_with_receiver(state: &AppState, id: &str, cmd: &AudioCommand) -> SetAudioOutcome {
     match load_receiver_binding(state, id).await {
         Err(()) => SetAudioOutcome::Db,
         Ok(None) => apply_to_device(state, id, cmd).await,
@@ -856,4 +1147,76 @@ async fn ungroup_handler(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     group_response(ungroup_device(&state, &id).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::audio::TransportCmd;
+
+    fn backing(
+        id: &str,
+        transport: bool,
+        sources: bool,
+        receiver_bound: bool,
+        now_playing: bool,
+    ) -> Backing {
+        Backing {
+            id: id.into(),
+            capabilities: AudioCapabilities {
+                transport,
+                sources,
+                ..Default::default()
+            },
+            receiver_bound,
+            has_now_playing: now_playing,
+        }
+    }
+
+    #[test]
+    fn routes_volume_to_the_receiver_bound_backing_not_the_primary() {
+        // BRAVIA shape: primary = the TV (no receiver), companion = the speaker
+        // (receiver-bound + reporting playback). Volume must reach the receiver
+        // (via the speaker), transport → the speaker, power → the TV. This is the
+        // exact precedence: a receiver binding on ANY backing wins volume.
+        let backings = vec![
+            backing("tv", false, false, false, false),
+            backing("speaker", true, false, true, true),
+        ];
+        let cmd = AudioCommand {
+            power: Some(true),
+            volume: Some(30),
+            mute: Some(true),
+            source: None,
+            transport: Some(TransportCmd::Toggle),
+        };
+        let routed: std::collections::HashMap<String, AudioCommand> =
+            route_across_backings(&cmd, &backings).into_iter().collect();
+
+        assert_eq!(routed["speaker"].volume, Some(30));
+        assert_eq!(routed["speaker"].mute, Some(true));
+        assert_eq!(routed["speaker"].transport, Some(TransportCmd::Toggle));
+        assert_eq!(routed["tv"].power, Some(true));
+        assert_eq!(routed["tv"].volume, None);
+    }
+
+    #[test]
+    fn routes_to_primary_when_no_backing_owns_the_field() {
+        // No receiver anywhere → volume falls back to the primary; source goes to
+        // the backing that has the `sources` capability.
+        let backings = vec![
+            backing("primary", false, true, false, false),
+            backing("comp", false, false, false, false),
+        ];
+        let cmd = AudioCommand {
+            volume: Some(50),
+            source: Some("hdmi1".into()),
+            ..Default::default()
+        };
+        let routed: std::collections::HashMap<String, AudioCommand> =
+            route_across_backings(&cmd, &backings).into_iter().collect();
+
+        assert_eq!(routed["primary"].volume, Some(50));
+        assert_eq!(routed["primary"].source.as_deref(), Some("hdmi1"));
+    }
 }

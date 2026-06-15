@@ -132,6 +132,17 @@ export async function setPowerShadow(id: string, shadowed_by: string | null): Pr
   });
 }
 
+/** M26 composite: merge an audio entity into `primary_id` (or `null` to unmerge).
+ * Unlike shadowing, the companion's capabilities are routed/overlaid onto the
+ * primary, not discarded. */
+export async function setAudioCompanion(id: string, primary_id: string | null): Promise<void> {
+  await fetch(`/api/audio/devices/${id}/companion`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ primary_id }),
+  });
+}
+
 /** Assign a device to a room from the device side (`null` removes it from its
  * room). Sets *direct* membership — room links (synced provider groups) are
  * managed on the Rooms page. */
@@ -368,6 +379,10 @@ export interface AudioDevice {
   shadowed_by?: string | null;
   /** true if the shadow was set automatically by hw_id matching (native wins). */
   shadow_auto?: boolean;
+  /** M26 composite: the primary device this entity is merged into (a companion),
+   * or null. A companion is hidden from control; its state/controls merge into
+   * the primary (unlike shadowed_by, which discards them). */
+  companion_of?: string | null;
   /** The room this device is directly assigned to (Devices-page assignment),
    * or null. Room links (synced provider groups) aren't reflected here. */
   room_id?: string | null;
@@ -448,6 +463,96 @@ export async function groupAudioDevice(
 /** Remove `id` from any playback group, returning it to standalone playback. */
 export async function ungroupAudioDevice(id: string): Promise<string | null> {
   const res = await fetch(`/api/audio/devices/${id}/ungroup`, { method: "POST" });
+  if (res.ok) return null;
+  return (await res.text()) || `HTTP ${res.status}`;
+}
+
+// ── Remote control (M24) ──────────────────────────────────────────────────────
+
+export interface RemoteState {
+  on: boolean;
+  /** Foreground app's package id (e.g. `com.netflix.ninja`), if reported. */
+  current_app?: string;
+  reachable?: boolean;
+}
+
+export interface RemoteDevice {
+  id: string;
+  provider_id: string;
+  device_id: string;
+  name: string;
+  state: RemoteState;
+  last_seen: string | null;
+  enabled: boolean;
+  glyph: string | null;
+  hw_id: string | null;
+  /** The paired TV audio device id, if this remote controls a known TV. */
+  paired_audio_id: string | null;
+}
+
+/** The canonical keys a remote understands (snake_case, mirrors the backend). */
+export type RemoteKey =
+  | "up" | "down" | "left" | "right" | "select"
+  | "back" | "home" | "menu"
+  | "volume_up" | "volume_down" | "mute"
+  | "play_pause" | "next" | "previous"
+  | "power";
+
+/** One action sent to a remote — a tagged union (exactly one variant). */
+export type RemoteCommand =
+  | { key: { key: RemoteKey; hold_secs?: number } }
+  | { text: { text: string } }
+  | { launch_app: { activity: string } }
+  | { power: { on: boolean } };
+
+/** A launchable app on a remote's TV (pinned ∪ recents). */
+export interface RemoteApp {
+  package: string;
+  name: string;
+  pinned: boolean;
+  last_seen: string | null;
+}
+
+export async function getRemoteDevices(): Promise<RemoteDevice[]> {
+  const res = await fetch("/api/remote/devices");
+  if (!res.ok) return [];
+  return res.json();
+}
+
+/** Live read — round-trips to the device for fresh power / current-app. */
+export async function getRemoteState(id: string): Promise<RemoteState | null> {
+  const res = await fetch(`/api/remote/devices/${id}`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function sendRemoteCommand(id: string, cmd: RemoteCommand): Promise<string | null> {
+  const res = await fetch(`/api/remote/devices/${id}/command`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(cmd),
+  });
+  if (res.ok) return null;
+  return (await res.text()) || `HTTP ${res.status}`;
+}
+
+/** A remote's launchable apps (pinned first, then recents). */
+export async function getRemoteApps(id: string): Promise<RemoteApp[]> {
+  const res = await fetch(`/api/remote/devices/${id}/apps`);
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function setRemoteAppPin(
+  id: string,
+  pkg: string,
+  pinned: boolean,
+): Promise<string | null> {
+  const res = await fetch(`/api/remote/devices/${id}/apps/pin`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ package: pkg, pinned }),
+  });
   if (res.ok) return null;
   return (await res.text()) || `HTTP ${res.status}`;
 }

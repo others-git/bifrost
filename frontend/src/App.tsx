@@ -11,6 +11,7 @@ import { FloorPlanPage } from "./pages/FloorPlan";
 import { SettingsPage } from "./pages/Settings";
 import { S } from "./styles";
 import { useViewport } from "./useViewport";
+import { useAutoReloadOnNewBuild } from "./useAutoReload";
 
 /** Pages reachable from the nav tray. */
 type NavPage = "dashboard" | "audio" | "devices" | "scenes" | "rooms" | "plan" | "settings";
@@ -62,6 +63,9 @@ export function App() {
   const [lights, setLights] = useState<Light[]>([]);
   const [version, setVersion] = useState("");
   const { isMobile, isCompact } = useViewport();
+
+  // Kiosk self-update: reload when a new frontend build is deployed.
+  useAutoReloadOnNewBuild();
 
   useEffect(() => {
     getHealth().then((h) => setVersion(h.version));
