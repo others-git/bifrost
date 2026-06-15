@@ -1082,12 +1082,9 @@ pub(crate) async fn apply_uniform_state(
     let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut applied = 0usize;
     let mut failed = 0usize;
-    let state_json = serde_json::to_string(new_state).unwrap_or_default();
-    // A pure on/off command (no lighting attributes) must NOT clobber the stored
-    // colour/brightness — the device keeps them across a power cycle, so we only
-    // flip `on`. Otherwise a power-on would wipe the colour and the UI would
-    // re-sync to a colourless default. (Shared with the single-light path.)
-    let pure_power = crate::api::lights::pure_power(new_state);
+    // `persist_light_state` merges only the attributes present in `new_state`, so
+    // a partial command (pure on/off, or a brightness-/colour-only cascade) keeps
+    // every member light's untouched dimensions intact.
 
     // Native group calls first — one Hue grouped_light PUT replaces N per-light PUTs.
     for chunk in native_chunks(state, room_id).await {
@@ -1102,13 +1099,7 @@ pub(crate) async fn apply_uniform_state(
             Ok(true) => {
                 for light_id in &chunk.light_ids {
                     covered.insert(light_id.clone());
-                    crate::api::lights::persist_light_state(
-                        &state.db,
-                        light_id,
-                        &state_json,
-                        pure_power,
-                    )
-                    .await;
+                    crate::api::lights::persist_light_state(&state.db, light_id, new_state).await;
                 }
                 applied += chunk.light_ids.len();
             }
@@ -1150,17 +1141,10 @@ pub(crate) async fn apply_uniform_state(
         };
         let db = state.db.clone();
         let target = new_state.clone();
-        let target_json = state_json.clone();
         jobs.push(async move {
             match provider.set_state(&m.device_id, &target).await {
                 Ok(()) => {
-                    crate::api::lights::persist_light_state(
-                        &db,
-                        &m.light_id,
-                        &target_json,
-                        pure_power,
-                    )
-                    .await;
+                    crate::api::lights::persist_light_state(&db, &m.light_id, &target).await;
                     true
                 }
                 Err(e) => {

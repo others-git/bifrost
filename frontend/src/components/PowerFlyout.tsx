@@ -165,6 +165,8 @@ export function DisableRow({
   enabled: boolean;
   onSetEnabled: (enabled: boolean) => void;
 }) {
+  const { isCompact } = useViewport();
+  const tone = enabled ? "#9a6b5a" : "#6fae84";
   return (
     <button
       onClick={() => onSetEnabled(!enabled)}
@@ -173,15 +175,30 @@ export function DisableRow({
           ? "Stop sending commands and hide from room control (stays in the room)"
           : "Resume control of this device"
       }
-      style={{
-        background: "none",
-        border: "none",
-        color: enabled ? "#9a6b5a" : "#6fae84",
-        cursor: "pointer",
-        fontSize: "0.74rem",
-        padding: "0.2rem 0",
-        alignSelf: "flex-start",
-      }}
+      style={
+        isCompact
+          ? {
+              background: "rgba(255,255,255,0.04)",
+              border: `1px solid ${tone}55`,
+              borderRadius: 10,
+              color: tone,
+              cursor: "pointer",
+              fontSize: "0.9rem",
+              padding: "0.7rem 1rem",
+              minHeight: 44,
+              width: "100%",
+              textAlign: "center",
+            }
+          : {
+              background: "none",
+              border: "none",
+              color: tone,
+              cursor: "pointer",
+              fontSize: "0.74rem",
+              padding: "0.2rem 0",
+              alignSelf: "flex-start",
+            }
+      }
     >
       {enabled ? "Disable device" : "Enable device"}
     </button>

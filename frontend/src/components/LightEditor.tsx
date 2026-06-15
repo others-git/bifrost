@@ -46,8 +46,49 @@ export function hexToHs(hex: string): [number, number] {
   return [h, s];
 }
 
+// ── Light control change contract ───────────────────────────────────────────
+//
+// Every light control surface (the color wheel, the white/temperature wheel, the
+// brightness bar, the swatches) reports a change through this one discriminated
+// union. The `field` says *which* dimension moved, so a fan-out caller (a room
+// cascade) can apply only that dimension and leave each member light's other
+// attributes intact — and so a brightness drag never overwrites a per-light
+// color, a color pick never resets brightness, and color vs. white stay distinct.
+// Add a new light control by adding a variant here and a case in each caller.
+
+export type LightControlChange =
+  | { field: "color"; hex: string }
+  | { field: "brightness"; brightness: number }
+  | { field: "temp"; mirek: number };
+
 // Warm whites first (the lived-in defaults), then color anchors.
 const SWATCHES = ["#ffffff", "#ffe4b3", "#ffb46b", "#ff7d33", "#ff5e9c", "#8b5cf6", "#3b82f6", "#4ade80"];
+
+// ── Color temperature (mirek ⇄ Kelvin ⇄ sRGB) ───────────────────────────────
+//
+// Mirek (micro-reciprocal kelvin = 1e6 / K) is the unit Hue uses; lower = cooler.
+// The 153–500 span is Hue's tunable-white range (≈6500K cool → ≈2000K warm).
+
+export const MIREK_MIN = 153; // ≈6500K — coolest white
+export const MIREK_MAX = 500; // ≈2000K — warmest white
+
+/** Approximate sRGB for a black-body temperature (Tanner Helland's fit), used to
+ * render the white wheel's gradient and the preview swatch. */
+export function kelvinToRgb(kelvin: number): [number, number, number] {
+  const t = Math.max(1000, Math.min(40000, kelvin)) / 100;
+  const clamp = (x: number) => Math.max(0, Math.min(255, Math.round(x)));
+  const r = t <= 66 ? 255 : 329.698727446 * Math.pow(t - 60, -0.1332047592);
+  const g =
+    t <= 66
+      ? 99.4708025861 * Math.log(t) - 161.1195681661
+      : 288.1221695283 * Math.pow(t - 60, -0.0755148492);
+  const b = t >= 66 ? 255 : t <= 19 ? 0 : 138.5177312231 * Math.log(t - 10) - 305.0447927307;
+  return [clamp(r), clamp(g), clamp(b)];
+}
+
+export function mirekToRgb(mirek: number): [number, number, number] {
+  return kelvinToRgb(1e6 / mirek);
+}
 
 // ── Color wheel ──────────────────────────────────────────────────────────────
 
@@ -150,11 +191,13 @@ export function ColorWheel({
 
 export function BrightnessBar({
   height = 176,
+  width = 30,
   hex,
   value,
   onPick,
 }: {
   height?: number;
+  width?: number;
   hex: string;
   value: number; // 1..100
   onPick: (value: number) => void;
@@ -168,7 +211,8 @@ export function BrightnessBar({
     onPick(Math.max(1, Math.min(100, Math.round(f * 100))));
   }
 
-  const knobTop = 3 + (1 - value / 100) * (height - 30);
+  const knob = width - 6;
+  const knobTop = 3 + (1 - value / 100) * (height - knob - 6);
 
   return (
     <div
@@ -176,9 +220,9 @@ export function BrightnessBar({
       title={`${value}%`}
       style={{
         position: "relative",
-        width: 30,
+        width,
         height,
-        borderRadius: 15,
+        borderRadius: width / 2,
         border: "1px solid #333",
         background: `linear-gradient(to bottom, ${hex}, #15151a)`,
         touchAction: "none",
@@ -200,16 +244,156 @@ export function BrightnessBar({
       <div
         style={{
           position: "absolute",
-          left: 2,
+          left: 3,
           top: knobTop,
-          width: 24,
-          height: 24,
+          width: knob,
+          height: knob,
           borderRadius: "50%",
           background: "#fff",
           boxShadow: "0 1px 5px rgba(0,0,0,0.65)",
           pointerEvents: "none",
         }}
       />
+    </div>
+  );
+}
+
+// ── White / color-temperature wheel ─────────────────────────────────────────
+
+/** A Hue-style "white" picker: a disc filled with a warm→cool gradient where the
+ * horizontal position selects the color temperature (mirek). Shares the disc
+ * shape and drag feel of [`ColorWheel`] so the Color/White toggle just swaps one
+ * for the other. The dot follows the finger; only its x maps to temperature. */
+export function ColorTempWheel({
+  size = 176,
+  mirek,
+  onPick,
+}: {
+  size?: number;
+  mirek: number;
+  onPick: (mirek: number) => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const dragging = useRef(false);
+
+  useEffect(() => {
+    const canvas = canvasRef.current!;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const px = Math.round(size * dpr);
+    canvas.width = px;
+    canvas.height = px;
+    const ctx = canvas.getContext("2d")!;
+    for (let x = 0; x < px; x++) {
+      // Left = warmest (MIREK_MAX), right = coolest (MIREK_MIN).
+      const f = x / (px - 1);
+      const m = MIREK_MAX - f * (MIREK_MAX - MIREK_MIN);
+      const [r, g, b] = mirekToRgb(m);
+      ctx.fillStyle = `rgb(${r},${g},${b})`;
+      ctx.fillRect(x, 0, 1, px);
+    }
+  }, [size]);
+
+  function pick(e: React.PointerEvent) {
+    const rect = canvasRef.current!.getBoundingClientRect();
+    const f = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    onPick(Math.round(MIREK_MAX - f * (MIREK_MAX - MIREK_MIN)));
+  }
+
+  const f = (MIREK_MAX - mirek) / (MIREK_MAX - MIREK_MIN);
+  const kx = f * size;
+  const ky = size / 2;
+
+  return (
+    <div
+      style={{ position: "relative", width: size, height: size, touchAction: "none", flexShrink: 0 }}
+      onPointerDown={(e) => {
+        dragging.current = true;
+        e.currentTarget.setPointerCapture(e.pointerId);
+        pick(e);
+      }}
+      onPointerMove={(e) => {
+        if (dragging.current) pick(e);
+      }}
+      onPointerUp={() => {
+        dragging.current = false;
+      }}
+    >
+      <canvas
+        ref={canvasRef}
+        style={{ width: size, height: size, display: "block", borderRadius: "50%", cursor: "crosshair" }}
+      />
+      <div
+        style={{
+          position: "absolute",
+          left: kx - 11,
+          top: ky - 11,
+          width: 22,
+          height: 22,
+          borderRadius: "50%",
+          border: "3px solid #fff",
+          boxShadow: "0 0 0 1px rgba(0,0,0,0.45), 0 1px 4px rgba(0,0,0,0.5)",
+          pointerEvents: "none",
+        }}
+      />
+    </div>
+  );
+}
+
+// ── Color / White mode toggle ────────────────────────────────────────────────
+
+/** Segmented pill that switches the editor between the color wheel and the white
+ * (color-temperature) wheel — the Hue "Color / White" tabs. Touch-sized on
+ * compact viewports per the shared control conventions. */
+function ModeToggle({
+  mode,
+  onChange,
+  compact,
+}: {
+  mode: "color" | "white";
+  onChange: (m: "color" | "white") => void;
+  compact: boolean;
+}) {
+  const seg = (m: "color" | "white", label: string) => {
+    const active = mode === m;
+    return (
+      <button
+        onClick={() => onChange(m)}
+        aria-pressed={active}
+        style={{
+          flex: 1,
+          padding: compact ? "0.55rem 0" : "0.3rem 0",
+          minHeight: compact ? 40 : undefined,
+          fontSize: compact ? "0.9rem" : "0.78rem",
+          fontWeight: 600,
+          letterSpacing: "0.02em",
+          borderRadius: 9,
+          border: "none",
+          cursor: "pointer",
+          color: active ? "#0c0c0e" : "#cfcfd6",
+          background: active
+            ? m === "white"
+              ? "linear-gradient(90deg, #ffd9a0, #cfe4ff)"
+              : "linear-gradient(90deg, #ff7d8a, #8b5cf6 55%, #38bdf8)"
+            : "transparent",
+        }}
+      >
+        {label}
+      </button>
+    );
+  };
+  return (
+    <div
+      style={{
+        display: "flex",
+        gap: 4,
+        padding: 3,
+        borderRadius: 12,
+        background: "rgba(255,255,255,0.06)",
+        border: "1px solid rgba(255,255,255,0.08)",
+      }}
+    >
+      {seg("color", "Color")}
+      {seg("white", "White")}
     </div>
   );
 }
@@ -221,8 +405,11 @@ export function LightEditor({
   title,
   initialHex,
   initialBrightness = 100,
+  initialMirek = 366, // ≈2700K, a warm-white default
   showColor = true,
   showBrightness = true,
+  showWhite = false,
+  initialMode,
   on,
   onToggle,
   onChange,
@@ -234,13 +421,22 @@ export function LightEditor({
   title?: string;
   initialHex: string;
   initialBrightness?: number;
+  /** Current color temperature in mirek, when the light supports white. */
+  initialMirek?: number;
   showColor?: boolean;
   showBrightness?: boolean;
+  /** Show the white / color-temperature wheel (light has tunable white). */
+  showWhite?: boolean;
+  /** Which wheel to open on. Defaults to the light's current mode (white if it's
+   * showing a temperature and no color), else color. */
+  initialMode?: "color" | "white";
   /** When provided, the editor shows a power switch row. */
   on?: boolean;
   onToggle?: () => void;
-  /** Fires live while dragging — callers debounce network sends. */
-  onChange: (hex: string, brightness: number) => void;
+  /** Fires live while dragging — callers debounce network sends. The change's
+   * `field` says which control moved, so a room cascade can adjust *only* that
+   * dimension and leave each member light's other attributes intact. */
+  onChange: (change: LightControlChange) => void;
   onClose: () => void;
   /** Extra controls rendered at the bottom (e.g. a room's scene selector). */
   children?: ReactNode;
@@ -252,6 +448,13 @@ export function LightEditor({
   // roundtrip jitter while dragging.
   const [[hue, sat], setHs] = useState<[number, number]>(() => hexToHs(initialHex));
   const [brightness, setBrightness] = useState(initialBrightness);
+  const [mirek, setMirek] = useState(initialMirek);
+  // Color vs. white are mutually exclusive; only offer the toggle when the light
+  // supports both. Default to the light's current mode.
+  const canToggle = showColor && showWhite;
+  const [mode, setMode] = useState<"color" | "white">(
+    () => initialMode ?? (showColor ? "color" : "white"),
+  );
   const hex = rgbToHex(...hsvToRgb(hue, sat, 1));
 
   useLayoutEffect(() => {
@@ -297,13 +500,23 @@ export function LightEditor({
 
   function applyColor(h: number, s: number) {
     setHs([h, s]);
-    onChange(rgbToHex(...hsvToRgb(h, s, 1)), brightness);
+    onChange({ field: "color", hex: rgbToHex(...hsvToRgb(h, s, 1)) });
   }
 
   function applyBrightness(b: number) {
     setBrightness(b);
-    onChange(hex, b);
+    onChange({ field: "brightness", brightness: b });
   }
+
+  function applyTemp(m: number) {
+    setMirek(m);
+    onChange({ field: "temp", mirek: m });
+  }
+
+  const whiteHex = rgbToHex(...mirekToRgb(mirek));
+  // Exactly one wheel renders for any capability combination.
+  const colorActive = showColor && (!showWhite || mode === "color");
+  const whiteActive = showWhite && (!showColor || mode === "white");
 
   return createPortal(
     <div
@@ -341,13 +554,24 @@ export function LightEditor({
         </button>
       </div>
 
-      <div style={{ display: "flex", gap: "0.8rem", alignItems: "center" }}>
-        {showColor && <ColorWheel hue={hue} sat={sat} onPick={applyColor} />}
-        {showBrightness && <BrightnessBar hex={showColor ? hex : "#ffd9a0"} value={brightness} onPick={applyBrightness} />}
+      {canToggle && <ModeToggle mode={mode} onChange={setMode} compact={isCompact} />}
+
+      <div style={{ display: "flex", gap: isCompact ? "1.4rem" : "0.8rem", alignItems: "center", justifyContent: "center" }}>
+        {colorActive && <ColorWheel size={isCompact ? 240 : 176} hue={hue} sat={sat} onPick={applyColor} />}
+        {whiteActive && <ColorTempWheel size={isCompact ? 240 : 176} mirek={mirek} onPick={applyTemp} />}
+        {showBrightness && (
+          <BrightnessBar
+            height={isCompact ? 240 : 176}
+            width={isCompact ? 44 : 30}
+            hex={whiteActive ? whiteHex : colorActive ? hex : "#ffd9a0"}
+            value={brightness}
+            onPick={applyBrightness}
+          />
+        )}
       </div>
 
-      {showColor && (
-        <div style={{ display: "flex", gap: "0.45rem", justifyContent: "center" }}>
+      {colorActive && (
+        <div style={{ display: "flex", gap: isCompact ? "0.6rem" : "0.45rem", justifyContent: "center", flexWrap: "wrap" }}>
           {SWATCHES.map((c) => (
             <button
               key={c}
@@ -357,8 +581,8 @@ export function LightEditor({
               }}
               title={c}
               style={{
-                width: 18,
-                height: 18,
+                width: isCompact ? 40 : 18,
+                height: isCompact ? 40 : 18,
                 borderRadius: "50%",
                 border: c === hex ? "2px solid #fff" : "1px solid rgba(255,255,255,0.25)",
                 background: c,

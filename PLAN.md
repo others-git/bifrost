@@ -13,6 +13,13 @@
   one has now-playing, the other the remote). Distinct from de-dup, which is for
   *equivalent* copies. Detail below.
 
+**Design directions (formalize as we add controls):**
+- **Normalized "Control" abstraction** — `LightControlChange` (M27) normalized *light*
+  controls into one typed change contract; extend to a shared, capability-gated,
+  compact-friendly control vocabulary across light/audio/power/remote so each new
+  control is declared once and reused by Dashboard / Rooms / Floor-Plan / scenes,
+  never forked per view. Detail in the M27 section.
+
 **Flagship — native voice (big, multi-phase):**
 - **M23 — Native voice: command control** *(P1 shipped: grammar + `/api/voice/command`)* —
   remaining: STT (`/api/voice/listen`), LLM fallback over MCP tool schemas, tablet PTT,
@@ -130,6 +137,48 @@ frontend is provider-agnostic; the HA Android TV Remote is the first backend.
   is suppressed while the remote is up. `tsc` + `vite build` clean.
 
 **M25 is feature-complete** (all 4 phases). Ships with the next release bump.
+
+---
+
+## M27 — Tunable white + the control-change contract — DONE (in tree, unreleased)
+
+A "white light" picker (Hue's Color/White tabs) plus the first step of a
+**normalized control design** for the growing set of light controls.
+
+**Frontend (`components/LightEditor.tsx`):**
+- **`ColorTempWheel`** — a disc filled with a warm→cool gradient where the x
+  position selects color temperature in **mirek** (`MIREK_MIN` 153 ≈6500K …
+  `MIREK_MAX` 500 ≈2000K). Shares the disc shape/drag feel of `ColorWheel`, so the
+  **`ModeToggle`** ("Color / White") just swaps one wheel for the other. `mirekToRgb`
+  (Tanner-Helland fit) renders the gradient + the brightness-bar tint.
+- New props `showWhite` / `initialMirek` / `initialMode`; the toggle only appears
+  when a light has both `color_rgb` and `color_temperature`. Wired through
+  Dashboard (`LightButton`, `RoomBox`), FloorPlan, and the scene palette editor.
+- **`LightControlChange`** — the formalized contract: every light control surface
+  (wheel, white wheel, brightness bar, swatches) emits one discriminated change
+  `{ field: "color" | "brightness" | "temp"; … }`. A fan-out caller (room cascade)
+  applies **only** the moved dimension, so brightness never stomps per-light color,
+  and color ⇄ white stay mutually exclusive. *Add a new light control by adding a
+  variant + a case in each caller.* This is the seed of the broader "Control"
+  normalization (see the open design note below).
+
+**Backend (`api::lights::persist_light_state`):** now **merges** the attributes
+present in a command into the cached `last_state` instead of overwriting the row —
+partial commands (pure on/off, brightness-only cascade, a white-temp change) keep
+the dimensions they didn't touch. **Color and color-temperature are mutually
+exclusive**: setting `color` clears `color_temp_mirek` and vice-versa, so
+`last_state` is an honest signal of the light's active mode. Removed the old
+`pure_power` special-case (the merge subsumes it). Tests:
+`room_brightness_change_preserves_light_color`, `light_color_temp_change_clears_color`
+(+ the existing `room_power_cycle_preserves_light_color` still green).
+
+**Open design note — formalize a reusable "Control" abstraction.** `LightControlChange`
+normalizes *light* controls; the next step is a shared control vocabulary across
+domains (light / audio / power / remote) so every new control surface (picker,
+slider, toggle, segmented mode) is declared once and reused by Dashboard, Rooms,
+Floor-Plan fly-outs, and scenes — never re-implemented per view. Capture the
+common shape (a labelled, capability-gated, compact-friendly control emitting a
+typed change to the shared service layer) as controls accrue.
 
 ---
 
@@ -252,6 +301,7 @@ A self-hosted Rust smart home hub that is:
 | 21 — Cross-provider de-dup | Hardware-id (`mac:`) matching **shadows** the HA copy under the native one (native wins); manual link/unlink as the no-hw_id fallback. Phase 1 shipped (Phase 2 fuzzy heuristics deferred). Detail in archive below. |
 | 22 — Receiver binding | Source devices (TV/streamer/console) **bind** to an AV receiver that owns their volume/mute; powering a source on wakes + switches the receiver to its input. Onkyo single-connection `OnkyoLink`. Phases 1+2 shipped. Detail in archive below. |
 | 25 — Remote control + `BifrostRemote` | `remote` device domain + HA Android-TV provider; session/`v1`/MCP surfaces; TV pairing by `hw_id`; app recents/pins; the `BifrostRemote` frontend. Feature-complete in tree (unreleased). Detail above. |
+| 27 — Tunable white + control-change contract | LightEditor gains a Hue-style **Color / White toggle** with a warm→cool **color-temperature wheel** (`ColorTempWheel`, mirek 153–500) for lights with `color_temperature`. Backed by a formalized **`LightControlChange`** union (`color`/`brightness`/`temp`) every light control emits, so a fan-out caller adjusts only the moved dimension. `persist_light_state` now **merges** present attributes (partial commands keep untouched dimensions) with **color⇄temp exclusivity** (set one, clear the other) — fixing the room-brightness-stomps-color bug and giving the UI an honest active-mode signal. Detail below. |
 
 ### Open follow-ups from shipped milestones
 

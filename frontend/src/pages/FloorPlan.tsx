@@ -32,7 +32,7 @@ import {
   type PlanSummary,
   type Room,
 } from "../api";
-import { ColorWheel, hexToHs, hexToRgb, hsvToRgb, LightEditor } from "../components/LightEditor";
+import { ColorWheel, hexToHs, hexToRgb, hsvToRgb, LightEditor, type LightControlChange } from "../components/LightEditor";
 import { AudioEditor } from "../components/AudioControls";
 import { RoomVolumeStrip } from "../components/RoomAudio";
 import { SceneButton, SceneModal } from "../components/scenes";
@@ -402,16 +402,31 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
   }
 
   /** Live edits from the shared editor — optimistic locally, debounced to the API. */
-  function editorChange(target: EditorTarget, hex: string, brightness: number) {
-    const color = rgbToXy(...hexToRgb(hex));
+  function editorChange(target: EditorTarget, change: LightControlChange) {
+    // Adjust only the dimension the user moved (see Dashboard's `cascade`): a room
+    // brightness change must not stomp each light's own color, color and white are
+    // mutually exclusive, and the backend merges the partial patch into each light.
+    const apply = (cur: Partial<LightState>): LightState => {
+      const next: LightState = { ...cur, on: true };
+      if (change.field === "brightness") next.brightness = change.brightness;
+      else if (change.field === "color") {
+        next.color = rgbToXy(...hexToRgb(change.hex));
+        next.color_temp_mirek = undefined;
+      } else {
+        next.color_temp_mirek = change.mirek;
+        next.color = undefined;
+      }
+      return next;
+    };
+    const patch: LightState =
+      change.field === "color"
+        ? { on: true, color: rgbToXy(...hexToRgb(change.hex)) }
+        : change.field === "temp"
+          ? { on: true, color_temp_mirek: change.mirek }
+          : { on: true, brightness: change.brightness };
     if (target.kind === "light") {
-      const next: LightState = {
-        ...(statesById.get(target.id) ?? {}),
-        on: true,
-        color,
-        brightness,
-      };
-      setStatesById((prev) => new Map(prev).set(target.id, next));
+      const next = apply(statesById.get(target.id) ?? {});
+      setStatesById((prevMap) => new Map(prevMap).set(target.id, next));
       clearTimeout(editTimer.current);
       editTimer.current = setTimeout(() => { setLightState(target.id, next); }, 200);
     } else if (target.kind === "room") {
@@ -419,14 +434,12 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
       if (!room) return;
       setStatesById((prev) => {
         const next = new Map(prev);
-        for (const id of room.light_ids) {
-          next.set(id, { ...(next.get(id) ?? {}), on: true, color, brightness });
-        }
+        for (const id of room.light_ids) next.set(id, apply(next.get(id) ?? {}));
         return next;
       });
       clearTimeout(editTimer.current);
       editTimer.current = setTimeout(() => {
-        setRoomState(room.id, { on: true, color, brightness });
+        setRoomState(room.id, patch);
       }, 250);
     }
   }
@@ -811,11 +824,14 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
               title={light ? lightLabel(light) : "Light"}
               initialHex={hex}
               initialBrightness={st?.brightness ?? 100}
+              initialMirek={st?.color_temp_mirek ?? 366}
+              initialMode={st?.color_temp_mirek != null && !st?.color ? "white" : "color"}
               showColor={light?.capabilities.color_rgb ?? true}
+              showWhite={light?.capabilities.color_temperature ?? false}
               showBrightness={light?.capabilities.dimmable ?? true}
               on={st?.on ?? false}
               onToggle={() => toggleLight(editor.id)}
-              onChange={(h, b) => editorChange(editor, h, b)}
+              onChange={(ch) => editorChange(editor, ch)}
               onClose={() => setEditor(null)}
             />
           );
@@ -844,15 +860,23 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
         const hex = litColor
           ? rgbToHex(...xyToRgb(litColor.x, litColor.y, litColor.brightness))
           : "#ffb84d";
+        const roomSupportsWhite = room.light_ids.some(
+          (id) => lights.find((l) => l.id === id)?.capabilities.color_temperature,
+        );
+        const roomMirek =
+          room.light_ids.map((id) => statesById.get(id)?.color_temp_mirek).find((m) => m != null) ??
+          366;
         return (
           <LightEditor
             anchor={editor.anchor}
             title={room.name}
             initialHex={hex}
             initialBrightness={statesById.get(room.light_ids[0] ?? "")?.brightness ?? 100}
+            initialMirek={roomMirek}
+            showWhite={roomSupportsWhite}
             on={anyOn}
             onToggle={() => setRoom(room, !anyOn)}
-            onChange={(h, b) => editorChange(editor, h, b)}
+            onChange={(ch) => editorChange(editor, ch)}
             onClose={() => setEditor(null)}
           >
             <SceneButton

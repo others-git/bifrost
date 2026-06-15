@@ -28,7 +28,7 @@ import {
 } from "../api";
 import { AudioEditor } from "../components/AudioControls";
 import { Glyph, powerKindGlyph, audioKindGlyph } from "../components/glyphs";
-import { hexToRgb, LightEditor } from "../components/LightEditor";
+import { hexToRgb, LightEditor, type LightControlChange } from "../components/LightEditor";
 import { DisableRow, PowerFlyout } from "../components/PowerFlyout";
 import { SceneButton, SceneModal } from "../components/scenes";
 import { useDialogs, type Dialogs } from "../components/dialogs";
@@ -62,7 +62,7 @@ interface Props {
 }
 
 export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
-  const { isMobile } = useViewport();
+  const { isMobile, isCompact } = useViewport();
   const [localLights, setLocalLights] = useState<Light[]>(lights);
   const [powerDevices, setPowerDevices] = useState<PowerDevice[]>([]);
   const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
@@ -167,8 +167,8 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
   const empty = localLights.length === 0 && powerDevices.length === 0 && audioDevices.length === 0;
 
   return (
-    <div style={{ padding: isMobile ? "1rem 0.85rem" : "2rem", maxWidth: 1100, margin: "0 auto", color: T.text }}>
-      <header style={{ marginBottom: "1.4rem" }}>
+    <div style={{ padding: isMobile ? "1rem 0.85rem" : isCompact ? "1.1rem 1rem" : "2rem", maxWidth: 1100, margin: "0 auto", color: T.text }}>
+      <header style={{ marginBottom: isCompact ? "0.9rem" : "1.4rem" }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: "0.9rem" }}>
           <h1 style={{ ...label, margin: 0, fontSize: "1rem", letterSpacing: "0.22em", color: T.text }}>
             Control
@@ -437,8 +437,11 @@ function RoomBox({
   const lit = lights.filter((l) => l.last_state?.on);
   const anyOn = lit.length > 0;
   const showColor = lights.some((l) => l.capabilities.color_rgb);
+  const showWhite = lights.some((l) => l.capabilities.color_temperature);
   const showBrightness = lights.some((l) => l.capabilities.dimmable);
-  const tunable = !!roomId && (showColor || showBrightness);
+  const tunable = !!roomId && (showColor || showWhite || showBrightness);
+  const roomMirek =
+    lit.map((l) => l.last_state?.color_temp_mirek).find((m): m is number => m != null) ?? 366;
 
   const counts = [
     lights.length && `${lights.length} light${lights.length !== 1 ? "s" : ""}`,
@@ -460,19 +463,36 @@ function RoomBox({
         ? `linear-gradient(90deg, ${hexes[0]}, ${hexes[0]}33)`
         : "linear-gradient(90deg, rgba(56,189,248,0.35), transparent 70%)";
 
-  function cascade(nextHex: string, nextBrightness: number) {
+  function cascade(change: LightControlChange) {
     if (!roomId) return;
-    const color = showColor ? rgbToXy(...hexToRgb(nextHex)) : undefined;
+    // Adjust only the dimension the user moved, per light by capability. A room
+    // brightness change must not overwrite each member's own color (e.g. set by a
+    // scene); a color or white change is mutually exclusive (set one, clear the
+    // other). The room PUT carries just the changed field — the backend merges it
+    // into each light's cached state and preserves the untouched dimensions.
     for (const l of lights) {
-      onLightUpdate(l.id, {
-        ...(l.last_state ?? { on: true }),
-        on: true,
-        brightness: l.capabilities.dimmable ? nextBrightness : l.last_state?.brightness,
-        color: l.capabilities.color_rgb && color ? color : l.last_state?.color,
-      });
+      const next: LightState = { ...(l.last_state ?? { on: true }), on: true };
+      if (change.field === "brightness") {
+        if (l.capabilities.dimmable) next.brightness = change.brightness;
+      } else if (change.field === "color") {
+        if (l.capabilities.color_rgb) {
+          next.color = rgbToXy(...hexToRgb(change.hex));
+          next.color_temp_mirek = undefined;
+        }
+      } else if (l.capabilities.color_temperature) {
+        next.color_temp_mirek = change.mirek;
+        next.color = undefined;
+      }
+      onLightUpdate(l.id, next);
     }
+    const patch: LightState =
+      change.field === "color"
+        ? { on: true, color: rgbToXy(...hexToRgb(change.hex)) }
+        : change.field === "temp"
+          ? { on: true, color_temp_mirek: change.mirek }
+          : { on: true, brightness: change.brightness };
     clearTimeout(commitTimer.current);
-    commitTimer.current = setTimeout(() => { setRoomState(roomId, { on: true, brightness: nextBrightness, color }); }, 200);
+    commitTimer.current = setTimeout(() => { setRoomState(roomId, patch); }, 200);
   }
 
   async function toggleAll() {
@@ -566,13 +586,14 @@ function RoomBox({
             }}
           />
         )}
-        <span style={{ ...label, fontSize: "0.8rem", color: roomId ? "#d8cfba" : T.faint, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {name}
-        </span>
-        <span style={{ fontSize: "0.7rem", color: T.faint, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {subtitle}
-        </span>
-        <span style={{ flex: 1 }} />
+        <div style={{ minWidth: 0, flex: 1, display: "flex", flexDirection: "column" }}>
+          <span style={{ ...label, fontSize: "0.82rem", color: roomId ? "#d8cfba" : T.faint, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {name}
+          </span>
+          <span style={{ fontSize: "0.7rem", color: T.faint, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {subtitle}
+          </span>
+        </div>
         {roomId && hasLights && <VerticalToggle on={anyOn} onToggle={toggleAll} disabled={busy} />}
       </header>
 
@@ -617,7 +638,9 @@ function RoomBox({
           title={name}
           initialHex={roomHex}
           initialBrightness={avgBrightness}
+          initialMirek={roomMirek}
           showColor={showColor}
+          showWhite={showWhite}
           showBrightness={showBrightness}
           on={anyOn}
           onToggle={toggleAll}
@@ -713,14 +736,24 @@ function LightButton({
   const serverColor = light.last_state?.color;
   const hex = serverColor ? rgbToHex(...xyToRgb(serverColor.x, serverColor.y, serverColor.brightness)) : "#ffb84d";
   const brightness = light.last_state?.brightness ?? 100;
+  const mirek = light.last_state?.color_temp_mirek ?? 366;
+  // A light is in white mode when it reports a temperature and no color.
+  const whiteMode = light.last_state?.color_temp_mirek != null && !light.last_state?.color;
 
-  function handleEditorChange(nextHex: string, nextBrightness: number) {
-    const next: LightState = {
-      ...(light.last_state ?? { on: true }),
-      on: true,
-      brightness: light.capabilities.dimmable ? nextBrightness : light.last_state?.brightness,
-      color: light.capabilities.color_rgb ? rgbToXy(...hexToRgb(nextHex)) : light.last_state?.color,
-    };
+  function handleEditorChange(change: LightControlChange) {
+    // Only the moved dimension changes; color and temperature are exclusive.
+    const next: LightState = { ...(light.last_state ?? { on: true }), on: true };
+    if (change.field === "brightness") {
+      if (light.capabilities.dimmable) next.brightness = change.brightness;
+    } else if (change.field === "color") {
+      if (light.capabilities.color_rgb) {
+        next.color = rgbToXy(...hexToRgb(change.hex));
+        next.color_temp_mirek = undefined;
+      }
+    } else if (light.capabilities.color_temperature) {
+      next.color_temp_mirek = change.mirek;
+      next.color = undefined;
+    }
     onLightUpdate(light.id, next);
     clearTimeout(commitTimer.current);
     commitTimer.current = setTimeout(() => { setLightState(light.id, next); }, 200);
@@ -752,7 +785,10 @@ function LightButton({
           title={light.name}
           initialHex={hex}
           initialBrightness={brightness}
+          initialMirek={mirek}
+          initialMode={whiteMode ? "white" : "color"}
           showColor={light.capabilities.color_rgb}
+          showWhite={light.capabilities.color_temperature}
           showBrightness={light.capabilities.dimmable}
           on={isOn}
           onToggle={toggle}

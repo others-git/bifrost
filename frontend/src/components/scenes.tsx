@@ -365,7 +365,7 @@ export function SceneEditor({
           title="Palette color"
           initialHex={palette[colorEdit.index]}
           showBrightness={false}
-          onChange={(hex) => setColor(colorEdit.index, hex)}
+          onChange={(ch) => { if (ch.field === "color") setColor(colorEdit.index, ch.hex); }}
           onClose={() => setColorEdit(null)}
         />
       )}

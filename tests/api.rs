@@ -1747,6 +1747,125 @@ async fn room_power_cycle_preserves_light_color() {
 }
 
 #[tokio::test]
+async fn room_brightness_change_preserves_light_color() {
+    // A room brightness change carries no colour, so it must scale brightness
+    // while leaving each member light's own colour intact (e.g. a scene's). The
+    // bug: the cascade used to broadcast one uniform colour on every change.
+    let device = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&device.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let body = format!(r#"{{"name":"R","light_ids":["{light_id}"]}}"#);
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post("/api/rooms", &cookie, &body))
+        .await
+        .unwrap();
+    let room_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Known colour + brightness.
+    let cresp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/lights/{light_id}"),
+            &cookie,
+            r##"{"on":true,"brightness":60,"color":{"x":0.64,"y":0.33,"brightness":0.6}}"##,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cresp.status(), StatusCode::NO_CONTENT);
+
+    // Room brightness-only change (no colour in the body).
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/state"),
+            &cookie,
+            r#"{"on":true,"brightness":30}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/lights", &cookie))
+        .await
+        .unwrap();
+    let lights = helpers::response_json(resp).await;
+    let light = lights
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["id"] == light_id.as_str())
+        .expect("light present");
+    assert_eq!(
+        light["last_state"]["brightness"].as_f64().unwrap(),
+        30.0,
+        "brightness not applied: {light}"
+    );
+    assert!(
+        (light["last_state"]["color"]["x"].as_f64().unwrap() - 0.64).abs() < 1e-6,
+        "colour was wiped by a brightness-only change: {light}"
+    );
+}
+
+#[tokio::test]
+async fn light_color_temp_change_clears_color() {
+    // Colour and colour temperature are mutually exclusive: switching a light to
+    // a white temperature must clear the cached colour, so the UI can tell from
+    // `last_state` which mode the light is in.
+    let device = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&device.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let cresp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/lights/{light_id}"),
+            &cookie,
+            r##"{"on":true,"color":{"x":0.64,"y":0.33,"brightness":0.6}}"##,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cresp.status(), StatusCode::NO_CONTENT);
+
+    let tresp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/lights/{light_id}"),
+            &cookie,
+            r#"{"on":true,"color_temp_mirek":300}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(tresp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/lights", &cookie))
+        .await
+        .unwrap();
+    let lights = helpers::response_json(resp).await;
+    let light = lights
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["id"] == light_id.as_str())
+        .expect("light present");
+    assert_eq!(light["last_state"]["color_temp_mirek"], 300, "{light}");
+    assert!(
+        light["last_state"]["color"].is_null(),
+        "colour not cleared when switching to white: {light}"
+    );
+}
+
+#[tokio::test]
 async fn set_room_state_unknown_room_returns_404() {
     let app = helpers::test_app_with_password().await;
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
