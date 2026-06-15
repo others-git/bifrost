@@ -39,6 +39,7 @@ import { SceneButton, SceneModal } from "../components/scenes";
 import { Modal, useDialogs } from "../components/dialogs";
 import { ACCENT, S } from "../styles";
 import { alpha } from "../theme";
+import { Switch as SharedSwitch } from "../components/controls";
 
 type Tool = "view" | "floor" | "wall" | "erase" | "place" | "room" | "paint";
 
@@ -1102,61 +1103,9 @@ function RoomController({
   );
 }
 
-/** A compact horizontal on/off switch. Stops propagation so it doesn't open the editor. */
-function Switch({
-  on,
-  onToggle,
-  disabled,
-}: {
-  on: boolean;
-  onToggle: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <button
-      onClick={(e) => { e.stopPropagation(); if (!disabled) onToggle(); }}
-      disabled={disabled}
-      aria-label={on ? "Turn off" : "Turn on"}
-      style={{
-        flexShrink: 0,
-        width: 40,
-        height: 22,
-        borderRadius: 11,
-        // Glassy electric switch, matching the Lights page toggles.
-        border: `1px solid ${on ? "rgba(125,211,252,0.55)" : "rgba(255,255,255,0.12)"}`,
-        cursor: disabled ? "default" : "pointer",
-        background: on
-          ? "linear-gradient(90deg, rgba(125,211,252,0.45), rgba(34,211,238,0.12) 70%), rgba(10,25,36,0.55)"
-          : "rgba(255,255,255,0.055)",
-        boxShadow: on
-          ? "0 0 14px -4px rgba(56,189,248,0.75), inset 0 1px 0 rgba(255,255,255,0.25)"
-          : "inset 0 1px 0 rgba(255,255,255,0.06)",
-        backdropFilter: "blur(4px)",
-        WebkitBackdropFilter: "blur(4px)",
-        position: "relative",
-        opacity: disabled ? 0.5 : 1,
-        transition: "background 0.2s, box-shadow 0.2s, border-color 0.2s",
-      }}
-    >
-      <span
-        style={{
-          position: "absolute",
-          top: 1,
-          left: on ? 20 : 2,
-          width: 18,
-          height: 18,
-          borderRadius: "50%",
-          background: on
-            ? "linear-gradient(180deg, #ffffff, #d6f1ff)"
-            : "rgba(255,255,255,0.4)",
-          boxShadow: on
-            ? "0 0 8px rgba(125,211,252,0.9), 0 1px 2px rgba(0,0,0,0.45)"
-            : "0 1px 2px rgba(0,0,0,0.35)",
-          transition: "left 0.2s, background 0.2s, box-shadow 0.2s",
-        }}
-      />
-    </button>
-  );
+/** Compact on/off switch — a thin wrapper over the shared control. */
+function Switch({ on, onToggle, disabled }: { on: boolean; onToggle: () => void; disabled?: boolean }) {
+  return <SharedSwitch on={on} onChange={() => onToggle()} disabled={disabled} />;
 }
 
 // ── Room editor panel (right of canvas, room tool) ──────────────────────────

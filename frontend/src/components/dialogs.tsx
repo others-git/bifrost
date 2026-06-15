@@ -4,6 +4,7 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { S } from "../styles";
+import { Button } from "./controls";
 import { color, font } from "../theme";
 
 const overlay: CSSProperties = {
@@ -166,18 +167,19 @@ function DialogHost({ req, done }: { req: DialogRequest; done: () => void }) {
       )}
       <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end", marginTop: "0.25rem" }}>
         {req.kind !== "alert" && (
-          <button onClick={cancel} style={S.buttonGhost}>
+          <Button variant="ghost" onClick={cancel}>
             Cancel
-          </button>
+          </Button>
         )}
-        <button
+        <Button
+          variant={danger ? "danger" : "primary"}
           onClick={submit}
           autoFocus={req.kind !== "prompt"}
           disabled={req.kind === "prompt" && !value.trim()}
-          style={danger ? { ...S.buttonDanger, background: color.rose, color: "#160a0e", fontWeight: 700 } : S.button}
+          style={danger ? { background: color.rose, color: "#160a0e", fontWeight: 700, boxShadow: "none" } : undefined}
         >
           {confirmLabel}
-        </button>
+        </Button>
       </div>
     </Modal>
   );

@@ -25,6 +25,7 @@ import { RoomDevicesPanel } from "../components/RoomDevices";
 import { SelectRow } from "../components/SelectRow";
 import { useDialogs } from "../components/dialogs";
 import { PageHeader } from "../components/PageHeader";
+import { Select } from "../components/Select";
 import { useViewport } from "../useViewport";
 import { ACCENT, S } from "../styles";
 
@@ -182,18 +183,14 @@ function RoomCard({
 
   const mergeSelect =
     mergeCandidates.length > 0 ? (
-      <select
-        value=""
+      <Select
+        value={undefined}
         disabled={merging}
-        onChange={(e) => { if (e.target.value) handleMerge(e.target.value); }}
+        onChange={(id) => handleMerge(id)}
+        placeholder={merging ? "Merging…" : "Merge into…"}
         title="Merge this room into another (this room is deleted)"
-        style={{ ...S.input, width: "auto", padding: "0.3rem 0.5rem", fontSize: "0.8rem", cursor: "pointer" }}
-      >
-        <option value="">{merging ? "Merging…" : "Merge into…"}</option>
-        {mergeCandidates.map((r) => (
-          <option key={r.id} value={r.id}>{r.name}</option>
-        ))}
-      </select>
+        options={mergeCandidates.map((r) => ({ value: r.id, label: r.name }))}
+      />
     ) : null;
 
   const titleBlock = (

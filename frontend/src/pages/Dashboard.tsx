@@ -32,6 +32,7 @@ import { hexToRgb, LightEditor, type LightControlChange } from "../components/Li
 import { T, font, glassCard, radius, color, glow, alpha } from "../theme";
 import { CornerFiligree } from "../components/ornament";
 import { PageHeader } from "../components/PageHeader";
+import { Switch } from "../components/controls";
 import { DisableRow, PowerFlyout } from "../components/PowerFlyout";
 import { SceneButton, SceneModal } from "../components/scenes";
 import { useDialogs, type Dialogs } from "../components/dialogs";
@@ -870,45 +871,7 @@ function AudioButton({
   );
 }
 
-/** On/off as a vertical sliding switch — up is on. */
+/** On/off as a vertical sliding switch — up is on. (Thin wrapper over `Switch`.) */
 function VerticalToggle({ on, onToggle, disabled }: { on: boolean; onToggle: () => void; disabled?: boolean }) {
-  return (
-    <button
-      onClick={(e) => { e.stopPropagation(); onToggle(); }}
-      disabled={disabled}
-      aria-label={on ? "Turn off" : "Turn on"}
-      style={{
-        flexShrink: 0,
-        width: 24,
-        height: 44,
-        borderRadius: 12,
-        border: `1px solid ${on ? "rgba(125,211,252,0.55)" : "rgba(255,255,255,0.12)"}`,
-        cursor: disabled ? "default" : "pointer",
-        background: on
-          ? "linear-gradient(180deg, rgba(125,211,252,0.45), rgba(34,211,238,0.12) 70%), rgba(10,25,36,0.55)"
-          : "rgba(255,255,255,0.055)",
-        boxShadow: on
-          ? "0 0 16px -4px rgba(56,189,248,0.75), inset 0 1px 0 rgba(255,255,255,0.25)"
-          : "inset 0 1px 0 rgba(255,255,255,0.06)",
-        backdropFilter: "blur(4px)",
-        WebkitBackdropFilter: "blur(4px)",
-        position: "relative",
-        transition: "background 0.2s, box-shadow 0.2s, border-color 0.2s",
-      }}
-    >
-      <span
-        style={{
-          position: "absolute",
-          left: 2,
-          top: on ? 2 : 22,
-          width: 18,
-          height: 18,
-          borderRadius: "50%",
-          background: on ? "linear-gradient(180deg, #ffffff, #d6f1ff)" : "rgba(255,255,255,0.4)",
-          boxShadow: on ? "0 0 8px rgba(125,211,252,0.9), 0 1px 2px rgba(0,0,0,0.45)" : "0 1px 2px rgba(0,0,0,0.35)",
-          transition: "top 0.2s, background 0.2s, box-shadow 0.2s",
-        }}
-      />
-    </button>
-  );
+  return <Switch on={on} onChange={() => onToggle()} disabled={disabled} vertical />;
 }

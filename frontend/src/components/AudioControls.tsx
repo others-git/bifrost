@@ -4,8 +4,7 @@
 // favorites; power lives in the surrounding chrome (card header / fly-out title)
 // via the exported PowerButton.
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useEffect, useRef, useState } from "react";
 import {
   getAudioFavorites,
   getRemoteDevices,
@@ -18,9 +17,10 @@ import {
 } from "../api";
 import { DisableRow } from "./PowerFlyout";
 import { BifrostRemote } from "./BifrostRemote";
-import { useViewport } from "../useViewport";
-import { sheetStyle } from "./sheet";
-import { T, domain, color, radius, font, alpha } from "../theme";
+import { Switch } from "./controls";
+import { Flyout } from "./Flyout";
+import { Select } from "./Select";
+import { T, domain, color, font, alpha } from "../theme";
 
 const ACCENT = domain.audio; // violet — audio's accent
 
@@ -157,19 +157,17 @@ export function AudioControls({
       {cap.sources && !offline && s.source_list && s.source_list.length > 0 && (
         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
           <span style={{ fontSize: "0.74rem", color: T.dim, flexShrink: 0 }}>Source</span>
-          <select
-            value={s.source ?? ""}
-            onChange={(e) => send({ source: e.target.value })}
+          <Select
+            value={s.source ?? undefined}
+            onChange={(src) => send({ source: src })}
             title="Switch input / app"
-            style={{ flex: 1, minWidth: 0, background: "rgba(255,255,255,0.04)", color: T.text, border: `1px solid ${T.cardBorder}`, borderRadius: 8, padding: "0.35rem 0.5rem", fontSize: "0.82rem", cursor: "pointer" }}
-          >
-            {!s.source && <option value="" disabled>Select…</option>}
-            {/* The current source can be outside the list (unknown/legacy) — keep it visible. */}
-            {s.source && !s.source_list.includes(s.source) && <option value={s.source}>{s.source}</option>}
-            {s.source_list.map((src) => (
-              <option key={src} value={src}>{src}</option>
-            ))}
-          </select>
+            style={{ flex: 1, minWidth: 0 }}
+            options={[
+              // The current source can be outside the list (unknown/legacy) — keep it visible.
+              ...(s.source && !s.source_list.includes(s.source) ? [{ value: s.source, label: s.source }] : []),
+              ...s.source_list.map((src) => ({ value: src, label: src })),
+            ]}
+          />
         </div>
       )}
 
@@ -254,41 +252,7 @@ export function TransportButton({
 
 /** Power for receivers/zones: a glassy electric pill, matching the light toggles. */
 export function PowerButton({ on, onToggle }: { on: boolean; onToggle: () => void }) {
-  return (
-    <button
-      onClick={onToggle}
-      aria-label={on ? "Turn off" : "Turn on"}
-      title={on ? "Power off" : "Power on"}
-      style={{
-        flexShrink: 0,
-        width: 44,
-        height: 24,
-        borderRadius: 12,
-        border: `1px solid ${on ? "rgba(167,139,250,0.6)" : "rgba(255,255,255,0.12)"}`,
-        cursor: "pointer",
-        background: on
-          ? "linear-gradient(90deg, rgba(167,139,250,0.5), rgba(56,189,248,0.12) 70%), rgba(20,16,30,0.55)"
-          : "rgba(255,255,255,0.06)",
-        boxShadow: on ? `0 0 14px -4px ${ACCENT}` : "inset 0 1px 0 rgba(255,255,255,0.06)",
-        position: "relative",
-        transition: "background 0.2s, box-shadow 0.2s, border-color 0.2s",
-      }}
-    >
-      <span
-        style={{
-          position: "absolute",
-          top: 2,
-          left: on ? 22 : 2,
-          width: 18,
-          height: 18,
-          borderRadius: "50%",
-          background: on ? "linear-gradient(180deg, #ffffff, #e6dbff)" : "rgba(255,255,255,0.4)",
-          boxShadow: on ? `0 0 8px ${ACCENT}` : "0 1px 2px rgba(0,0,0,0.35)",
-          transition: "left 0.2s",
-        }}
-      />
-    </button>
-  );
+  return <Switch on={on} onChange={() => onToggle()} accent={domain.audio} />;
 }
 
 /**
@@ -313,9 +277,6 @@ export function AudioEditor({
   /** M22: name of the receiver this source's volume routes to, if bound. */
   receiverName?: string;
 }) {
-  const { isCompact } = useViewport();
-  const panelRef = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const cap = device.capabilities;
   const offline = device.state.reachable === false;
 
@@ -336,71 +297,16 @@ export function AudioEditor({
     };
   }, [device.kind, device.id]);
 
-  useLayoutEffect(() => {
-    if (isCompact) return; // bottom sheet on phones — no anchor math
-    const panel = panelRef.current;
-    if (!panel) return;
-    const rect =
-      anchor instanceof HTMLElement ? anchor.getBoundingClientRect() : new DOMRect(anchor.x, anchor.y, 0, 0);
-    const w = panel.offsetWidth;
-    const h = panel.offsetHeight;
-    let left = rect.right + 12;
-    if (left + w > window.innerWidth - 8) left = rect.left - 12 - w;
-    left = Math.max(8, Math.min(window.innerWidth - w - 8, left));
-    let top = rect.top + rect.height / 2 - h / 2;
-    top = Math.max(8, Math.min(window.innerHeight - h - 8, top));
-    setPos({ left, top });
-  }, [anchor, isCompact]);
-
-  useEffect(() => {
-    const onDown = (e: PointerEvent) => {
-      if (remoteOpenRef.current) return; // the remote overlay owns clicks while open
-      if (panelRef.current && !panelRef.current.contains(e.target as Node)) onClose();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !remoteOpenRef.current) onClose();
-    };
-    const t = setTimeout(() => document.addEventListener("pointerdown", onDown), 0);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      clearTimeout(t);
-      document.removeEventListener("pointerdown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
-
   function togglePower() {
     onLocalPatch(device.id, { power: !device.state.power });
     setAudioState(device.id, { power: !device.state.power });
   }
 
-  return createPortal(
-    <div
-      ref={panelRef}
-      style={
-        isCompact
-          ? sheetStyle
-          : {
-              position: "fixed",
-              left: pos?.left ?? 0,
-              top: pos?.top ?? 0,
-              visibility: pos ? "visible" : "hidden",
-              zIndex: 60,
-              width: 260,
-              background: color.surface,
-              border: `1px solid ${color.hairline}`,
-              borderRadius: radius.frame,
-              padding: "0.9rem",
-              boxShadow: "0 12px 34px rgba(0,0,0,0.7)",
-              display: "flex",
-              flexDirection: "column",
-              gap: "0.7rem",
-            }
-      }
-    >
+  return (
+    <Flyout anchor={anchor} onClose={onClose} width={260} closeGuard={() => remoteOpenRef.current}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.8rem" }}>
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontWeight: 600, fontSize: "0.9rem", color: "#eee", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          <div style={{ fontWeight: 600, fontSize: "0.9rem", color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {device.name}
           </div>
           <div style={{ fontSize: "0.7rem", color: T.faint }}>{KIND_LABEL[device.kind] ?? device.kind}</div>
@@ -456,7 +362,6 @@ export function AudioEditor({
           onSetEnabled={(en) => { onSetEnabled(en); if (!en) onClose(); }}
         />
       )}
-    </div>,
-    document.body,
+    </Flyout>
   );
 }

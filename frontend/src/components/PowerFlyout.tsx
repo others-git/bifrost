@@ -2,13 +2,11 @@
 // full name, its kind, and an on/off switch. Anchored next to its trigger on
 // desktop; a bottom sheet on phones — matching LightEditor / AudioEditor.
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import type { PowerDevice } from "../api";
 import { Glyph, powerKindGlyph } from "./glyphs";
-import { sheetStyle } from "./sheet";
 import { useViewport } from "../useViewport";
-import { color, radius, alpha } from "../theme";
+import { color, alpha } from "../theme";
+import { Flyout } from "./Flyout";
 
 const ACCENT = color.cyan;
 
@@ -34,70 +32,11 @@ export function PowerFlyout({
   onSetEnabled?: (enabled: boolean) => void;
   onClose: () => void;
 }) {
-  const { isCompact } = useViewport();
-  const panelRef = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const on = device.state.on;
   const offline = device.state.reachable === false;
 
-  useLayoutEffect(() => {
-    if (isCompact) return;
-    const panel = panelRef.current;
-    if (!panel) return;
-    const rect =
-      anchor instanceof HTMLElement
-        ? anchor.getBoundingClientRect()
-        : new DOMRect(anchor.x, anchor.y, 0, 0);
-    const w = panel.offsetWidth;
-    const h = panel.offsetHeight;
-    let left = rect.right + 12;
-    if (left + w > window.innerWidth - 8) left = rect.left - 12 - w;
-    left = Math.max(8, Math.min(window.innerWidth - w - 8, left));
-    let top = rect.top + rect.height / 2 - h / 2;
-    top = Math.max(8, Math.min(window.innerHeight - h - 8, top));
-    setPos({ left, top });
-  }, [anchor, isCompact]);
-
-  useEffect(() => {
-    const onDown = (e: PointerEvent) => {
-      if (panelRef.current && !panelRef.current.contains(e.target as Node)) onClose();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    const t = setTimeout(() => document.addEventListener("pointerdown", onDown), 0);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      clearTimeout(t);
-      document.removeEventListener("pointerdown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
-
-  return createPortal(
-    <div
-      ref={panelRef}
-      style={
-        isCompact
-          ? sheetStyle
-          : {
-              position: "fixed",
-              left: pos?.left ?? 0,
-              top: pos?.top ?? 0,
-              visibility: pos ? "visible" : "hidden",
-              zIndex: 60,
-              width: 240,
-              background: color.surface,
-              border: `1px solid ${color.hairline}`,
-              borderRadius: radius.frame,
-              padding: "0.9rem",
-              boxShadow: "0 12px 34px rgba(0,0,0,0.7)",
-              display: "flex",
-              flexDirection: "column",
-              gap: "0.8rem",
-            }
-      }
-    >
+  return (
+    <Flyout anchor={anchor} onClose={onClose} width={240} gap="0.8rem">
       <div style={{ display: "flex", alignItems: "center", gap: "0.7rem" }}>
         <span style={{ color: on ? ACCENT : "var(--bf-dim)", flexShrink: 0 }}>
           <Glyph name={device.glyph ?? powerKindGlyph(device.kind)} size={24} />
@@ -153,8 +92,7 @@ export function PowerFlyout({
           }}
         />
       )}
-    </div>,
-    document.body,
+    </Flyout>
   );
 }
 

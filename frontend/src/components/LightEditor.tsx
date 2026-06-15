@@ -2,12 +2,12 @@
 // with a Hue-style hue/saturation color wheel and a vertical brightness bar.
 // Used for lights, rooms, scene palettes, and the planner paint brush.
 
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { createPortal } from "react-dom";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { rgbToHex } from "../api";
 import { useViewport } from "../useViewport";
-import { sheetStyle } from "./sheet";
-import { color, radius } from "../theme";
+import { color } from "../theme";
+import { Segmented, Switch } from "./controls";
+import { Flyout } from "./Flyout";
 
 // ── HSV color math (h in degrees, s/v in 0..1) ──────────────────────────────
 
@@ -354,48 +354,18 @@ function ModeToggle({
   onChange: (m: "color" | "white") => void;
   compact: boolean;
 }) {
-  const seg = (m: "color" | "white", label: string) => {
-    const active = mode === m;
-    return (
-      <button
-        onClick={() => onChange(m)}
-        aria-pressed={active}
-        style={{
-          flex: 1,
-          padding: compact ? "0.55rem 0" : "0.3rem 0",
-          minHeight: compact ? 40 : undefined,
-          fontSize: compact ? "0.9rem" : "0.78rem",
-          fontWeight: 600,
-          letterSpacing: "0.02em",
-          borderRadius: 9,
-          border: "none",
-          cursor: "pointer",
-          color: active ? "#0c0c0e" : "#cfcfd6",
-          background: active
-            ? m === "white"
-              ? "linear-gradient(90deg, #ffd9a0, #cfe4ff)"
-              : "linear-gradient(90deg, #ff7d8a, #8b5cf6 55%, #38bdf8)"
-            : "transparent",
-        }}
-      >
-        {label}
-      </button>
-    );
-  };
+  // Expressive tabs: the Color tab previews the spectrum, White the warm→cool
+  // range. Those gradients are intentionally literal (they aren't theme accents).
   return (
-    <div
-      style={{
-        display: "flex",
-        gap: 4,
-        padding: 3,
-        borderRadius: 12,
-        background: "rgba(255,255,255,0.06)",
-        border: "1px solid rgba(255,255,255,0.08)",
-      }}
-    >
-      {seg("color", "Color")}
-      {seg("white", "White")}
-    </div>
+    <Segmented
+      value={mode}
+      onChange={onChange}
+      compact={compact}
+      options={[
+        { value: "color", label: "Color", activeBg: "linear-gradient(90deg, #ff7d8a, #8b5cf6 55%, #38bdf8)" },
+        { value: "white", label: "White", activeBg: "linear-gradient(90deg, #ffd9a0, #cfe4ff)" },
+      ]}
+    />
   );
 }
 
@@ -443,8 +413,6 @@ export function LightEditor({
   children?: ReactNode;
 }) {
   const { isCompact } = useViewport();
-  const panelRef = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   // Uncontrolled after mount: seeding from props once avoids hex→hsv→hex
   // roundtrip jitter while dragging.
   const [[hue, sat], setHs] = useState<[number, number]>(() => hexToHs(initialHex));
@@ -457,47 +425,6 @@ export function LightEditor({
     () => initialMode ?? (showColor ? "color" : "white"),
   );
   const hex = rgbToHex(...hsvToRgb(hue, sat, 1));
-
-  useLayoutEffect(() => {
-    // On phones the editor is a bottom sheet — no anchor math needed.
-    if (isCompact) return;
-    const panel = panelRef.current;
-    if (!panel) return;
-    const rect =
-      anchor instanceof HTMLElement
-        ? anchor.getBoundingClientRect()
-        : new DOMRect(anchor.x, anchor.y, 0, 0);
-    const w = panel.offsetWidth;
-    const h = panel.offsetHeight;
-    let left = rect.right + 12;
-    if (left + w > window.innerWidth - 8) left = rect.left - 12 - w;
-    left = Math.max(8, Math.min(window.innerWidth - w - 8, left));
-    let top = rect.top + rect.height / 2 - h / 2;
-    top = Math.max(8, Math.min(window.innerHeight - h - 8, top));
-    setPos({ left, top });
-  }, [anchor, isCompact]);
-
-  useEffect(() => {
-    const onDown = (e: PointerEvent) => {
-      const target = e.target as Node;
-      if (panelRef.current?.contains(target)) return;
-      // Clicks on the trigger element are handled by the trigger itself (so it
-      // can toggle the editor closed); don't also self-close here.
-      if (anchor instanceof HTMLElement && anchor.contains(target)) return;
-      onClose();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    // Defer so the click that opened the editor doesn't immediately close it.
-    const t = setTimeout(() => document.addEventListener("pointerdown", onDown), 0);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      clearTimeout(t);
-      document.removeEventListener("pointerdown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [onClose, anchor]);
 
   function applyColor(h: number, s: number) {
     setHs([h, s]);
@@ -519,31 +446,10 @@ export function LightEditor({
   const colorActive = showColor && (!showWhite || mode === "color");
   const whiteActive = showWhite && (!showColor || mode === "white");
 
-  return createPortal(
-    <div
-      ref={panelRef}
-      style={
-        isCompact
-          ? sheetStyle
-          : {
-              position: "fixed",
-              left: pos?.left ?? 0,
-              top: pos?.top ?? 0,
-              visibility: pos ? "visible" : "hidden",
-              zIndex: 60,
-              background: color.surface,
-              border: `1px solid ${color.hairline}`,
-              borderRadius: radius.frame,
-              padding: "0.9rem",
-              boxShadow: "0 12px 34px rgba(0,0,0,0.7)",
-              display: "flex",
-              flexDirection: "column",
-              gap: "0.7rem",
-            }
-      }
-    >
+  return (
+    <Flyout anchor={anchor} onClose={onClose}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem" }}>
-        <span style={{ fontWeight: 600, fontSize: "0.9rem", color: "#eee", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <span style={{ fontWeight: 600, fontSize: "0.9rem", color: color.text, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {title ?? "Color"}
         </span>
         <button
@@ -597,50 +503,12 @@ export function LightEditor({
 
       {onToggle && (
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--bf-border)", paddingTop: "0.6rem" }}>
-          <span style={{ fontSize: "0.8rem", color: "#999" }}>Power</span>
-          <button
-            onClick={onToggle}
-            aria-label={on ? "Turn off" : "Turn on"}
-            style={{
-              width: 44,
-              height: 24,
-              borderRadius: 12,
-              // Glassy electric pill, matching the page toggles.
-              border: `1px solid ${on ? "rgba(125,211,252,0.55)" : "rgba(255,255,255,0.12)"}`,
-              cursor: "pointer",
-              background: on
-                ? "linear-gradient(90deg, rgba(125,211,252,0.45), rgba(34,211,238,0.12) 70%), rgba(10,25,36,0.55)"
-                : "rgba(255,255,255,0.07)",
-              boxShadow: on
-                ? "0 0 14px -4px rgba(56,189,248,0.75), inset 0 1px 0 rgba(255,255,255,0.25)"
-                : "inset 0 1px 0 rgba(255,255,255,0.06)",
-              position: "relative",
-              transition: "background 0.2s, box-shadow 0.2s, border-color 0.2s",
-            }}
-          >
-            <span
-              style={{
-                position: "absolute",
-                top: 2,
-                left: on ? 22 : 2,
-                width: 18,
-                height: 18,
-                borderRadius: "50%",
-                background: on
-                  ? "linear-gradient(180deg, #ffffff, #d6f1ff)"
-                  : "rgba(255,255,255,0.4)",
-                boxShadow: on
-                  ? "0 0 8px rgba(125,211,252,0.9), 0 1px 2px rgba(0,0,0,0.45)"
-                  : "0 1px 2px rgba(0,0,0,0.35)",
-                transition: "left 0.2s, background 0.2s, box-shadow 0.2s",
-              }}
-            />
-          </button>
+          <span style={{ fontSize: "0.8rem", color: color.dim }}>Power</span>
+          <Switch on={!!on} onChange={() => onToggle()} />
         </div>
       )}
 
       {children}
-    </div>,
-    document.body,
+    </Flyout>
   );
 }

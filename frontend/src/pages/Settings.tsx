@@ -27,6 +27,7 @@ import {
 import { useDialogs, type Dialogs } from "../components/dialogs";
 import { PageHeader, SectionLabel } from "../components/PageHeader";
 import { ThemeSwitcher } from "../components/ThemeSwitcher";
+import { Select } from "../components/Select";
 import { useViewport } from "../useViewport";
 import { ACCENT, S } from "../styles";
 
@@ -806,39 +807,20 @@ function AddProviderForm({
 
       <label style={labelStyle}>
         <span>Type</span>
-        <select
+        <Select
           value={selectedType}
-          onChange={(e) => setSelectedType(e.target.value)}
-          style={{ ...S.input, cursor: "pointer" }}
-        >
-          <optgroup label="Lights">
-            {types
-              .filter((t) => t.kind === "light")
-              .map((t) => (
-                <option key={t.provider_type} value={t.provider_type}>
-                  {t.display_name}
-                </option>
-              ))}
-          </optgroup>
-          <optgroup label="Audio">
-            {types
-              .filter((t) => t.kind === "audio")
-              .map((t) => (
-                <option key={t.provider_type} value={t.provider_type}>
-                  {t.display_name}
-                </option>
-              ))}
-          </optgroup>
-          <optgroup label="Integrations">
-            {types
-              .filter((t) => t.kind === "integration")
-              .map((t) => (
-                <option key={t.provider_type} value={t.provider_type}>
-                  {t.display_name}
-                </option>
-              ))}
-          </optgroup>
-        </select>
+          onChange={setSelectedType}
+          style={{ width: "100%" }}
+          options={(["light", "audio", "integration"] as const).flatMap((kind) =>
+            types
+              .filter((t) => t.kind === kind)
+              .map((t) => ({
+                value: t.provider_type,
+                label: t.display_name,
+                group: kind === "light" ? "Lights" : kind === "audio" ? "Audio" : "Integrations",
+              })),
+          )}
+        />
       </label>
 
       {selected?.supports_discovery && (

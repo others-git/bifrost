@@ -35,6 +35,9 @@ import {
 } from "../api";
 import { Glyph, GLYPH_OPTIONS, powerKindGlyph, audioKindGlyph } from "../components/glyphs";
 import { PageHeader, SectionLabel } from "../components/PageHeader";
+import { Switch } from "../components/controls";
+import { MenuItem, menuSurface } from "../components/Select";
+import { sheetStyle } from "../components/sheet";
 import { useViewport } from "../useViewport";
 import { T, ACCENT, alpha } from "../theme";
 
@@ -181,44 +184,7 @@ function Toggle({
   disabled?: boolean;
   onToggle: () => void;
 }) {
-  return (
-    <button
-      onClick={onToggle}
-      disabled={disabled}
-      aria-label={on ? "Turn off" : "Turn on"}
-      title={on ? "Turn off" : "Turn on"}
-      style={{
-        // Vertical, like a physical wall switch: up = on, down = off.
-        flexShrink: 0,
-        width: 26,
-        height: 46,
-        borderRadius: 13,
-        border: `1px solid ${on ? "rgba(56,189,248,0.6)" : "rgba(255,255,255,0.12)"}`,
-        cursor: disabled ? "not-allowed" : "pointer",
-        opacity: disabled ? 0.5 : 1,
-        background: on
-          ? "linear-gradient(0deg, rgba(56,189,248,0.12) 25%, rgba(56,189,248,0.5)), rgba(16,22,30,0.55)"
-          : "rgba(255,255,255,0.06)",
-        boxShadow: on ? `0 0 14px -4px ${ACCENT}` : "inset 0 1px 0 rgba(255,255,255,0.06)",
-        position: "relative",
-        transition: "background 0.2s, box-shadow 0.2s, border-color 0.2s",
-      }}
-    >
-      <span
-        style={{
-          position: "absolute",
-          left: 2,
-          top: on ? 2 : 23,
-          width: 20,
-          height: 20,
-          borderRadius: "50%",
-          background: on ? "linear-gradient(180deg, #ffffff, #d9f1ff)" : "rgba(255,255,255,0.4)",
-          boxShadow: on ? `0 0 8px ${ACCENT}` : "0 1px 2px rgba(0,0,0,0.35)",
-          transition: "top 0.2s",
-        }}
-      />
-    </button>
-  );
+  return <Switch on={on} onChange={() => onToggle()} disabled={disabled} vertical />;
 }
 
 /// A popover **portaled to `document.body`** and anchored to its trigger button.
@@ -254,18 +220,10 @@ function AnchoredPanel({
     setPos({ left, top });
   }, [anchor, isCompact]);
 
+  // Same look as the shared `Select` dropdown: frosted surface, gold hairline,
+  // sharp frame radius, hover rows — bottom sheet on compact.
   const panelStyle: React.CSSProperties = isCompact
-    ? {
-        position: "fixed",
-        left: 0,
-        right: 0,
-        bottom: 0,
-        zIndex: 61,
-        maxHeight: "60vh",
-        overflowY: "auto",
-        borderRadius: "3px 3px 0 0",
-        padding: "0.6rem 0.6rem calc(1.2rem + env(safe-area-inset-bottom))",
-      }
+    ? { ...sheetStyle, zIndex: 61, maxHeight: "60vh" }
     : {
         position: "fixed",
         left: pos?.left ?? -9999,
@@ -275,22 +233,13 @@ function AnchoredPanel({
         width,
         maxHeight: 300,
         overflowY: "auto",
-        borderRadius: 10,
-        padding: "0.45rem",
+        ...menuSurface,
       };
 
   return createPortal(
     <>
       <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 60 }} />
-      <div
-        ref={ref}
-        style={{
-          background: "#22201b",
-          border: `1px solid ${T.cardBorder}`,
-          boxShadow: "0 12px 30px -10px rgba(0,0,0,0.7)",
-          ...panelStyle,
-        }}
-      >
+      <div ref={ref} style={panelStyle}>
         {children}
       </div>
     </>,
@@ -389,29 +338,14 @@ function RoomPicker({
       {choices.map((c) => {
         const active = (c.id ?? null) === current;
         return (
-          <button
-            key={c.id ?? "__none"}
-            onClick={() => onPick(c.id)}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "0.5rem",
-              width: "100%",
-              textAlign: "left",
-              background: active ? "rgba(56,189,248,0.12)" : "transparent",
-              border: "none",
-              borderRadius: 8,
-              color: active ? ACCENT : c.id ? T.text : T.faint,
-              cursor: "pointer",
-              fontSize: isCompact ? "0.95rem" : "0.82rem",
-              padding: isCompact ? "0.7rem 0.6rem" : "0.45rem 0.5rem",
-            }}
-          >
-            <span style={{ width: 16, display: "grid", placeItems: "center", flexShrink: 0 }}>
-              {active ? "✓" : ""}
+          <MenuItem key={c.id ?? "__none"} active={active} compact={isCompact} onClick={() => onPick(c.id)}>
+            <span style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <span style={{ width: 16, display: "grid", placeItems: "center", flexShrink: 0 }}>
+                {active ? "✓" : ""}
+              </span>
+              {c.name}
             </span>
-            {c.name}
-          </button>
+          </MenuItem>
         );
       })}
     </AnchoredPanel>
@@ -453,23 +387,10 @@ function ReceiverPicker({
   );
   const bound = currentReceiver ? devices.find((a) => a.id === currentReceiver) : null;
   const inputs = bound?.state?.source_list ?? [];
-  const rowStyle = (active: boolean, dim = false): React.CSSProperties => ({
-    display: "flex",
-    alignItems: "center",
-    gap: "0.5rem",
-    width: "100%",
-    textAlign: "left",
-    background: active ? "rgba(56,189,248,0.12)" : "transparent",
-    border: "none",
-    borderRadius: 8,
-    color: active ? ACCENT : dim ? T.faint : T.text,
-    cursor: "pointer",
-    fontSize: isCompact ? "0.95rem" : "0.82rem",
-    padding: isCompact ? "0.7rem 0.6rem" : "0.45rem 0.5rem",
-  });
-  const check = (active: boolean) => (
-    <span style={{ width: 16, display: "grid", placeItems: "center", flexShrink: 0 }}>
-      {active ? "✓" : ""}
+  const row = (active: boolean, label: React.ReactNode) => (
+    <span style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+      <span style={{ width: 16, display: "grid", placeItems: "center", flexShrink: 0 }}>{active ? "✓" : ""}</span>
+      {label}
     </span>
   );
   return (
@@ -477,10 +398,9 @@ function ReceiverPicker({
       <div style={{ color: T.dim, fontSize: "0.78rem", padding: "0.3rem 0.6rem 0.4rem" }}>
         Route volume to
       </div>
-      <button style={rowStyle(!currentReceiver, true)} onClick={() => onPick(null, null)}>
-        {check(!currentReceiver)}
-        Not bound
-      </button>
+      <MenuItem active={!currentReceiver} compact={isCompact} onClick={() => onPick(null, null)}>
+        {row(!currentReceiver, "Not bound")}
+      </MenuItem>
       {candidates.length === 0 && !bound ? (
         <div style={{ color: T.faint, fontSize: "0.78rem", padding: "0.2rem 0.6rem 0.5rem" }}>
           No receivers found.
@@ -489,15 +409,10 @@ function ReceiverPicker({
         candidates.map((r) => {
           const active = currentReceiver === r.id;
           return (
-            <button
-              key={r.id}
-              style={rowStyle(active)}
-              // Keep the chosen input only while staying on the same receiver.
-              onClick={() => onPick(r.id, active ? currentSource : null)}
-            >
-              {check(active)}
-              {r.name}
-            </button>
+            // Keep the chosen input only while staying on the same receiver.
+            <MenuItem key={r.id} active={active} compact={isCompact} onClick={() => onPick(r.id, active ? currentSource : null)}>
+              {row(active, r.name)}
+            </MenuItem>
           );
         })
       )}
@@ -514,27 +429,57 @@ function ReceiverPicker({
           >
             Switch {bound.name} to
           </div>
-          <button
-            style={rowStyle(!currentSource, true)}
-            onClick={() => onPick(currentReceiver, null)}
-          >
-            {check(!currentSource)}
-            Don’t switch input
-          </button>
+          <MenuItem active={!currentSource} compact={isCompact} onClick={() => onPick(currentReceiver, null)}>
+            {row(!currentSource, "Don’t switch input")}
+          </MenuItem>
           {inputs.map((src) => {
             const active = currentSource === src;
             return (
-              <button
-                key={src}
-                style={rowStyle(active)}
-                onClick={() => onPick(currentReceiver, src)}
-              >
-                {check(active)}
-                {src}
-              </button>
+              <MenuItem key={src} active={active} compact={isCompact} onClick={() => onPick(currentReceiver, src)}>
+                {row(active, src)}
+              </MenuItem>
             );
           })}
         </>
+      )}
+    </AnchoredPanel>
+  );
+}
+
+/// Pick a primary to MERGE this audio entity into (M26) — its controls route to
+/// that device. The lossless counterpart to "mark as duplicate" (shadow). Compact
+/// icon trigger (the dense inventory row); its dropdown uses the shared menu look.
+function MergePicker({
+  anchor,
+  isCompact,
+  candidates,
+  onPick,
+  onClose,
+}: {
+  anchor: HTMLElement | null;
+  isCompact: boolean;
+  candidates: Item[];
+  onPick: (primaryId: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <AnchoredPanel anchor={anchor} isCompact={isCompact} width={240} onClose={onClose}>
+      <div style={{ color: T.dim, fontSize: "0.72rem", padding: "0.3rem 0.6rem 0.4rem", lineHeight: 1.35 }}>
+        Merge into… <span style={{ color: T.faint }}>(same physical device — combines controls)</span>
+      </div>
+      {candidates.length === 0 ? (
+        <div style={{ color: T.faint, fontSize: "0.78rem", padding: "0.2rem 0.6rem 0.5rem" }}>
+          No other audio devices to merge into.
+        </div>
+      ) : (
+        candidates.map((c) => (
+          <MenuItem key={c.id} compact={isCompact} onClick={() => onPick(c.id)}>
+            <span style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+              <Glyph name={c.glyph ?? c.defaultGlyph} size={18} />
+              {c.name}
+            </span>
+          </MenuItem>
+        ))
       )}
     </AnchoredPanel>
   );
@@ -749,8 +694,8 @@ function DeviceCard({
               display: "grid",
               placeItems: "center",
               color: ACCENT,
-              background: "rgba(56,189,248,0.08)",
-              border: `1px solid ${T.cardBorder}`,
+              background: alpha(ACCENT, 0.08),
+              border: `1px solid ${mergePicking ? ACCENT : T.cardBorder}`,
               cursor: "pointer",
               fontSize: "1rem",
               lineHeight: 1,
@@ -948,54 +893,6 @@ function MergedCompanion({
   );
 }
 
-/// Pick a primary to MERGE this audio entity into (M26) — its controls route to
-/// that device. The lossless counterpart to "mark as duplicate" (shadow).
-function MergePicker({
-  anchor,
-  isCompact,
-  candidates,
-  onPick,
-  onClose,
-}: {
-  anchor: HTMLElement | null;
-  isCompact: boolean;
-  candidates: Item[];
-  onPick: (primaryId: string) => void;
-  onClose: () => void;
-}) {
-  const rowStyle: React.CSSProperties = {
-    display: "flex",
-    alignItems: "center",
-    gap: "0.5rem",
-    width: "100%",
-    textAlign: "left",
-    background: "transparent",
-    border: "none",
-    borderRadius: 8,
-    color: T.text,
-    cursor: "pointer",
-    fontSize: isCompact ? "0.95rem" : "0.82rem",
-    padding: isCompact ? "0.7rem 0.6rem" : "0.45rem 0.5rem",
-  };
-  return (
-    <AnchoredPanel anchor={anchor} isCompact={isCompact} onClose={onClose}>
-      <div style={{ color: T.dim, fontSize: "0.78rem", padding: "0.3rem 0.6rem 0.4rem" }}>
-        Merge into… (same physical device — combines controls)
-      </div>
-      {candidates.length === 0 ? (
-        <div style={{ color: T.faint, fontSize: "0.78rem", padding: "0.2rem 0.6rem 0.5rem" }}>
-          No other audio devices to merge into.
-        </div>
-      ) : (
-        candidates.map((c) => (
-          <button key={c.id} style={rowStyle} onClick={() => onPick(c.id)}>
-            {c.name}
-          </button>
-        ))
-      )}
-    </AnchoredPanel>
-  );
-}
 
 const SECTIONS: { domain: Domain; title: string }[] = [
   { domain: "light", title: "Lights" },

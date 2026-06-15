@@ -15,7 +15,7 @@ import {
   type Theme,
 } from "../theme";
 import { color, font, radius } from "../theme";
-import { S } from "../styles";
+import { Button } from "./controls";
 
 export function ThemeSwitcher() {
   const [list, setList] = useState<Theme[]>(() => allThemes());
@@ -73,13 +73,13 @@ export function ThemeSwitcher() {
         ))}
       </div>
       <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.85rem", alignItems: "center" }}>
-        <button onClick={generate} style={S.buttonGhost}>
+        <Button variant="ghost" onClick={generate}>
           🎲 Generate
-        </button>
+        </Button>
         {unsaved && (
-          <button onClick={keep} style={S.buttonAccent}>
+          <Button variant="accent" onClick={keep}>
             Keep this
-          </button>
+          </Button>
         )}
         <span style={{ fontSize: "0.78rem", color: color.faint }}>
           {unsaved ? "Unsaved — Keep it to make it stick." : `${active.name} active`}
