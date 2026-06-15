@@ -48,6 +48,10 @@ pub(crate) struct LightRow {
     /// The room this device is directly assigned to (Devices-page assignment),
     /// or `None`. Room *links* (synced provider groups) aren't reflected here.
     room_id: Option<String>,
+    /// The room this device belongs to **via a synced provider-group link**, when
+    /// it has no direct assignment. Lets the Devices page show the effective room
+    /// (e.g. a Hue bulb in the linked "Living room") instead of "No room".
+    inherited_room_id: Option<String>,
 }
 
 fn row_to_light(r: sqlx::sqlite::SqliteRow) -> LightRow {
@@ -70,6 +74,9 @@ fn row_to_light(r: sqlx::sqlite::SqliteRow) -> LightRow {
         shadowed_by: r.get("shadowed_by"),
         shadow_auto: r.get::<i64, _>("shadow_auto") != 0,
         room_id: r.get("room_id"),
+        // try_get: queries that don't compute it (live get-one, internal reads)
+        // simply leave it None.
+        inherited_room_id: r.try_get("inherited_room_id").ok().flatten(),
     }
 }
 
@@ -78,7 +85,10 @@ fn row_to_light(r: sqlx::sqlite::SqliteRow) -> LightRow {
 pub(crate) async fn list_all_lights(state: &AppState) -> Result<Vec<LightRow>, ()> {
     sqlx::query(
         "SELECT id, provider_id, device_id, name, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto,
-                (SELECT room_id FROM room_lights WHERE light_id = lights.id LIMIT 1) AS room_id
+                (SELECT room_id FROM room_lights WHERE light_id = lights.id LIMIT 1) AS room_id,
+                (SELECT rl.room_id FROM room_links rl
+                   JOIN provider_group_lights pgl ON pgl.provider_group_id = rl.provider_group_id
+                   WHERE pgl.light_id = lights.id LIMIT 1) AS inherited_room_id
          FROM lights ORDER BY name",
     )
     .fetch_all(&state.db)
@@ -90,7 +100,10 @@ pub(crate) async fn list_all_lights(state: &AppState) -> Result<Vec<LightRow>, (
 pub(crate) async fn get_light_by_id(state: &AppState, id: &str) -> Result<Option<LightRow>, ()> {
     sqlx::query(
         "SELECT id, provider_id, device_id, name, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto,
-                (SELECT room_id FROM room_lights WHERE light_id = lights.id LIMIT 1) AS room_id
+                (SELECT room_id FROM room_lights WHERE light_id = lights.id LIMIT 1) AS room_id,
+                (SELECT rl.room_id FROM room_links rl
+                   JOIN provider_group_lights pgl ON pgl.provider_group_id = rl.provider_group_id
+                   WHERE pgl.light_id = lights.id LIMIT 1) AS inherited_room_id
          FROM lights WHERE id = ?",
     )
     .bind(id)

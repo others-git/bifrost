@@ -66,6 +66,10 @@ pub(crate) struct PowerDeviceRow {
     /// The room this device is directly assigned to (Devices-page assignment),
     /// or `None`. Room *links* (synced provider groups) aren't reflected here.
     pub room_id: Option<String>,
+    /// The room this device belongs to **via a synced provider-group link**, when
+    /// it has no direct assignment — so the Devices page shows the effective room
+    /// rather than "No room".
+    pub inherited_room_id: Option<String>,
 }
 
 fn kind_str(kind: PowerKind) -> &'static str {
@@ -106,6 +110,7 @@ fn row_to_device(r: sqlx::sqlite::SqliteRow) -> PowerDeviceRow {
         shadowed_by: r.get("shadowed_by"),
         shadow_auto: r.get::<i64, _>("shadow_auto") != 0,
         room_id: r.get("room_id"),
+        inherited_room_id: r.try_get("inherited_room_id").ok().flatten(),
     }
 }
 
@@ -124,7 +129,10 @@ pub(crate) fn build_power_provider(
 pub(crate) async fn list_all_power_devices(state: &AppState) -> Result<Vec<PowerDeviceRow>, ()> {
     sqlx::query(
         "SELECT id, provider_id, device_id, name, kind, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto,
-                (SELECT room_id FROM room_power_devices WHERE power_device_id = power_devices.id LIMIT 1) AS room_id
+                (SELECT room_id FROM room_power_devices WHERE power_device_id = power_devices.id LIMIT 1) AS room_id,
+                (SELECT rl.room_id FROM room_links rl
+                   JOIN provider_group_power_devices pgp ON pgp.provider_group_id = rl.provider_group_id
+                   WHERE pgp.power_device_id = power_devices.id LIMIT 1) AS inherited_room_id
          FROM power_devices ORDER BY name",
     )
     .fetch_all(&state.db)
@@ -143,6 +151,9 @@ pub(crate) async fn get_power_device_live(
         "SELECT pd.id, pd.provider_id, pd.device_id, pd.name, pd.kind, pd.last_state, pd.last_seen,
                 pd.enabled, pd.glyph, pd.hw_id, pd.shadowed_by, pd.shadow_auto,
                 (SELECT room_id FROM room_power_devices WHERE power_device_id = pd.id LIMIT 1) AS room_id,
+                (SELECT rl.room_id FROM room_links rl
+                   JOIN provider_group_power_devices pgp ON pgp.provider_group_id = rl.provider_group_id
+                   WHERE pgp.power_device_id = pd.id LIMIT 1) AS inherited_room_id,
                 p.provider_type, p.credentials
          FROM power_devices pd JOIN providers p ON pd.provider_id = p.id
          WHERE pd.id = ? AND p.enabled = 1",

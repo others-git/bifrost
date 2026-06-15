@@ -148,6 +148,10 @@ pub(crate) struct AudioDeviceRow {
     /// The room this device is directly assigned to (Devices-page assignment),
     /// or `None`. Room *links* (synced provider groups) aren't reflected here.
     pub room_id: Option<String>,
+    /// The room this device belongs to **via a synced provider-group link**, when
+    /// it has no direct assignment — so the Devices page shows the effective room
+    /// rather than "No room".
+    pub inherited_room_id: Option<String>,
     /// M22 receiver binding: the audio device id whose volume/mute this source
     /// routes to (the receiver is the volume authority). `None` = unbound.
     pub receiver_id: Option<String>,
@@ -180,6 +184,7 @@ fn row_to_device(r: sqlx::sqlite::SqliteRow) -> AudioDeviceRow {
         shadowed_by: r.get("shadowed_by"),
         shadow_auto: r.get::<i64, _>("shadow_auto") != 0,
         room_id: r.get("room_id"),
+        inherited_room_id: r.try_get("inherited_room_id").ok().flatten(),
         receiver_id: r.get("receiver_id"),
         receiver_source: r.get("receiver_source"),
         companion_of: r.get("companion_of"),
@@ -250,7 +255,10 @@ pub(crate) fn build_audio_provider(
 pub(crate) async fn list_all_devices(state: &AppState) -> Result<Vec<AudioDeviceRow>, ()> {
     let mut devices: Vec<AudioDeviceRow> = sqlx::query(
         "SELECT id, provider_id, device_id, name, kind, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto, receiver_id, receiver_source, companion_of,
-                (SELECT room_id FROM room_audio_devices WHERE audio_device_id = audio_devices.id LIMIT 1) AS room_id
+                (SELECT room_id FROM room_audio_devices WHERE audio_device_id = audio_devices.id LIMIT 1) AS room_id,
+                (SELECT rl.room_id FROM room_links rl
+                   JOIN provider_group_audio_devices pga ON pga.provider_group_id = rl.provider_group_id
+                   WHERE pga.audio_device_id = audio_devices.id LIMIT 1) AS inherited_room_id
          FROM audio_devices ORDER BY name",
     )
     .fetch_all(&state.db)
@@ -307,6 +315,9 @@ pub(crate) async fn get_device_live(
                 a.last_state, a.last_seen, a.enabled, a.glyph, a.hw_id, a.shadowed_by, a.shadow_auto,
                 a.receiver_id, a.receiver_source, a.companion_of,
                 (SELECT room_id FROM room_audio_devices WHERE audio_device_id = a.id LIMIT 1) AS room_id,
+                (SELECT rl.room_id FROM room_links rl
+                   JOIN provider_group_audio_devices pga ON pga.provider_group_id = rl.provider_group_id
+                   WHERE pga.audio_device_id = a.id LIMIT 1) AS inherited_room_id,
                 p.provider_type, p.credentials
          FROM audio_devices a JOIN providers p ON a.provider_id = p.id
          WHERE a.id = ? AND p.enabled = 1",

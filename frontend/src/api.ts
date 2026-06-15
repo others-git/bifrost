@@ -57,6 +57,8 @@ export interface Light {
   /** The room this device is directly assigned to (Devices-page assignment),
    * or null. Room links (synced provider groups) aren't reflected here. */
   room_id?: string | null;
+  /** Room via a synced provider-group link, when there's no direct room_id. */
+  inherited_room_id?: string | null;
 }
 
 /** Enable/disable a device of any domain (lights / audio / power). Disabled =
@@ -393,6 +395,8 @@ export interface AudioDevice {
   /** The room this device is directly assigned to (Devices-page assignment),
    * or null. Room links (synced provider groups) aren't reflected here. */
   room_id?: string | null;
+  /** Room via a synced provider-group link, when there's no direct room_id. */
+  inherited_room_id?: string | null;
   /** M22: the receiver this source's volume/mute routes to; null = unbound. */
   receiver_id?: string | null;
   /** The receiver input to select when this source becomes active; null = none. */
@@ -598,6 +602,8 @@ export interface PowerDevice {
   /** The room this device is directly assigned to (Devices-page assignment),
    * or null. Room links (synced provider groups) aren't reflected here. */
   room_id?: string | null;
+  /** Room via a synced provider-group link, when there's no direct room_id. */
+  inherited_room_id?: string | null;
 }
 
 export async function getPowerDevices(): Promise<PowerDevice[]> {

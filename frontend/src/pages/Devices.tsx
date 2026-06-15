@@ -68,6 +68,9 @@ interface Item {
   companionOf: string | null;
   /** Directly-assigned room id, or null (room links aren't reflected here). */
   roomId: string | null;
+  /** Room via a synced provider-group link, shown when there's no direct roomId
+   * so an implicitly-grouped device reads as its effective room, not "No room". */
+  inheritedRoomId: string | null;
   /** Audio only: the device kind, so a source (TV/speaker/zone) can be bound to
    * a receiver while receivers themselves aren't offered the control. */
   audioKind?: AudioDevice["kind"];
@@ -108,6 +111,7 @@ function lightItem(l: Light): Item {
     shadowAuto: l.shadow_auto === true,
     companionOf: null,
     roomId: l.room_id ?? null,
+    inheritedRoomId: l.inherited_room_id ?? null,
   };
 }
 
@@ -127,6 +131,7 @@ function audioItem(a: AudioDevice): Item {
     shadowAuto: a.shadow_auto === true,
     companionOf: a.companion_of ?? null,
     roomId: a.room_id ?? null,
+    inheritedRoomId: a.inherited_room_id ?? null,
     audioKind: a.kind,
     receiverId: a.receiver_id ?? null,
     receiverSource: a.receiver_source ?? null,
@@ -150,6 +155,7 @@ function powerItem(p: PowerDevice): Item {
     shadowAuto: p.shadow_auto === true,
     companionOf: null,
     roomId: p.room_id ?? null,
+    inheritedRoomId: p.inherited_room_id ?? null,
   };
 }
 
@@ -252,6 +258,7 @@ function RoomPicker({
   anchor,
   rooms,
   current,
+  inherited = false,
   isCompact,
   onPick,
   onClose,
@@ -259,6 +266,8 @@ function RoomPicker({
   anchor: HTMLElement | null;
   rooms: Room[];
   current: string | null;
+  /** `current` comes from a synced group link, not a direct assignment. */
+  inherited?: boolean;
   isCompact: boolean;
   onPick: (roomId: string | null) => void;
   onClose: () => void;
@@ -272,6 +281,11 @@ function RoomPicker({
       {isCompact && (
         <div style={{ color: T.dim, fontSize: "0.78rem", padding: "0.3rem 0.6rem 0.5rem" }}>
           Assign room
+        </div>
+      )}
+      {inherited && current && (
+        <div style={{ color: T.dim, fontSize: "0.74rem", padding: "0.3rem 0.6rem 0.5rem", lineHeight: 1.4 }}>
+          In this room via a synced group. Pick one to set a direct override.
         </div>
       )}
       {choices.map((c) => {
@@ -464,7 +478,14 @@ function DeviceCard({
   const receiverBtnRef = useRef<HTMLButtonElement>(null);
   const mergeBtnRef = useRef<HTMLButtonElement>(null);
   const { isCompact } = useViewport();
-  const roomName = item.roomId ? (rooms.find((r) => r.id === item.roomId)?.name ?? null) : null;
+  // Effective room: a direct assignment, else the room reached via a synced
+  // provider-group link. Shown so an implicitly-grouped device reads as its
+  // real room rather than "No room".
+  const effectiveRoomId = item.roomId ?? item.inheritedRoomId;
+  const isInheritedRoom = !item.roomId && !!item.inheritedRoomId;
+  const roomName = effectiveRoomId
+    ? (rooms.find((r) => r.id === effectiveRoomId)?.name ?? null)
+    : null;
   // A source device (TV/streamer/console — any audio that isn't itself a
   // receiver) can route its volume to a receiver.
   const isAudioSource = item.domain === "audio" && item.audioKind !== "receiver";
@@ -660,7 +681,11 @@ function DeviceCard({
       <button
         ref={roomBtnRef}
         onClick={() => setRoomPicking((v) => !v)}
-        title={roomName ? `Room: ${roomName} — click to change` : "Assign to a room"}
+        title={
+          roomName
+            ? `Room: ${roomName}${isInheritedRoom ? " (via synced group)" : ""} — click to ${isInheritedRoom ? "override" : "change"}`
+            : "Assign to a room"
+        }
         style={{
           flexShrink: 0,
           width: 34,
@@ -668,9 +693,13 @@ function DeviceCard({
           borderRadius: 9,
           display: "grid",
           placeItems: "center",
-          color: item.roomId ? ACCENT : T.faint,
+          // An inherited (linked) room shows assigned but muted, to distinguish
+          // it from a direct assignment.
+          color: item.roomId ? ACCENT : effectiveRoomId ? T.dim : T.faint,
           background: item.roomId ? "rgba(56,189,248,0.10)" : "rgba(255,255,255,0.03)",
-          border: item.roomId ? `1px solid rgba(56,189,248,0.35)` : `1px solid ${T.cardBorder}`,
+          border: item.roomId
+            ? `1px solid rgba(56,189,248,0.35)`
+            : `1px solid ${T.cardBorder}`,
           cursor: "pointer",
         }}
       >
@@ -680,7 +709,8 @@ function DeviceCard({
         <RoomPicker
           anchor={roomBtnRef.current}
           rooms={rooms}
-          current={item.roomId}
+          current={effectiveRoomId}
+          inherited={isInheritedRoom}
           isCompact={isCompact}
           onPick={(r) => {
             onSetRoom(r);

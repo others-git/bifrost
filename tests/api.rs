@@ -2180,6 +2180,52 @@ async fn sync_creates_mirror_and_room_with_linked_members() {
 }
 
 #[tokio::test]
+async fn light_reports_inherited_room_from_a_synced_group_link() {
+    // A light that's in a room only via a synced provider-group link (no direct
+    // assignment) must report that room as inherited_room_id, so the Devices page
+    // shows its effective room instead of "No room".
+    let bridge = hue_bridge_with_room("Living Room").await;
+    let (app, light_id) = helpers::test_app_with_hue_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    app.clone()
+        .oneshot(helpers::authed_post(
+            "/api/providers/prov-hue-1/sync-groups",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+
+    let rooms = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/rooms", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let room_id = rooms[0]["id"].as_str().unwrap().to_string();
+
+    let lights = helpers::response_json(
+        app.oneshot(helpers::authed_get("/api/lights", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let light = lights
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["id"] == light_id)
+        .expect("light present");
+    assert!(light["room_id"].is_null(), "no direct assignment");
+    assert_eq!(
+        light["inherited_room_id"], room_id,
+        "effective room via the link"
+    );
+}
+
+#[tokio::test]
 async fn sync_rename_follows_while_room_keeps_inherited_name() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, ResponseTemplate};
