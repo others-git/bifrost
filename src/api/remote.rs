@@ -160,25 +160,69 @@ pub(crate) struct RemoteApp {
     pub last_seen: Option<String>,
 }
 
-/// Friendly name for a known Play Store package; falls back to the package id.
-/// Small, curated list of the common TV apps — extend as needed.
+/// Friendly name for a known Play Store package. Matches by **brand keyword**,
+/// because the same app ships under many package ids across TV makers and regions
+/// (`com.hulu.plus`, `com.hulu.livingroomplus`, …) — exact matching missed those.
+/// Order matters: more specific keywords first. Unknown packages are prettified.
 fn app_display_name(package: &str) -> String {
-    let name = match package {
-        "com.netflix.ninja" => "Netflix",
-        "com.google.android.youtube.tv" | "com.google.android.youtube.tvkids" => "YouTube",
-        "com.amazon.amazonvideo.livingroom" => "Prime Video",
-        "com.disney.disneyplus" => "Disney+",
-        "com.hulu.plus" => "Hulu",
-        "com.hbo.hbonow" | "com.wbd.stream" => "Max",
-        "com.spotify.tv.android" => "Spotify",
-        "com.plexapp.android" => "Plex",
-        "org.xbmc.kodi" => "Kodi",
-        "tv.twitch.android.app" => "Twitch",
-        "com.apple.atve.androidtv.appletv" => "Apple TV",
-        "com.google.android.apps.tv.dreamx" => "Screensaver",
-        _ => return package.to_string(),
-    };
-    name.to_string()
+    let p = package.to_ascii_lowercase();
+    // (keyword, friendly name). Keywords are checked in order against the
+    // lowercased package id; the first contained match wins.
+    const KNOWN: &[(&str, &str)] = &[
+        ("youtube.tvkids", "YouTube Kids"),
+        ("youtube", "YouTube"),
+        ("netflix", "Netflix"),
+        ("amazonvideo", "Prime Video"),
+        ("amazon.avod", "Prime Video"),
+        ("primevideo", "Prime Video"),
+        ("disneyplus", "Disney+"),
+        ("hulu", "Hulu"),
+        ("hbo", "Max"),
+        ("wbd.stream", "Max"),
+        ("spotify", "Spotify"),
+        ("plexapp", "Plex"),
+        ("kodi", "Kodi"),
+        ("twitch", "Twitch"),
+        ("appletv", "Apple TV"),
+        ("apple.atve", "Apple TV"),
+        ("peacock", "Peacock"),
+        ("paramount", "Paramount+"),
+        ("crunchyroll", "Crunchyroll"),
+        ("tubitv", "Tubi"),
+        ("pluto", "Pluto TV"),
+        ("sling", "Sling TV"),
+        ("pandora", "Pandora"),
+        ("vudu", "Vudu"),
+        ("dreamx", "Screensaver"),
+    ];
+    for (kw, name) in KNOWN {
+        if p.contains(kw) {
+            return name.to_string();
+        }
+    }
+    prettify_package(package)
+}
+
+/// Best-effort readable name for an unknown package id — capitalize the vendor
+/// segment (`com.foobar.tv` → "Foobar"), falling back to the id if it's not a
+/// dotted package. Better than showing `com.foobar.tv` raw.
+fn prettify_package(package: &str) -> String {
+    if package.contains("://") || !package.contains('.') {
+        return package.to_string();
+    }
+    let parts: Vec<&str> = package.split('.').filter(|s| !s.is_empty()).collect();
+    // The vendor (2nd) segment is usually the brand; fall back to the last.
+    let seg = parts
+        .get(1)
+        .filter(|s| s.len() > 2)
+        .or_else(|| parts.last())
+        .copied()
+        .unwrap_or(package);
+    let mut chars = seg.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => package.to_string(),
+    }
 }
 
 /// `true` if `activity` looks like a launchable package id (not a deep-link URL).
@@ -484,4 +528,40 @@ async fn set_glyph_handler(
     crate::api::set_device_glyph(&state, "remote_devices", &id, req.glyph)
         .await
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{app_display_name, prettify_package};
+
+    #[test]
+    fn app_display_name_matches_brand_across_package_variants() {
+        // The reported bug: a Hulu package variant fell through to the raw id.
+        assert_eq!(app_display_name("com.hulu.livingroomplus"), "Hulu");
+        assert_eq!(app_display_name("com.hulu.plus"), "Hulu");
+        assert_eq!(app_display_name("com.netflix.ninja"), "Netflix");
+        assert_eq!(app_display_name("com.google.android.youtube.tv"), "YouTube");
+        assert_eq!(
+            app_display_name("com.google.android.youtube.tvkids"),
+            "YouTube Kids"
+        );
+        assert_eq!(
+            app_display_name("com.amazon.amazonvideo.livingroom"),
+            "Prime Video"
+        );
+        assert_eq!(app_display_name("com.disney.disneyplus"), "Disney+");
+    }
+
+    #[test]
+    fn app_display_name_prettifies_unknown_packages() {
+        // Unknown brand → capitalized vendor segment, not the raw dotted id.
+        assert_eq!(app_display_name("com.foobar.tv"), "Foobar");
+        assert_eq!(prettify_package("com.acmecorp.player"), "Acmecorp");
+        // Non-package strings (deep links / plain text) pass through untouched.
+        assert_eq!(
+            prettify_package("https://youtube.com/watch"),
+            "https://youtube.com/watch"
+        );
+        assert_eq!(prettify_package("HDMI 1"), "HDMI 1");
+    }
 }

@@ -354,6 +354,23 @@ export function AudioEditor({
           name={device.name}
           initialOn={device.state.power}
           onClose={() => setRemoteOpen(false)}
+          // Bound to a receiver (M22): the remote's volume/mute drive the device,
+          // which the backend routes to the receiver — not the TV's own volume.
+          onVolume={
+            device.receiver_id
+              ? (k) => {
+                  const st = device.state;
+                  if (k === "mute") {
+                    onLocalPatch(device.id, { mute: !st.mute });
+                    setAudioState(device.id, { mute: !st.mute });
+                  } else {
+                    const v = Math.max(0, Math.min(100, (st.volume ?? 0) + (k === "volume_up" ? 2 : -2)));
+                    onLocalPatch(device.id, { volume: v });
+                    setAudioState(device.id, { volume: v });
+                  }
+                }
+              : undefined
+          }
         />
       )}
       {onSetEnabled && (

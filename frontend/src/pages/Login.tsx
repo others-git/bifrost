@@ -3,7 +3,10 @@ import { login } from "../api";
 import { S } from "../styles";
 import { Button } from "../components/controls";
 
-export function LoginPage({ onSuccess }: { onSuccess: () => void }) {
+// "BIFROST" in Elder Futhark — the same runic wordmark the rest of the app uses.
+const BRAND_RUNES = "ᛒᛁᚠᚱᛟᛋᛏ";
+
+export function LoginPage({ onSuccess, version }: { onSuccess: () => void; version?: string }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -21,7 +24,13 @@ export function LoginPage({ onSuccess }: { onSuccess: () => void }) {
   return (
     <div style={S.center}>
       <form onSubmit={submit} style={{ ...S.card, width: 300 }}>
-        <h1 className="bifrost-brand" style={{ margin: "0 0 0.5rem", fontSize: "1.6rem", letterSpacing: "0.05em" }}>BIFROST</h1>
+        <h1
+          className="bifrost-brand"
+          aria-label="Bifrost"
+          style={{ margin: "0 0 0.85rem", fontSize: "2.1rem", letterSpacing: "0.12em", textAlign: "center" }}
+        >
+          {BRAND_RUNES}
+        </h1>
         <input
           type="password"
           placeholder="Password"
@@ -31,10 +40,15 @@ export function LoginPage({ onSuccess }: { onSuccess: () => void }) {
           autoFocus
           required
         />
-        {error && <p style={{ color: "#f66", margin: 0, fontSize: "0.875rem" }}>{error}</p>}
+        {error && <p style={{ color: "var(--bf-rose)", margin: 0, fontSize: "0.875rem" }}>{error}</p>}
         <Button type="submit" disabled={loading}>
           {loading ? "Signing in…" : "Sign in"}
         </Button>
+        {version && (
+          <p style={{ textAlign: "center", color: "var(--bf-faint)", fontSize: "0.72rem", margin: "0.15rem 0 0" }}>
+            v{version}
+          </p>
+        )}
       </form>
     </div>
   );

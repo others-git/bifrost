@@ -25,12 +25,17 @@ export function BifrostRemote({
   name,
   initialOn,
   onClose,
+  onVolume,
 }: {
   remoteId: string;
   name: string;
   /** Power state from the opening fly-out, shown until the live read lands. */
   initialOn?: boolean;
   onClose: () => void;
+  /** When the paired device routes volume elsewhere (e.g. a receiver it's bound
+   * to, M22), the volume/mute keys call this instead of sending TV remote keys —
+   * so the buttons drive the device that actually owns the volume. */
+  onVolume?: (key: "volume_up" | "volume_down" | "mute") => void;
 }) {
   const { isCompact } = useViewport();
   const [state, setState] = useState<RemoteState | null>(null);
@@ -189,11 +194,11 @@ export function BifrostRemote({
         <Key glyph="☰" label="Menu" onClick={press("menu")} />
       </Row>
 
-      {/* Volume */}
+      {/* Volume — routes to the receiver when the device is bound (onVolume). */}
       <Row>
-        <Key glyph="🔉" label="Volume down" mono onClick={press("volume_down")} />
-        <Key glyph="🔇" label="Mute" mono onClick={press("mute")} />
-        <Key glyph="🔊" label="Volume up" mono onClick={press("volume_up")} />
+        <Key glyph="🔉" label="Volume down" mono onClick={onVolume ? () => onVolume("volume_down") : press("volume_down")} />
+        <Key glyph="🔇" label="Mute" mono onClick={onVolume ? () => onVolume("mute") : press("mute")} />
+        <Key glyph="🔊" label="Volume up" mono onClick={onVolume ? () => onVolume("volume_up") : press("volume_up")} />
       </Row>
 
       {/* Transport */}

@@ -95,7 +95,7 @@ export function App() {
     );
   }
   if (page === "setup") return <SetupPage onComplete={() => setPage("login")} />;
-  if (page === "login") return <LoginPage onSuccess={() => init()} />;
+  if (page === "login") return <LoginPage onSuccess={() => init()} version={version} />;
 
   const navigate = (p: NavPage) => {
     if (p === "dashboard" || p === "scenes" || p === "plan")
