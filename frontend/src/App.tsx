@@ -20,6 +20,12 @@ import { VoiceFeedback } from "./components/VoiceFeedback";
 type NavPage = "dashboard" | "audio" | "devices" | "scenes" | "rooms" | "plan" | "settings";
 type Page = "loading" | "setup" | "login" | NavPage;
 
+/** True when served inside the Bifrost kiosk WebView (it appends
+ * `BifrostKiosk/<version>` to its User-Agent). A wall fixture is paired by QR
+ * and deauthed remotely by the controller, so we hide the Sign-out button there
+ * — otherwise any passerby could tap it and knock the tablet offline. */
+const IS_KIOSK = /\bBifrostKiosk\//.test(navigator.userAgent);
+
 /** "BIFROST" in Elder Futhark — ᛒ(B) ᛁ(I) ᚠ(F) ᚱ(R) ᛟ(O) ᛋ(S) ᛏ(T). */
 const BRAND_RUNES = "ᛒᛁᚠᚱᛟᛋᛏ";
 
@@ -202,13 +208,16 @@ function MobileTopBar({
         {title && <span style={{ fontSize: "0.85rem", fontFamily: font.display, letterSpacing: "0.08em", color: color.dim }}>{title}</span>}
       </div>
       {version && <span style={{ fontSize: "0.65rem", color: color.faint }}>v{version}</span>}
-      <button
-        onClick={onLogout}
-        aria-label="Sign out"
-        style={{ display: "grid", placeItems: "center", background: "none", border: "none", color: color.faint, cursor: "pointer", padding: "0.2rem 0.3rem" }}
-      >
-        <Glyph name="logout" size={18} />
-      </button>
+      {/* No Sign-out on the kiosk: deauth is the controller's job, not a tap. */}
+      {!IS_KIOSK && (
+        <button
+          onClick={onLogout}
+          aria-label="Sign out"
+          style={{ display: "grid", placeItems: "center", background: "none", border: "none", color: color.faint, cursor: "pointer", padding: "0.2rem 0.3rem" }}
+        >
+          <Glyph name="logout" size={18} />
+        </button>
+      )}
     </header>
   );
 }
@@ -371,28 +380,31 @@ function NavTray({
 
       <span style={{ flex: 1 }} />
 
-      <button
-        onClick={onLogout}
-        title={collapsed ? "Sign out" : undefined}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "0.65rem",
-          padding: collapsed ? "0.55rem 0" : "0.55rem 0.6rem",
-          justifyContent: collapsed ? "center" : "flex-start",
-          background: "none",
-          border: "none",
-          borderRadius: 8,
-          color: color.faint,
-          fontSize: "0.9rem",
-          cursor: "pointer",
-          whiteSpace: "nowrap",
-          overflow: "hidden",
-        }}
-      >
-        <span style={{ width: 18, display: "grid", placeItems: "center", flexShrink: 0 }}><Glyph name="logout" size={18} /></span>
-        {!collapsed && "Sign out"}
-      </button>
+      {/* No Sign-out on the kiosk: deauth is the controller's job, not a tap. */}
+      {!IS_KIOSK && (
+        <button
+          onClick={onLogout}
+          title={collapsed ? "Sign out" : undefined}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "0.65rem",
+            padding: collapsed ? "0.55rem 0" : "0.55rem 0.6rem",
+            justifyContent: collapsed ? "center" : "flex-start",
+            background: "none",
+            border: "none",
+            borderRadius: 8,
+            color: color.faint,
+            fontSize: "0.9rem",
+            cursor: "pointer",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+          }}
+        >
+          <span style={{ width: 18, display: "grid", placeItems: "center", flexShrink: 0 }}><Glyph name="logout" size={18} /></span>
+          {!collapsed && "Sign out"}
+        </button>
+      )}
 
       <button
         onClick={toggle}

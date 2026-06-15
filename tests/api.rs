@@ -5730,6 +5730,72 @@ async fn voice_command_resolves_light_by_name_and_drives_provider() {
 }
 
 #[tokio::test]
+async fn voice_llm_fallback_resolves_an_unparsed_clause_and_drives_the_device() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // A clause the native grammar can't parse, rescued by the configured `chat`
+    // model: it returns one tool call, which maps to a Command and dispatches.
+    let bridge = wled_mock().await;
+    let (app, _light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Mock chat endpoint — returns a set_power tool call for the test light.
+    let chat = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{ "message": { "tool_calls": [{
+                "id": "c1", "type": "function",
+                "function": {
+                    "name": "set_power",
+                    "arguments": "{\"target\":\"test light\",\"on\":false}"
+                }
+            }]}}]
+        })))
+        .mount(&chat)
+        .await;
+
+    // Point the `chat` role at the mock.
+    let cfg = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/ai-endpoints/chat",
+            &cookie,
+            &format!(r#"{{"base_url":"{}","model":"m"}}"#, chat.uri()),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        cfg.status().is_success(),
+        "configuring chat endpoint: {:?}",
+        cfg.status()
+    );
+
+    // "abracadabra" is unparseable by the grammar → LLM fallback → set_power.
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "POST",
+            "/api/voice/command",
+            &cookie,
+            r#"{"text":"abracadabra"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["ok"], true, "llm-fallback command failed: {body}");
+
+    // The mapped Command drove the light's provider.
+    let reqs = bridge.received_requests().await.unwrap();
+    assert!(
+        reqs.iter().any(|r| r.url.path() == "/json/state"),
+        "the LLM-resolved command never reached the device"
+    );
+}
+
+#[tokio::test]
 async fn voice_falls_back_to_ha_assist_for_unparsed_commands() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};

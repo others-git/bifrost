@@ -1025,6 +1025,87 @@ export async function createEnrollmentToken(): Promise<{
   return res.json();
 }
 
+// ── AI model endpoints (voice: transcription / chat / tts) ───────────────────
+
+export type AiRole = "transcription" | "chat" | "tts";
+
+export interface AiEndpoint {
+  role: AiRole;
+  base_url: string;
+  model: string;
+  /** A key is stored (never returned). Omit `api_key` on save to keep it. */
+  has_key: boolean;
+  enabled: boolean;
+}
+
+export async function getAiEndpoints(): Promise<AiEndpoint[]> {
+  const res = await fetch("/api/ai-endpoints");
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function putAiEndpoint(
+  role: AiRole,
+  body: { base_url: string; model: string; api_key?: string | null; enabled: boolean },
+): Promise<void> {
+  const res = await fetch(`/api/ai-endpoints/${role}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+}
+
+export async function deleteAiEndpoint(role: AiRole): Promise<void> {
+  await fetch(`/api/ai-endpoints/${role}`, { method: "DELETE" });
+}
+
+/** Probe an endpoint's reachability (`GET {base_url}/models`). */
+export async function testAiEndpoint(role: AiRole): Promise<{ ok: boolean; message: string }> {
+  const res = await fetch(`/api/ai-endpoints/${role}/test`, { method: "POST" });
+  if (!res.ok) return { ok: false, message: `HTTP ${res.status}` };
+  return res.json();
+}
+
+// ── Kiosks (wall-tablet companion apps) ──────────────────────────────────────
+
+export interface Kiosk {
+  id: string;
+  name: string;
+  app_version: string | null;
+  screen_on: boolean | null;
+  last_seen: string | null;
+  online: boolean;
+  pending_command: string | null;
+  /** false once de-authed (key revoked) — must re-pair. */
+  authorized: boolean;
+}
+
+export async function getKiosks(): Promise<Kiosk[]> {
+  const res = await fetch("/api/kiosks");
+  if (!res.ok) return [];
+  return res.json();
+}
+
+/** Queue a command the kiosk performs on its next check-in. */
+export async function kioskCommand(id: string, command: "sleep" | "wake" | "lock"): Promise<void> {
+  const res = await fetch(`/api/kiosks/${id}/command`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ command }),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+}
+
+/** Revoke the kiosk's key — it must re-enroll via QR. */
+export async function kioskDeauth(id: string): Promise<void> {
+  await fetch(`/api/kiosks/${id}/deauth`, { method: "POST" });
+}
+
+export async function forgetKiosk(id: string): Promise<void> {
+  await fetch(`/api/kiosks/${id}`, { method: "DELETE" });
+}
+
 // ── Floor plans ──────────────────────────────────────────────────────────────
 
 export type WallDir = "h" | "v";

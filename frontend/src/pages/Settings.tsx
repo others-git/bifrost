@@ -19,7 +19,18 @@ import {
   createEnrollmentToken,
   getSettings,
   updateSettings,
+  getAiEndpoints,
+  putAiEndpoint,
+  deleteAiEndpoint,
+  testAiEndpoint,
+  getKiosks,
+  kioskCommand,
+  kioskDeauth,
+  forgetKiosk,
   type ApiKey,
+  type AiEndpoint,
+  type AiRole,
+  type Kiosk,
   type ConnectionStatus,
   type CredentialField,
   type Provider,
@@ -38,6 +49,14 @@ interface Props {
   onNavigate: (page: "dashboard") => void;
 }
 
+type SettingsTab = "providers" | "voice" | "clients" | "appearance";
+const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
+  { id: "providers", label: "Providers" },
+  { id: "voice", label: "Voice & AI" },
+  { id: "clients", label: "Clients" },
+  { id: "appearance", label: "Appearance" },
+];
+
 export function SettingsPage({ onNavigate: _onNavigate }: Props) {
   const dialogs = useDialogs();
   const { isMobile } = useViewport();
@@ -45,6 +64,7 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
   const [types, setTypes] = useState<ProviderType[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const [toast, setToast] = useState("");
+  const [tab, setTab] = useState<SettingsTab>("providers");
 
   async function loadProviders() {
     setProviders(await getProviders());
@@ -127,12 +147,45 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
     <div style={{ padding: isMobile ? "1rem 0.85rem" : "2rem", maxWidth: 720, margin: "0 auto" }}>
       <PageHeader title="Settings" />
 
-      <SectionLabel style={{ marginBottom: "0.8rem" }}>Appearance</SectionLabel>
-      <div style={{ marginBottom: "2rem" }}>
-        <ThemeSwitcher />
+      {/* Tabs — keeps a growing Settings page legible. Scrolls on narrow screens. */}
+      <div
+        style={{
+          display: "flex",
+          gap: "0.15rem",
+          borderBottom: "1px solid var(--bf-border)",
+          margin: "0 0 1.5rem",
+          // overflow-x:auto alone makes the browser compute overflow-y as auto
+          // too, which spawns a stray vertical scrollbar (the up/down arrows).
+          // Pin the vertical axis hidden so only horizontal scrolling shows.
+          overflowX: "auto",
+          overflowY: "hidden",
+        }}
+      >
+        {SETTINGS_TABS.map((t) => {
+          const active = tab === t.id;
+          return (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                whiteSpace: "nowrap",
+                padding: isMobile ? "0.7rem 0.95rem" : "0.55rem 0.95rem",
+                fontSize: "0.92rem",
+                fontWeight: active ? 600 : 500,
+                color: active ? ACCENT : "var(--bf-dim)",
+                borderBottom: `2px solid ${active ? ACCENT : "transparent"}`,
+                marginBottom: -1,
+                transition: "color 0.15s",
+              }}
+            >
+              {t.label}
+            </button>
+          );
+        })}
       </div>
-
-      <SectionLabel style={{ marginBottom: "1.1rem" }}>Providers</SectionLabel>
 
       {toast && (
         <div style={{ background: "#1e3a1e", border: "1px solid #2a5a2a", borderRadius: 8, padding: "0.6rem 1rem", marginBottom: "1rem", color: "var(--bf-good)", fontSize: "0.875rem" }}>
@@ -140,70 +193,83 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
         </div>
       )}
 
-      {providers.length > 0 && (
-        <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginBottom: "1rem" }}>
-          <Button variant="ghost" onClick={() => runAll("discover")} disabled={!!running} title="Discover devices on every provider">
-            {running === "discover" ? "Discovering…" : "Discover all"}
-          </Button>
-          <Button variant="ghost" onClick={() => runAll("sync")} disabled={!!running} title="Discover devices and mirror rooms/zones for every provider">
-            {running === "sync" ? "Syncing…" : "Sync all"}
-          </Button>
-          <Button variant="ghost"
-            onClick={() => runAll("prune-sync")}
-            disabled={!!running}
-            title="Force-prune devices providers no longer report, then discover + sync — across all providers"
-          >
-            {running === "prune-sync" ? "Pruning…" : "Prune + Sync all"}
-          </Button>
+      {tab === "providers" && (
+        <>
+          {providers.length > 0 && (
+            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginBottom: "1rem" }}>
+              <Button variant="ghost" onClick={() => runAll("discover")} disabled={!!running} title="Discover devices on every provider">
+                {running === "discover" ? "Discovering…" : "Discover all"}
+              </Button>
+              <Button variant="ghost" onClick={() => runAll("sync")} disabled={!!running} title="Discover devices and mirror rooms/zones for every provider">
+                {running === "sync" ? "Syncing…" : "Sync all"}
+              </Button>
+              <Button variant="ghost"
+                onClick={() => runAll("prune-sync")}
+                disabled={!!running}
+                title="Force-prune devices providers no longer report, then discover + sync — across all providers"
+              >
+                {running === "prune-sync" ? "Pruning…" : "Prune + Sync all"}
+              </Button>
+            </div>
+          )}
+
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+            {providers.length === 0 && !showAdd && (
+              <p style={{ color: "var(--bf-faint)", margin: 0 }}>No providers configured.</p>
+            )}
+            {providers.map((p) => (
+              <ProviderCard
+                key={p.id}
+                provider={p}
+                types={types}
+                onCredentialsSaved={() => showToast("Credentials updated — reconnecting.")}
+                onRemove={() => handleRemove(p.id)}
+                onDiscover={() => handleDiscover(p.id)}
+                onSetPrune={async (prune) => {
+                  await setProviderPrune(p.id, prune);
+                  await loadProviders();
+                }}
+                onImportGroups={async () => {
+                  const r = await syncProviderGroups(p.id);
+                  showToast(
+                    r.synced === 0
+                      ? "No rooms or zones defined on this provider."
+                      : `Synced ${r.synced} room${r.synced !== 1 ? "s" : ""} (${r.rooms_created} created, ${r.rooms_linked} linked).`,
+                  );
+                }}
+              />
+            ))}
+          </div>
+
+          {showAdd ? (
+            <div style={{ marginTop: "1.5rem" }}>
+              <AddProviderForm types={types} onAdded={handleAdded} onCancel={() => setShowAdd(false)} />
+            </div>
+          ) : (
+            <Button onClick={() => setShowAdd(true)} style={{ marginTop: "1.5rem" }}>
+              + Add Provider
+            </Button>
+          )}
+
+          <ExpandedLanSection />
+        </>
+      )}
+
+      {tab === "voice" && <AiEndpointsSection dialogs={dialogs} />}
+
+      {tab === "clients" && (
+        <>
+          <ApiKeysSection dialogs={dialogs} />
+          <KiosksSection dialogs={dialogs} />
+        </>
+      )}
+
+      {tab === "appearance" && (
+        <div style={{ marginTop: "0.25rem" }}>
+          <ThemeSwitcher />
         </div>
       )}
 
-      <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-        {providers.length === 0 && !showAdd && (
-          <p style={{ color: "var(--bf-faint)", margin: 0 }}>No providers configured.</p>
-        )}
-        {providers.map((p) => (
-          <ProviderCard
-            key={p.id}
-            provider={p}
-            types={types}
-            onCredentialsSaved={() => showToast("Credentials updated — reconnecting.")}
-            onRemove={() => handleRemove(p.id)}
-            onDiscover={() => handleDiscover(p.id)}
-            onSetPrune={async (prune) => {
-              await setProviderPrune(p.id, prune);
-              await loadProviders();
-            }}
-            onImportGroups={async () => {
-              const r = await syncProviderGroups(p.id);
-              showToast(
-                r.synced === 0
-                  ? "No rooms or zones defined on this provider."
-                  : `Synced ${r.synced} room${r.synced !== 1 ? "s" : ""} (${r.rooms_created} created, ${r.rooms_linked} linked).`,
-              );
-            }}
-          />
-        ))}
-      </div>
-
-      {showAdd ? (
-        <div style={{ marginTop: "1.5rem" }}>
-          <AddProviderForm
-            types={types}
-            onAdded={handleAdded}
-            onCancel={() => setShowAdd(false)}
-          />
-        </div>
-      ) : (
-        <Button
-          onClick={() => setShowAdd(true)} style={{ marginTop: "1.5rem" }}
-        >
-          + Add Provider
-        </Button>
-      )}
-
-      <ExpandedLanSection />
-      <ApiKeysSection dialogs={dialogs} />
       {dialogs.element}
     </div>
   );
@@ -1033,3 +1099,279 @@ const labelStyle: React.CSSProperties = {
   fontSize: "0.875rem",
   color: "var(--bf-dim)",
 };
+
+// ── AI model endpoints (Voice & AI tab) ──────────────────────────────────────
+
+const AI_ROLES: { role: AiRole; title: string; blurb: string; placeholder: string }[] = [
+  {
+    role: "chat",
+    title: "Chat (command LLM)",
+    blurb: "Interprets voice commands the built-in grammar can't parse. OpenAI-compatible /chat/completions with tool-calling.",
+    placeholder: "e.g. http://localhost:11434/v1",
+  },
+  {
+    role: "transcription",
+    title: "Transcription (speech-to-text)",
+    blurb: "Server-side STT for clients that upload audio to /api/voice/listen. The wall-tablet kiosk transcribes on-device with Vosk and does NOT use this — leave it unset unless a client sends raw audio.",
+    placeholder: "e.g. http://localhost:8080/v1",
+  },
+  {
+    role: "tts",
+    title: "Text-to-speech",
+    blurb: "Spoken replies (reserved for the conversation / talk modes).",
+    placeholder: "e.g. http://localhost:8080/v1",
+  },
+];
+
+function AiEndpointsSection({ dialogs }: { dialogs: Dialogs }) {
+  const [eps, setEps] = useState<AiEndpoint[]>([]);
+  async function load() {
+    setEps(await getAiEndpoints());
+  }
+  useEffect(() => {
+    load();
+  }, []);
+  return (
+    <section style={{ marginTop: "0.25rem" }}>
+      <SectionLabel style={{ marginBottom: "0.4rem" }}>AI model endpoints</SectionLabel>
+      <p style={{ margin: "0 0 1rem", color: "var(--bf-faint)", fontSize: "0.85rem" }}>
+        Optional, pluggable local/OSS models for the voice pipeline (Ollama, LocalAI, …). Each role
+        degrades gracefully when unset — the built-in command grammar always works.
+      </p>
+      <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+        {AI_ROLES.map((r) => (
+          <AiEndpointCard
+            key={r.role}
+            meta={r}
+            current={eps.find((e) => e.role === r.role)}
+            dialogs={dialogs}
+            onSaved={load}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AiEndpointCard({
+  meta,
+  current,
+  dialogs,
+  onSaved,
+}: {
+  meta: { role: AiRole; title: string; blurb: string; placeholder: string };
+  current?: AiEndpoint;
+  dialogs: Dialogs;
+  onSaved: () => void;
+}) {
+  const [baseUrl, setBaseUrl] = useState("");
+  const [model, setModel] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [enabled, setEnabled] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [test, setTest] = useState<{ ok: boolean; message: string } | null>(null);
+
+  // Sync local fields when the loaded endpoint arrives/changes (load is async).
+  useEffect(() => {
+    setBaseUrl(current?.base_url ?? "");
+    setModel(current?.model ?? "");
+    setEnabled(current?.enabled ?? true);
+    setApiKey("");
+  }, [current?.base_url, current?.model, current?.enabled]);
+
+  const configured = !!current;
+
+  async function save() {
+    if (!baseUrl.trim() || !model.trim()) {
+      await dialogs.alert({ title: "Missing fields", message: "Base URL and model are required." });
+      return;
+    }
+    setBusy(true);
+    try {
+      await putAiEndpoint(meta.role, {
+        base_url: baseUrl.trim(),
+        model: model.trim(),
+        // Send the key only when the user typed one; otherwise preserve the stored one.
+        ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
+        enabled,
+      });
+      setApiKey("");
+      setTest(null);
+      onSaved();
+    } catch (e) {
+      await dialogs.alert({ title: "Couldn't save", message: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runTest() {
+    setBusy(true);
+    setTest(null);
+    try {
+      setTest(await testAiEndpoint(meta.role));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function clear() {
+    const ok = await dialogs.confirm({
+      title: "Clear endpoint",
+      message: `Remove the ${meta.title} endpoint?`,
+      confirmLabel: "Clear",
+      danger: true,
+    });
+    if (!ok) return;
+    await deleteAiEndpoint(meta.role);
+    onSaved();
+  }
+
+  return (
+    <div style={{ ...S.card, gap: "0.6rem" }}>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontWeight: 600, display: "flex", alignItems: "center", gap: "0.5rem" }}>
+          {meta.title}
+          {configured && (
+            <span style={{ fontSize: "0.7rem", color: enabled ? "var(--bf-good)" : "var(--bf-faint)" }}>
+              {enabled ? "● enabled" : "○ disabled"}
+            </span>
+          )}
+        </div>
+        <div style={{ color: "var(--bf-faint)", fontSize: "0.78rem", marginTop: "0.2rem" }}>{meta.blurb}</div>
+      </div>
+      <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder={meta.placeholder} style={{ ...S.input }} />
+      <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+        <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="model (e.g. llama3.1)" style={{ ...S.input, flex: 1, minWidth: 130 }} />
+        <input
+          value={apiKey}
+          onChange={(e) => setApiKey(e.target.value)}
+          type="password"
+          placeholder={current?.has_key ? "•••• key set — blank keeps it" : "API key (optional)"}
+          style={{ ...S.input, flex: 1, minWidth: 130 }}
+        />
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+        <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.82rem", color: "var(--bf-dim)" }}>
+          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> Enabled
+        </label>
+        <div style={{ flex: 1 }} />
+        {test && (
+          <span style={{ fontSize: "0.78rem", color: test.ok ? "var(--bf-good)" : "var(--bf-rose, #e57)" }}>
+            {test.ok ? "✓ reachable" : `✗ ${test.message}`}
+          </span>
+        )}
+        {configured && (
+          <Button variant="ghost" onClick={runTest} disabled={busy} style={{ padding: "0.3rem 0.7rem", fontSize: "0.78rem" }}>
+            Test
+          </Button>
+        )}
+        {configured && (
+          <Button variant="danger" onClick={clear} disabled={busy} style={{ padding: "0.3rem 0.7rem", fontSize: "0.78rem" }}>
+            Clear
+          </Button>
+        )}
+        <Button onClick={save} disabled={busy}>
+          {busy ? "Saving…" : "Save"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// ── Kiosks (wall-tablet companion apps) ──────────────────────────────────────
+
+function KiosksSection({ dialogs }: { dialogs: Dialogs }) {
+  const [kiosks, setKiosks] = useState<Kiosk[]>([]);
+  async function load() {
+    setKiosks(await getKiosks());
+  }
+  useEffect(() => {
+    load();
+  }, []);
+
+  async function send(k: Kiosk, command: "sleep" | "wake" | "lock") {
+    await kioskCommand(k.id, command);
+    await load();
+  }
+  async function deauth(k: Kiosk) {
+    const ok = await dialogs.confirm({
+      title: "De-authorize kiosk",
+      message: `Revoke "${k.name}"'s key? It loses access immediately and must be re-paired via QR.`,
+      confirmLabel: "De-auth",
+      danger: true,
+    });
+    if (!ok) return;
+    await kioskDeauth(k.id);
+    await load();
+  }
+  async function forget(k: Kiosk) {
+    const ok = await dialogs.confirm({
+      title: "Forget kiosk",
+      message: `Remove "${k.name}" from the list? (Does not revoke its key — de-auth first to do that.)`,
+      confirmLabel: "Forget",
+      danger: true,
+    });
+    if (!ok) return;
+    await forgetKiosk(k.id);
+    await load();
+  }
+
+  return (
+    <section style={{ marginTop: "2.5rem" }}>
+      <SectionLabel style={{ marginBottom: "0.4rem" }}>Kiosks</SectionLabel>
+      <p style={{ margin: "0 0 1rem", color: "var(--bf-faint)", fontSize: "0.85rem" }}>
+        Wall-tablet companion apps that check in here. Put one to sleep, lock it (sign out of the
+        dashboard), or de-authorize it (revoke its key). Pair a new one above via{" "}
+        <strong>Pair a device</strong>.
+      </p>
+      <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+        {kiosks.length === 0 && (
+          <p style={{ color: "var(--bf-faint)", margin: 0, fontSize: "0.85rem" }}>No kiosks have checked in.</p>
+        )}
+        {kiosks.map((k) => (
+          <div key={k.id} style={{ ...S.card, gap: "0.5rem" }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontWeight: 600, display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+                {k.name}
+                <span style={{ fontSize: "0.7rem", color: k.online ? "var(--bf-good)" : "var(--bf-faint)" }}>
+                  {k.online ? "● online" : "○ offline"}
+                </span>
+                {!k.authorized && <span style={{ fontSize: "0.7rem", color: "var(--bf-rose, #e57)" }}>needs re-pair</span>}
+              </div>
+              <div style={{ color: "var(--bf-faint)", fontSize: "0.74rem", marginTop: "0.15rem" }}>
+                {k.app_version ? `v${k.app_version} · ` : ""}
+                {k.screen_on === null ? "" : k.screen_on ? "screen on · " : "screen off · "}
+                {k.last_seen ? `seen ${k.last_seen}` : "never seen"}
+                {k.pending_command ? ` · queued: ${k.pending_command}` : ""}
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
+              <Button
+                variant="ghost"
+                onClick={() => send(k, k.screen_on === false ? "wake" : "sleep")}
+                style={{ padding: "0.3rem 0.7rem", fontSize: "0.78rem" }}
+              >
+                {k.screen_on === false ? "Wake" : "Sleep"}
+              </Button>
+              <Button variant="ghost" onClick={() => send(k, "lock")} style={{ padding: "0.3rem 0.7rem", fontSize: "0.78rem" }}>
+                Lock
+              </Button>
+              <Button
+                variant="danger"
+                onClick={() => deauth(k)}
+                disabled={!k.authorized}
+                style={{ padding: "0.3rem 0.7rem", fontSize: "0.78rem" }}
+              >
+                De-auth
+              </Button>
+              <Button variant="danger" onClick={() => forget(k)} style={{ padding: "0.3rem 0.7rem", fontSize: "0.78rem" }}>
+                Forget
+              </Button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}

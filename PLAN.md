@@ -41,14 +41,24 @@
   never forked per view. Detail in the M27 section.
 
 **Flagship — native voice (big, multi-phase):**
-- **M23 — Native voice: command control** *(P1 + P2 backend shipped: grammar +
+- **M23 — Native voice: command control** *(P1 + P2 + P3 backend shipped: grammar +
   `/api/voice/command`; pluggable model-role config (`ai_endpoints`) + STT
-  `/api/voice/listen`; voice seam now also Bearer-keyed like `/api/v1` so the
-  headless wall-tablet satellite can drive it without a session — documented in
-  `API.md`)* — remaining: LLM fallback over MCP tool schemas, tablet PTT
-  + AI-endpoints Settings UI, wake word. Pluggable local/OSS models, degrades to grammar.
+  `/api/voice/listen`; Bearer-keyed voice seam; **P3 LLM fallback** — an unparsed
+  clause goes to the `chat` model (OpenAI tool-calling), mapped to the same `Command`
+  AST and dispatched via the shared service fns; native-first grammar → LLM → HA)* —
+  remaining: tablet PTT + AI-endpoints Settings UI, wake word. Degrades to grammar.
 - **M24 — Talk mode: conversation & live translator** *(not started)* — WSS streaming
   pipeline (`/api/voice/stream`); the headline use case is a live two-party translator.
+
+**Self-improving voice (new):**
+- **M30 — Smart vocabulary catalogue** *(seed shipped in M23 P3)* — the LLM/HA fallback
+  gives a learning loop: we know the raw transcript (what STT heard) and what it resolved
+  to. P3 already logs rescued grammar-misses (`tracing target "voice_learn"`: heard +
+  mapped `Command`). Promote to a persisted catalogue `(heard, resolved command, source,
+  count, last_seen)`, mine recurring misses (incl. STT mishears like "office loot" →
+  "office lights off"), and **patch over time**: learned aliases/normalizations fed back
+  into the grammar + a fast-path cache so a known transcript skips the LLM (less latency,
+  less fallback reliance). Also enriches the kiosk vocabulary endpoint.
 
 **Feature backlog:**
 - **M12.2 — Music services (real Spotify & friends)** *(not started)* — OAuth music-service

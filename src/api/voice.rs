@@ -433,17 +433,24 @@ async fn run_command(state: &AppState, text: &str, context_room: Option<&str>) -
                 ok: true,
                 said: "Okay.".into(),
             },
-            // Native grammar couldn't parse this clause. Fall back to HA Assist
-            // (the long tail — e.g. "play <title> on the TV"); if no HA provider
-            // is configured or it errors, report the original miss.
-            Clause::Unparsed { heard } => match ha_assist_fallback(state, &heard).await {
-                Some((said, ok)) => ClauseResult { heard, ok, said },
-                None => ClauseResult {
-                    said: format!("I didn't understand \"{heard}\"."),
-                    heard,
-                    ok: false,
-                },
-            },
+            // Native grammar couldn't parse this clause. Fall back to the LLM
+            // (the `chat` model, if configured) which maps it to a Command, then
+            // to HA Assist (the long tail — e.g. "play <title> on the TV"); if
+            // neither resolves it, report the original miss.
+            Clause::Unparsed { heard } => {
+                if let Some(result) = llm_fallback(state, &heard, context_room).await {
+                    result
+                } else {
+                    match ha_assist_fallback(state, &heard).await {
+                        Some((said, ok)) => ClauseResult { heard, ok, said },
+                        None => ClauseResult {
+                            said: format!("I didn't understand \"{heard}\"."),
+                            heard,
+                            ok: false,
+                        },
+                    }
+                }
+            }
         });
     }
     let ok = results.iter().all(|r| r.ok);
@@ -478,6 +485,274 @@ async fn ha_assist_fallback(state: &AppState, text: &str) -> Option<(String, boo
             None
         }
     }
+}
+
+// ── LLM fallback (M23 P3) ────────────────────────────────────────────────────
+
+/// Interpret a clause the native grammar couldn't parse with the configured
+/// `chat` model (OpenAI-compatible tool-calling), mapping the model's single
+/// tool call to the **same `Command` AST the grammar produces** and dispatching
+/// it through the shared [`dispatch`] path. Returns `None` when no `chat`
+/// endpoint is configured, the model is unreachable, or it didn't return a
+/// usable tool call — so the caller falls through to HA Assist. Native-first:
+/// grammar → LLM → HA.
+async fn llm_fallback(
+    state: &AppState,
+    heard: &str,
+    context_room: Option<&str>,
+) -> Option<ClauseResult> {
+    let ep = crate::api::ai_endpoints::endpoint_for(state, "chat").await?;
+    let body = serde_json::json!({
+        "model": ep.model,
+        "temperature": 0,
+        "tool_choice": "required",
+        "tools": llm_tools(),
+        "messages": [
+            { "role": "system", "content": llm_system_prompt(&home_names_snapshot(state).await) },
+            { "role": "user", "content": heard },
+        ],
+    });
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(20))
+        .build()
+        .ok()?;
+    let mut req = client
+        .post(format!("{}/chat/completions", ep.base_url))
+        .json(&body);
+    if let Some(k) = &ep.api_key {
+        req = req.bearer_auth(k);
+    }
+    let resp = req.send().await.ok()?;
+    if !resp.status().is_success() {
+        tracing::debug!("chat endpoint returned {}", resp.status());
+        return None;
+    }
+    let json: serde_json::Value = resp.json().await.ok()?;
+    let call = &json["choices"][0]["message"]["tool_calls"][0]["function"];
+    let name = call["name"].as_str()?;
+    // OpenAI passes tool arguments as a JSON-encoded string.
+    let args: serde_json::Value = serde_json::from_str(call["arguments"].as_str()?).ok()?;
+    let command = tool_call_to_command(name, &args)?;
+    // Capture signal for the future self-improving vocabulary catalogue: the
+    // transcript the grammar missed and what the LLM resolved it to.
+    tracing::info!(target: "voice_learn", heard, ?command, "llm rescued grammar miss");
+    Some(dispatch(state, heard, command, context_room).await)
+}
+
+/// A compact, names-only inventory for the LLM prompt so it targets real
+/// entities (the model picks from these; [`dispatch`] resolves the name).
+async fn home_names_snapshot(state: &AppState) -> String {
+    let join = |ents: Vec<Ent>| {
+        ents.into_iter()
+            .map(|e| e.name)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "Rooms: {}\nLights: {}\nSpeakers/TVs: {}\nSwitches/plugs: {}\nScenes: {}",
+        join(rooms(state).await),
+        join(lights(state).await),
+        join(audio(state).await),
+        join(power(state).await),
+        join(scenes(state).await),
+    )
+}
+
+fn llm_system_prompt(snapshot: &str) -> String {
+    format!(
+        "You translate a smart-home voice command into exactly one tool call. \
+         Use only the device, room, and scene names listed below (case-insensitive; \
+         a room name controls everything in it). For `target`, pass a name from the \
+         list, or \"here\" for the current room, or \"everywhere\" for the whole home. \
+         Call exactly one tool; do not invent names or actions.\n\n{snapshot}"
+    )
+}
+
+/// The tool catalogue offered to the chat model — mirrors the grammar's
+/// [`Command`] vocabulary. Mapped back by [`tool_call_to_command`].
+fn llm_tools() -> serde_json::Value {
+    let t = |name: &str, desc: &str, props: serde_json::Value, required: &[&str]| {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": desc,
+                "parameters": { "type": "object", "properties": props, "required": required },
+            }
+        })
+    };
+    let target = serde_json::json!({ "type": "string", "description": "room/device name, or \"here\"/\"everywhere\"" });
+    serde_json::json!([
+        t(
+            "set_power",
+            "Turn a light/room/device on or off.",
+            serde_json::json!({ "target": target, "on": { "type": "boolean" } }),
+            &["target", "on"]
+        ),
+        t(
+            "set_brightness",
+            "Set brightness to an absolute percent (0-100).",
+            serde_json::json!({ "target": target, "percent": { "type": "integer" } }),
+            &["target", "percent"]
+        ),
+        t(
+            "set_color",
+            "Set a light/room color by common color name (e.g. red, amber, teal) or #rrggbb.",
+            serde_json::json!({ "target": target, "color": { "type": "string" } }),
+            &["target", "color"]
+        ),
+        t(
+            "set_color_temperature",
+            "Set white temperature by name: warm, soft white, neutral, cool, daylight.",
+            serde_json::json!({ "target": target, "temp": { "type": "string" } }),
+            &["target", "temp"]
+        ),
+        t(
+            "set_volume",
+            "Set audio volume to an absolute percent (0-100).",
+            serde_json::json!({ "target": target, "percent": { "type": "integer" } }),
+            &["target", "percent"]
+        ),
+        t(
+            "set_mute",
+            "Mute or unmute audio.",
+            serde_json::json!({ "target": target, "mute": { "type": "boolean" } }),
+            &["target", "mute"]
+        ),
+        t(
+            "transport",
+            "Media transport control.",
+            serde_json::json!({ "target": target, "action": { "type": "string", "enum": ["play","pause","stop","next","previous","toggle"] } }),
+            &["target", "action"]
+        ),
+        t(
+            "apply_scene",
+            "Apply a named scene to a room's lights.",
+            serde_json::json!({ "target": target, "scene": { "type": "string" } }),
+            &["target", "scene"]
+        ),
+        t(
+            "adjust",
+            "Nudge brightness or volume up/down relative to the current level.",
+            serde_json::json!({ "target": target, "domain": { "type": "string", "enum": ["brightness","volume","auto"] }, "up": { "type": "boolean" }, "amount": { "type": "number", "description": "fraction 0-1 of current (default 0.5)" } }),
+            &["target", "up"]
+        ),
+    ])
+}
+
+/// Map one chat-model tool call to a [`Command`], reusing the grammar's own
+/// colour/temperature semantics. `None` = unmappable (bad args, unknown
+/// colour/temp/action) so the caller falls through.
+fn tool_call_to_command(name: &str, args: &serde_json::Value) -> Option<Command> {
+    let target = || llm_target(args["target"].as_str().unwrap_or(""));
+    match name {
+        "set_power" => Some(Command::Power {
+            target: target(),
+            lights_only: false,
+            on: args["on"].as_bool()?,
+        }),
+        "set_brightness" => Some(Command::Brightness {
+            target: target(),
+            percent: pct_arg(args.get("percent"))?,
+        }),
+        "set_volume" => Some(Command::Volume {
+            target: target(),
+            percent: pct_arg(args.get("percent"))?,
+        }),
+        "set_mute" => Some(Command::Mute {
+            target: target(),
+            mute: args["mute"].as_bool()?,
+        }),
+        "set_color" => {
+            let (rgb, label) = color_name_to_rgb(args["color"].as_str()?)?;
+            Some(Command::Color {
+                target: target(),
+                rgb,
+                label,
+            })
+        }
+        "set_color_temperature" => {
+            let temp = args["temp"].as_str()?.trim().to_lowercase();
+            temp_mirek(&temp)?; // validate against TEMPS
+            Some(Command::ColorTemp {
+                target: target(),
+                temp,
+            })
+        }
+        "transport" => Some(Command::Transport {
+            target: target(),
+            cmd: transport_from_str(args["action"].as_str()?)?,
+        }),
+        "apply_scene" => Some(Command::Scene {
+            target: target(),
+            scene: args["scene"].as_str()?.trim().to_string(),
+        }),
+        "adjust" => {
+            let domain = match args["domain"].as_str().unwrap_or("auto") {
+                "brightness" => RelDomain::Brightness,
+                "volume" => RelDomain::Volume,
+                _ => RelDomain::Auto,
+            };
+            let mag = args["amount"]
+                .as_f64()
+                .map(|f| f as f32)
+                .unwrap_or(0.5)
+                .clamp(0.05, 1.0);
+            Some(Command::Relative {
+                target: target(),
+                domain,
+                up: args["up"].as_bool()?,
+                mag,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn llm_target(s: &str) -> Target {
+    match s.trim().to_lowercase().as_str() {
+        "" | "here" | "this room" => Target::Here,
+        "everywhere" | "all" | "everything" | "whole house" | "the house" => Target::Everywhere,
+        _ => Target::Named(s.trim().to_string()),
+    }
+}
+
+fn pct_arg(v: Option<&serde_json::Value>) -> Option<u8> {
+    let v = v?;
+    let n = v
+        .as_u64()
+        .or_else(|| v.as_f64().map(|f| f.round() as u64))
+        .or_else(|| {
+            v.as_str()
+                .and_then(|s| s.trim().trim_end_matches('%').parse().ok())
+        })?;
+    Some(n.min(100) as u8)
+}
+
+/// Color name (from [`COLORS`]) or `#rrggbb` → RGB + spoken label.
+fn color_name_to_rgb(name: &str) -> Option<((u8, u8, u8), String)> {
+    let n = name.trim().to_lowercase();
+    if let Some((w, rgb)) = COLORS.iter().find(|(w, _)| *w == n) {
+        return Some((*rgb, (*w).to_string()));
+    }
+    if let Some(hex) = n.strip_prefix('#').filter(|h| h.len() == 6) {
+        let p = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+        return Some(((p(0)?, p(2)?, p(4)?), name.trim().to_string()));
+    }
+    None
+}
+
+fn transport_from_str(s: &str) -> Option<TransportCmd> {
+    Some(match s.trim().to_lowercase().as_str() {
+        "pause" => TransportCmd::Pause,
+        "play" | "resume" => TransportCmd::Play,
+        "stop" => TransportCmd::Stop,
+        "next" | "skip" => TransportCmd::Next,
+        "previous" | "back" => TransportCmd::Previous,
+        "toggle" => TransportCmd::Toggle,
+        _ => return None,
+    })
 }
 
 // ── Dispatch (resolve entity → shared service fn) ────────────────────────────
@@ -1715,6 +1990,99 @@ fn remove_number_tokens(c: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── LLM-fallback tool-call → Command mapping (M23 P3) ────────────────────
+
+    #[test]
+    fn tool_call_maps_to_the_grammar_command() {
+        let j = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+
+        assert_eq!(
+            tool_call_to_command("set_power", &j(r#"{"target":"office","on":false}"#)),
+            Some(Command::Power {
+                target: Target::Named("office".into()),
+                lights_only: false,
+                on: false
+            })
+        );
+        assert_eq!(
+            tool_call_to_command("set_brightness", &j(r#"{"target":"here","percent":40}"#)),
+            Some(Command::Brightness {
+                target: Target::Here,
+                percent: 40
+            })
+        );
+        // Colour reuses the grammar's COLORS table (amber → its rgb + label).
+        let amber = COLORS.iter().find(|(w, _)| *w == "amber").unwrap().1;
+        assert_eq!(
+            tool_call_to_command("set_color", &j(r#"{"target":"office","color":"amber"}"#)),
+            Some(Command::Color {
+                target: Target::Named("office".into()),
+                rgb: amber,
+                label: "amber".into()
+            })
+        );
+        // Temperature validates against TEMPS.
+        assert_eq!(
+            tool_call_to_command(
+                "set_color_temperature",
+                &j(r#"{"target":"here","temp":"warm"}"#)
+            ),
+            Some(Command::ColorTemp {
+                target: Target::Here,
+                temp: "warm".into()
+            })
+        );
+        assert_eq!(
+            tool_call_to_command(
+                "transport",
+                &j(r#"{"target":"everywhere","action":"pause"}"#)
+            ),
+            Some(Command::Transport {
+                target: Target::Everywhere,
+                cmd: TransportCmd::Pause
+            })
+        );
+    }
+
+    #[test]
+    fn tool_call_rejects_unmappable_args() {
+        let j = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+        // Unknown colour / temp / action / tool → None (falls through to HA).
+        assert!(
+            tool_call_to_command("set_color", &j(r#"{"target":"x","color":"ochre"}"#)).is_none()
+        );
+        assert!(
+            tool_call_to_command(
+                "set_color_temperature",
+                &j(r#"{"target":"x","temp":"toasty"}"#)
+            )
+            .is_none()
+        );
+        assert!(
+            tool_call_to_command("transport", &j(r#"{"target":"x","action":"rewind"}"#)).is_none()
+        );
+        assert!(tool_call_to_command("teleport", &j(r#"{"target":"x"}"#)).is_none());
+    }
+
+    #[test]
+    fn llm_helpers_parse_targets_colors_and_levels() {
+        assert_eq!(llm_target(""), Target::Here);
+        assert_eq!(llm_target("HERE"), Target::Here);
+        assert_eq!(llm_target("everywhere"), Target::Everywhere);
+        assert_eq!(
+            llm_target("Living Room"),
+            Target::Named("Living Room".into())
+        );
+        assert_eq!(
+            color_name_to_rgb("#ff8800"),
+            Some(((255, 136, 0), "#ff8800".into()))
+        );
+        assert!(color_name_to_rgb("not-a-color").is_none());
+        assert_eq!(pct_arg(Some(&serde_json::json!(150))), Some(100)); // clamps
+        assert_eq!(pct_arg(Some(&serde_json::json!("55%"))), Some(55));
+        assert_eq!(transport_from_str("skip"), Some(TransportCmd::Next));
+    }
 
     fn cmd(text: &str) -> Command {
         match parse(text).into_iter().next() {

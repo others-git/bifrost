@@ -424,9 +424,16 @@ cookie, so it sends a minted `bfr_` key like any other public-API client.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/voice/command` | Run a **text** command through the native grammar (HA-Assist fallback) |
+| `POST` | `/api/voice/command` | Run a **text** command (fallback chain below) |
 | `POST` | `/api/voice/listen` | Upload **audio**; server transcribes (configured STT) then runs it |
 | `GET` | `/api/voice/vocabulary` | `{ words: [...] }` — the command-grammar keywords plus every enabled room/device/scene name (tokenized). A device with on-device STT (the wall tablet) biases its recognizer to this list so in-domain words aren't misheard. |
+
+A clause is resolved **native-first**: the deterministic grammar parses what it can;
+a clause it can't parse falls to the configured **`chat` LLM** (OpenAI-compatible
+tool-calling — it maps the phrasing to the same internal command and dispatches via
+the shared service layer); failing that, to **Home Assistant Assist**. Each fallback
+is optional — with neither configured, an unparsed clause returns "I didn't
+understand". Configure the `chat` model under `PUT /api/ai-endpoints/chat`.
 
 `/api/voice/command` — JSON in, JSON out:
 
