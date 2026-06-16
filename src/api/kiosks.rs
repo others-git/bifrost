@@ -23,12 +23,26 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
+    response::sse::{Event, KeepAlive, Sse},
     routing::{delete, get, post},
 };
+use futures_util::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
+use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
+
+/// A controller command pushed to a kiosk over its live SSE stream ([`stream`]).
+/// Broadcast to every stream subscriber; each connection filters for its own
+/// [`KioskCommand::kiosk_id`]. Clone-able so the broadcast channel can fan it out.
+#[derive(Clone, Debug)]
+pub struct KioskCommand {
+    pub kiosk_id: String,
+    pub command: String,
+}
 
 /// A kiosk is "online" if it checked in within this window.
 const ONLINE_WINDOW_SECS: i64 = 90;
@@ -40,8 +54,10 @@ const VALID_COMMANDS: [&str; 3] = ["sleep", "wake", "lock"];
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/checkin", post(checkin))
+        .route("/stream", get(stream))
         .route("/", get(list))
         .route("/{id}/command", post(command))
+        .route("/{id}/room", axum::routing::put(set_room))
         .route("/{id}/deauth", post(deauth))
         .route("/{id}", delete(forget))
 }
@@ -62,6 +78,9 @@ struct CheckinRequest {
 struct CheckinResponse {
     /// The command to perform, if any was queued — consumed by this check-in.
     command: Option<String>,
+    /// The kiosk's assigned Room **name**, if any — the app adopts it as the
+    /// voice context room (so "turn on the lights" resolves to that room).
+    room: Option<String>,
 }
 
 /// `POST /api/kiosks/checkin` (API-key auth) — the kiosk heartbeat. Upserts the
@@ -129,7 +148,17 @@ async fn checkin(
             .await;
     }
 
-    Json(CheckinResponse { command }).into_response()
+    // The assigned room's name (if any) — the app adopts it as voice context.
+    let room: Option<String> = sqlx::query_scalar(
+        "SELECT r.name FROM kiosks k JOIN rooms r ON k.room_id = r.id WHERE k.id = ?",
+    )
+    .bind(&kiosk_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+
+    Json(CheckinResponse { command, room }).into_response()
 }
 
 #[derive(Serialize)]
@@ -145,13 +174,15 @@ struct KioskRow {
     pending_command: Option<String>,
     /// `false` once de-authed (its key was revoked) — it must re-enroll.
     authorized: bool,
+    /// Assigned Room id (its voice context), or null. Set via `PUT …/room`.
+    room_id: Option<String>,
 }
 
 /// `GET /api/kiosks` (session) — the clients view: every registered kiosk with
 /// its check-in status. Session-only, so it isn't reachable with a kiosk key.
 async fn list(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
     let rows = sqlx::query(&format!(
-        "SELECT id, name, app_version, screen_on, last_seen, pending_command,
+        "SELECT id, name, app_version, screen_on, last_seen, pending_command, room_id,
                 api_key_id IS NOT NULL AS authorized,
                 (last_seen > datetime('now', '-{ONLINE_WINDOW_SECS} seconds')) AS online
          FROM kiosks ORDER BY name"
@@ -171,6 +202,7 @@ async fn list(State(state): State<Arc<AppState>>, _: Session) -> impl IntoRespon
                     online: r.get::<Option<i64>, _>("online").unwrap_or(0) != 0,
                     pending_command: r.get("pending_command"),
                     authorized: r.get::<i64, _>("authorized") != 0,
+                    room_id: r.get("room_id"),
                 })
                 .collect::<Vec<_>>(),
         )
@@ -187,8 +219,10 @@ struct CommandRequest {
     command: String,
 }
 
-/// `POST /api/kiosks/{id}/command` (session) — queue a command for the kiosk to
-/// pick up on its next check-in.
+/// `POST /api/kiosks/{id}/command` (session) — deliver a command to the kiosk.
+/// It's **pushed instantly** to the kiosk's live SSE stream ([`stream`]) and
+/// also stored in `pending_command` as the fallback for a kiosk that's offline
+/// or mid-reconnect (consumed on its next check-in).
 async fn command(
     State(state): State<Arc<AppState>>,
     _: Session,
@@ -209,11 +243,86 @@ async fn command(
         .execute(&state.db)
         .await
     {
-        Ok(r) if r.rows_affected() > 0 => StatusCode::NO_CONTENT.into_response(),
+        Ok(r) if r.rows_affected() > 0 => {
+            // Push to any live stream now; the row above covers offline kiosks.
+            let _ = state.kiosk_commands.send(KioskCommand {
+                kiosk_id: id.clone(),
+                command: cmd.to_string(),
+            });
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(_) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => {
             tracing::error!("db error queuing kiosk command: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// `GET /api/kiosks/stream` (API-key auth) — the kiosk's live command channel.
+/// Opened by the kiosk after it checks in; controller commands ([`command`]) are
+/// pushed here instantly as SSE `command` events instead of waiting for the next
+/// poll. Requires the kiosk to be registered (so we can resolve its id); if not,
+/// 404 and the app retries after its next heartbeat.
+async fn stream(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>> + Send + 'static>, StatusCode> {
+    let Some(key_id) = require_api_key(&state, &headers).await else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let kiosk_id: Option<String> = sqlx::query_scalar("SELECT id FROM kiosks WHERE api_key_id = ?")
+        .bind(&key_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+    let Some(kiosk_id) = kiosk_id else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    let rx = state.kiosk_commands.subscribe();
+    let events = BroadcastStream::new(rx)
+        .filter_map(|r| std::future::ready(r.ok()))
+        .filter_map(move |cmd| {
+            std::future::ready((cmd.kiosk_id == kiosk_id).then(|| {
+                Ok::<Event, Infallible>(Event::default().event("command").data(cmd.command))
+            }))
+        });
+
+    Ok(Sse::new(events).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    ))
+}
+
+#[derive(Deserialize)]
+struct SetRoomRequest {
+    /// Target Room id, or null to clear the assignment.
+    room_id: Option<String>,
+}
+
+/// `PUT /api/kiosks/{id}/room` (session) — assign the kiosk to a Bifrost Room
+/// (its voice context), or clear it with a null `room_id`. The kiosk adopts the
+/// room on its next check-in.
+async fn set_room(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+    Json(req): Json<SetRoomRequest>,
+) -> impl IntoResponse {
+    match sqlx::query("UPDATE kiosks SET room_id = ? WHERE id = ?")
+        .bind(&req.room_id)
+        .bind(&id)
+        .execute(&state.db)
+        .await
+    {
+        Ok(r) if r.rows_affected() > 0 => StatusCode::NO_CONTENT,
+        Ok(_) => StatusCode::NOT_FOUND,
+        Err(e) => {
+            tracing::error!("db error setting kiosk room: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
         }
     }
 }

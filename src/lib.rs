@@ -27,6 +27,10 @@ pub struct AppState {
     /// the kiosk reloads to pick up the new build. Catches **any** restart —
     /// including backend-only redeploys that leave the frontend bundle unchanged.
     pub instance_id: String,
+    /// Instant push of controller commands to a kiosk's live SSE stream
+    /// (`GET /api/kiosks/stream`). `kiosks.pending_command` is the fallback for a
+    /// kiosk that's offline / mid-reconnect (delivered on its next check-in).
+    pub kiosk_commands: tokio::sync::broadcast::Sender<api::kiosks::KioskCommand>,
     cipher: Aes256Gcm,
 }
 
@@ -39,6 +43,7 @@ impl AppState {
             connections: Mutex::new(ConnectionRegistry::new()),
             started_at: std::time::Instant::now(),
             instance_id: uuid::Uuid::new_v4().to_string(),
+            kiosk_commands: tokio::sync::broadcast::channel(64).0,
         }
     }
 

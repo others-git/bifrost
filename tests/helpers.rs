@@ -71,6 +71,20 @@ pub async fn test_app_with_password() -> Router {
     build_app(state)
 }
 
+/// Like [`test_app_with_password`] but also hands back the state, so a test can
+/// observe internals (e.g. the kiosk command broadcast channel).
+pub async fn test_app_with_password_and_state() -> (Router, Arc<AppState>) {
+    let db = test_db().await;
+    let hash = hash_password(TEST_PASSWORD);
+    sqlx::query("INSERT INTO config (id, password_hash, setup_complete) VALUES (1, ?, 1)")
+        .bind(&hash)
+        .execute(&db)
+        .await
+        .unwrap();
+    let state = Arc::new(AppState::new(db, TEST_SECRET, test_registry()));
+    (build_app(state.clone()), state)
+}
+
 /// POST /api/auth/login and return the Set-Cookie header value on success.
 pub async fn login(app: &Router, password: &str) -> String {
     let req = Request::builder()

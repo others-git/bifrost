@@ -1079,6 +1079,8 @@ export interface Kiosk {
   pending_command: string | null;
   /** false once de-authed (key revoked) — must re-pair. */
   authorized: boolean;
+  /** Assigned Room id (the kiosk's voice context / location), or null. */
+  room_id: string | null;
 }
 
 export async function getKiosks(): Promise<Kiosk[]> {
@@ -1093,6 +1095,16 @@ export async function kioskCommand(id: string, command: "sleep" | "wake" | "lock
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ command }),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+}
+
+/** Assign the kiosk to a Room (its voice context), or clear with null. */
+export async function setKioskRoom(id: string, room_id: string | null): Promise<void> {
+  const res = await fetch(`/api/kiosks/${id}/room`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ room_id }),
   });
   if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
 }

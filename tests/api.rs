@@ -3232,6 +3232,151 @@ async fn kiosk_checkin_registers_and_command_is_delivered_once() {
 }
 
 #[tokio::test]
+async fn kiosk_stream_requires_api_key() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(anon_json("GET", "/api/kiosks/stream", ""))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn kiosk_stream_is_not_found_until_registered() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "Bedroom tablet").await;
+    // Authed with a real key, but the kiosk hasn't checked in yet — no row to
+    // resolve, so the stream 404s and the app retries after a heartbeat.
+    let resp = app
+        .oneshot(bearer_json("GET", "/api/kiosks/stream", &key, ""))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn kiosk_command_is_pushed_to_the_live_stream() {
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "Bedroom tablet").await;
+
+    // Register the kiosk, then start listening on the push channel as the live
+    // stream would.
+    app.clone()
+        .oneshot(bearer_json("POST", "/api/kiosks/checkin", &key, "{}"))
+        .await
+        .unwrap();
+    let mut rx = state.kiosk_commands.subscribe();
+
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let id = list.as_array().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Queueing a command pushes it instantly to subscribers (not just the poll).
+    let q = app
+        .oneshot(helpers::authed_post(
+            &format!("/api/kiosks/{id}/command"),
+            &cookie,
+            r#"{"command":"sleep"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(q.status(), StatusCode::NO_CONTENT);
+
+    let pushed = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("command was not pushed within 1s")
+        .expect("broadcast recv");
+    assert_eq!(pushed.kiosk_id, id);
+    assert_eq!(pushed.command, "sleep");
+}
+
+#[tokio::test]
+async fn kiosk_room_assignment_flows_to_checkin_and_list() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "Bedroom tablet").await;
+
+    // Register the kiosk and create a room.
+    app.clone()
+        .oneshot(bearer_json("POST", "/api/kiosks/checkin", &key, "{}"))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(helpers::authed_post(
+            "/api/rooms",
+            &cookie,
+            r#"{"name":"Bedroom"}"#,
+        ))
+        .await
+        .unwrap();
+
+    let rooms = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/rooms", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let room_id = rooms.as_array().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let kiosks = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let kid = kiosks.as_array().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Assign the room.
+    let put = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/kiosks/{kid}/room"),
+            &cookie,
+            &format!(r#"{{"room_id":"{room_id}"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::NO_CONTENT);
+
+    // The list reflects the assignment, and check-in hands the kiosk the room name.
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(list.as_array().unwrap()[0]["room_id"], room_id);
+
+    let checkin = helpers::response_json(
+        app.oneshot(bearer_json("POST", "/api/kiosks/checkin", &key, "{}"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(checkin["room"], "Bedroom");
+}
+
+#[tokio::test]
 async fn kiosk_command_rejects_unknown_verb() {
     let app = helpers::test_app_with_password().await;
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;

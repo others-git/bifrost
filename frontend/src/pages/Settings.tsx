@@ -26,11 +26,14 @@ import {
   getKiosks,
   kioskCommand,
   kioskDeauth,
+  setKioskRoom,
   forgetKiosk,
+  getRooms,
   type ApiKey,
   type AiEndpoint,
   type AiRole,
   type Kiosk,
+  type Room,
   type ConnectionStatus,
   type CredentialField,
   type Provider,
@@ -600,7 +603,10 @@ function PairDeviceModal({ onClose }: { onClose: () => void }) {
               transition: "opacity 0.2s",
             }}
           >
-            <QRCodeSVG value={payload} size={220} marginSize={0} />
+            {/* Bigger modules + the spec quiet zone (margin) + error correction
+                so a soft-focus tablet camera can lock on. marginSize=0 made it
+                near-unscannable on poor cameras. */}
+            <QRCodeSVG value={payload} size={288} marginSize={4} level="M" />
           </div>
         )}
         {!token && !error && (
@@ -1283,12 +1289,19 @@ function AiEndpointCard({
 
 function KiosksSection({ dialogs }: { dialogs: Dialogs }) {
   const [kiosks, setKiosks] = useState<Kiosk[]>([]);
+  const [rooms, setRooms] = useState<Room[]>([]);
   async function load() {
     setKiosks(await getKiosks());
   }
   useEffect(() => {
     load();
+    getRooms().then(setRooms);
   }, []);
+
+  async function assignRoom(k: Kiosk, roomId: string | null) {
+    await setKioskRoom(k.id, roomId);
+    await load();
+  }
 
   async function send(k: Kiosk, command: "sleep" | "wake" | "lock") {
     await kioskCommand(k.id, command);
@@ -1346,7 +1359,28 @@ function KiosksSection({ dialogs }: { dialogs: Dialogs }) {
                 {k.pending_command ? ` · queued: ${k.pending_command}` : ""}
               </div>
             </div>
-            <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap", alignItems: "center" }}>
+              {/* Room = the kiosk's voice context (e.g. "turn on the lights" → its room). */}
+              <select
+                value={k.room_id ?? ""}
+                onChange={(e) => assignRoom(k, e.target.value || null)}
+                title="Voice context room for this kiosk"
+                style={{
+                  background: "var(--bf-panel, #1a1320)",
+                  color: "var(--bf-text, #eee)",
+                  border: "1px solid var(--bf-hairline, #333)",
+                  borderRadius: 6,
+                  padding: "0.3rem 0.5rem",
+                  fontSize: "0.78rem",
+                }}
+              >
+                <option value="">No room</option>
+                {rooms.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.name}
+                  </option>
+                ))}
+              </select>
               <Button
                 variant="ghost"
                 onClick={() => send(k, k.screen_on === false ? "wake" : "sleep")}
