@@ -6,7 +6,9 @@ import {
   getPowerDevices,
   getProviders,
   getRooms,
+  getScenes,
   mergePatch,
+  restoreDefaultHome,
   rgbToHex,
   rgbToXy,
   savePaletteSceneFromRoom,
@@ -29,6 +31,7 @@ import {
   type Provider,
   type Room,
   type RoomControl,
+  type Scene,
 } from "../api";
 import { AudioEditor } from "../components/AudioControls";
 import { Glyph, powerKindGlyph, audioKindGlyph } from "../components/glyphs";
@@ -62,10 +65,12 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
   const [scenes, setScenes] = useState<PaletteScene[]>([]);
+  const [homeScenes, setHomeScenes] = useState<Scene[]>([]);
   const dialogs = useDialogs();
 
   function loadScenes() {
     getPaletteScenes().then(setScenes);
+    getScenes().then(setHomeScenes);
   }
 
   useEffect(() => { setLocalLights(lights); }, [lights]);
@@ -158,9 +163,26 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
 
   const onCount = localLights.filter((l) => l.last_state?.on).length;
   const empty = localLights.length === 0 && powerDevices.length === 0 && audioDevices.length === 0;
+  const defaultHome = homeScenes.find((s) => s.is_default);
+
+  async function doRestoreHome() {
+    if (!defaultHome) return;
+    const ok = await dialogs.confirm({
+      title: "Restore Home",
+      message: `Set every light and switch back to the "${defaultHome.name}" scene?`,
+      confirmLabel: "Restore",
+    });
+    if (!ok) return;
+    try {
+      await restoreDefaultHome();
+      onRefresh();
+    } catch (e) {
+      await dialogs.alert({ title: "Couldn't restore", message: e instanceof Error ? e.message : String(e) });
+    }
+  }
 
   return (
-    <div style={{ padding: isMobile ? "1rem 0.85rem" : isCompact ? "1.1rem 1rem" : "2rem", maxWidth: 1100, margin: "0 auto", color: T.text }}>
+    <div style={{ padding: isMobile ? "1rem 0.85rem" : isCompact ? "1.1rem 1rem" : "2rem", maxWidth: 1100, margin: "0 auto", color: T.text, display: "flex", flexDirection: "column", minHeight: "100%", boxSizing: "border-box" }}>
       <PageHeader
         title="Control"
         status={localLights.length > 0 ? `${onCount} of ${localLights.length} lights on` : undefined}
@@ -198,6 +220,12 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
           onPowerSetEnabled={onPowerSetEnabled}
           onChanged={onRefresh}
         />
+      )}
+
+      {defaultHome && !empty && (
+        <div style={{ marginTop: "auto", display: "flex", justifyContent: "center", paddingTop: "2.2rem" }}>
+          <RestoreHomeButton name={defaultHome.name} onRestore={doRestoreHome} />
+        </div>
       )}
       {dialogs.element}
     </div>
@@ -851,6 +879,84 @@ function RoomControlButton({
         />
       )}
     </>
+  );
+}
+
+/** The whole-home "Restore Home" action — a gilded **power seal**: a round gothic
+ * emblem (double filigree rings echoing the room-card corners, a restore arrow at
+ * its heart) over a slow breathing gold aura, with an engraved label beneath.
+ * Gold is the ornament/power accent, setting it apart from the cyan per-device
+ * controls; the seal form makes the "bring everything back" action ceremonial. */
+function RestoreHomeButton({ name, onRestore }: { name: string; onRestore: () => void }) {
+  const [hover, setHover] = useState(false);
+  // Match the app's primary accent (nav + room power buttons), not a bespoke gold.
+  const g = T.accent;
+  const size = 64;
+  return (
+    <div
+      onPointerEnter={() => setHover(true)}
+      onPointerLeave={() => setHover(false)}
+      style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "0.7rem" }}
+    >
+      <div style={{ position: "relative", display: "grid", placeItems: "center" }}>
+        {/* Breathing gold aura behind the seal. */}
+        <span
+          aria-hidden
+          className="bifrost-seal-breathe"
+          style={{
+            position: "absolute",
+            width: size + 26,
+            height: size + 26,
+            borderRadius: "50%",
+            background: `radial-gradient(circle, ${alpha(g, 0.4)}, transparent 68%)`,
+            pointerEvents: "none",
+          }}
+        />
+        <button
+          onClick={onRestore}
+          title={`Restore the whole home to "${name}"`}
+          aria-label="Restore Home"
+          style={{
+            position: "relative",
+            width: size,
+            height: size,
+            borderRadius: "50%",
+            display: "grid",
+            placeItems: "center",
+            cursor: "pointer",
+            color: g,
+            background: `radial-gradient(circle at 50% 32%, ${alpha(g, hover ? 0.3 : 0.16)}, transparent 62%), ${color.surface}`,
+            border: `1px solid ${alpha(g, hover ? 0.78 : 0.5)}`,
+            boxShadow: `${glow(g, hover ? 36 : 22)}, inset 0 0 20px -8px ${g}`,
+            backdropFilter: "blur(10px)",
+            WebkitBackdropFilter: "blur(10px)",
+            transform: hover ? "scale(1.06)" : "scale(1)",
+            transition: "transform .2s ease, box-shadow .3s ease, border-color .3s ease, color .2s ease, background .3s ease",
+          }}
+        >
+          {/* Inner filigree ring — the engraved-seal double edge. */}
+          <span
+            aria-hidden
+            style={{ position: "absolute", inset: 6, borderRadius: "50%", border: `1px solid ${alpha(g, 0.32)}`, pointerEvents: "none" }}
+          />
+          <Glyph name="restore" size={26} />
+        </button>
+      </div>
+      <span
+        style={{
+          fontFamily: font.display,
+          textTransform: "uppercase",
+          letterSpacing: "0.24em",
+          fontSize: "0.72rem",
+          fontWeight: 600,
+          color: g,
+          textShadow: `0 0 12px ${alpha(g, 0.5)}`,
+          transition: "color .2s ease",
+        }}
+      >
+        Restore Home
+      </span>
+    </div>
   );
 }
 

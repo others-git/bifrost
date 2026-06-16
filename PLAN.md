@@ -63,8 +63,6 @@
 **Feature backlog:**
 - **M12.2 — Music services (real Spotify & friends)** *(not started)* — OAuth music-service
   domain that targets an audio device (Spotify Connect).
-- **M15 — Scenes capture full device state (audio-aware)** *(not started)* — snapshot
-  audio source/volume too, not just lights.
 - **M17 — Floor plan on mobile** *(deferred)* — view/control + touch drafting on phones.
 - **M18 — Matter device support** *(not started, spike-gated)* — Bifrost as a Matter
   controller for Wi-Fi lights/plugs.
@@ -336,6 +334,7 @@ A self-hosted Rust smart home hub that is:
 | 25 — Remote control + `BifrostRemote` | `remote` device domain + HA Android-TV provider; session/`v1`/MCP surfaces; TV pairing by `hw_id`; app recents/pins; the `BifrostRemote` frontend. Feature-complete in tree (unreleased). Detail above. |
 | 27 — Tunable white + control-change contract | LightEditor gains a Hue-style **Color / White toggle** with a warm→cool **color-temperature wheel** (`ColorTempWheel`, mirek 153–500) for lights with `color_temperature`. Backed by a formalized **`LightControlChange`** union (`color`/`brightness`/`temp`) every light control emits, so a fan-out caller adjusts only the moved dimension. `persist_light_state` now **merges** present attributes (partial commands keep untouched dimensions) with **color⇄temp exclusivity** (set one, clear the other) — fixing the room-brightness-stomps-color bug and giving the UI an honest active-mode signal. Detail below. |
 | 31 — Configurable room controls | Per-room **quick-control buttons** (`room_controls`, migration 0034, `PUT /rooms/{id}/controls`): glyph buttons on the Control card doing `power`/`volume`/`brightness` against a chosen member set, or `scene` apply; configured on the Rooms page. The room on/off **switch becomes a power-glyph button**, with the configured buttons to its left. Control-page device glyphs gain a **long-press = power toggle** (tap still opens the fly-out). Session API only (not v1/MCP yet). |
+| 32 — Home Scenes | Repurposed the dead global `scenes` system into **whole-home snapshot/restore** of lights **+ power devices** (migration 0035: `scenes.is_default` + `scene_power_entries`). New `PUT /scenes/{id}/default` + `POST /scenes/restore-default`; managed in a "Home scenes" section on the Scenes page; surfaced as the gilded **Restore Home** seal (cyan accent, breathing aura, `restore` glyph) anchored bottom-center on the Control page. Audio capture deferred. |
 
 ### Open follow-ups from shipped milestones
 
@@ -808,19 +807,6 @@ domain that *targets* an audio device, independent of Sonos/Onkyo. Per-service.
 
 Tier 3 (constructing DIDL URIs for arbitrary tracks / scraping Onkyo's NLA menu)
 stays out of scope — brittle and firmware-dependent.
-
-## Milestone 15 — Scenes capture full device state (audio-aware)
-
-Make **save-scene** future-proof: snapshot *all* member device state, not just
-lights. For audio, capture the **selected source/playlist/station** (e.g. a
-Spotify radio station) — explicitly **ignore** the transient now-playing track.
-Applying a scene restores lights + audio source/volume together.
-
-- [ ] Extend the scene snapshot to audio device state (selected source/content,
-  volume, mute; skip now-playing track).
-- [ ] Capture the selected provider content reference where the protocol exposes
-  it (Onkyo NET service; Sonos favorite / queue origin).
-- [ ] Apply path restores audio state alongside lights.
 
 ## Milestone 17 — Floor plan on mobile (view/control + touch drafting) (deferred)
 

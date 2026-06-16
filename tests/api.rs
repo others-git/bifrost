@@ -687,6 +687,128 @@ async fn activate_unknown_scene_returns_404() {
 }
 
 #[tokio::test]
+async fn home_scene_default_set_list_and_restore() {
+    let bridge = wled_mock().await;
+    let (app, _light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Snapshot the home (1 light, 0 power devices in this fixture).
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/scenes",
+            &cookie,
+            r#"{"name":"Home"}"#,
+        ))
+        .await
+        .unwrap();
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["lights"], 1);
+    assert_eq!(body["power"], 0);
+    let scene_id = body["id"].as_str().unwrap().to_string();
+
+    // No default yet → Restore Home is a 404.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/scenes/restore-default",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Mark it default → listed as such.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/scenes/{scene_id}/default"),
+            &cookie,
+            r#"{"default":true}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/scenes", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(helpers::response_json(resp).await[0]["is_default"], true);
+
+    // Restore Home now applies the default scene through the provider.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/scenes/restore-default",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(helpers::response_json(resp).await["applied"], 1);
+    assert!(
+        bridge
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.url.path() == "/json/state"),
+        "Restore Home didn't reach the device"
+    );
+
+    // Unset the default → Restore Home 404s again.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/scenes/{scene_id}/default"),
+            &cookie,
+            r#"{"default":false}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(helpers::authed_post(
+            "/api/scenes/restore-default",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn home_scene_routes_require_session() {
+    let app = helpers::test_app_with_password().await;
+    for (method, uri, bodytext) in [
+        ("POST", "/api/scenes/restore-default", "{}"),
+        ("PUT", "/api/scenes/some-id/default", r#"{"default":true}"#),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(bodytext))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{method} {uri}");
+    }
+}
+
+#[tokio::test]
 async fn delete_scene_removes_it() {
     let bridge = wled_mock().await;
     let (app, _light_id) = helpers::test_app_with_light(&bridge.uri()).await;

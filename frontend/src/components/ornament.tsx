@@ -17,7 +17,7 @@ const TARNISH = ["var(--bf-tarnishHi)", "var(--bf-tarnishLo)", "var(--bf-tarnish
  * an engraved plate. `colors` = the room's lit light hexes (the gradient flows
  * through them); empty/undefined → tarnished brass. */
 export function CornerFiligree({
-  inset = 4,
+  inset = 2,
   len = 20,
   thickness = 2.5,
   colors,

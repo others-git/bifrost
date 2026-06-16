@@ -720,16 +720,37 @@ export async function updateProviderCredentials(
   return { error: (await res.text()) || `HTTP ${res.status}` };
 }
 
+/** A whole-home scene: a snapshot of every light + power device, applied all at
+ * once. One can be the `is_default` "Restore Home" preset. (Room-scoped color
+ * looks are `PaletteScene`, a separate system.) */
 export interface Scene {
   id: string;
   name: string;
   created_at: string;
   lights: number;
+  power: number;
+  is_default: boolean;
 }
 
 export async function getScenes(): Promise<Scene[]> {
   const res = await fetch("/api/scenes");
   if (!res.ok) return [];
+  return res.json();
+}
+
+/** Mark (or clear) a home scene as the single "Restore Home" default. */
+export async function setDefaultScene(id: string, isDefault: boolean): Promise<void> {
+  await fetch(`/api/scenes/${id}/default`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ default: isDefault }),
+  });
+}
+
+/** One-tap "Restore Home": apply the default home scene. Throws if none is set. */
+export async function restoreDefaultHome(): Promise<{ applied: number; failed: number }> {
+  const res = await fetch("/api/scenes/restore-default", { method: "POST" });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
   return res.json();
 }
 
