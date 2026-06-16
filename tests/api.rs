@@ -5123,6 +5123,135 @@ async fn room_audio_members_set_list_and_clear() {
 }
 
 #[tokio::test]
+async fn room_controls_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/rooms/some-id/controls")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"controls":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn room_controls_set_validate_list_and_clear() {
+    let bridge = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/rooms",
+            &cookie,
+            r#"{"name":"Den","light_ids":[]}"#,
+        ))
+        .await
+        .unwrap();
+    let room_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Unknown kind → 422.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/controls"),
+            &cookie,
+            r#"{"controls":[{"kind":"frobnicate","glyph":"power","targets":[]}]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Unknown target device → 422.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/controls"),
+            &cookie,
+            r#"{"controls":[{"kind":"power","glyph":"power","targets":[{"domain":"light","id":"ghost"}]}]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // A scene control with no scene_id → 422.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/controls"),
+            &cookie,
+            r#"{"controls":[{"kind":"scene","glyph":"scene"}]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Valid power control targeting the light → 204, then listed on the room.
+    let body = format!(
+        r#"{{"controls":[{{"kind":"power","glyph":"power","label":"All","targets":[{{"domain":"light","id":"{light_id}"}}]}}]}}"#
+    );
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/controls"),
+            &cookie,
+            &body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/rooms", &cookie))
+        .await
+        .unwrap();
+    let rooms = helpers::response_json(resp).await;
+    let ctrl = &rooms[0]["controls"][0];
+    assert_eq!(ctrl["kind"], "power");
+    assert_eq!(ctrl["glyph"], "power");
+    assert_eq!(ctrl["label"], "All");
+    assert_eq!(ctrl["targets"][0]["domain"], "light");
+    assert_eq!(ctrl["targets"][0]["id"], light_id);
+    assert!(ctrl["id"].as_str().is_some_and(|s| !s.is_empty()));
+
+    // Clear with an empty list.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/controls"),
+            &cookie,
+            r#"{"controls":[]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/rooms", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(
+        helpers::response_json(resp).await[0]["controls"],
+        serde_json::json!([])
+    );
+}
+
+#[tokio::test]
 async fn room_audio_state_fans_out_with_offsets() {
     // Two receivers in one room; the room volume fans out to both, with each
     // device's per-room offset applied (clamped 0–100). Onkyo master volume is

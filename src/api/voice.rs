@@ -159,10 +159,23 @@ async fn listen_handler(
             .into_response();
     };
 
+    // Dev-only clip capture: when BIFROST_LISTEN_DUMP_DIR is set, keep a copy of
+    // the uploaded audio so real mic clips can be harvested for the STT bench
+    // harness (scripts/stt-bench) without rebuilding the kiosk. Clone only when
+    // enabled so the normal path pays nothing.
+    let dump_dir = std::env::var("BIFROST_LISTEN_DUMP_DIR").ok();
+    let dump_bytes = dump_dir.as_ref().map(|_| bytes.clone());
+
     let text = match transcribe(&ep, filename, bytes).await {
         Ok(t) => t,
         Err(e) => return (StatusCode::BAD_GATEWAY, e).into_response(),
     };
+
+    if let (Some(dir), Some(b)) = (dump_dir.as_deref(), dump_bytes)
+        && let Some(p) = maybe_dump_clip(Some(dir), &b, &text)
+    {
+        tracing::info!(target: "voice_learn", clip = %p.display(), transcript = %text, "dumped /listen clip");
+    }
 
     let result = run_command(&state, &text, room.as_deref()).await;
     Json(ListenResponse {
@@ -413,6 +426,30 @@ async fn transcribe(ep: &AiEndpoint, filename: String, bytes: Vec<u8>) -> Result
     Ok(text)
 }
 
+/// Dev-only: persist an uploaded `/listen` clip (plus the transcript as a
+/// labeling hint, written to a sidecar `.txt`) under `dir` so real mic audio can
+/// be harvested for the STT benchmark harness. Returns the WAV path written, or
+/// `None` when disabled (`dir == None`) or on any I/O error — capture must never
+/// affect the voice response. Pure (takes `dir` explicitly) so it's unit-testable
+/// without touching process env.
+fn maybe_dump_clip(
+    dir: Option<&str>,
+    bytes: &[u8],
+    transcript: &str,
+) -> Option<std::path::PathBuf> {
+    let dir = dir?;
+    std::fs::create_dir_all(dir).ok()?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    let wav = std::path::Path::new(dir).join(format!("clip_{ts}.wav"));
+    std::fs::write(&wav, bytes).ok()?;
+    // Best-effort hint; the user corrects it to true ground truth in manifest.tsv.
+    let _ = std::fs::write(wav.with_extension("txt"), transcript);
+    Some(wav)
+}
+
 /// Parse `text` into clauses and execute each. Shared seam: STT (P2) and any
 /// other ingress call this with the recognized text.
 async fn run_command(state: &AppState, text: &str, context_room: Option<&str>) -> CommandResponse {
@@ -587,8 +624,15 @@ fn llm_tools() -> serde_json::Value {
         t(
             "set_power",
             "Turn a light/room/device on or off.",
-            serde_json::json!({ "target": target, "on": { "type": "boolean" } }),
-            &["target", "on"]
+            serde_json::json!({
+                "target": target,
+                "on": { "type": "boolean" },
+                "lights_only": {
+                    "type": "boolean",
+                    "description": "true when the user referred specifically to lights/lamps (e.g. \"the office lights\"); false for a whole room or all devices (e.g. \"the office\", \"everything\"). When in doubt and the word \"lights\"/\"lamps\" appears, use true so speakers/switches aren't toggled."
+                }
+            }),
+            &["target", "on", "lights_only"]
         ),
         t(
             "set_brightness",
@@ -649,7 +693,9 @@ fn tool_call_to_command(name: &str, args: &serde_json::Value) -> Option<Command>
     match name {
         "set_power" => Some(Command::Power {
             target: target(),
-            lights_only: false,
+            // Match the grammar: scope to lights when the user said "lights",
+            // else fan out to the whole room (default false, as parse_target does).
+            lights_only: args["lights_only"].as_bool().unwrap_or(false),
             on: args["on"].as_bool()?,
         }),
         "set_brightness" => Some(Command::Brightness {
@@ -1442,8 +1488,13 @@ fn parse(text: &str) -> Vec<Clause> {
 /// Lowercase, strip the wake word and leading politeness, collapse whitespace.
 fn normalize(text: &str) -> String {
     let mut s = text.to_lowercase();
-    for p in [".", ",", "!", "?", ";"] {
-        s = s.replace(p, &format!("{p} "));
+    // Drop sentence punctuation. A server-side STT (whisper/Speaches) adds
+    // ".?!" etc.; Vosk never does. Left in, a stray "." token breaks target
+    // resolution (e.g. "office lights ." → "I couldn't find office lights."),
+    // so /listen would fail where /command works. Commas are kept below — they
+    // separate clauses in split_clauses.
+    for p in ['.', '!', '?', ';', ':'] {
+        s = s.replace(p, " ");
     }
     let mut s = s.split_whitespace().collect::<Vec<_>>().join(" ");
     // Wake word.
@@ -1997,12 +2048,26 @@ mod tests {
     fn tool_call_maps_to_the_grammar_command() {
         let j = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
 
+        // Bare target (no lights_only) → whole-room power, matching parse_target.
         assert_eq!(
             tool_call_to_command("set_power", &j(r#"{"target":"office","on":false}"#)),
             Some(Command::Power {
                 target: Target::Named("office".into()),
                 lights_only: false,
                 on: false
+            })
+        );
+        // "...lights" → the model sets lights_only, so speakers/switches in the
+        // room aren't toggled (the Sonos-fanout bug seen on the tablet).
+        assert_eq!(
+            tool_call_to_command(
+                "set_power",
+                &j(r#"{"target":"office","on":true,"lights_only":true}"#)
+            ),
+            Some(Command::Power {
+                target: Target::Named("office".into()),
+                lights_only: true,
+                on: true
             })
         );
         assert_eq!(
@@ -2111,6 +2176,36 @@ mod tests {
                 target: Target::Named("office".into()),
                 lights_only: true,
                 on: false
+            }
+        );
+    }
+
+    #[test]
+    fn maybe_dump_clip_writes_when_enabled_and_skips_when_off() {
+        // Disabled (no dir) → nothing written, returns None.
+        assert!(maybe_dump_clip(None, b"x", "t").is_none());
+
+        // Enabled → WAV bytes + a sidecar transcript hint land under the dir.
+        let dir = std::env::temp_dir().join(format!("bifrost-dump-{}", std::process::id()));
+        let p = maybe_dump_clip(Some(dir.to_str().unwrap()), b"RIFFfake", "office lights").unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"RIFFfake");
+        assert_eq!(
+            std::fs::read_to_string(p.with_extension("txt")).unwrap(),
+            "office lights"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stt_punctuation_and_wake_word_are_stripped() {
+        // Server-side STT (whisper/Speaches) capitalizes + adds a trailing period
+        // that Vosk never does; neither may leak into parsing or the target.
+        assert_eq!(
+            cmd("Bifrost turn on the office lights."),
+            Command::Power {
+                target: Target::Named("office".into()),
+                lights_only: true,
+                on: true
             }
         );
     }

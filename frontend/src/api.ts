@@ -784,8 +784,41 @@ export interface Room {
   audio_devices: RoomAudioMember[];
   /** Power devices (switches/plugs/fans) the room contains. */
   power_device_ids: string[];
+  /** User-configured quick-control buttons on the room's Control card. */
+  controls: RoomControl[];
   /** Disabled rooms are hidden from the Dashboard/Floor Plan; managed in Settings. */
   enabled: boolean;
+}
+
+export type ControlKind = "power" | "volume" | "brightness" | "scene";
+
+/** One device a configured control acts on. */
+export interface ControlTarget {
+  domain: "light" | "audio" | "power";
+  id: string;
+}
+
+/** A configured quick-control button (see migration 0034). `power` toggles its
+ * targets; `volume`/`brightness` open a scoped control; `scene` applies a scene. */
+export interface RoomControl {
+  /** Server-assigned; empty/omitted on create. */
+  id?: string;
+  kind: ControlKind;
+  /** A Glyph registry name (`components/glyphs`). */
+  glyph: string;
+  label?: string | null;
+  targets: ControlTarget[];
+  scene_id?: string | null;
+}
+
+/** Replace the room's configured quick-control buttons (add/edit/remove/reorder). */
+export async function setRoomControls(roomId: string, controls: RoomControl[]): Promise<void> {
+  const res = await fetch(`/api/rooms/${roomId}/controls`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ controls }),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
 }
 
 export interface RoomAudioMember {

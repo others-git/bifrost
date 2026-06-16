@@ -11,13 +11,16 @@ import {
   rgbToXy,
   savePaletteSceneFromRoom,
   setAudioEnabled,
+  setAudioState,
   setLightEnabled,
   setLightState,
   setPowerEnabled,
   setPowerState,
   setRoomState,
   xyToRgb,
+  type AudioCommand,
   type AudioDevice,
+  type ControlTarget,
   type Light,
   type LightState,
   type LightStatePatch,
@@ -25,6 +28,7 @@ import {
   type PowerDevice,
   type Provider,
   type Room,
+  type RoomControl,
 } from "../api";
 import { AudioEditor } from "../components/AudioControls";
 import { Glyph, powerKindGlyph, audioKindGlyph } from "../components/glyphs";
@@ -32,7 +36,6 @@ import { hexToRgb, LightEditor, type LightControlChange } from "../components/Li
 import { T, font, glassCard, radius, color, glow, alpha } from "../theme";
 import { CornerFiligree } from "../components/ornament";
 import { PageHeader } from "../components/PageHeader";
-import { Switch } from "../components/controls";
 import { DisableRow, PowerFlyout } from "../components/PowerFlyout";
 import { SceneButton, SceneModal } from "../components/scenes";
 import { useDialogs, type Dialogs } from "../components/dialogs";
@@ -302,7 +305,7 @@ function RoomGrid({
   return (
     <div style={{ columnCount: isMobile ? 1 : 2, columnGap: "1.1rem" }}>
       {roomSections.map(({ room, lights, power, audio }, i) => (
-        <RoomBox key={room.id} index={i} name={room.name} roomId={room.id} lights={lights} power={power} audio={audio} {...common} />
+        <RoomBox key={room.id} index={i} name={room.name} roomId={room.id} lights={lights} power={power} audio={audio} controls={room.controls} {...common} />
       ))}
       {leftoverSections.map(([providerId, sectionLights], i) => (
         <RoomBox
@@ -316,6 +319,7 @@ function RoomGrid({
           lights={sectionLights}
           power={[]}
           audio={[]}
+          controls={[]}
           {...common}
         />
       ))}
@@ -374,6 +378,7 @@ function RoomBox({
   lights,
   power,
   audio,
+  controls,
   scenes,
   dialogs,
   onScenesChanged,
@@ -392,6 +397,7 @@ function RoomBox({
   lights: Light[];
   power: PowerDevice[];
   audio: AudioDevice[];
+  controls: RoomControl[];
   scenes: PaletteScene[];
   dialogs: Dialogs;
   onScenesChanged: () => void;
@@ -413,6 +419,11 @@ function RoomBox({
 
   const lit = lights.filter((l) => l.last_state?.on);
   const anyOn = lit.length > 0;
+  // Room-level power reflects ALL member domains (a speakers-only room can still
+  // be powered). The master power button uses this; the header dot stays light-
+  // centric (it breathes the lit color).
+  const roomAnyOn = anyOn || power.some((d) => d.state.on) || audio.some((d) => d.state.power);
+  const canPower = !!roomId && lights.length + power.length + audio.length > 0;
   const showColor = lights.some((l) => l.capabilities.color_rgb);
   const showWhite = lights.some((l) => l.capabilities.color_temperature);
   const showBrightness = lights.some((l) => l.capabilities.dimmable);
@@ -467,7 +478,7 @@ function RoomBox({
 
   async function toggleAll() {
     if (!roomId) return;
-    const next = !anyOn;
+    const next = !roomAnyOn;
     setBusy(true);
     for (const l of lights) onLightUpdate(l.id, { ...(l.last_state ?? { on: false }), on: next });
     try {
@@ -509,8 +520,6 @@ function RoomBox({
       await dialogs.alert({ title: "Couldn't save scene", message: String(e) });
     }
   }
-
-  const hasLights = lights.length > 0;
 
   return (
     <section
@@ -569,7 +578,41 @@ function RoomBox({
             {subtitle}
           </span>
         </div>
-        {roomId && hasLights && <VerticalToggle on={anyOn} onToggle={toggleAll} disabled={busy} />}
+        {(canPower || controls.length > 0) && (
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ display: "flex", alignItems: "center", gap: isCompact ? "0.3rem" : "0.4rem", flexShrink: 0 }}
+          >
+            {controls.map((c) => (
+              <RoomControlButton
+                key={c.id ?? `${c.kind}-${c.glyph}`}
+                control={c}
+                roomId={roomId}
+                lights={lights}
+                power={power}
+                audio={audio}
+                onLightUpdate={onLightUpdate}
+                onPowerToggle={onPowerToggle}
+                onAudioPatch={onAudioPatch}
+                onChanged={onChanged}
+                size={isCompact ? 38 : 42}
+              />
+            ))}
+            {canPower && (
+              <GlyphButton
+                on={roomAnyOn}
+                accent={T.accent}
+                title={roomAnyOn ? "Turn room off" : "Turn room on"}
+                active={false}
+                buttonRef={null}
+                onClick={toggleAll}
+                size={isCompact ? 38 : 42}
+              >
+                <Glyph name="power" size={isCompact ? 18 : 20} />
+              </GlyphButton>
+            )}
+          </div>
+        )}
       </header>
 
       <div
@@ -640,6 +683,177 @@ function RoomBox({
   );
 }
 
+/** A user-configured quick-control button on a room's header (see migration
+ * 0034 / RoomControlsPanel). `power` toggles its targets and `scene` applies a
+ * scene directly; `brightness`/`volume` open the shared LightEditor/AudioEditor
+ * scoped to the targets (fanning to all of them). */
+function RoomControlButton({
+  control,
+  roomId,
+  lights,
+  power,
+  audio,
+  onLightUpdate,
+  onPowerToggle,
+  onAudioPatch,
+  onChanged,
+  size,
+}: {
+  control: RoomControl;
+  roomId?: string;
+  lights: Light[];
+  power: PowerDevice[];
+  audio: AudioDevice[];
+  onLightUpdate: (id: string, state: LightState) => void;
+  onPowerToggle: (id: string, next: boolean) => void;
+  onAudioPatch: (id: string, patch: Partial<AudioDevice["state"]>) => void;
+  onChanged: () => void;
+  size: number;
+}) {
+  const ref = useRef<HTMLButtonElement>(null);
+  const [open, setOpen] = useState(false);
+  const commitTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  const has = (domain: ControlTarget["domain"], id: string) =>
+    control.targets.some((t) => t.domain === domain && t.id === id);
+  const tLights = lights.filter((l) => has("light", l.id));
+  const tPower = power.filter((d) => has("power", d.id));
+  const tAudio = audio.filter((d) => has("audio", d.id));
+
+  // A non-scene control whose targets have all been removed/disabled has nothing
+  // to act on — drop it rather than render a dead button.
+  if (control.kind !== "scene" && tLights.length + tPower.length + tAudio.length === 0) {
+    return null;
+  }
+
+  const anyOn =
+    control.kind === "scene"
+      ? false
+      : tLights.some((l) => l.last_state?.on) ||
+        tPower.some((d) => d.state.on) ||
+        tAudio.some((d) => d.state.power);
+
+  const accent =
+    control.kind === "volume" ? T.audio : control.kind === "brightness" ? "#ffb84d" : T.accent;
+
+  function togglePower() {
+    const next = !anyOn;
+    for (const l of tLights) {
+      const s: LightState = { ...(l.last_state ?? { on: false }), on: next };
+      onLightUpdate(l.id, s);
+      setLightState(l.id, s);
+    }
+    for (const d of tPower) onPowerToggle(d.id, next);
+    for (const d of tAudio) {
+      onAudioPatch(d.id, { power: next });
+      setAudioState(d.id, { power: next });
+    }
+  }
+
+  async function applyScene() {
+    if (!roomId || !control.scene_id) return;
+    await applySceneToRoom(roomId, control.scene_id);
+    onChanged();
+  }
+
+  // Brightness cascade across the target lights (per-light by capability),
+  // debounced — mirrors the room-header cascade.
+  function cascade(change: LightControlChange) {
+    const updates: [string, LightState][] = [];
+    for (const l of tLights) {
+      const next: LightState = { ...(l.last_state ?? { on: true }), on: true };
+      if (change.field === "brightness") {
+        if (l.capabilities.dimmable) next.brightness = change.brightness;
+      } else if (change.field === "color") {
+        if (l.capabilities.color_rgb) {
+          next.color = rgbToXy(...hexToRgb(change.hex));
+          next.color_temp_mirek = undefined;
+        }
+      } else if (l.capabilities.color_temperature) {
+        next.color_temp_mirek = change.mirek;
+        next.color = undefined;
+      }
+      onLightUpdate(l.id, next);
+      updates.push([l.id, next]);
+    }
+    clearTimeout(commitTimer.current);
+    commitTimer.current = setTimeout(() => {
+      for (const [id, s] of updates) setLightState(id, s);
+    }, 200);
+  }
+
+  // Volume control fans changes to every target audio device. The AudioEditor
+  // commits its own `device`; this wrapper fans the same command to the rest.
+  function fanAudio(id: string, patch: Partial<AudioDevice["state"]>) {
+    const cmd: AudioCommand = {};
+    if (patch.volume !== undefined) cmd.volume = patch.volume;
+    if (patch.mute !== undefined) cmd.mute = patch.mute;
+    if (patch.power !== undefined) cmd.power = patch.power;
+    for (const d of tAudio) {
+      onAudioPatch(d.id, patch);
+      if (d.id !== id && Object.keys(cmd).length > 0) setAudioState(d.id, cmd);
+    }
+  }
+
+  function onClick() {
+    if (control.kind === "power") togglePower();
+    else if (control.kind === "scene") applyScene();
+    else setOpen((v) => !v);
+  }
+
+  const litT = tLights.filter((l) => l.last_state?.on);
+  const firstColor = litT.map((l) => l.last_state?.color).find((c) => c);
+  const initHex = firstColor
+    ? rgbToHex(...xyToRgb(firstColor.x, firstColor.y, firstColor.brightness))
+    : "#ffb84d";
+  const initBrightness = litT.length
+    ? Math.round(litT.reduce((s, l) => s + (l.last_state?.brightness ?? 100), 0) / litT.length)
+    : 100;
+  const initMirek =
+    litT.map((l) => l.last_state?.color_temp_mirek).find((m): m is number => m != null) ?? 366;
+  const title = control.label || control.kind;
+
+  return (
+    <>
+      <GlyphButton
+        on={anyOn}
+        accent={accent}
+        title={title}
+        active={open}
+        buttonRef={ref}
+        onClick={onClick}
+        size={size}
+      >
+        <Glyph name={control.glyph} size={size <= 40 ? 18 : 20} />
+      </GlyphButton>
+      {open && control.kind === "brightness" && ref.current && (
+        <LightEditor
+          anchor={ref.current}
+          title={title}
+          initialHex={initHex}
+          initialBrightness={initBrightness}
+          initialMirek={initMirek}
+          showColor={tLights.some((l) => l.capabilities.color_rgb)}
+          showWhite={tLights.some((l) => l.capabilities.color_temperature)}
+          showBrightness={tLights.some((l) => l.capabilities.dimmable)}
+          on={anyOn}
+          onToggle={togglePower}
+          onChange={cascade}
+          onClose={() => setOpen(false)}
+        />
+      )}
+      {open && control.kind === "volume" && tAudio[0] && ref.current && (
+        <AudioEditor
+          device={tAudio[0]}
+          anchor={ref.current}
+          onLocalPatch={fanAudio}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </>
+  );
+}
+
 // ── Device glyph buttons ──────────────────────────────────────────────────────
 
 /** Shared shell: a square button showing a device-type glyph, glowing in its
@@ -652,6 +866,8 @@ function GlyphButton({
   active,
   buttonRef,
   onClick,
+  onLongPress,
+  size = 52,
   children,
 }: {
   on: boolean;
@@ -661,17 +877,48 @@ function GlyphButton({
   active: boolean;
   buttonRef: React.Ref<HTMLButtonElement>;
   onClick: () => void;
+  /** Press-and-hold (~500ms) action; suppresses the click that would follow.
+   * Used as a quick power toggle so a tap still opens the fly-out. */
+  onLongPress?: () => void;
+  size?: number;
   children: React.ReactNode;
 }) {
+  const holdTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const fired = useRef(false);
+
+  function startHold() {
+    fired.current = false;
+    if (!onLongPress) return;
+    holdTimer.current = setTimeout(() => {
+      fired.current = true;
+      onLongPress();
+    }, 500);
+  }
+  function cancelHold() {
+    clearTimeout(holdTimer.current);
+  }
+  function handleClick() {
+    // Swallow the click that fires after a long-press completes.
+    if (fired.current) {
+      fired.current = false;
+      return;
+    }
+    onClick();
+  }
+
   return (
     <button
       ref={buttonRef}
-      onClick={onClick}
-      title={title}
+      onClick={handleClick}
+      onPointerDown={startHold}
+      onPointerUp={cancelHold}
+      onPointerLeave={cancelHold}
+      onPointerCancel={cancelHold}
+      title={onLongPress ? `${title} — hold to toggle power` : title}
       aria-label={title}
       style={{
-        width: 52,
-        height: 52,
+        width: size,
+        height: size,
         flexShrink: 0,
         display: "grid",
         placeItems: "center",
@@ -756,6 +1003,7 @@ function LightButton({
         active={editing}
         buttonRef={ref}
         onClick={() => setEditing((v) => !v)}
+        onLongPress={toggle}
       >
         <Glyph name={light.glyph ?? "bulb"} />
       </GlyphButton>
@@ -807,6 +1055,7 @@ function PowerButton({
         active={open}
         buttonRef={ref}
         onClick={() => setOpen((v) => !v)}
+        onLongPress={() => onToggle(device.id, !device.state.on)}
       >
         <Glyph name={device.glyph ?? powerKindGlyph(device.kind)} />
       </GlyphButton>
@@ -844,6 +1093,11 @@ function AudioButton({
   const offline = device.state.reachable === false;
   const grouped = !!groupMembers && groupMembers.length >= 2;
   const title = grouped ? groupMembers!.map((m) => m.name).join(" + ") : device.name;
+  function togglePower() {
+    const next = !device.state.power;
+    onAudioPatch(device.id, { power: next });
+    setAudioState(device.id, { power: next });
+  }
   return (
     <>
       <GlyphButton
@@ -854,6 +1108,7 @@ function AudioButton({
         active={open}
         buttonRef={ref}
         onClick={() => setOpen((v) => !v)}
+        onLongPress={togglePower}
       >
         <Glyph name={grouped ? "speaker_group" : (device.glyph ?? audioKindGlyph(device.kind))} />
       </GlyphButton>
@@ -871,7 +1126,3 @@ function AudioButton({
   );
 }
 
-/** On/off as a vertical sliding switch — up is on. (Thin wrapper over `Switch`.) */
-function VerticalToggle({ on, onToggle, disabled }: { on: boolean; onToggle: () => void; disabled?: boolean }) {
-  return <Switch on={on} onChange={() => onToggle()} disabled={disabled} vertical />;
-}

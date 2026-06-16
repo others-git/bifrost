@@ -8,6 +8,7 @@ import {
   createRoom,
   getAudioDevices,
   getLights,
+  getPaletteScenes,
   getPowerDevices,
   getProviderGroups,
   getRooms,
@@ -16,12 +17,14 @@ import {
   setRoomEnabled,
   type AudioDevice,
   type Light,
+  type PaletteScene,
   type PowerDevice,
   type ProviderGroupInfo,
   type Room,
 } from "../api";
 import { RoomVolumeStrip } from "../components/RoomAudio";
 import { RoomDevicesPanel } from "../components/RoomDevices";
+import { RoomControlsPanel } from "../components/RoomControls";
 import { SelectRow } from "../components/SelectRow";
 import { useDialogs, type Dialogs } from "../components/dialogs";
 import { PageHeader } from "../components/PageHeader";
@@ -38,6 +41,7 @@ export function RoomsPage() {
   const [lights, setLights] = useState<Light[]>([]);
   const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
   const [powerDevices, setPowerDevices] = useState<PowerDevice[]>([]);
+  const [scenes, setScenes] = useState<PaletteScene[]>([]);
   const [showAdd, setShowAdd] = useState(false);
 
   async function load() {
@@ -45,6 +49,7 @@ export function RoomsPage() {
     setProviderGroups(await getProviderGroups());
     setAudioDevices(await getAudioDevices());
     setPowerDevices(await getPowerDevices());
+    setScenes(await getPaletteScenes());
     const l = await getLights();
     if (l !== "unauthorized") setLights(l);
   }
@@ -93,6 +98,7 @@ export function RoomsPage() {
             providerGroups={providerGroups}
             audioDevices={audioDevices}
             powerDevices={powerDevices}
+            scenes={scenes}
             dialogs={dialogs}
             onChanged={load}
             onRemove={() => handleRemove(room.id, room.name)}
@@ -143,6 +149,7 @@ function RoomCard({
   providerGroups,
   audioDevices,
   powerDevices,
+  scenes,
   dialogs,
   onChanged,
   onRemove,
@@ -153,6 +160,7 @@ function RoomCard({
   providerGroups: ProviderGroupInfo[];
   audioDevices: AudioDevice[];
   powerDevices: PowerDevice[];
+  scenes: PaletteScene[];
   // Owned by RoomsPage (which renders `dialogs.element`). A RoomCard must NOT
   // call useDialogs() itself: that returns a separate instance whose element is
   // never mounted, so confirm()/alert() would hang forever (merge silently did
@@ -163,6 +171,7 @@ function RoomCard({
 }) {
   const { isMobile } = useViewport();
   const [editingDevices, setEditingDevices] = useState(false);
+  const [editingControls, setEditingControls] = useState(false);
   const [merging, setMerging] = useState(false);
   const mergeCandidates = allRooms.filter((r) => r.id !== room.id);
   const speakers = room.audio_devices.length;
@@ -256,6 +265,11 @@ function RoomCard({
             Devices
           </Button>
           <Button variant="ghost"
+            onClick={() => setEditingControls((v) => !v)} style={{ ...(editingControls ? { borderColor: ACCENT, color: ACCENT } : {}) }}
+          >
+            Controls
+          </Button>
+          <Button variant="ghost"
             onClick={async () => { await setRoomEnabled(room.id, !room.enabled); await onChanged(); }}
             title={room.enabled ? "Hide this room from the Dashboard and Floor Plan" : "Show this room again"}
           >
@@ -277,6 +291,18 @@ function RoomCard({
           providerGroups={providerGroups}
           onSaved={() => { setEditingDevices(false); onChanged(); }}
           onCancel={() => setEditingDevices(false)}
+        />
+      )}
+
+      {editingControls && (
+        <RoomControlsPanel
+          room={room}
+          lights={lights}
+          audioDevices={audioDevices}
+          powerDevices={powerDevices}
+          scenes={scenes}
+          onSaved={() => { setEditingControls(false); onChanged(); }}
+          onCancel={() => setEditingControls(false)}
         />
       )}
     </div>

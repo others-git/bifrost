@@ -1,0 +1,9 @@
+# STT benchmark ground truth.  Format:  <relative-wav-path>\t<expected transcript>
+# Lines starting with # are ignored. Clips with no entry are transcribed for
+# speed/load but skipped for accuracy scoring.
+#
+# jfk.wav is the stock whisper sample (general English) — validates the harness
+# and gives a speed/load baseline. For accuracy on YOUR home, record real
+# command clips (phone voice memo → export WAV) and add lines like:
+#   office-lights-on.wav	bifrost turn on the office lights
+jfk.wav	And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country.

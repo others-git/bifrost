@@ -39,6 +39,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{id}/lights", put(set_direct_lights))
         .route("/{id}/power", put(set_room_power_devices))
         .route("/{id}/links", put(set_links))
+        .route("/{id}/controls", put(set_room_controls))
         .route("/{id}/state", put(set_room_state))
         .route("/{id}/scenes/{scene_id}/apply", post(apply_scene))
 }
@@ -72,9 +73,37 @@ struct RoomInfo {
     audio_devices: Vec<RoomAudioMember>,
     /// Power devices (switches/plugs/fans) the room contains.
     power_device_ids: Vec<String>,
+    /// User-configured quick-control buttons rendered on the room's Control card.
+    controls: Vec<RoomControl>,
     /// Disabled rooms are hidden from the Dashboard/Floor Plan and the public
     /// API, but still listed in Settings so they can be re-enabled.
     enabled: bool,
+}
+
+/// A configured quick-control button (see migration 0034). `kind` decides the
+/// action; `targets` names the devices it acts on (empty for `scene`, which uses
+/// `scene_id`).
+#[derive(Serialize, Deserialize, Clone)]
+pub(crate) struct RoomControl {
+    #[serde(default)]
+    id: String,
+    /// power | volume | brightness | scene
+    kind: String,
+    /// A Glyph registry name (frontend `components/glyphs`).
+    glyph: String,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    targets: Vec<ControlTarget>,
+    #[serde(default)]
+    scene_id: Option<String>,
+}
+
+/// One device a control acts on. `domain` ∈ light | audio | power.
+#[derive(Serialize, Deserialize, Clone)]
+pub(crate) struct ControlTarget {
+    domain: String,
+    id: String,
 }
 
 #[derive(Serialize)]
@@ -452,6 +481,7 @@ async fn list_rooms(State(state): State<Arc<AppState>>, _: Session) -> impl Into
 
         let audio_devices = effective_audio_members(&state, &id).await;
         let power_device_ids = effective_power_member_ids(&state, &id).await;
+        let controls = list_room_controls(&state, &id).await;
 
         out.push(RoomInfo {
             light_ids: effective_member_ids(&state, &id).await,
@@ -459,6 +489,7 @@ async fn list_rooms(State(state): State<Arc<AppState>>, _: Session) -> impl Into
             links,
             audio_devices,
             power_device_ids,
+            controls,
             enabled: room.get::<i64, _>("enabled") != 0,
             id,
             name: room.get("name"),
@@ -550,6 +581,153 @@ async fn set_room_audio_devices(
         .bind(&id)
         .bind(&d.audio_device_id)
         .bind(d.volume_offset)
+        .execute(&state.db)
+        .await;
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// The room's configured quick-control buttons, ordered for display. Targets
+/// are decoded from the stored JSON; a malformed row degrades to empty targets
+/// rather than failing the whole listing.
+pub(crate) async fn list_room_controls(state: &AppState, room_id: &str) -> Vec<RoomControl> {
+    sqlx::query(
+        "SELECT id, kind, glyph, label, targets, scene_id
+         FROM room_controls WHERE room_id = ? ORDER BY position, created_at",
+    )
+    .bind(room_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| {
+        let targets_json: String = r.get("targets");
+        RoomControl {
+            id: r.get("id"),
+            kind: r.get("kind"),
+            glyph: r.get("glyph"),
+            label: r.get("label"),
+            targets: serde_json::from_str(&targets_json).unwrap_or_default(),
+            scene_id: r.get("scene_id"),
+        }
+    })
+    .collect()
+}
+
+#[derive(Deserialize)]
+struct SetRoomControlsRequest {
+    /// Replaces the room's controls wholesale (add/edit/remove/reorder), like
+    /// `set_links`. Array order becomes each control's display `position`.
+    #[serde(default)]
+    controls: Vec<RoomControl>,
+}
+
+/// A control kind must name one of the four supported actions.
+fn valid_control_kind(kind: &str) -> bool {
+    matches!(kind, "power" | "volume" | "brightness" | "scene")
+}
+
+/// Confirm a target device id exists in the table for its domain.
+async fn target_exists(state: &AppState, t: &ControlTarget) -> bool {
+    let table = match t.domain.as_str() {
+        "light" => "lights",
+        "audio" => "audio_devices",
+        "power" => "power_devices",
+        _ => return false,
+    };
+    sqlx::query(&format!("SELECT 1 FROM {table} WHERE id = ?"))
+        .bind(&t.id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+/// Replace the room's configured quick-control buttons. Validates each control's
+/// kind, glyph, and targets (a `scene` needs a known `scene_id`; the others need
+/// at least one valid target device). Replace-all, mirroring `set_links`.
+async fn set_room_controls(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+    Json(req): Json<SetRoomControlsRequest>,
+) -> impl IntoResponse {
+    if !room_exists(&state, &id).await {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    for c in &req.controls {
+        if !valid_control_kind(&c.kind) {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("unknown control kind '{}'", c.kind),
+            )
+                .into_response();
+        }
+        if c.glyph.trim().is_empty() {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "control glyph is required",
+            )
+                .into_response();
+        }
+        if c.kind == "scene" {
+            let ok = match &c.scene_id {
+                Some(sid) => sqlx::query("SELECT 1 FROM palette_scenes WHERE id = ?")
+                    .bind(sid)
+                    .fetch_optional(&state.db)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some(),
+                None => false,
+            };
+            if !ok {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "scene control needs a known scene_id",
+                )
+                    .into_response();
+            }
+        } else {
+            if c.targets.is_empty() {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("'{}' control needs at least one target device", c.kind),
+                )
+                    .into_response();
+            }
+            for t in &c.targets {
+                if !target_exists(&state, t).await {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        format!("unknown {} device '{}'", t.domain, t.id),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
+
+    let _ = sqlx::query("DELETE FROM room_controls WHERE room_id = ?")
+        .bind(&id)
+        .execute(&state.db)
+        .await;
+    for (pos, c) in req.controls.iter().enumerate() {
+        let targets_json = serde_json::to_string(&c.targets).unwrap_or_else(|_| "[]".into());
+        let _ = sqlx::query(
+            "INSERT INTO room_controls (id, room_id, kind, glyph, label, targets, scene_id, position)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&id)
+        .bind(&c.kind)
+        .bind(c.glyph.trim())
+        .bind(&c.label)
+        .bind(&targets_json)
+        .bind(&c.scene_id)
+        .bind(pos as i64)
         .execute(&state.db)
         .await;
     }

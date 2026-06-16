@@ -131,6 +131,37 @@ const BODIES: Record<string, JSX.Element> = {
       <path d="M10.3 19v-4.6h3.4V19" />
     </>
   ),
+  power: (
+    // The power symbol (a broken ring + top bar) — for on/off control buttons.
+    <>
+      <path d="M12 3v8.5" />
+      <path d="M7.8 6.7a6.5 6.5 0 1 0 8.4 0" />
+    </>
+  ),
+  volume: (
+    // A speaker cone with sound waves — for a volume control button.
+    <>
+      <path d="M4 9.5v5h3.5L13 19V5L7.5 9.5H4Z" />
+      <path d="M16.5 9.2a4 4 0 0 1 0 5.6" />
+      <path d="M19 7a7 7 0 0 1 0 10" />
+    </>
+  ),
+  brightness: (
+    // A sun with rays — for a brightness control button.
+    <>
+      <circle cx="12" cy="12" r="3.6" />
+      <path d="M12 2.5v2.4M12 19.1v2.4M2.5 12h2.4M19.1 12h2.4M5.1 5.1l1.7 1.7M17.2 17.2l1.7 1.7M18.9 5.1l-1.7 1.7M6.8 17.2l-1.7 1.7" />
+    </>
+  ),
+  scene: (
+    // Three sliders — a saved scene / preset look.
+    <>
+      <path d="M4 7h16M4 12h16M4 17h16" />
+      <circle cx="9" cy="7" r="1.9" fill="currentColor" stroke="none" />
+      <circle cx="15.5" cy="12" r="1.9" fill="currentColor" stroke="none" />
+      <circle cx="7.5" cy="17" r="1.9" fill="currentColor" stroke="none" />
+    </>
+  ),
 };
 
 /// User-pickable override glyphs, with display labels (the per-kind power glyphs
@@ -147,6 +178,23 @@ export const GLYPH_OPTIONS: { name: string; label: string }[] = [
   { name: "switch", label: "Switch" },
   { name: "toggle", label: "Toggle" },
   { name: "fan", label: "Fan" },
+  { name: "generic", label: "Generic" },
+];
+
+/// Glyphs offered for a configured room control button (the "Add Control" flow).
+/// Control-meaningful first (power/volume/brightness/scene), then device glyphs
+/// so a button can read as the thing it drives.
+export const CONTROL_GLYPH_OPTIONS: { name: string; label: string }[] = [
+  { name: "power", label: "Power" },
+  { name: "volume", label: "Volume" },
+  { name: "brightness", label: "Brightness" },
+  { name: "scene", label: "Scene" },
+  { name: "bulb", label: "Bulb" },
+  { name: "led_strip", label: "LED strip" },
+  { name: "speaker", label: "Speaker" },
+  { name: "fan", label: "Fan" },
+  { name: "plug", label: "Plug" },
+  { name: "tv", label: "TV" },
   { name: "generic", label: "Generic" },
 ];
 
