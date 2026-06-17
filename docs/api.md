@@ -1,141 +1,495 @@
 # Bifrost Public API (`/api/v1`)
 
-A small REST API for third-party apps (Home Assistant, scripts, dashboards) to
-read and control your lights and rooms. It mirrors what the Bifrost UI can do
-for **lights** and **rooms** — including scenes — but not the floor plan or
-provider configuration.
+A key-authenticated REST API for external applications (automation scripts,
+assistants, etc.). A valid key grants full access to lights, rooms, and scenes —
+there is no RBAC. The floor plan and provider management are not exposed; use the
+web UI for those. The same key also unlocks the embedded **MCP** server at
+[`/mcp`](#mcp-endpoint-mcp) for natural-language control.
 
 ## Authentication
 
-All `/api/v1` requests require a **client API key** sent as a Bearer token:
+Create a key in **Settings → API keys**. The full key (`bfr_` + 64 hex chars) is
+shown exactly once at creation — only a SHA-256 hash is stored, so it cannot be
+recovered later. Revoking a key takes effect immediately.
+
+Send the key as a Bearer token on every request:
 
 ```
-Authorization: Bearer bfr_xxxxxxxxxxxxxxxx…
+Authorization: Bearer bfr_<your-key>
 ```
 
-There is no RBAC: any valid key has full access to lights and rooms.
-
-### Managing keys
-
-Keys are created and revoked from the Bifrost UI (**Settings → API keys**), or
-via the session-authenticated management endpoints below. A key's full value is
-shown **once**, at creation — only a SHA-256 hash is stored, so it cannot be
-recovered later. Lost a key? Revoke it and mint a new one.
-
-| Method | Path | Body | Notes |
-|---|---|---|---|
-| `GET` | `/api/api-keys` | — | List keys (id, name, prefix, timestamps). Never returns the key. |
-| `POST` | `/api/api-keys` | `{"name": "Home Assistant"}` | Returns `{id, name, key, prefix}` — `key` is shown only here. |
-| `DELETE` | `/api/api-keys/{id}` | — | Revoke a key immediately. |
-
-These management endpoints use the UI session cookie, not a Bearer key.
-
-A request with a missing or unknown key gets **401 Unauthorized**.
-
-## Conventions
-
-- Base URL: `http(s)://<host>/api/v1`
-- Request and response bodies are JSON.
-- A light/room **state** object:
-  ```json
-  {
-    "on": true,
-    "brightness": 80.0,          // 0–100, optional
-    "color": { "x": 0.45, "y": 0.41, "brightness": 0.8 },  // CIE xy + 0–1 Y, optional
-    "color_temp_mirek": 280       // 153–500, optional
-  }
-  ```
-  Only `on` is required; omit fields you don't want to set.
-
-## Lights
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/lights` | List all lights with capabilities and last known state. |
-| `GET` | `/lights/{id}` | One light. `404` if unknown. |
-| `PUT` | `/lights/{id}/state` | Set a light's state. Body: a state object. |
-
-`PUT /lights/{id}/state` returns `204 No Content` on success, `404` if the light
-is unknown, `502` if the provider rejected the call.
+Missing or unknown keys get `401 Unauthorized` on every endpoint.
 
 ```bash
-curl -X PUT https://bifrost.local/api/v1/lights/$ID/state \
-  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"on": true, "brightness": 60}'
+curl -H "Authorization: Bearer $BIFROST_KEY" http://bifrost.local:3000/api/v1/lights
 ```
 
-## Rooms
+## Data shapes
 
-Rooms are the Bifrost-level grouping (not provider groups). Membership is the
-union of linked provider-group lights and directly-assigned lights.
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/rooms` | List rooms: `{id, name, light_ids}`. |
-| `PUT` | `/rooms/{id}/state` | Drive every light in the room to one state. |
-
-`PUT /rooms/{id}/state` returns `{"applied": N, "failed": M}`. It uses native
-group control (e.g. one Hue `grouped_light` call) where possible and fans out
-per-light otherwise. `404` if the room has no members.
-
-```bash
-curl -X PUT https://bifrost.local/api/v1/rooms/$ROOM/state \
-  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"on": false}'
-```
-
-## Scenes
-
-Scenes are **global** palette presets — a name, an optional brightness, and a
-color palette — not tied to any room. You define a scene once and apply it to
-whichever room you like. A single-color (or brightness-only) scene drives the
-whole room uniformly; a multi-color palette is distributed round-robin across
-the room's lights in a stable order.
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/scenes` | List all scenes. |
-| `POST` | `/scenes` | Create a scene. |
-| `POST` | `/scenes/from-room/{room_id}` | Save a room's current colors as a new scene. Body: `{"name": "…"}`. |
-| `DELETE` | `/scenes/{id}` | Delete a scene. |
-| `POST` | `/rooms/{room_id}/scenes/{scene_id}/apply` | Apply a scene to a room. Returns `{applied, failed}`. `404` if the scene or room is unknown. |
-
-Create body:
+### Light
 
 ```json
 {
-  "name": "Warm",
-  "brightness": 40,                 // optional, 1–100
-  "palette": ["#ff8800", "#ffd9a0"] // #rrggbb hex colors
+  "id": "8b7f…",                 // Bifrost UUID — use this in all /lights/{id} calls
+  "provider_id": "ab12…",        // provider-native identifier (informational)
+  "provider": "hue",             // hue | govee | wled | tasmota | shelly | lifx | govee-lan
+  "name": "Desk lamp",
+  "state": { … LightState … },
+  "capabilities": {
+    "dimmable": true,
+    "color_rgb": true,
+    "color_temperature": true,
+    "hue_gamut": "C",            // A | B | C | null
+    "effects": ["no_effect", "candle", "fire"]  // supported dynamic effects; omitted when none
+  },
+  "last_seen": "2026-06-11T12:00:00Z"
 }
 ```
 
-Invalid palette colors or an out-of-range brightness return `422 Unprocessable
-Entity`. `POST /scenes/from-room/{room_id}` returns `422` if no light in the room
-is currently on, and `404` if the room is unknown.
+### LightState
 
-```bash
-# Define a scene, then apply it to a room.
-SCENE=$(curl -s -X POST https://bifrost.local/api/v1/scenes \
-  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"name":"Sunset","brightness":75,"palette":["#ff7d33","#ff5e9c"]}' | jq -r .id)
+Sent in full on writes (it is a complete state, not a patch):
 
-curl -X POST https://bifrost.local/api/v1/rooms/$ROOM/scenes/$SCENE/apply \
-  -H "Authorization: Bearer $KEY"
+```json
+{
+  "on": true,
+  "brightness": 80.0,            // 0–100, null for non-dimmable
+  "color": {                     // CIE xyY; null to leave color alone
+    "x": 0.4573,
+    "y": 0.41,
+    "brightness": 1.0            // linear Y, 0.0–1.0
+  },
+  "color_temp_mirek": null,      // 153–500 (≈6500K–2000K); alternative to color
+  "reachable": true,             // read-only; ignored on writes
+  "effect": "candle"             // a name from capabilities.effects; "no_effect" clears. Omit to leave unchanged
+}
 ```
 
-## Not exposed
+### Scene (full-state snapshot)
 
-The floor plan, provider credentials, and provider/group sync are intentionally
-out of scope for the public API.
+```json
+{
+  "id": "f3c2…",
+  "name": "Movie Night",
+  "created_at": "2026-06-17T21:00:00Z",
+  "lights": 3,                  // captured light entries
+  "power": 1,                   // captured power-device entries
+  "is_default": false,          // the single "Restore Home" preset (home scenes only)
+  "room_id": "a1b2…",           // null = whole-home (Home Scene); set = Room Scene
+  "room_name": "Living Room"    // null for a home scene
+}
+```
+
+A scene is a snapshot of each captured light's **full** state (color **or**
+temperature **or** effect) plus each power device's on/off, restored verbatim. A
+**Home Scene** (`room_id: null`) captures the whole home; a **Room Scene**
+captures one room's effective members. Activating a scene re-applies exactly what
+was captured.
+
+## Endpoints
+
+### Lights
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/lights` | All lights with current state |
+| `GET` | `/api/v1/lights/{id}` | One light (404 if unknown) |
+| `PUT` | `/api/v1/lights/{id}/state` | Set state; body is a full `LightState` |
+
+`PUT …/state` responds `204 No Content` on success, `404` for an unknown light,
+`502` if the provider could not be reached.
+
+```bash
+# Turn a light red at half brightness
+curl -X PUT -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"on":true,"brightness":50,"color":{"x":0.675,"y":0.322,"brightness":1.0}}' \
+  http://bifrost.local:3000/api/v1/lights/$LIGHT_ID/state
+```
+
+### Rooms
+
+A room is Bifrost's user-defined grouping (which may be linked to a provider's
+native group). `light_ids` are the *effective* members: lights in the linked
+provider group plus any directly assigned.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/rooms` | All enabled rooms: `[{ id, name, light_ids, audio_device_ids, power_device_ids }]` — `audio_device_ids` / `power_device_ids` are the room's audio/power members; control each via the audio/power endpoints |
+| `PUT` | `/api/v1/rooms/{id}/state` | Apply a `LightState` to every member |
+
+Room writes respond `200` with `{ "applied": N, "failed": M }` — per-light
+results, since a room can span providers and some members may be offline.
+`404` if the room has no members.
+
+### Scenes
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/scenes` | All scenes (home + room-scoped) |
+| `POST` | `/api/v1/scenes` | Capture a snapshot: `{ name, room_id? }` → `201 { id, lights, power }`. Omit `room_id` for a whole-home scene; pass a room id to scope it to that room's members. `404` if the room is unknown |
+| `POST` | `/api/v1/scenes/{id}/activate` | Re-apply the scene → `200 { applied, failed }` (`404` if unknown/empty) |
+| `DELETE` | `/api/v1/scenes/{id}` | Delete → `204` |
+
+`POST /scenes` validates: name required, brightness 1–100 if present, palette
+entries must be `#rrggbb`, max 6 colors → `422` with a message on violation.
+`from-room` returns `422` if nothing in the room is currently lit.
+
+### Audio devices
+
+Receivers and networked speakers (Onkyo via eISCP, Sonos via local UPnP).
+
+```json
+{
+  "id": "c41a…",
+  "provider_id": "9b2e…",
+  "name": "Onkyo receiver (192.168.1.40)",
+  "kind": "receiver",              // receiver | speaker | zone
+  "capabilities": { "sources": true, "transport": true, "now_playing": true },
+  "state": {
+    "power": true,
+    "volume": 35,                  // 0–100
+    "mute": false,
+    "source": "net",               // current input/app
+    "source_list": ["net","tv","Hulu"], // selectable inputs / TV apps (omitted if none); switch by sending one as `source`
+    "now_playing": {               // when available
+      "title": "Karma Police",
+      "artist": "Radiohead",
+      "album": "OK Computer",
+      "play_state": "playing"      // playing | paused | stopped
+    },
+    "reachable": true
+  },
+  "last_seen": "2026-06-12 05:30:00"
+}
+```
+
+A device's `capabilities` may also include `"favorites": true` (Sonos) — the
+device exposes saved favorites you can start playing (see below) — and
+`"grouping": true` (Sonos speakers) — the speaker can be joined into/out of a
+provider-native synced playback group (see below).
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/audio/devices` | All audio devices (cached state) |
+| `GET` | `/api/v1/audio/devices/{id}` | One device — live read, refreshes the cache |
+| `PUT` | `/api/v1/audio/devices/{id}/state` | Send a command (body below) |
+| `GET` | `/api/v1/audio/devices/{id}/favorites` | List saved favorites (live read) |
+| `POST` | `/api/v1/audio/devices/{id}/favorites/play` | Start a favorite (body below) |
+| `POST` | `/api/v1/audio/devices/{id}/group` | Join this speaker into a group (body below) |
+| `POST` | `/api/v1/audio/devices/{id}/ungroup` | Remove this speaker from its group |
+| `PUT` | `/api/v1/audio/devices/{id}/receiver` | Bind this source to a receiver (body below) |
+| `PUT` | `/api/v1/audio/devices/{id}/companion` | Merge this entity into a primary as its companion (body below) |
+
+`PUT …/state` takes a **sparse command** — only the fields present are applied:
+
+```json
+{
+  "power": true,
+  "volume": 40,
+  "mute": false,
+  "source": "spotify",
+  "transport": "play"    // play | pause | stop | next | previous | toggle
+}
+```
+
+Source names: receiver inputs (`net`, `tv`, `bd`, `cbl`, `bluetooth`, …), raw
+Onkyo SLI hex (`"2B"`), or a streaming service (`spotify`, `tunein`, `deezer`,
+`tidal`, `airplay`, `internet-radio`) — service names switch the receiver to
+NET and select the service in one call. Sonos does not accept `source` (start
+playback from a Sonos app, then control transport here); on Sonos, `power`
+maps to play/pause.
+
+Responses: `204` success, `404` unknown device, `422` invalid command (e.g.
+unknown source — message in body), `502` device unreachable.
+
+A bound source's read (`GET …/{id}`) reports the **receiver's** volume/mute,
+and its `receiver_id` / `receiver_source` fields name the binding.
+
+#### Bind a source to a receiver
+
+Real AV: a TV / streamer / console feeds audio *through* an AV receiver, which
+owns the volume. Bind the source to its receiver and `PUT …/state` to the source
+then routes `volume`/`mute` to the receiver, while `power`/`source`/`transport`
+stay on the source. Powering the source **on** also wakes the receiver and (if
+`receiver_source` is set) switches it to that input. Many sources may share one
+receiver. Stored on the source.
+
+```json
+// PUT …/{id}/receiver
+{
+  "receiver_id": "<audio device id>",  // null to unbind
+  "receiver_source": "Game"             // optional: receiver input to select on power-on
+}
+```
+
+Responses: `204` success, `404` unknown source device, `422` invalid binding
+(self-binding, unknown receiver, or a receiver that is itself bound).
+
+#### Merge a duplicate device (composite)
+
+One physical device can surface as several entities with **complementary**
+capabilities (e.g. a smart TV's two `media_player` views — one carries
+now-playing, the other the apps). Merge the secondary into a **primary** as its
+companion: the companion is hidden from control, but its state and controls are
+**routed/overlaid** onto the primary — nothing is lost (unlike a hidden
+duplicate). `volume`/`mute` route to whichever backing is receiver-bound,
+`transport` to the one reporting playback, `source` to the one with inputs, and
+`power` to the primary; the merged read fills now-playing / sources / the
+receiver binding from the companion.
+
+```json
+// PUT …/{id}/companion
+{
+  "primary_id": "<audio device id>"   // null to unmerge
+}
+```
+
+Responses: `204` success, `404` unknown device, `422` invalid (self-merge, an
+unknown/companion/shadowed primary, or a device that is itself a primary).
+
+#### Favorites
+
+Favorites are the presets the user already saved on the provider (e.g. Sonos
+Favorites — playlists, stations). No accounts or search: you list them and
+start one by reference.
+
+```json
+// GET …/favorites
+[
+  { "id": "FV:2/12", "title": "Jazz", "subtitle": "Spotify" },
+  { "id": "FV:2/3", "title": "BBC Radio 6", "subtitle": "TuneIn" }
+]
+```
+
+`POST …/favorites/play` takes the id in the body (provider ids contain slashes):
+
+```json
+{ "favorite_id": "FV:2/12" }
+```
+
+Responses: list → `200` with the array (empty for providers without favorites,
+such as Onkyo); play → `204` success, `404` unknown device, `422` unknown
+favorite, `502` device unreachable.
+
+#### Grouping (provider-native)
+
+Speakers with `"grouping": true` (Sonos) can be joined into a synced playback
+group that plays in sync, controlled through a coordinator — the provider's own
+grouping, **independent of Bifrost Rooms**. `POST …/{id}/group` joins the
+speaker `{id}` into the group coordinated by another speaker:
+
+```json
+{ "coordinator_id": "<another audio device id>" }
+```
+
+`POST …/{id}/ungroup` removes the speaker from any group (returns it to
+standalone playback; idempotent). Both speakers must belong to the same
+provider. After a change, the household topology shifts — re-run discovery
+(`POST /api/providers/{id}/discover`) to surface the synced-group zone device.
+
+Responses: `204` success, `404` unknown device, `422` invalid (different
+providers, or grouping a speaker with itself), `502` device unreachable.
+
+### Power devices
+
+Strictly on/off endpoints — switches, smart plugs, fans, boolean helpers —
+surfaced by integration providers (Home Assistant today). A power device has no
+capability set; its whole state is `on`. `kind` is presentational (drives the UI
+glyph) and is one of `switch | outlet | fan | toggle | generic`.
+
+```json
+{
+  "id": "5d2f…",
+  "provider_id": "c09e…",
+  "device_id": "switch.porch",   // provider-native id (HA entity_id)
+  "name": "Porch",
+  "kind": "switch",
+  "state": { "on": true, "reachable": true },
+  "last_seen": "2026-06-13 04:39:28"
+}
+```
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/power/devices` | All power devices (cached state) |
+| `GET` | `/api/v1/power/devices/{id}` | One device — live read, refreshes the cache |
+| `PUT` | `/api/v1/power/devices/{id}/state` | Set power: body `{ "on": true|false }` |
+
+`PUT …/state` responds `204` on success, `404` unknown device, `502` if the
+device could not be reached.
+
+### Remotes
+
+A virtual smart-remote for a TV / streamer (Android TV Remote via Home Assistant
+today). State is `on` plus the foreground app (`current_app`, a package id).
+`paired_audio_id` links the remote to its TV's audio device when they share
+hardware.
+
+```json
+{
+  "id": "9a1b…",
+  "provider_id": "c09e…",
+  "device_id": "remote.bedroom_tv",
+  "name": "Bedroom TV",
+  "state": { "on": true, "current_app": "com.netflix.ninja", "reachable": true },
+  "enabled": true,
+  "paired_audio_id": "7c3d…"
+}
+```
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/remote/devices` | All remotes (cached state) |
+| `GET` | `/api/v1/remote/devices/{id}` | One remote — live read, refreshes the cache |
+| `POST` | `/api/v1/remote/devices/{id}/command` | Send a command (see below) |
+
+The command body is a tagged union — exactly one variant:
+
+```json
+{ "key": { "key": "select", "hold_secs": 0.0 } }   // canonical key press
+{ "text": { "text": "hello" } }                      // type literal text
+{ "launch_app": { "activity": "com.netflix.ninja" } } // package id OR deep-link URL
+{ "power": { "on": true } }                          // power on/off
+```
+
+Canonical keys: `up`, `down`, `left`, `right`, `select`, `back`, `home`, `menu`,
+`volume_up`, `volume_down`, `mute`, `play_pause`, `next`, `previous`, `power`.
+`POST …/command` responds `204` on success, `404` unknown remote, `502` if it
+could not be reached.
 
 ## Status codes
 
 | Code | Meaning |
 |---|---|
-| `200` | OK (with body) |
-| `204` | Success, no body (light state set) |
-| `400`/`422` | Malformed or invalid request body |
-| `401` | Missing or invalid API key |
+| `200` / `201` / `204` | Success (body / created / no body) |
+| `401` | Missing or revoked API key |
 | `404` | Unknown light, room, or scene |
-| `502` | A provider rejected the upstream call |
+| `422` | Validation failure (message in body) |
+| `502` | Provider unreachable (device offline, bridge down) |
+
+## Key management (UI/session only)
+
+Keys are managed with a browser session, not with another key — a leaked key
+cannot mint more keys: `GET/POST /api/api-keys`, `DELETE /api/api-keys/{id}`.
+
+## Device enrollment (QR pairing)
+
+Headless devices (the wall-tablet voice satellite) get a key without anyone
+typing one. An authenticated dashboard session mints a short-lived, single-use
+token; the device scans a QR carrying it and redeems it for a normal `bfr_` key
+(which then shows up in **Settings → API keys** and is revocable like any other).
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `POST` | `/api/enrollment` | session | Mint a pairing token → `{ token, expires_at, expires_in_secs }` (TTL 5 min) |
+| `POST` | `/api/enrollment/redeem` | **token** (no key/session) | `{ token, device_name? }` → `201 { key, prefix, name }` |
+
+The redeem route is intentionally unauthenticated — the device has no credential
+yet — but is gated on a valid, unexpired, **unused** token, which only an authed
+session can create. Redemption is atomic and single-use; a replayed token gets
+`401`.
+
+The dashboard renders the QR as JSON `{ "v": 1, "base_url": "<origin>", "token": "<token>" }`.
+A client scans it, then `POST`s `{ token, device_name }` to
+`base_url + /api/enrollment/redeem` and stores the returned `key` for all
+subsequent `/api/v1` + `/api/voice` calls.
+
+## Kiosk control (`/api/kiosks`)
+
+Manage the wall-tablet companion apps. A kiosk is identified by the `bfr_` key it
+was paired with (via enrollment); it **checks in** on a heartbeat and the server
+hands back a queued command. Management endpoints are **session-only** (driven
+from a phone/desktop), so they aren't reachable with a kiosk key — and the
+companion app sets a `BifrostKiosk/<ver>` User-Agent suffix so the frontend hides
+this view on the kiosk itself.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `POST` | `/api/kiosks/checkin` | **kiosk key** | Heartbeat: `{ name?, app_version?, screen_on? }` → `{ command }` (queued command, consumed) |
+| `GET` | `/api/kiosks` | session | List kiosks: `[{ id, name, app_version, screen_on, last_seen, online, pending_command, authorized }]` |
+| `POST` | `/api/kiosks/{id}/command` | session | Queue `{ command }` — one of `sleep`, `wake`, `lock` |
+| `POST` | `/api/kiosks/{id}/deauth` | session | Revoke the kiosk's key (it must re-enroll) |
+| `DELETE` | `/api/kiosks/{id}` | session | Forget a kiosk record |
+
+**Command semantics** (the app performs these on check-in):
+- `sleep` / `wake` — turn the display off / on.
+- `lock` — force sign-out of the Bifrost WebView session (re-enter password).
+- **de-auth** is *not* a queued command — it revokes the key immediately, so the
+  app's next call gets `401` and it re-enrolls via a fresh QR scan.
+
+**Companion-app contract:** check in every ~30–60s with the paired key; act on a
+returned `command` (and clear nothing — the server consumes it); treat a `401`
+from any authed call as "de-authed" → drop to QR enrollment. Set the WebView
+User-Agent to include `BifrostKiosk/<version>`.
+
+## Voice control (`/api/voice`)
+
+Natural-language command endpoints, gated by the **same Bearer API keys** as
+`/api/v1` (a browser session also works, for the web conversation modal). This is
+the contract the headless wall-tablet **voice satellite** uses — it has no login
+cookie, so it sends a minted `bfr_` key like any other public-API client.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/voice/command` | Run a **text** command (fallback chain below) |
+| `POST` | `/api/voice/listen` | Upload **audio**; server transcribes (configured STT) then runs it |
+| `GET` | `/api/voice/vocabulary` | `{ words: [...] }` — the command-grammar keywords plus every enabled room/device/scene name (tokenized). A device with on-device STT (the wall tablet) biases its recognizer to this list so in-domain words aren't misheard. |
+
+A clause is resolved **native-first**: the deterministic grammar parses what it can;
+a clause it can't parse falls to the configured **`chat` LLM** (OpenAI-compatible
+tool-calling — it maps the phrasing to the same internal command and dispatches via
+the shared service layer); failing that, to **Home Assistant Assist**. Each fallback
+is optional — with neither configured, an unparsed clause returns "I didn't
+understand". Configure the `chat` model under `PUT /api/ai-endpoints/chat`.
+
+`/api/voice/command` — JSON in, JSON out:
+
+```bash
+curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"text":"bifrost, turn off the office", "context":{"room":"office"}}' \
+  http://bifrost.local:3000/api/voice/command
+```
+
+```jsonc
+// request
+{ "text": "...", "context": { "room": "<id-or-name>" } }  // context optional; room disambiguates bare references
+// response
+{ "ok": true, "said": "Turned off the office.", "clauses": [ { "heard": "...", "ok": true, "said": "..." } ] }
+```
+
+`/api/voice/listen` — `multipart/form-data` with an audio `file` field (and an
+optional `room` text field). Returns the same shape plus the recognized
+`transcript`. Returns `503` when no transcription model is configured (so text
+control over `/command` never depends on STT being up):
+
+```bash
+curl -X POST -H "Authorization: Bearer $KEY" \
+  -F file=@utterance.wav -F room=office \
+  http://bifrost.local:3000/api/voice/listen
+```
+
+## MCP endpoint (`/mcp`)
+
+Bifrost embeds a [Model Context Protocol](https://modelcontextprotocol.io)
+server so an AI assistant can control the home in natural language. It is served
+at **`POST /mcp`** as a **Streamable HTTP** endpoint (stateless, JSON responses)
+and gated by the **same Bearer API keys** as `/api/v1`:
+
+```
+Authorization: Bearer bfr_<your-key>
+Content-Type: application/json
+Accept: application/json, text/event-stream
+```
+
+A missing or invalid key returns `401` before any MCP processing. The MCP tools
+call the same shared service layer as the routes above, so behaviour can't drift
+from the REST surface. Tools resolve lights, rooms, scenes, and audio devices by
+**id or case-insensitive name/substring**. The tool catalogue and mapping live
+in [MCP server](mcp.md). stdio-only clients can bridge to this endpoint with the
+standard `mcp-remote` shim — there is no separate stdio server.
+
+## Versioning
+
+The `/api/v1` surface is additive-stable: fields may be added to responses, but
+existing fields and routes will not change meaning within v1. Breaking changes
+get a new prefix.

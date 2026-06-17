@@ -1,0 +1,75 @@
+site_name: Bifrost
+site_description: >-
+  A self-hosted smart-home hub — lights, audio, and power behind one fast UI,
+  a clean API, and voice control.
+site_url: https://others-git.github.io/bifrost/
+repo_url: https://github.com/others-git/bifrost
+repo_name: others-git/bifrost
+edit_uri: ""
+copyright: Bifrost — self-hosted smart-home hub
+
+# All documentation lives in docs/ (index, providers, api, mcp). The repo-root
+# README.md is a slim landing that points here.
+docs_dir: docs
+
+theme:
+  name: material
+  language: en
+  logo: assets/favicon.svg
+  favicon: assets/favicon.svg
+  palette:
+    # Dark (slate) is the default — gothic-cathedral-meets-neon-HUD, on brand.
+    - scheme: slate
+      toggle:
+        icon: material/weather-night
+        name: Switch to light
+    - scheme: default
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark
+  font:
+    text: Inter
+    code: JetBrains Mono
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - navigation.sections
+    - toc.follow
+    - content.code.copy
+    - content.code.annotate
+    - search.suggest
+    - search.highlight
+
+extra_css:
+  - stylesheets/extra.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - footnotes
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Home: index.md
+  - Providers: providers.md
+  - Public API: api.md
+  - MCP server: mcp.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/others-git/bifrost
+      name: Bifrost on GitHub

@@ -83,8 +83,8 @@ When the service layer (or `/api/v1`) changes:
 3. Cover it per CLAUDE.md: a tool-level test in `tests/api.rs` driving `/mcp`
    (the service fns themselves are already covered), plus unit tests for any new
    resolution/parsing helper.
-4. Cross-link from [PLAN.md](PLAN.md) if it's part of a milestone, and note the
-   endpoint in [API.md](API.md) if a new REST route backs it.
+4. Cross-link from [the roadmap](https://github.com/others-git/bifrost/blob/main/PLAN.md) if it's part of a milestone, and note the
+   endpoint in [the API reference](api.md) if a new REST route backs it.
 
 ## Why embedded
 

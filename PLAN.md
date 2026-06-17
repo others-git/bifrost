@@ -339,7 +339,7 @@ A self-hosted Rust smart home hub that is:
 | 8.x — Polish | Global scenes, Govee LAN (UDP), floor-plan save perf (WAL + transactions), RoomPicker, aurora navbar, electric toggles |
 | 9 — Public API | API keys (`bfr_`, SHA-256 hash, `Authorization: Bearer`); `/api/v1` lights/rooms/scenes as thin handlers over the session service fns; documented in `API.md` |
 | 10 — Audio devices | `AudioProvider` trait + audio factory map; Onkyo eISCP (PWR/MVL/AMT/SLI, NET transport, NSV incl. Spotify, metadata, zone 2, persistent push → `/api/events`) + Sonos UPnP (topology fan-out, volume/mute, transport + DIDL, groups as `zone` devices); `/api/audio/*` + `/api/v1/audio/*`; Settings + Dashboard/Floor-Plan controls |
-| 11 — Embedded MCP server | MCP is a **first-class Bifrost surface**, not a separate repo: `src/api/mcp.rs` serves a Streamable HTTP server at `/mcp` (Bearer-gated, same keys as `/api/v1`) via `rmcp`, with 13 tools (`get_home_state`, `set_light`, `set_room`, `apply_scene`/`apply_scene_all`, `save_scene_from_room`, `set_audio`, `get_audio_state`, `list_audio_favorites`/`play_audio_favorite`, `group_speakers`/`ungroup_speaker`) calling the shared service layer directly + name resolution. Streamable HTTP only (stdio clients bridge via `mcp-remote`); the old `bifrost-mcp` TS repo is retired. Catalogue in [MCP.md](MCP.md) |
+| 11 — Embedded MCP server | MCP is a **first-class Bifrost surface**, not a separate repo: `src/api/mcp.rs` serves a Streamable HTTP server at `/mcp` (Bearer-gated, same keys as `/api/v1`) via `rmcp`, with 13 tools (`get_home_state`, `set_light`, `set_room`, `apply_scene`/`apply_scene_all`, `save_scene_from_room`, `set_audio`, `get_audio_state`, `list_audio_favorites`/`play_audio_favorite`, `group_speakers`/`ungroup_speaker`) calling the shared service layer directly + name resolution. Streamable HTTP only (stdio clients bridge via `mcp-remote`); the old `bifrost-mcp` TS repo is retired. Catalogue in [MCP.md](docs/mcp.md) |
 | 12.1 — Audio favorites | `list_favorites`/`play_favorite` + `AudioFavorite`; Sonos via ContentDirectory `Browse FV:2` + play-by-reference (stream vs queue); session + v1 routes, Audio-page list |
 | 13 — Audio rooms → Bifrost Rooms | `discover_groups` (Sonos, one group per player) wraps into the shared `provider_groups`/`room_links` machinery; provider-card button unified to **"Sync"** for both domains |
 | 14 — Multi-device room audio | Migration 0018 `room_audio_devices`; room volume/mute **fans out** to all audio members with a per-room offset; `PUT /rooms/{id}/audio` + `/audio/state`; Floor-Plan member/offset panel |
@@ -361,7 +361,7 @@ A self-hosted Rust smart home hub that is:
   `M-SEARCH` → `LOCATION` host), auto-fills the seed, and the household fans out.
   No seed IP needs to be known.
 - [x] **MCP `list_audio_favorites` / `play_audio_favorite`** (M12) — shipped as
-  embedded MCP tools in M11. Tracked in [MCP.md](MCP.md).
+  embedded MCP tools in M11. Tracked in [MCP.md](docs/mcp.md).
 - [ ] **Onkyo NET presets** (M12, deferred) — eISCP exposes service *selection*
   (`NSV`) but not preset *enumeration*; needs the receiver's undocumented HTTP API.
 

@@ -1164,11 +1164,11 @@ export function DevicesPage() {
             display: "grid",
             // Phones: one column. Everything else: cards at least 360px so the
             // glyph + name + action cluster fit one row without crushing the
-            // name; `min(100%, …)` keeps a single card from overflowing a narrow
-            // viewport.
-            gridTemplateColumns: isMobile
-              ? "1fr"
-              : "repeat(auto-fill, minmax(min(100%, 360px), 1fr))",
+            // name. (A plain `360px` track-min — not `minmax(min(100%, 360px), …)`
+            // — because that `min()` form trips an auto-fill column-count quirk
+            // that packs an extra, overflowing column on desktop; the guard is
+            // moot here since this grid only renders above the mobile breakpoint.)
+            gridTemplateColumns: isMobile ? "1fr" : "repeat(auto-fill, minmax(360px, 1fr))",
             gap: "0.7rem",
           }}
         >

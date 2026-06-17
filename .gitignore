@@ -17,3 +17,6 @@ TODO
 
 # Local dev server launcher (holds BIFROST_SECRET) — never commit
 /dev.sh
+
+# MkDocs build output (docs site)
+/site/
