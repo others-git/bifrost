@@ -312,6 +312,13 @@ export async function logout(): Promise<void> {
   await fetch("/api/auth/logout", { method: "POST" });
 }
 
+/** Trade a paired kiosk's `bfr_key` cookie (set by the kiosk app) for a dashboard
+ * session, so an authorized wall fixture skips the password login. */
+export async function kioskLogin(): Promise<boolean> {
+  const res = await fetch("/api/auth/kiosk", { method: "POST" });
+  return res.ok;
+}
+
 export async function getLights(): Promise<Light[] | "unauthorized"> {
   const res = await fetch("/api/lights");
   if (res.status === 401) return "unauthorized";

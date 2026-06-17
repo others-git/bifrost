@@ -1,5 +1,5 @@
 import { useEffect, useState, type MouseEvent } from "react";
-import { getHealth, getLights, logout, getSetupStatus, type Light } from "./api";
+import { getHealth, getLights, logout, getSetupStatus, kioskLogin, type Light } from "./api";
 import { Glyph } from "./components/glyphs";
 import { SetupPage } from "./pages/Setup";
 import { LoginPage } from "./pages/Login";
@@ -81,10 +81,21 @@ export function App() {
     getHealth().then((h) => setVersion(h.version));
   }, []);
 
+  // A paired kiosk trades its `bfr_key` cookie for a session instead of showing
+  // login — both on first load and when a session later expires. Returns the
+  // lights result after the (single) re-auth attempt.
+  async function lightsWithKioskAuth() {
+    let result = await getLights();
+    if (result === "unauthorized" && IS_KIOSK && (await kioskLogin())) {
+      result = await getLights();
+    }
+    return result;
+  }
+
   async function init() {
     const status = await getSetupStatus();
     if (!status.setup_complete) { setPage("setup"); return; }
-    const result = await getLights();
+    const result = await lightsWithKioskAuth();
     if (result === "unauthorized") { setPage("login"); return; }
     setLights(result);
     setPage("dashboard");
@@ -93,7 +104,7 @@ export function App() {
   useEffect(() => { init(); }, []);
 
   async function refreshLights() {
-    const result = await getLights();
+    const result = await lightsWithKioskAuth();
     if (result === "unauthorized") { setPage("login"); return; }
     setLights(result);
   }
@@ -169,8 +180,10 @@ export function App() {
           window.bifrostVoice. Non-blocking; present on every signed-in page. */}
       <VoiceFeedback />
 
-      {/* Hold-to-talk mic: bypasses wake spotting, drives the same overlay. */}
-      <PushToTalk />
+      {/* Hold-to-talk mic for browser/phone clients. Hidden on the kiosk: it has
+          always-on native (Vosk) voice already, and its `getUserMedia` can't run
+          over the kiosk's plain-HTTP LAN origin (that's the "needs HTTPS" error). */}
+      {!IS_KIOSK && <PushToTalk />}
     </div>
   );
 }

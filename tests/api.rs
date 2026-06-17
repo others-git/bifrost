@@ -429,6 +429,68 @@ async fn list_providers_with_valid_session_returns_empty_array() {
 }
 
 #[tokio::test]
+async fn kiosk_login_exchanges_key_for_session() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "wall tablet").await;
+
+    // No / unknown key cookie → 401.
+    for cookie_hdr in ["", "bfr_key=bfr_nope"] {
+        let mut req = Request::builder().method("POST").uri("/api/auth/kiosk");
+        if !cookie_hdr.is_empty() {
+            req = req.header(header::COOKIE, cookie_hdr);
+        }
+        let resp = app
+            .clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "cookie={cookie_hdr:?}"
+        );
+    }
+
+    // The real key cookie → 200 + a session cookie that authenticates the dashboard.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/kiosk")
+                .header(header::COOKIE, format!("bfr_key={key}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let set_cookie = resp
+        .headers()
+        .get(header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        set_cookie.contains("bifrost_session="),
+        "no session cookie minted"
+    );
+
+    let session = set_cookie.split(';').next().unwrap();
+    let resp = app
+        .oneshot(helpers::authed_get("/api/providers", session))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "minted session should authenticate"
+    );
+}
+
+#[tokio::test]
 async fn reorder_providers_persists_display_order() {
     let (app, state) = helpers::test_app_with_password_and_state().await;
     for (id, name) in [("p-a", "Alpha"), ("p-b", "Bravo"), ("p-c", "Charlie")] {

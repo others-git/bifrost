@@ -1304,6 +1304,9 @@ function KiosksSection({ dialogs }: { dialogs: Dialogs }) {
   const [rooms, setRooms] = useState<Room[]>([]);
   // Latest APK the hub has cached, so each row can show up-to-date vs Update.
   const [latest, setLatest] = useState<KioskUpdateManifest | null>(null);
+  // kioskId → target version we pushed, so the row can show "Updating…" until the
+  // kiosk re-checks-in reporting that version (it goes offline mid-install).
+  const [updating, setUpdating] = useState<Record<string, string>>({});
   async function load() {
     setKiosks(await getKiosks());
   }
@@ -1313,13 +1316,43 @@ function KiosksSection({ dialogs }: { dialogs: Dialogs }) {
     getKioskUpdateStatus().then((s) => setLatest(s.cached));
   }, []);
 
+  // While any update is in flight, poll so the version/online status refresh as
+  // the kiosk downloads, installs, restarts, and checks back in.
+  useEffect(() => {
+    if (Object.keys(updating).length === 0) return;
+    const t = setInterval(load, 4000);
+    return () => clearInterval(t);
+  }, [updating]);
+
+  // Clear the "Updating…" marker once a kiosk reports the target version.
+  useEffect(() => {
+    setUpdating((u) => {
+      let changed = false;
+      const next = { ...u };
+      for (const k of kiosks) {
+        if (next[k.id] && k.app_version === next[k.id]) {
+          delete next[k.id];
+          changed = true;
+        }
+      }
+      return changed ? next : u;
+    });
+  }, [kiosks]);
+
   async function assignRoom(k: Kiosk, roomId: string | null) {
     await setKioskRoom(k.id, roomId);
     await load();
   }
 
-  async function send(k: Kiosk, command: "sleep" | "wake" | "lock" | "update") {
+  async function send(k: Kiosk, command: "sleep" | "wake" | "lock") {
     await kioskCommand(k.id, command);
+    await load();
+  }
+
+  async function pushUpdate(k: Kiosk) {
+    if (!latest) return;
+    setUpdating((u) => ({ ...u, [k.id]: latest.version_name }));
+    await kioskCommand(k.id, "update");
     await load();
   }
   async function deauth(k: Kiosk) {
@@ -1362,13 +1395,27 @@ function KiosksSection({ dialogs }: { dialogs: Dialogs }) {
             <div style={{ minWidth: 0 }}>
               <div style={{ fontWeight: 600, display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
                 {k.name}
+                {/* App version chip — surfaced here, not buried in the meta line. */}
+                <span
+                  style={{
+                    fontSize: "0.68rem",
+                    fontWeight: 600,
+                    letterSpacing: "0.03em",
+                    color: "var(--bf-dim)",
+                    background: "rgba(255,255,255,0.05)",
+                    border: "1px solid var(--bf-hairline, #333)",
+                    borderRadius: 999,
+                    padding: "0.05rem 0.45rem",
+                  }}
+                >
+                  {k.app_version ? `v${k.app_version}` : "unknown ver."}
+                </span>
                 <span style={{ fontSize: "0.7rem", color: k.online ? "var(--bf-good)" : "var(--bf-faint)" }}>
                   {k.online ? "● online" : "○ offline"}
                 </span>
                 {!k.authorized && <span style={{ fontSize: "0.7rem", color: "var(--bf-rose, #e57)" }}>needs re-pair</span>}
               </div>
               <div style={{ color: "var(--bf-faint)", fontSize: "0.74rem", marginTop: "0.15rem" }}>
-                {k.app_version ? `v${k.app_version} · ` : ""}
                 {k.screen_on === null ? "" : k.screen_on ? "screen on · " : "screen off · "}
                 {k.last_seen ? `seen ${k.last_seen}` : "never seen"}
                 {k.pending_command ? ` · queued: ${k.pending_command}` : ""}
@@ -1417,9 +1464,14 @@ function KiosksSection({ dialogs }: { dialogs: Dialogs }) {
               <Button variant="danger" onClick={() => forget(k)} style={{ padding: "0.3rem 0.7rem", fontSize: "0.78rem" }}>
                 Forget
               </Button>
-              {/* Update status: compare the kiosk's reported version to the APK the
-                  hub has cached. Offer the push when they differ; else say so. */}
-              {latest &&
+              {/* Update status: "Updating…" while a push is in flight, else compare
+                  the kiosk's version to the hub's cached APK — up-to-date or Update. */}
+              {updating[k.id] ? (
+                <span style={{ fontSize: "0.74rem", color: "var(--bf-accent, #38bdf8)", whiteSpace: "nowrap" }}>
+                  <span className="bifrost-voice-pulse" style={{ display: "inline-block" }}>⟳</span> Updating → {updating[k.id]}…
+                </span>
+              ) : (
+                latest &&
                 k.app_version &&
                 (k.app_version === latest.version_name ? (
                   <span style={{ fontSize: "0.74rem", color: "var(--bf-good)", whiteSpace: "nowrap" }}>
@@ -1427,14 +1479,15 @@ function KiosksSection({ dialogs }: { dialogs: Dialogs }) {
                   </span>
                 ) : (
                   <Button
-                    onClick={() => send(k, "update")}
+                    onClick={() => pushUpdate(k)}
                     disabled={!k.online || !k.authorized}
-                    title={`Push v${latest.version_name} to this kiosk (it pulls + installs)`}
+                    title={`Push v${latest.version_name} to this kiosk (it pulls + installs over the LAN)`}
                     style={{ padding: "0.3rem 0.7rem", fontSize: "0.78rem" }}
                   >
                     Update → {latest.version_name}
                   </Button>
-                ))}
+                ))
+              )}
             </div>
           </div>
         ))}

@@ -16,10 +16,51 @@ use uuid::Uuid;
 const SESSION_COOKIE: &str = "bifrost_session";
 const SESSION_TTL_HOURS: i64 = 24 * 7;
 
+const KIOSK_KEY_COOKIE: &str = "bfr_key";
+
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/login", post(login))
         .route("/logout", post(logout))
+        .route("/kiosk", post(kiosk_login))
+}
+
+/// Create a session row and return the `Set-Cookie` header value for it. Shared by
+/// the password login and the kiosk key exchange.
+async fn mint_session_cookie(state: &Arc<AppState>) -> String {
+    let session_id = Uuid::new_v4().to_string();
+    let expires_at = (Utc::now() + chrono::Duration::hours(SESSION_TTL_HOURS))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    let _ = sqlx::query("INSERT INTO sessions (id, expires_at) VALUES (?, ?)")
+        .bind(&session_id)
+        .bind(&expires_at)
+        .execute(&state.db)
+        .await;
+    format!(
+        "{SESSION_COOKIE}={session_id}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
+        SESSION_TTL_HOURS * 3600
+    )
+}
+
+/// `POST /api/auth/kiosk` — a paired kiosk trades its `bfr_` key (carried in the
+/// `bfr_key` cookie the kiosk WebView sets) for a real dashboard session, so an
+/// authorized wall fixture never has to show the password login. Validates the
+/// key like any public-API call; 401 if absent/unknown.
+async fn kiosk_login(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+    let Some(key) = extract_cookie(&headers, KIOSK_KEY_COOKIE) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if crate::api::apikeys::validate_key(&state, &key)
+        .await
+        .is_none()
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let cookie = mint_session_cookie(&state).await;
+    let mut out = HeaderMap::new();
+    out.insert(header::SET_COOKIE, cookie.parse().unwrap());
+    (out, Json(LoginResponse { ok: true })).into_response()
 }
 
 #[derive(Deserialize)]
@@ -57,25 +98,9 @@ pub async fn login(
         return (StatusCode::UNAUTHORIZED, "wrong password").into_response();
     }
 
-    let session_id = Uuid::new_v4().to_string();
-    let expires_at = (Utc::now() + chrono::Duration::hours(SESSION_TTL_HOURS))
-        .format("%Y-%m-%d %H:%M:%S")
-        .to_string();
-
-    let _ = sqlx::query("INSERT INTO sessions (id, expires_at) VALUES (?, ?)")
-        .bind(&session_id)
-        .bind(&expires_at)
-        .execute(&state.db)
-        .await;
-
-    let cookie = format!(
-        "{SESSION_COOKIE}={session_id}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
-        SESSION_TTL_HOURS * 3600
-    );
-
+    let cookie = mint_session_cookie(&state).await;
     let mut headers = HeaderMap::new();
     headers.insert(header::SET_COOKIE, cookie.parse().unwrap());
-
     (headers, Json(LoginResponse { ok: true })).into_response()
 }
 
@@ -135,10 +160,15 @@ impl FromRequestParts<Arc<AppState>> for Session {
 }
 
 fn extract_session(headers: &HeaderMap) -> Option<String> {
+    extract_cookie(headers, SESSION_COOKIE)
+}
+
+/// Pull a named cookie's value out of the `Cookie` header.
+fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     let cookie_hdr = headers.get(header::COOKIE)?.to_str().ok()?;
     cookie_hdr.split(';').find_map(|part| {
         let part = part.trim();
-        part.strip_prefix(SESSION_COOKIE)
+        part.strip_prefix(name)
             .and_then(|rest| rest.strip_prefix('='))
             .map(|v| v.to_string())
     })

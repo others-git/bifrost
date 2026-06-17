@@ -87,11 +87,10 @@ fn extract_bearer(headers: &HeaderMap) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Authenticate a public-API request. Returns the matching key id and bumps its
-/// `last_used` timestamp; `None` if the header is missing or the key is unknown.
-pub async fn require_api_key(state: &Arc<AppState>, headers: &HeaderMap) -> Option<String> {
-    let key = extract_bearer(headers)?;
-    let hash = hash_key(&key);
+/// Validate a raw `bfr_` key, returning the matching key id (bumping `last_used`)
+/// or `None` if unknown. Used by the Bearer guard and the kiosk session exchange.
+pub async fn validate_key(state: &Arc<AppState>, key: &str) -> Option<String> {
+    let hash = hash_key(key);
     let row = sqlx::query(
         "UPDATE api_keys SET last_used = datetime('now') WHERE key_hash = ? RETURNING id",
     )
@@ -100,6 +99,12 @@ pub async fn require_api_key(state: &Arc<AppState>, headers: &HeaderMap) -> Opti
     .await
     .ok()??;
     Some(row.get("id"))
+}
+
+/// Authenticate a public-API request. Returns the matching key id and bumps its
+/// `last_used` timestamp; `None` if the header is missing or the key is unknown.
+pub async fn require_api_key(state: &Arc<AppState>, headers: &HeaderMap) -> Option<String> {
+    validate_key(state, &extract_bearer(headers)?).await
 }
 
 // ── Management handlers (session-authenticated) ──────────────────────────────
