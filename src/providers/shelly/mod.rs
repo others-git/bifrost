@@ -125,6 +125,7 @@ impl LightProvider for ShellyProvider {
                 color_rgb: false,
                 color_temperature: false,
                 hue_gamut: None,
+                effects: Vec::new(),
             },
             last_seen: Utc::now(),
             hw_id: None,
@@ -175,6 +176,7 @@ fn shelly_to_light_state(l: &ShellyLight) -> LightState {
         color: None,
         color_temp_mirek: None,
         reachable: None,
+        effect: None,
     }
 }
 

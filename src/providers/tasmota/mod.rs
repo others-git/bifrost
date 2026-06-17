@@ -119,6 +119,7 @@ fn parse_tasmota_state(s: &TasmotaState) -> LightState {
         color,
         color_temp_mirek: None,
         reachable: None,
+        effect: None,
     }
 }
 
@@ -177,6 +178,7 @@ impl LightProvider for TasmotaProvider {
                 color_rgb: state_raw.color.is_some(),
                 color_temperature: false,
                 hue_gamut: None,
+                effects: Vec::new(),
             },
             last_seen: Utc::now(),
             hw_id: None,
@@ -425,6 +427,7 @@ mod tests {
             color: Some(Color::from_rgb(255, 0, 0)),
             color_temp_mirek: None,
             reachable: None,
+            effect: None,
         };
         TasmotaProvider::new_for_test(server.uri())
             .unwrap()

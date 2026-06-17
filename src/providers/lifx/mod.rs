@@ -246,6 +246,7 @@ fn lifx_to_light(l: LifxLight) -> Light {
             color_rgb: has_color,
             color_temperature: has_temp,
             hue_gamut: None,
+            effects: Vec::new(),
         },
         last_seen: Utc::now(),
     }

@@ -50,6 +50,12 @@ pub struct LightState {
     /// cloud APIs return stale power state for offline devices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reachable: Option<bool>,
+    /// Active dynamic effect (a name from [`LightCapabilities::effects`], e.g.
+    /// "candle"), or `"no_effect"` when none is running. None = the provider
+    /// doesn't report effects / a partial update doesn't touch it. Setting it on
+    /// a `set_state` applies the effect (the device animates color/brightness).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect: Option<String>,
 }
 
 /// A partial light-state update. Hue SSE events only carry the fields that
@@ -67,6 +73,8 @@ pub struct LightStatePatch {
     pub color_temp_mirek: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reachable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect: Option<String>,
 }
 
 impl LightStatePatch {
@@ -79,6 +87,7 @@ impl LightStatePatch {
             color: s.color.clone(),
             color_temp_mirek: s.color_temp_mirek,
             reachable: s.reachable,
+            effect: s.effect.clone(),
         }
     }
 
@@ -88,6 +97,7 @@ impl LightStatePatch {
             && self.color.is_none()
             && self.color_temp_mirek.is_none()
             && self.reachable.is_none()
+            && self.effect.is_none()
     }
 
     /// Merge this patch into an existing state, leaving absent fields untouched.
@@ -106,6 +116,9 @@ impl LightStatePatch {
         }
         if let Some(r) = self.reachable {
             state.reachable = Some(r);
+        }
+        if let Some(e) = &self.effect {
+            state.effect = Some(e.clone());
         }
     }
 }
@@ -195,6 +208,10 @@ pub struct LightCapabilities {
     pub color_temperature: bool,
     /// Hue gamut type (A, B, or C); None for non-Hue or unknown.
     pub hue_gamut: Option<HueGamut>,
+    /// Dynamic effects this light supports (provider-native names, e.g.
+    /// "candle"/"fire"; includes "no_effect" to clear). Empty = no effects.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<String>,
 }
 
 /// Hue color gamut bounds in CIE xy.

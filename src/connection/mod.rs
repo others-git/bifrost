@@ -1102,6 +1102,7 @@ mod tests {
                 color_rgb: true,
                 color_temperature: true,
                 hue_gamut: Some(crate::models::HueGamut::C),
+                effects: Vec::new(),
             }),
         };
         apply_event_to_db(&event, &db).await;

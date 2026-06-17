@@ -271,6 +271,7 @@ fn govee_device_to_light(d: GoveeDevice, state: Option<LightState>) -> Light {
             color_rgb: has_color,
             color_temperature: has_color_temp,
             hue_gamut: None,
+            effects: Vec::new(),
         },
         last_seen: Utc::now(),
     }

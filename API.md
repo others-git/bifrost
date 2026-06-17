@@ -39,7 +39,8 @@ curl -H "Authorization: Bearer $BIFROST_KEY" http://bifrost.local:3000/api/v1/li
     "dimmable": true,
     "color_rgb": true,
     "color_temperature": true,
-    "hue_gamut": "C"             // A | B | C | null
+    "hue_gamut": "C",            // A | B | C | null
+    "effects": ["no_effect", "candle", "fire"]  // supported dynamic effects; omitted when none
   },
   "last_seen": "2026-06-11T12:00:00Z"
 }
@@ -59,7 +60,8 @@ Sent in full on writes (it is a complete state, not a patch):
     "brightness": 1.0            // linear Y, 0.0–1.0
   },
   "color_temp_mirek": null,      // 153–500 (≈6500K–2000K); alternative to color
-  "reachable": true              // read-only; ignored on writes
+  "reachable": true,             // read-only; ignored on writes
+  "effect": "candle"             // a name from capabilities.effects; "no_effect" clears. Omit to leave unchanged
 }
 ```
 

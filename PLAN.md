@@ -574,6 +574,16 @@ Add a row whenever a gap is flagged; check it off when the native provider has i
   selectable Line-In / TV via `SetAVTransportURI` + favorites (already have
   list/play) wired through `select_source`. Not doable: making "Spotify Connect"
   itself a switch target (no UPnP path — it's a read-only current-source value).
+- [ ] **Dynamic light effects.** HA surfaces `effect`/`effect_list` on lights
+  (candle, fire, sparkle, …) that native providers dropped. Now modelled in the
+  light domain: `LightCapabilities.effects` (supported names) + `LightState.effect`
+  (active), a `{field:"effect"}` `LightControlChange` + per-light `LightEditor`
+  picker, routed through the shared `set_state`/`persist_light_state` merge so
+  session/v1/MCP share it. **Hue done** (CLIP v2 `effects` on the light resource —
+  discover reads `status_values`/`status`, set sends `{"effects":{"effect":…}}`).
+  **Pending:** LIFX (cloud `/effects/` breathe/pulse/move/morph/flame; + LAN),
+  Govee (scene/DIY effects), HA light `effect_list` passthrough; MCP `set_effect`
+  tool; effects picker on the Floor-Plan editor.
 
 ---
 

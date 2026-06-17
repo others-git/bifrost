@@ -878,6 +878,7 @@ fn build_light_state(
         color,
         color_temp_mirek,
         reachable: None,
+        effect: None,
     })
 }
 

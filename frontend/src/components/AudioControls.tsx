@@ -18,9 +18,9 @@ import {
 import { DisableRow } from "./PowerFlyout";
 import { BifrostRemote } from "./BifrostRemote";
 import { Switch } from "./controls";
-import { Flyout } from "./Flyout";
+import { Flyout, FlyoutHeader } from "./Flyout";
 import { Select } from "./Select";
-import { T, domain, color, font, alpha } from "../theme";
+import { T, domain, color, alpha, labelType } from "../theme";
 
 const ACCENT = domain.audio; // violet — audio's accent
 
@@ -173,10 +173,10 @@ export function AudioControls({
 
       {/* Favorites */}
       {cap.favorites && !offline && (
-        <div style={{ borderTop: `1px solid ${T.cardBorder}`, paddingTop: "0.6rem" }}>
+        <div style={{ borderTop: `1px solid ${color.hairline}`, paddingTop: "0.6rem" }}>
           <button
             onClick={toggleFavorites}
-            style={{ background: "none", border: "none", color: T.dim, cursor: "pointer", fontFamily: font.display, fontSize: "0.74rem", letterSpacing: "0.14em", textTransform: "uppercase", padding: 0, display: "flex", alignItems: "center", gap: "0.35rem" }}
+            style={{ ...labelType, background: "none", border: "none", color: T.dim, cursor: "pointer", fontSize: "0.62rem", padding: 0, display: "flex", alignItems: "center", gap: "0.35rem" }}
           >
             ♥ Favorites <span style={{ fontSize: "0.6rem" }}>{favOpen ? "▲" : "▼"}</span>
           </button>
@@ -304,24 +304,14 @@ export function AudioEditor({
 
   return (
     <Flyout anchor={anchor} onClose={onClose} width={260} closeGuard={() => remoteOpenRef.current}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.8rem" }}>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontWeight: 600, fontSize: "0.9rem", color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {device.name}
-          </div>
-          <div style={{ fontSize: "0.7rem", color: T.faint }}>{KIND_LABEL[device.kind] ?? device.kind}</div>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-          {cap.sources && !offline && <PowerButton on={device.state.power} onToggle={togglePower} />}
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            style={{ background: "none", border: "none", color: "#777", cursor: "pointer", fontSize: "1.15rem", lineHeight: 1, padding: 0 }}
-          >
-            ×
-          </button>
-        </div>
-      </div>
+      {/* Audio is the violet domain — the shared header carries that accent. */}
+      <FlyoutHeader
+        title={device.name}
+        subtitle={KIND_LABEL[device.kind] ?? device.kind}
+        accent={color.violet}
+        actions={cap.sources && !offline ? <PowerButton on={device.state.power} onToggle={togglePower} /> : undefined}
+        onClose={onClose}
+      />
       {pairedRemote && !offline && (
         <button
           onClick={() => setRemoteOpen(true)}

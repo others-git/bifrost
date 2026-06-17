@@ -7,6 +7,8 @@ export interface LightState {
   color_temp_mirek?: number;
   /** Provider-reported reachability; undefined when the provider doesn't say. */
   reachable?: boolean;
+  /** Active dynamic effect (a name from `capabilities.effects`, "no_effect" = none). */
+  effect?: string;
 }
 
 /** Partial state carried by live events — absent fields are unchanged. */
@@ -16,6 +18,7 @@ export interface LightStatePatch {
   color?: { x: number; y: number; brightness: number };
   color_temp_mirek?: number;
   reachable?: boolean;
+  effect?: string;
 }
 
 /** Merge a live-event patch into an existing state without losing fields. */
@@ -26,6 +29,7 @@ export function mergePatch(base: LightState | undefined, patch: LightStatePatch)
     color: patch.color ?? base?.color,
     color_temp_mirek: patch.color_temp_mirek ?? base?.color_temp_mirek,
     reachable: patch.reachable ?? base?.reachable,
+    effect: patch.effect ?? base?.effect,
   };
 }
 
@@ -33,6 +37,8 @@ export interface LightCapabilities {
   dimmable: boolean;
   color_rgb: boolean;
   color_temperature: boolean;
+  /** Dynamic effects this light supports (provider names; includes "no_effect"). */
+  effects?: string[];
 }
 
 export interface Light {

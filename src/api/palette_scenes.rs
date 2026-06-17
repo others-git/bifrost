@@ -243,6 +243,7 @@ pub(crate) async fn apply_scene_to_room(
             color: colors.first().cloned(),
             color_temp_mirek: None,
             reachable: None,
+            effect: None,
         };
         return Some(apply_uniform_state(state, room_id, &target, members).await);
     }
@@ -263,6 +264,7 @@ pub(crate) async fn apply_scene_to_room(
             color: Some(colors[i % colors.len()].clone()),
             color_temp_mirek: None,
             reachable: None,
+            effect: None,
         };
         let target_json = serde_json::to_string(&target).unwrap_or_default();
 

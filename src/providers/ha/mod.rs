@@ -577,6 +577,7 @@ fn parse_light_state(e: &HaEntity) -> LightState {
         color,
         color_temp_mirek,
         reachable: Some(e.state != "unavailable"),
+        effect: None,
     }
 }
 
@@ -588,6 +589,7 @@ fn light_capabilities(attrs: &Value) -> LightCapabilities {
         color_rgb: ["hs", "rgb", "rgbw", "rgbww", "xy"].iter().any(|&m| has(m)),
         color_temperature: has("color_temp"),
         hue_gamut: None, // not exposed through HA; native Hue keeps the gamut
+        effects: Vec::new(),
     }
 }
 

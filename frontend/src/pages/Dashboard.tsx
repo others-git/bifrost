@@ -469,6 +469,9 @@ function RoomBox({
 
   function cascade(change: LightControlChange) {
     if (!roomId) return;
+    // Effects are a per-light control (each light's supported set differs), not a
+    // room-wide cascade — the room editor doesn't surface them.
+    if (change.field === "effect") return;
     // Adjust only the dimension the user moved, per light by capability. A room
     // brightness change must not overwrite each member's own color (e.g. set by a
     // scene); a color or white change is mutually exclusive (set one, clear the
@@ -782,6 +785,7 @@ function RoomControlButton({
   // Brightness cascade across the target lights (per-light by capability),
   // debounced — mirrors the room-header cascade.
   function cascade(change: LightControlChange) {
+    if (change.field === "effect") return; // per-light control, not a room cascade
     const updates: [string, LightState][] = [];
     for (const l of tLights) {
       const next: LightState = { ...(l.last_state ?? { on: true }), on: true };
@@ -1116,9 +1120,13 @@ function LightButton({
         next.color = rgbToXy(...hexToRgb(change.hex));
         next.color_temp_mirek = undefined;
       }
-    } else if (light.capabilities.color_temperature) {
-      next.color_temp_mirek = change.mirek;
-      next.color = undefined;
+    } else if (change.field === "temp") {
+      if (light.capabilities.color_temperature) {
+        next.color_temp_mirek = change.mirek;
+        next.color = undefined;
+      }
+    } else if (change.field === "effect") {
+      next.effect = change.effect;
     }
     onLightUpdate(light.id, next);
     clearTimeout(commitTimer.current);
@@ -1157,6 +1165,8 @@ function LightButton({
           showColor={light.capabilities.color_rgb}
           showWhite={light.capabilities.color_temperature}
           showBrightness={light.capabilities.dimmable}
+          effects={light.capabilities.effects}
+          initialEffect={light.last_state?.effect}
           on={isOn}
           onToggle={toggle}
           onChange={handleEditorChange}

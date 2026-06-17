@@ -162,6 +162,9 @@ pub(crate) async fn persist_light_state(db: &sqlx::SqlitePool, light_id: &str, n
     if new.reachable.is_some() {
         merged.reachable = new.reachable;
     }
+    if new.effect.is_some() {
+        merged.effect = new.effect.clone();
+    }
 
     let Ok(json) = serde_json::to_string(&merged) else {
         return;

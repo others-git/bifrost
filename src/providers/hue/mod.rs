@@ -155,6 +155,18 @@ struct HueLightResource {
     color_temperature: Option<HueColorTemperature>,
     #[serde(default)]
     color_gamut_type: Option<String>,
+    #[serde(default)]
+    effects: Option<HueEffects>,
+}
+
+/// CLIP v2 dynamic effects on a light: `status` is the running effect
+/// ("no_effect" when idle); `status_values` enumerates what this light supports.
+#[derive(Debug, Deserialize)]
+struct HueEffects {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    status_values: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -246,6 +258,13 @@ struct HuePutLight {
     color: Option<HueColor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     color_temperature: Option<HueColorTemperature>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effects: Option<HueEffectPut>,
+}
+
+#[derive(Debug, Serialize)]
+struct HueEffectPut {
+    effect: String,
 }
 
 // ── Conversion helpers ──────────────────────────────────────────────────────
@@ -270,6 +289,9 @@ fn hue_resource_to_light(r: HueLightResource, hw_id: Option<String>) -> Light {
         .and_then(gamut_from_str);
     // A light that reports a color object at all is full-RGB capable.
     let has_color = r.color.is_some();
+    // Dynamic effects: the running one → state, the supported set → capability.
+    let effect = r.effects.as_ref().and_then(|e| e.status.clone());
+    let effects = r.effects.map(|e| e.status_values).unwrap_or_default();
     let color = r.color.map(|c| {
         let brightness = r
             .dimming
@@ -294,12 +316,14 @@ fn hue_resource_to_light(r: HueLightResource, hw_id: Option<String>) -> Light {
             color,
             color_temp_mirek: r.color_temperature.and_then(|ct| ct.mirek),
             reachable: None,
+            effect,
         },
         capabilities: LightCapabilities {
             dimmable: true,
             color_rgb: has_color,
             color_temperature: true,
             hue_gamut: gamut,
+            effects,
         },
         last_seen: Utc::now(),
         hw_id,
@@ -356,6 +380,10 @@ impl LightProvider for HueProvider {
             color_temperature: state
                 .color_temp_mirek
                 .map(|m| HueColorTemperature { mirek: Some(m) }),
+            effects: state
+                .effect
+                .as_ref()
+                .map(|e| HueEffectPut { effect: e.clone() }),
         };
 
         self.client
@@ -498,6 +526,8 @@ impl LightProvider for HueProvider {
             color_temperature: state
                 .color_temp_mirek
                 .map(|m| HueColorTemperature { mirek: Some(m) }),
+            // Effects aren't a grouped_light attribute — applied per-light only.
+            effects: None,
         };
 
         self.client
@@ -709,6 +739,12 @@ pub fn parse_patch_from_event(item: &serde_json::Value) -> crate::models::LightS
         .and_then(|ct| ct.get("mirek"))
         .and_then(|v| v.as_u64())
         .map(|m| m as u16);
+    // A `status` change on the light's effects object pushes the running effect.
+    let effect = item
+        .get("effects")
+        .and_then(|e| e.get("status"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
 
     crate::models::LightStatePatch {
         on,
@@ -716,6 +752,7 @@ pub fn parse_patch_from_event(item: &serde_json::Value) -> crate::models::LightS
         color,
         color_temp_mirek,
         reachable: None,
+        effect,
     }
 }
 
@@ -848,6 +885,7 @@ mod tests {
             color: None,
             color_temp_mirek: Some(370),
             reachable: None,
+            effect: None,
         };
         mock_provider(&server)
             .await
@@ -861,6 +899,52 @@ mod tests {
         assert_eq!(body["on"]["on"], true);
         assert_eq!(body["dimming"]["brightness"], 50.0);
         assert_eq!(body["color_temperature"]["mirek"], 370);
+    }
+
+    #[tokio::test]
+    async fn discover_reads_effects_capability_and_active() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/clip/v2/resource/light"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "id": "fx-1",
+                    "metadata": {"name": "Candle"},
+                    "on": {"on": true},
+                    "effects": { "status": "candle", "status_values": ["no_effect", "candle", "fire"] }
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let lights = mock_provider(&server).await.discover().await.unwrap();
+        assert_eq!(lights[0].state.effect.as_deref(), Some("candle"));
+        assert_eq!(
+            lights[0].capabilities.effects,
+            vec!["no_effect", "candle", "fire"]
+        );
+    }
+
+    #[tokio::test]
+    async fn set_state_sends_the_effect() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/clip/v2/resource/light/abc-123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+            .mount(&server)
+            .await;
+        let state = LightState {
+            on: true,
+            effect: Some("fire".to_string()),
+            ..Default::default()
+        };
+        mock_provider(&server)
+            .await
+            .set_state("abc-123", &state)
+            .await
+            .unwrap();
+        let received = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
+        assert_eq!(body["effects"]["effect"], "fire");
     }
 
     #[tokio::test]
@@ -879,6 +963,7 @@ mod tests {
             color: None,
             color_temp_mirek: None,
             reachable: None,
+            effect: None,
         };
 
         let start = std::time::Instant::now();

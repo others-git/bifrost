@@ -5,9 +5,9 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { rgbToHex } from "../api";
 import { useViewport } from "../useViewport";
-import { color } from "../theme";
+import { color, glow, alpha } from "../theme";
 import { Segmented, Switch } from "./controls";
-import { Flyout } from "./Flyout";
+import { Flyout, FlyoutHeader, FlyoutSection } from "./Flyout";
 
 // ── HSV color math (h in degrees, s/v in 0..1) ──────────────────────────────
 
@@ -60,7 +60,8 @@ export function hexToHs(hex: string): [number, number] {
 export type LightControlChange =
   | { field: "color"; hex: string }
   | { field: "brightness"; brightness: number }
-  | { field: "temp"; mirek: number };
+  | { field: "temp"; mirek: number }
+  | { field: "effect"; effect: string };
 
 // Warm whites first (the lived-in defaults), then color anchors.
 const SWATCHES = ["#ffffff", "#ffe4b3", "#ffb46b", "#ff7d33", "#ff5e9c", "#8b5cf6", "#3b82f6", "#4ade80"];
@@ -167,20 +168,30 @@ export function ColorWheel({
     >
       <canvas
         ref={canvasRef}
-        style={{ width: size, height: size, display: "block", borderRadius: "50%", cursor: "crosshair" }}
+        style={{
+          width: size,
+          height: size,
+          display: "block",
+          borderRadius: "50%",
+          cursor: "crosshair",
+          // Gold filigree rim + a faint inner darkening for HUD depth.
+          boxShadow: `inset 0 0 22px -12px #000, 0 0 0 1px ${color.hairline}`,
+        }}
       />
+      {/* Selection thumb: the chosen color, ringed in white over a dark contrast
+          edge (so it reads on any hue) and haloed in its own color — "lit". */}
       <div
         style={{
           position: "absolute",
-          left: kx - 10,
-          top: ky - 10,
-          width: 20,
-          height: 20,
+          left: kx - 11,
+          top: ky - 11,
+          width: 22,
+          height: 22,
           borderRadius: "50%",
-          border: "3px solid #fff",
+          border: "2px solid #fff",
           boxSizing: "border-box",
           background: `rgb(${cr},${cg},${cb})`,
-          boxShadow: "0 1px 5px rgba(0,0,0,0.65)",
+          boxShadow: `0 0 0 1px rgba(0,0,0,0.5), 0 0 14px rgb(${cr},${cg},${cb}), 0 1px 6px rgba(0,0,0,0.6)`,
           pointerEvents: "none",
         }}
       />
@@ -224,8 +235,9 @@ export function BrightnessBar({
         width,
         height,
         borderRadius: width / 2,
-        border: `1px solid ${color.border}`,
+        border: `1px solid ${color.hairline}`,
         background: `linear-gradient(to bottom, ${hex}, ${color.surfaceOff})`,
+        boxShadow: "inset 0 0 14px -8px #000",
         touchAction: "none",
         cursor: "pointer",
         flexShrink: 0,
@@ -251,7 +263,8 @@ export function BrightnessBar({
           height: knob,
           borderRadius: "50%",
           background: "#fff",
-          boxShadow: "0 1px 5px rgba(0,0,0,0.65)",
+          // Haloed in the current color, ringed for contrast — matches the wheel thumb.
+          boxShadow: `0 0 0 1px rgba(0,0,0,0.4), 0 0 10px ${hex}, 0 1px 5px rgba(0,0,0,0.6)`,
           pointerEvents: "none",
         }}
       />
@@ -303,6 +316,7 @@ export function ColorTempWheel({
   const f = (MIREK_MAX - mirek) / (MIREK_MAX - MIREK_MIN);
   const kx = f * size;
   const ky = size / 2;
+  const [tr, tg, tb] = mirekToRgb(mirek);
 
   return (
     <div
@@ -321,7 +335,14 @@ export function ColorTempWheel({
     >
       <canvas
         ref={canvasRef}
-        style={{ width: size, height: size, display: "block", borderRadius: "50%", cursor: "crosshair" }}
+        style={{
+          width: size,
+          height: size,
+          display: "block",
+          borderRadius: "50%",
+          cursor: "crosshair",
+          boxShadow: `inset 0 0 22px -12px #000, 0 0 0 1px ${color.hairline}`,
+        }}
       />
       <div
         style={{
@@ -331,8 +352,10 @@ export function ColorTempWheel({
           width: 22,
           height: 22,
           borderRadius: "50%",
-          border: "3px solid #fff",
-          boxShadow: "0 0 0 1px rgba(0,0,0,0.45), 0 1px 4px rgba(0,0,0,0.5)",
+          border: "2px solid #fff",
+          boxSizing: "border-box",
+          background: `rgb(${tr},${tg},${tb})`,
+          boxShadow: `0 0 0 1px rgba(0,0,0,0.5), 0 0 14px rgb(${tr},${tg},${tb}), 0 1px 6px rgba(0,0,0,0.6)`,
           pointerEvents: "none",
         }}
       />
@@ -381,6 +404,8 @@ export function LightEditor({
   showBrightness = true,
   showWhite = false,
   initialMode,
+  effects,
+  initialEffect,
   on,
   onToggle,
   onChange,
@@ -401,6 +426,11 @@ export function LightEditor({
   /** Which wheel to open on. Defaults to the light's current mode (white if it's
    * showing a temperature and no color), else color. */
   initialMode?: "color" | "white";
+  /** Dynamic effects the light supports (provider names; "no_effect" = clear).
+   * When non-empty, an effects picker renders. */
+  effects?: string[];
+  /** The currently-active effect, if any. */
+  initialEffect?: string;
   /** When provided, the editor shows a power switch row. */
   on?: boolean;
   onToggle?: () => void;
@@ -441,6 +471,15 @@ export function LightEditor({
     onChange({ field: "temp", mirek: m });
   }
 
+  const [effect, setEffect] = useState(initialEffect);
+  function applyEffect(e: string) {
+    setEffect(e);
+    onChange({ field: "effect", effect: e });
+  }
+  /** "no_effect" is the canonical clear value; render it as "Off". */
+  const effectLabel = (e: string) =>
+    e === "no_effect" ? "Off" : e.charAt(0).toUpperCase() + e.slice(1);
+
   const whiteHex = rgbToHex(...mirekToRgb(mirek));
   // Exactly one wheel renders for any capability combination.
   const colorActive = showColor && (!showWhite || mode === "color");
@@ -448,18 +487,8 @@ export function LightEditor({
 
   return (
     <Flyout anchor={anchor} onClose={onClose}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem" }}>
-        <span style={{ fontWeight: 600, fontSize: "0.9rem", color: color.text, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {title ?? "Color"}
-        </span>
-        <button
-          onClick={onClose}
-          aria-label="Close"
-          style={{ background: "none", border: "none", color: "#777", cursor: "pointer", fontSize: "1.15rem", lineHeight: 1, padding: 0 }}
-        >
-          ×
-        </button>
-      </div>
+      {/* Lights are the cyan domain — the shared header carries that accent. */}
+      <FlyoutHeader title={title ?? "Color"} accent={color.cyan} onClose={onClose} />
 
       {canToggle && <ModeToggle mode={mode} onChange={setMode} compact={isCompact} />}
 
@@ -491,21 +520,56 @@ export function LightEditor({
                 width: isCompact ? 40 : 18,
                 height: isCompact ? 40 : 18,
                 borderRadius: "50%",
-                border: c === hex ? "2px solid #fff" : "1px solid rgba(255,255,255,0.25)",
+                border: c === hex ? `2px solid ${color.gold}` : `1px solid ${alpha(color.text, 0.22)}`,
                 background: c,
                 cursor: "pointer",
                 padding: 0,
+                boxShadow: c === hex ? glow(color.gold, 12) : "none",
+                transform: c === hex ? "scale(1.18)" : "scale(1)",
+                transition: "transform .12s ease, box-shadow .15s ease",
               }}
             />
           ))}
         </div>
       )}
 
+      {effects && effects.length > 0 && (
+        <FlyoutSection label="Effect">
+          <div style={{ display: "flex", gap: isCompact ? "0.5rem" : "0.35rem", flexWrap: "wrap" }}>
+            {effects.map((e) => {
+              const active = effect === e;
+              return (
+                <button
+                  key={e}
+                  onClick={() => applyEffect(e)}
+                  style={{
+                    padding: isCompact ? "0.4rem 0.75rem" : "0.28rem 0.6rem",
+                    borderRadius: 999,
+                    fontSize: "0.76rem",
+                    fontWeight: active ? 600 : 400,
+                    letterSpacing: "0.02em",
+                    cursor: "pointer",
+                    color: active ? color.ink : color.dim,
+                    background: active
+                      ? color.cyan
+                      : `linear-gradient(${alpha(color.text, 0.06)}, ${alpha(color.text, 0.02)})`,
+                    border: `1px solid ${active ? color.cyan : color.hairline}`,
+                    boxShadow: active ? glow(color.cyan, 14) : "none",
+                    transition: "background .15s ease, color .15s ease, box-shadow .2s ease",
+                  }}
+                >
+                  {effectLabel(e)}
+                </button>
+              );
+            })}
+          </div>
+        </FlyoutSection>
+      )}
+
       {onToggle && (
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--bf-border)", paddingTop: "0.6rem" }}>
-          <span style={{ fontSize: "0.8rem", color: color.dim }}>Power</span>
+        <FlyoutSection label="Power" inline>
           <Switch on={!!on} onChange={() => onToggle()} />
-        </div>
+        </FlyoutSection>
       )}
 
       {children}

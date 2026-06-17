@@ -417,6 +417,8 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
 
   /** Live edits from the shared editor — optimistic locally, debounced to the API. */
   function editorChange(target: EditorTarget, change: LightControlChange) {
+    // Effects are a per-light control not surfaced on the plan's editor yet.
+    if (change.field === "effect") return;
     // Adjust only the dimension the user moved (see Dashboard's `cascade`): a room
     // brightness change must not stomp each light's own color, color and white are
     // mutually exclusive, and the backend merges the partial patch into each light.

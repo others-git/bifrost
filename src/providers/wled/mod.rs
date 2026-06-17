@@ -104,6 +104,7 @@ fn parse_wled_state(s: &WledState) -> LightState {
         color,
         color_temp_mirek: None,
         reachable: None,
+        effect: None,
     }
 }
 
@@ -148,6 +149,7 @@ impl LightProvider for WledProvider {
                 color_rgb: true,
                 color_temperature: false,
                 hue_gamut: None,
+                effects: Vec::new(),
             },
             last_seen: Utc::now(),
             hw_id: None,
@@ -383,6 +385,7 @@ mod tests {
             color: Some(Color::from_rgb(255, 0, 0)),
             color_temp_mirek: None,
             reachable: None,
+            effect: None,
         };
         WledProvider::new_for_test(server.uri())
             .unwrap()
