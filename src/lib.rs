@@ -230,15 +230,52 @@ async fn serve_frontend(uri: axum::http::Uri) -> axum::response::Response {
             };
             axum::response::Response::builder()
                 .header("content-type", content_type)
+                .header("cache-control", cache_control_for(path))
                 .body(axum::body::Body::from(content.data.to_vec()))
                 .unwrap()
         }
         None => match FrontendAssets::get("index.html") {
+            // SPA fallback — always the HTML entry, so never cache it.
             Some(content) => axum::response::Response::builder()
                 .header("content-type", "text/html")
+                .header("cache-control", "no-cache")
                 .body(axum::body::Body::from(content.data.to_vec()))
                 .unwrap(),
             None => axum::http::StatusCode::NOT_FOUND.into_response(),
         },
+    }
+}
+
+/// Cache policy for an embedded frontend asset. Vite fingerprints everything under
+/// `assets/` (e.g. `index-abc123.js`), so those are immutable and cache forever;
+/// the HTML entry and other unhashed files must **revalidate every load** so a new
+/// deploy's bundle is picked up — kiosk WebViews otherwise serve a stale
+/// `index.html` (pinned to an old bundle hash) indefinitely.
+fn cache_control_for(path: &str) -> &'static str {
+    if path.starts_with("assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    }
+}
+
+#[cfg(test)]
+mod frontend_cache_tests {
+    use super::cache_control_for;
+
+    #[test]
+    fn hashed_assets_are_immutable_html_entry_is_revalidated() {
+        assert_eq!(
+            cache_control_for("assets/index-abc123.js"),
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(
+            cache_control_for("assets/index-abc123.css"),
+            "public, max-age=31536000, immutable"
+        );
+        // The entry HTML and other unhashed files must always revalidate.
+        assert_eq!(cache_control_for("index.html"), "no-cache");
+        assert_eq!(cache_control_for("favicon.svg"), "no-cache");
+        assert_eq!(cache_control_for("manifest.webmanifest"), "no-cache");
     }
 }

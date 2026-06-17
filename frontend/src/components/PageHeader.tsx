@@ -6,6 +6,7 @@
 
 import type { ReactNode } from "react";
 import { color, font, gildedRule } from "../theme";
+import { useViewport } from "../useViewport";
 
 export function PageHeader({
   title,
@@ -21,6 +22,17 @@ export function PageHeader({
   /** Right-aligned controls (e.g. a Refresh button). */
   actions?: ReactNode;
 }) {
+  const { isCompact } = useViewport();
+  // On compact (phones + tablets) the page name already shows in the top bar and
+  // the active bottom tab, so the in-page header is redundant — drop it. Keep any
+  // actions (e.g. Devices' Refresh) so no control is silently lost.
+  if (isCompact) {
+    return actions ? (
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "1rem" }}>
+        {actions}
+      </div>
+    ) : null;
+  }
   return (
     <header style={{ marginBottom: "1.4rem" }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: "0.9rem", flexWrap: "wrap" }}>

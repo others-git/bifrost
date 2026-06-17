@@ -12,6 +12,14 @@ import { useRef, useState } from "react";
 import { color, alpha, glow } from "../theme";
 import { useViewport } from "../useViewport";
 
+declare global {
+  interface Window {
+    /** Injected by the kiosk app (addJavascriptInterface). `start()` triggers the
+     * native voice pipeline to capture a command (skip wake word). */
+    bifrostKioskPtt?: { start: () => void };
+  }
+}
+
 // Below this hold time a press is treated as an accidental tap and dropped, so a
 // stray click never fires an empty transcription request.
 const MIN_HOLD_MS = 300;
@@ -44,6 +52,17 @@ export function PushToTalk() {
   async function start(e: React.PointerEvent<HTMLButtonElement>) {
     e.preventDefault();
     if (recRef.current || sendingRef.current) return;
+
+    // On the kiosk, hand off to the native voice pipeline (the WebView mic can't
+    // run over plain HTTP). One tap opens a command capture; the native side
+    // drives the listening overlay + processing.
+    if (window.bifrostKioskPtt) {
+      window.bifrostKioskPtt.start();
+      setActive(true);
+      setTimeout(() => setActive(false), 800);
+      return;
+    }
+
     // Keep receiving pointerup even if the finger/cursor drifts off the button.
     try {
       e.currentTarget.setPointerCapture(e.pointerId);

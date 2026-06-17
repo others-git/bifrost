@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   addProvider,
   discoverProvider,
@@ -271,13 +271,7 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
 
       {tab === "voice" && <AiEndpointsSection dialogs={dialogs} />}
 
-      {tab === "clients" && (
-        <>
-          <ApiKeysSection dialogs={dialogs} />
-          <KiosksSection dialogs={dialogs} />
-          <KioskUpdateSection dialogs={dialogs} />
-        </>
-      )}
+      {tab === "clients" && <ClientsTab dialogs={dialogs} />}
 
       {tab === "appearance" && (
         <div style={{ marginTop: "0.25rem" }}>
@@ -1299,11 +1293,35 @@ function AiEndpointCard({
 
 // ── Kiosks (wall-tablet companion apps) ──────────────────────────────────────
 
-function KiosksSection({ dialogs }: { dialogs: Dialogs }) {
+/** Clients tab. Owns the hub's cached-APK manifest so a "Check for updates" in
+ * [KioskUpdateSection] live-updates the per-kiosk Update buttons in
+ * [KiosksSection] without a tab round-trip (siblings reading one source). */
+function ClientsTab({ dialogs }: { dialogs: Dialogs }) {
+  const [latest, setLatest] = useState<KioskUpdateManifest | null>(null);
+  const reloadLatest = useCallback(() => {
+    getKioskUpdateStatus().then((s) => setLatest(s.cached));
+  }, []);
+  useEffect(() => {
+    reloadLatest();
+  }, [reloadLatest]);
+  return (
+    <>
+      <ApiKeysSection dialogs={dialogs} />
+      <KiosksSection dialogs={dialogs} latest={latest} />
+      <KioskUpdateSection dialogs={dialogs} latest={latest} onCacheChanged={reloadLatest} />
+    </>
+  );
+}
+
+function KiosksSection({
+  dialogs,
+  latest,
+}: {
+  dialogs: Dialogs;
+  latest: KioskUpdateManifest | null;
+}) {
   const [kiosks, setKiosks] = useState<Kiosk[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
-  // Latest APK the hub has cached, so each row can show up-to-date vs Update.
-  const [latest, setLatest] = useState<KioskUpdateManifest | null>(null);
   // kioskId → target version we pushed, so the row can show "Updating…" until the
   // kiosk re-checks-in reporting that version (it goes offline mid-install).
   const [updating, setUpdating] = useState<Record<string, string>>({});
@@ -1313,7 +1331,6 @@ function KiosksSection({ dialogs }: { dialogs: Dialogs }) {
   useEffect(() => {
     load();
     getRooms().then(setRooms);
-    getKioskUpdateStatus().then((s) => setLatest(s.cached));
   }, []);
 
   // While any update is in flight, poll so the version/online status refresh as
@@ -1498,13 +1515,22 @@ function KiosksSection({ dialogs }: { dialogs: Dialogs }) {
 
 // ── Kiosk app updates (hub relays GitHub releases to offline LAN kiosks) ──────
 
-function KioskUpdateSection({ dialogs }: { dialogs: Dialogs }) {
+function KioskUpdateSection({
+  dialogs,
+  latest: cached,
+  onCacheChanged,
+}: {
+  dialogs: Dialogs;
+  /** The hub's cached manifest (owned by [ClientsTab]). */
+  latest: KioskUpdateManifest | null;
+  /** Called after a fetch changes the cache, so siblings refresh. */
+  onCacheChanged: () => void;
+}) {
   const [repo, setRepo] = useState("");
   const [asset, setAsset] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [checking, setChecking] = useState(false);
-  const [cached, setCached] = useState<KioskUpdateManifest | null>(null);
 
   useEffect(() => {
     getKioskUpdateConfig().then((c) => {
@@ -1512,7 +1538,6 @@ function KioskUpdateSection({ dialogs }: { dialogs: Dialogs }) {
       setAsset(c.asset);
       setLoaded(true);
     });
-    getKioskUpdateStatus().then((s) => setCached(s.cached));
   }, []);
 
   async function save() {
@@ -1535,7 +1560,9 @@ function KioskUpdateSection({ dialogs }: { dialogs: Dialogs }) {
       await dialogs.alert({ title: "Update check failed", message: res.error });
       return;
     }
-    setCached(res.manifest);
+    // Refresh the shared cache state so the per-kiosk Update buttons appear
+    // immediately (no tab round-trip).
+    onCacheChanged();
     await dialogs.alert({
       title: res.downloaded ? "Update cached" : "Already up to date",
       message: `v${res.manifest.version_name} (build ${res.manifest.version_code}) is ${

@@ -180,10 +180,11 @@ export function App() {
           window.bifrostVoice. Non-blocking; present on every signed-in page. */}
       <VoiceFeedback />
 
-      {/* Hold-to-talk mic for browser/phone clients. Hidden on the kiosk: it has
-          always-on native (Vosk) voice already, and its `getUserMedia` can't run
-          over the kiosk's plain-HTTP LAN origin (that's the "needs HTTPS" error). */}
-      {!IS_KIOSK && <PushToTalk />}
+      {/* Push-to-talk mic. On browser/phone it captures via getUserMedia → upload;
+          on the kiosk it drives the *native* voice pipeline through the
+          `window.bifrostKioskPtt` bridge (the WebView's getUserMedia can't run over
+          the plain-HTTP LAN origin). */}
+      <PushToTalk />
     </div>
   );
 }
@@ -215,7 +216,9 @@ function MobileTopBar({
         zIndex: 30,
       }}
     >
-      {/* Brand + current page, centered in the bar; controls stay flush right. */}
+      {/* Brand + current page, centered in the bar; controls stay flush right.
+          On compact the in-page PageHeader is hidden, so this is where the page
+          name lives (alongside the active bottom tab). */}
       <div
         style={{
           position: "absolute",
