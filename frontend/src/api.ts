@@ -744,9 +744,10 @@ export async function updateProviderCredentials(
   return { error: (await res.text()) || `HTTP ${res.status}` };
 }
 
-/** A whole-home scene: a snapshot of every light + power device, applied all at
- * once. One can be the `is_default` "Restore Home" preset. (Room-scoped color
- * looks are `PaletteScene`, a separate system.) */
+/** A scene: a full-state snapshot of lights (color/temp/effect) + power devices,
+ * restored verbatim. `room_id == null` = a whole-home scene (one can be the
+ * `is_default` "Restore Home" preset); otherwise it's scoped to that room's
+ * members (a Room Scene). */
 export interface Scene {
   id: string;
   name: string;
@@ -754,6 +755,8 @@ export interface Scene {
   lights: number;
   power: number;
   is_default: boolean;
+  room_id: string | null;
+  room_name: string | null;
 }
 
 export async function getScenes(): Promise<Scene[]> {
@@ -778,11 +781,16 @@ export async function restoreDefaultHome(): Promise<{ applied: number; failed: n
   return res.json();
 }
 
-export async function createScene(name: string): Promise<{ id: string; lights: number }> {
+/** Capture a new scene. Omit `roomId` for a whole-home snapshot; pass a room id
+ * to scope it to that room's members (a Room Scene). */
+export async function createScene(
+  name: string,
+  roomId?: string,
+): Promise<{ id: string; lights: number; power: number }> {
   const res = await fetch("/api/scenes", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, room_id: roomId ?? null }),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
@@ -990,63 +998,6 @@ export async function setRoomState(
     headers: { "content-type": "application/json" },
     body: JSON.stringify(state),
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
-}
-
-// ── Palette scenes (global presets, applied to any room) ─────────────────────
-
-export interface PaletteScene {
-  id: string;
-  name: string;
-  brightness?: number;
-  palette: string[];
-}
-
-export async function getPaletteScenes(): Promise<PaletteScene[]> {
-  const res = await fetch("/api/palette-scenes");
-  if (!res.ok) return [];
-  return res.json();
-}
-
-export async function createPaletteScene(scene: {
-  name: string;
-  brightness?: number;
-  palette: string[];
-}): Promise<{ id: string }> {
-  const res = await fetch("/api/palette-scenes", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(scene),
-  });
-  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
-  return res.json();
-}
-
-/** Capture a room's currently-lit colors and average brightness as a new scene. */
-export async function savePaletteSceneFromRoom(
-  roomId: string,
-  name: string,
-): Promise<{ id: string }> {
-  const res = await fetch(`/api/palette-scenes/from-room/${roomId}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name }),
-  });
-  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
-  return res.json();
-}
-
-export async function deletePaletteScene(sceneId: string): Promise<void> {
-  await fetch(`/api/palette-scenes/${sceneId}`, { method: "DELETE" });
-}
-
-/** Apply a global scene to a specific room. */
-export async function applySceneToRoom(
-  roomId: string,
-  sceneId: string,
-): Promise<{ applied: number; failed: number }> {
-  const res = await fetch(`/api/rooms/${roomId}/scenes/${sceneId}/apply`, { method: "POST" });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }

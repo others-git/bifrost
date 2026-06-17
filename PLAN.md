@@ -352,6 +352,7 @@ A self-hosted Rust smart home hub that is:
 | 27 — Tunable white + control-change contract | LightEditor gains a Hue-style **Color / White toggle** with a warm→cool **color-temperature wheel** (`ColorTempWheel`, mirek 153–500) for lights with `color_temperature`. Backed by a formalized **`LightControlChange`** union (`color`/`brightness`/`temp`) every light control emits, so a fan-out caller adjusts only the moved dimension. `persist_light_state` now **merges** present attributes (partial commands keep untouched dimensions) with **color⇄temp exclusivity** (set one, clear the other) — fixing the room-brightness-stomps-color bug and giving the UI an honest active-mode signal. Detail below. |
 | 31 — Configurable room controls | Per-room **quick-control buttons** (`room_controls`, migration 0034, `PUT /rooms/{id}/controls`): glyph buttons on the Control card doing `power`/`volume`/`brightness` against a chosen member set, or `scene` apply; configured on the Rooms page. The room on/off **switch becomes a power-glyph button**, with the configured buttons to its left. Control-page device glyphs gain a **long-press = power toggle** (tap still opens the fly-out). Session API only (not v1/MCP yet). |
 | 32 — Home Scenes | Repurposed the dead global `scenes` system into **whole-home snapshot/restore** of lights **+ power devices** (migration 0035: `scenes.is_default` + `scene_power_entries`). New `PUT /scenes/{id}/default` + `POST /scenes/restore-default`; managed in a "Home scenes" section on the Scenes page; surfaced as the gilded **Restore Home** seal (cyan accent, breathing aura, `restore` glyph) anchored bottom-center on the Control page. Audio capture deferred. |
+| 33 — Unified scenes (Home + Room) | **Divorced palette from scene**: removed the lossy palette-scene system (colours-only room *looks*) entirely — module, routes, presets, and the `palette_scenes` table (migration 0038, which also adds `scenes.room_id` and repoints `room_controls.scene_id` → `scenes`). One DRY snapshot model scoped by `room_id`: a **Home Scene** (`room_id` null) snapshots the whole home, a **Room Scene** captures one room's effective members; both store each light's full `LightState` (incl. **effect**, mutually exclusive with color/temp) + power on/off and share `capture_scene`/`apply_scene_entries` across session/`v1`/MCP. v1 → `POST /scenes {name, room_id?}` + `/scenes/{id}/activate`; MCP → `activate_scene` / `save_room_scene` / `save_home_scene`. Scenes page lists Home + per-room scenes; room fly-out `SceneModal` saves/activates a room's scenes. |
 
 ### Open follow-ups from shipped milestones
 
@@ -587,9 +588,17 @@ Add a row whenever a gap is flagged; check it off when the native provider has i
   HA (`effect_list`/`effect` passthrough → `light.turn_on { effect }`); Govee
   (dynamic light scenes via cached `/device/scenes` → `dynamic_scene` control).
   MCP `set_light` carries an `effect` arg; Floor-Plan per-light editor shows the
-  tab. The frontend sends `effect` **only** on an actual effect pick (a colour/
-  brightness tweak clears it) so a transient LIFX breathe/pulse isn't re-triggered.
-  *(LIFX LAN effects + Govee DIY-scene subset remain as future polish.)*
+  tab. Govee pulls its **full** catalog — built-in `lightScene` **+** the user's
+  `diyScene`s (cached `/device/scenes` + `/device/diy-scenes`, each applied under
+  its own instance) — and the Effects tab adds a **search box + reusable theme
+  category tabs** (`categorizeEffects`) once a catalog passes ~14 entries, so a
+  ~250-scene Govee strip stays navigable. **Effect is a third mutually-exclusive
+  light mode** alongside colour and colour-temp (`persist_light_state` /
+  `LightStatePatch::apply_to` clear the others; `models::is_clear_effect`
+  normalizes `no_effect`/`off`/`none` → `None`), so the frontend sends `effect`
+  only on an actual pick, a transient LIFX breathe/pulse isn't re-fired, and
+  **Home Scenes capture & reapply a running effect** as part of each light's full
+  state (`scene_entries`). *(LIFX LAN effects remain as future polish.)*
 
 ---
 

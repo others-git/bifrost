@@ -65,20 +65,26 @@ Sent in full on writes (it is a complete state, not a patch):
 }
 ```
 
-### Scene (global palette preset)
+### Scene (full-state snapshot)
 
 ```json
 {
   "id": "f3c2…",
-  "name": "Sunset",
-  "brightness": 75.0,            // 0–100 or null (colors only)
-  "palette": ["#ff7d33", "#ff5e9c", "#ffb04d"]  // 0–6 hex colors
+  "name": "Movie Night",
+  "created_at": "2026-06-17T21:00:00Z",
+  "lights": 3,                  // captured light entries
+  "power": 1,                   // captured power-device entries
+  "is_default": false,          // the single "Restore Home" preset (home scenes only)
+  "room_id": "a1b2…",           // null = whole-home (Home Scene); set = Room Scene
+  "room_name": "Living Room"    // null for a home scene
 }
 ```
 
-A scene is room-independent. Applying one with a single color washes the whole
-room; multiple colors are distributed round-robin across the room's lights; an
-empty palette changes brightness only.
+A scene is a snapshot of each captured light's **full** state (color **or**
+temperature **or** effect) plus each power device's on/off, restored verbatim. A
+**Home Scene** (`room_id: null`) captures the whole home; a **Room Scene**
+captures one room's effective members. Activating a scene re-applies exactly what
+was captured.
 
 ## Endpoints
 
@@ -110,19 +116,18 @@ provider group plus any directly assigned.
 |---|---|---|
 | `GET` | `/api/v1/rooms` | All enabled rooms: `[{ id, name, light_ids, audio_device_ids, power_device_ids }]` — `audio_device_ids` / `power_device_ids` are the room's audio/power members; control each via the audio/power endpoints |
 | `PUT` | `/api/v1/rooms/{id}/state` | Apply a `LightState` to every member |
-| `POST` | `/api/v1/rooms/{id}/scenes/{scene_id}/apply` | Apply a scene to the room |
 
 Room writes respond `200` with `{ "applied": N, "failed": M }` — per-light
 results, since a room can span providers and some members may be offline.
-`404` if the room has no members or the scene is unknown.
+`404` if the room has no members.
 
 ### Scenes
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/v1/scenes` | All scenes |
-| `POST` | `/api/v1/scenes` | Create: `{ name, brightness?, palette? }` → `201 { id }` |
-| `POST` | `/api/v1/scenes/from-room/{room_id}` | Capture the room's current lit colors as a new scene: `{ name }` → `201 { id }` |
+| `GET` | `/api/v1/scenes` | All scenes (home + room-scoped) |
+| `POST` | `/api/v1/scenes` | Capture a snapshot: `{ name, room_id? }` → `201 { id, lights, power }`. Omit `room_id` for a whole-home scene; pass a room id to scope it to that room's members. `404` if the room is unknown |
+| `POST` | `/api/v1/scenes/{id}/activate` | Re-apply the scene → `200 { applied, failed }` (`404` if unknown/empty) |
 | `DELETE` | `/api/v1/scenes/{id}` | Delete → `204` |
 
 `POST /scenes` validates: name required, brightness 1–100 if present, palette

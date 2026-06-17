@@ -2,7 +2,7 @@
 // with a Hue-style hue/saturation color wheel and a vertical brightness bar.
 // Used for lights, rooms, scene palettes, and the planner paint brush.
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { rgbToHex } from "../api";
 import { useViewport } from "../useViewport";
 import { color, glow, alpha } from "../theme";
@@ -411,9 +411,44 @@ function ModeToggle({
 
 // ── Effects grid ─────────────────────────────────────────────────────────────
 
-/** The Effects tab body: a responsive grid of effect tiles. The active effect is
- * cyan-lit with an animated shimmer bar; the rest sit on hairline glass. Replaces
- * the old afterthought chip row — effects are now a first-class picker. */
+export type EffectCategory = { name: string; effects: string[] };
+
+// Theme buckets, matched by keyword on the effect name (first rule wins). These
+// are provider-agnostic — any provider that ships a big built-in catalog (Govee
+// today; future ones) sorts into the same tabs. Anything unmatched → "Other".
+const CATEGORY_RULES: { name: string; re: RegExp }[] = [
+  { name: "Calm", re: /sleep|medit|calm|quiet|sooth|relax|care|read|study|business|work|leisure|dream|night|morning|afternoon|warm|cozy|sweet|gentle|soft|retro|profound|longing|awaken/i },
+  { name: "Nature", re: /forest|leaf|leaves|sea|ocean|river|lake|sky|aurora|rainbow|sunrise|sunset|dusk|sun|star|universe|galaxy|cosmos|moon|glacier|canyon|desert|gobi|karst|cave|corn|flower|wave|ripple|grass|spring|summer|fall|autumn|winter|snow|cloud|lightning|meteor|water|rain|downpour|sail|underwater/i },
+  { name: "Fire", re: /fire|flame|candle|ember|lava|volcano/i },
+  { name: "Holiday", re: /christmas|halloween|valentine|easter|thanksgiving|new\s?year|birthday|mother|father|ghost|firework|carnival|sled|gift|holiday|spooky/i },
+  { name: "Party", re: /party|disco|danc|club|rave|tango|cha-?cha|waltz|ballet|jazz|poppin|electro|breaking|latin|pole|street|festiv|celebrat/i },
+  { name: "Play", re: /game|racing|shoot|fight|adventure|puzzle|cards|cosplay|siren|crossing|movie|comed|drama|thriller|romance|documentar|sci-?fi|science fiction|suspense|war|action|sport/i },
+  { name: "Vivid", re: /energetic|excite|happy|active|crazy|heartbeat|tension|rush|fascinat|cheerful|breath|pulse|twinkle|spark|glisten|prism|opal|flash|swing|flow|release|stack|enthusi|color|loop|morph|move|chase|enchant|sunbeam|disco/i },
+];
+
+/** Group provider effect names into theme categories (reusable across providers).
+ * Returns only non-empty buckets, in rule order with "Other" last. */
+export function categorizeEffects(effects: string[]): EffectCategory[] {
+  const buckets = new Map<string, string[]>();
+  for (const e of effects) {
+    const rule = CATEGORY_RULES.find((r) => r.re.test(e));
+    const name = rule ? rule.name : "Other";
+    (buckets.get(name) ?? buckets.set(name, []).get(name)!).push(e);
+  }
+  const order = [...CATEGORY_RULES.map((r) => r.name), "Other"];
+  return order
+    .filter((n) => buckets.has(n))
+    .map((name) => ({ name, effects: buckets.get(name)! }));
+}
+
+// Above this many effects, the panel adds a search box + category tabs so a big
+// catalog (Govee strips ship ~200+) stays navigable. Smaller lists (Hue/LIFX)
+// render the plain grid.
+const SEARCHABLE_THRESHOLD = 14;
+
+/** The Effects tab body. A small catalog is a plain responsive grid of tiles; a
+ * large one (Govee scenes) gains a search field + theme category tabs that filter
+ * the grid. The active effect is cyan-lit with an animated shimmer bar. */
 function EffectsPanel({
   effects,
   active,
@@ -425,84 +460,167 @@ function EffectsPanel({
   onPick: (effect: string) => void;
   compact: boolean;
 }) {
+  const advanced = effects.length > SEARCHABLE_THRESHOLD;
+  const categories = useMemo(() => (advanced ? categorizeEffects(effects) : []), [effects, advanced]);
+  const [cat, setCat] = useState("All");
+  const [query, setQuery] = useState("");
+
+  const q = query.trim().toLowerCase();
+  const visible = useMemo(() => {
+    let list = effects;
+    if (cat !== "All") list = categories.find((c) => c.name === cat)?.effects ?? effects;
+    if (q) list = list.filter((e) => (effectLabel(e) + " " + e).toLowerCase().includes(q));
+    return list;
+  }, [effects, categories, cat, q]);
+
+  const tabs = useMemo(
+    () => [{ name: "All", effects } as EffectCategory, ...categories],
+    [effects, categories],
+  );
+
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: compact ? "1fr 1fr" : "repeat(auto-fill, minmax(118px, 1fr))",
-        gap: compact ? "0.55rem" : "0.45rem",
-        maxHeight: compact ? "none" : 280,
-        overflowY: "auto",
-      }}
-    >
-      {effects.map((e) => {
-        const isActive = active === e;
-        const isOff = effectLabel(e) === "Off";
-        return (
-          <button
-            key={e}
-            onClick={() => onPick(e)}
+    <div style={{ display: "flex", flexDirection: "column", gap: compact ? "0.6rem" : "0.5rem" }}>
+      {advanced && (
+        <>
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={`Search ${effects.length} effects…`}
             style={{
-              position: "relative",
-              overflow: "hidden",
+              width: "100%",
+              boxSizing: "border-box",
+              padding: compact ? "0.6rem 0.8rem" : "0.4rem 0.6rem",
+              fontSize: compact ? "0.95rem" : "0.82rem",
+              color: color.text,
+              background: alpha(color.text, 0.05),
+              border: `1px solid ${color.hairline}`,
+              borderRadius: 10,
+              outline: "none",
+            }}
+          />
+          {/* Category tabs — horizontally scrollable chip row. */}
+          <div
+            style={{
               display: "flex",
-              flexDirection: "column",
-              alignItems: "flex-start",
               gap: "0.35rem",
-              minHeight: compact ? 60 : 52,
-              padding: compact ? "0.6rem 0.7rem" : "0.5rem 0.6rem",
-              borderRadius: 12,
-              cursor: "pointer",
-              textAlign: "left",
-              color: isActive ? color.text : color.dim,
-              background: isActive
-                ? `linear-gradient(150deg, ${alpha(color.cyan, 0.22)}, ${alpha(color.cyan, 0.05)})`
-                : `linear-gradient(${alpha(color.text, 0.05)}, ${alpha(color.text, 0.015)})`,
-              border: `1px solid ${isActive ? alpha(color.cyan, 0.7) : color.hairline}`,
-              boxShadow: isActive ? glow(color.cyan, 16) : "none",
-              transition: "background .15s ease, color .15s ease, box-shadow .2s ease, border-color .15s ease",
+              overflowX: "auto",
+              paddingBottom: 2,
+              scrollbarWidth: "none",
             }}
           >
-            <span
-              aria-hidden
+            {tabs.map((t) => {
+              const on = cat === t.name;
+              return (
+                <button
+                  key={t.name}
+                  onClick={() => setCat(t.name)}
+                  style={{
+                    flexShrink: 0,
+                    padding: compact ? "0.35rem 0.7rem" : "0.25rem 0.55rem",
+                    borderRadius: 999,
+                    fontSize: compact ? "0.78rem" : "0.72rem",
+                    fontWeight: on ? 600 : 500,
+                    whiteSpace: "nowrap",
+                    cursor: "pointer",
+                    color: on ? color.ink : color.dim,
+                    background: on ? color.cyan : alpha(color.text, 0.05),
+                    border: `1px solid ${on ? color.cyan : color.hairline}`,
+                    boxShadow: on ? glow(color.cyan, 10) : "none",
+                    transition: "background .15s ease, color .15s ease",
+                  }}
+                >
+                  {t.name}
+                  <span style={{ opacity: 0.6, marginLeft: 4 }}>{t.effects.length}</span>
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: compact ? "1fr 1fr" : "repeat(auto-fill, minmax(118px, 1fr))",
+          gap: compact ? "0.55rem" : "0.45rem",
+          maxHeight: advanced ? (compact ? 360 : 300) : compact ? "none" : 280,
+          overflowY: "auto",
+        }}
+      >
+        {visible.map((e) => {
+          const isActive = active === e;
+          const isOff = effectLabel(e) === "Off";
+          return (
+            <button
+              key={e}
+              onClick={() => onPick(e)}
               style={{
-                fontSize: "0.95rem",
-                lineHeight: 1,
-                filter: isActive ? "none" : "grayscale(1) opacity(0.55)",
-              }}
-            >
-              {effectGlyph(e, isOff)}
-            </span>
-            <span
-              style={{
-                fontSize: compact ? "0.82rem" : "0.78rem",
-                fontWeight: isActive ? 600 : 500,
-                letterSpacing: "0.01em",
-                whiteSpace: "nowrap",
+                position: "relative",
                 overflow: "hidden",
-                textOverflow: "ellipsis",
-                width: "100%",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "flex-start",
+                gap: "0.35rem",
+                minHeight: compact ? 60 : 52,
+                padding: compact ? "0.6rem 0.7rem" : "0.5rem 0.6rem",
+                borderRadius: 12,
+                cursor: "pointer",
+                textAlign: "left",
+                color: isActive ? color.text : color.dim,
+                background: isActive
+                  ? `linear-gradient(150deg, ${alpha(color.cyan, 0.22)}, ${alpha(color.cyan, 0.05)})`
+                  : `linear-gradient(${alpha(color.text, 0.05)}, ${alpha(color.text, 0.015)})`,
+                border: `1px solid ${isActive ? alpha(color.cyan, 0.7) : color.hairline}`,
+                boxShadow: isActive ? glow(color.cyan, 16) : "none",
+                transition: "background .15s ease, color .15s ease, box-shadow .2s ease, border-color .15s ease",
               }}
             >
-              {effectLabel(e)}
-            </span>
-            {isActive && !isOff && (
               <span
                 aria-hidden
                 style={{
-                  position: "absolute",
-                  left: 0,
-                  bottom: 0,
-                  height: 2,
-                  width: "100%",
-                  background: `linear-gradient(90deg, transparent, ${color.cyan}, transparent)`,
-                  animation: "bifrostEffectShimmer 1.8s ease-in-out infinite",
+                  fontSize: "0.95rem",
+                  lineHeight: 1,
+                  filter: isActive ? "none" : "grayscale(1) opacity(0.55)",
                 }}
-              />
-            )}
-          </button>
-        );
-      })}
+              >
+                {effectGlyph(e, isOff)}
+              </span>
+              <span
+                style={{
+                  fontSize: compact ? "0.82rem" : "0.78rem",
+                  fontWeight: isActive ? 600 : 500,
+                  letterSpacing: "0.01em",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  width: "100%",
+                }}
+              >
+                {effectLabel(e)}
+              </span>
+              {isActive && !isOff && (
+                <span
+                  aria-hidden
+                  style={{
+                    position: "absolute",
+                    left: 0,
+                    bottom: 0,
+                    height: 2,
+                    width: "100%",
+                    background: `linear-gradient(90deg, transparent, ${color.cyan}, transparent)`,
+                    animation: "bifrostEffectShimmer 1.8s ease-in-out infinite",
+                  }}
+                />
+              )}
+            </button>
+          );
+        })}
+        {visible.length === 0 && (
+          <div style={{ gridColumn: "1 / -1", color: color.faint, fontSize: "0.8rem", padding: "0.6rem 0.2rem" }}>
+            No effects match “{query}”.
+          </div>
+        )}
+      </div>
     </div>
   );
 }

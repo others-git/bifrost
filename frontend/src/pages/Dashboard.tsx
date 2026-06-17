@@ -1,17 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  applySceneToRoom,
+  activateScene,
+  createScene,
   getAudioDevices,
-  getPaletteScenes,
   getPowerDevices,
   getProviders,
   getRooms,
   getScenes,
   mergePatch,
+  removeScene,
   restoreDefaultHome,
   rgbToHex,
   rgbToXy,
-  savePaletteSceneFromRoom,
   setAudioEnabled,
   setAudioState,
   setLightEnabled,
@@ -26,7 +26,6 @@ import {
   type Light,
   type LightState,
   type LightStatePatch,
-  type PaletteScene,
   type PowerDevice,
   type Provider,
   type Room,
@@ -64,14 +63,14 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
   const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
-  const [scenes, setScenes] = useState<PaletteScene[]>([]);
-  const [homeScenes, setHomeScenes] = useState<Scene[]>([]);
+  // All scenes (home + room-scoped); per-room subsets are filtered downstream.
+  const [scenes, setScenes] = useState<Scene[]>([]);
   const dialogs = useDialogs();
 
   function loadScenes() {
-    getPaletteScenes().then(setScenes);
-    getScenes().then(setHomeScenes);
+    getScenes().then(setScenes);
   }
+  const homeScenes = scenes;
 
   useEffect(() => { setLocalLights(lights); }, [lights]);
   useEffect(() => { getProviders().then(setProviders); }, []);
@@ -251,7 +250,7 @@ function RoomGrid({
   audioDevices: AudioDevice[];
   rooms: Room[];
   providers: Provider[];
-  scenes: PaletteScene[];
+  scenes: Scene[];
   dialogs: Dialogs;
   onScenesChanged: () => void;
   onLightUpdate: (id: string, state: LightState) => void;
@@ -421,7 +420,7 @@ function RoomBox({
   power: PowerDevice[];
   audio: AudioDevice[];
   controls: RoomControl[];
-  scenes: PaletteScene[];
+  scenes: Scene[];
   dialogs: Dialogs;
   onScenesChanged: () => void;
   onLightUpdate: (id: string, state: LightState) => void;
@@ -516,34 +515,36 @@ function RoomBox({
   }
 
   async function applyScene(sceneId: string) {
-    if (!roomId || !sceneId) return;
+    if (!sceneId) return;
     setBusy(true);
     try {
-      await applySceneToRoom(roomId, sceneId);
+      await activateScene(sceneId);
       onChanged();
     } finally {
       setBusy(false);
     }
   }
 
-  async function saveAsScene() {
-    if (!roomId) return;
-    if (!anyOn) {
-      await dialogs.alert({ title: "Nothing to save", message: "No lights in this room are on — turn some on first." });
-      return;
-    }
-    const sceneName = await dialogs.prompt({
-      title: "Save room as scene",
-      message: "Saves this room's current colors and brightness as a reusable scene.",
-      placeholder: "Scene name",
-      confirmLabel: "Save",
-    });
-    if (!sceneName?.trim()) return;
+  async function saveAsScene(name: string) {
+    if (!roomId || !name.trim()) return;
+    setBusy(true);
     try {
-      await savePaletteSceneFromRoom(roomId, sceneName.trim());
+      await createScene(name.trim(), roomId);
       onScenesChanged();
     } catch (e) {
       await dialogs.alert({ title: "Couldn't save scene", message: String(e) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteScene(sceneId: string) {
+    setBusy(true);
+    try {
+      await removeScene(sceneId);
+      onScenesChanged();
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -613,7 +614,6 @@ function RoomBox({
               <RoomControlButton
                 key={c.id ?? `${c.kind}-${c.glyph}`}
                 control={c}
-                roomId={roomId}
                 lights={lights}
                 power={power}
                 audio={audio}
@@ -698,10 +698,11 @@ function RoomBox({
       {scenesOpen && (
         <SceneModal
           roomName={name}
-          scenes={scenes}
+          scenes={scenes.filter((s) => s.room_id === roomId)}
           busy={busy}
           onApply={async (id) => { await applyScene(id); setScenesOpen(false); }}
           onSave={saveAsScene}
+          onDelete={deleteScene}
           onClose={() => setScenesOpen(false)}
         />
       )}
@@ -715,7 +716,6 @@ function RoomBox({
  * scoped to the targets (fanning to all of them). */
 function RoomControlButton({
   control,
-  roomId,
   lights,
   power,
   audio,
@@ -726,7 +726,6 @@ function RoomControlButton({
   size,
 }: {
   control: RoomControl;
-  roomId?: string;
   lights: Light[];
   power: PowerDevice[];
   audio: AudioDevice[];
@@ -777,8 +776,8 @@ function RoomControlButton({
   }
 
   async function applyScene() {
-    if (!roomId || !control.scene_id) return;
-    await applySceneToRoom(roomId, control.scene_id);
+    if (!control.scene_id) return;
+    await activateScene(control.scene_id);
     onChanged();
   }
 

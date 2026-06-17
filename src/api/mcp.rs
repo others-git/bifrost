@@ -3,7 +3,7 @@
 //! Served at `/mcp` as a Streamable HTTP endpoint (stateless, JSON responses),
 //! gated by the same Bearer API keys as `/api/v1`. Tools call the shared
 //! service functions (`api::lights` / `api::audio` / `api::rooms` /
-//! `api::palette_scenes`) directly — no HTTP hop — so the MCP surface can't
+//! `api::scenes`) directly — no HTTP hop — so the MCP surface can't
 //! drift from the session and public APIs. There is no stdio transport;
 //! stdio-only clients can bridge with the standard `mcp-remote` shim.
 //!
@@ -20,12 +20,10 @@ use crate::api::audio::{
     play_device_favorite, set_audio_receiver, ungroup_device,
 };
 use crate::api::lights::{SetLightOutcome, apply_light_state, list_all_lights};
-use crate::api::palette_scenes::{
-    SceneError, apply_scene_to_room, create_scene_from_room, list_scenes, parse_hex_color,
-};
 use crate::api::power::{SetPowerOutcome, apply_power_state, list_all_power_devices};
 use crate::api::remote::{RemoteOutcome, apply_remote_command, list_remotes};
 use crate::api::rooms::{apply_room_state, effective_members, list_public_rooms};
+use crate::api::scenes::{SceneCaptureError, apply_scene_entries, capture_scene, list_all_scenes};
 use crate::models::audio::{AudioCommand, AudioFavorite, TransportCmd};
 use crate::models::remote::{RemoteCommand, RemoteKey};
 use crate::models::{Color, LightState};
@@ -105,8 +103,9 @@ impl ServerHandler for BifrostMcp {
             .with_server_info(Implementation::new("bifrost", env!("CARGO_PKG_VERSION")))
             .with_instructions(
                 "Bifrost smart-home control. Rooms aggregate lights and audio devices; \
-                 scenes are color palettes applied to a room's lights. Tools accept an \
-                 id or a case-insensitive name/substring for lights, rooms, scenes and \
+                 scenes are saved full-state snapshots (room-scoped or whole-home) that \
+                 restore each light's color/temperature/effect + power on/off. Tools accept \
+                 an id or a case-insensitive name/substring for lights, rooms, scenes and \
                  audio devices. Start with get_home_state for a full snapshot.",
             )
     }
@@ -147,24 +146,23 @@ pub struct SetRoomRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ApplySceneRequest {
-    /// Room id or name.
-    pub room: String,
-    /// Scene id or name.
+pub struct ActivateSceneRequest {
+    /// Scene id, or a case-insensitive name/substring. A scene is self-scoped —
+    /// a room scene restores its room, a home scene the whole house.
     pub scene: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ApplySceneAllRequest {
-    /// Scene id or name, applied to every enabled room.
-    pub scene: String,
+pub struct SaveRoomSceneRequest {
+    /// Room whose current full state to snapshot (id or name).
+    pub room: String,
+    /// Name for the new room scene.
+    pub name: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct SaveSceneRequest {
-    /// Room whose current light states to snapshot (id or name).
-    pub room: String,
-    /// Name for the new scene.
+pub struct SaveHomeSceneRequest {
+    /// Name for the new whole-home scene.
     pub name: String,
 }
 
@@ -259,7 +257,7 @@ impl BifrostMcp {
         let (rooms, lights, scenes, audio_devices, power_devices) = tokio::join!(
             list_public_rooms(&self.state),
             list_all_lights(&self.state),
-            list_scenes(&self.state),
+            list_all_scenes(&self.state),
             list_all_devices(&self.state),
             list_all_power_devices(&self.state),
         );
@@ -346,71 +344,49 @@ impl BifrostMcp {
         ))
     }
 
-    #[tool(description = "Apply a scene (color palette + brightness) to a room's lights.")]
-    async fn apply_scene(
+    #[tool(
+        description = "Activate a saved scene by id or name, restoring the captured light + power state (effects included). A room scene restores its room; a home scene the whole house."
+    )]
+    async fn activate_scene(
         &self,
-        Parameters(req): Parameters<ApplySceneRequest>,
+        Parameters(req): Parameters<ActivateSceneRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        let rooms = named_rooms(&self.state).await?;
-        let room_id = match resolve("room", &req.room, &rooms) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
         let scenes = named_scenes(&self.state).await?;
         let scene_id = match resolve("scene", &req.scene, &scenes) {
             Ok(id) => id,
             Err(e) => return Ok(e),
         };
-        match apply_scene_to_room(&self.state, &scene_id, &room_id).await {
+        match apply_scene_entries(&self.state, &scene_id, None).await {
             Some((applied, failed)) => Ok(ok_json(
                 serde_json::json!({ "applied": applied, "failed": failed }),
             )),
-            None => Ok(fail("scene or room not found")),
+            None => Ok(fail("scene not found or empty")),
         }
     }
 
-    #[tool(description = "Apply a scene to every enabled room — a whole-home look.")]
-    async fn apply_scene_all(
+    #[tool(
+        description = "Save a room's current full state (each light's color/temperature/effect + power on/off) as a new named Room Scene."
+    )]
+    async fn save_room_scene(
         &self,
-        Parameters(req): Parameters<ApplySceneAllRequest>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let scenes = named_scenes(&self.state).await?;
-        let scene_id = match resolve("scene", &req.scene, &scenes) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let rooms = named_rooms(&self.state).await?;
-        if rooms.is_empty() {
-            return Ok(fail("there are no rooms"));
-        }
-        let mut results = Vec::with_capacity(rooms.len());
-        for room in &rooms {
-            let (applied, failed) = apply_scene_to_room(&self.state, &scene_id, &room.id)
-                .await
-                .unwrap_or((0, 0));
-            results.push(serde_json::json!({
-                "room": room.name, "applied": applied, "failed": failed,
-            }));
-        }
-        Ok(ok_json(serde_json::json!(results)))
-    }
-
-    #[tool(description = "Save the room's current light colors/brightness as a new named scene.")]
-    async fn save_scene_from_room(
-        &self,
-        Parameters(req): Parameters<SaveSceneRequest>,
+        Parameters(req): Parameters<SaveRoomSceneRequest>,
     ) -> Result<CallToolResult, ErrorData> {
         let rooms = named_rooms(&self.state).await?;
         let room_id = match resolve("room", &req.room, &rooms) {
             Ok(id) => id,
             Err(e) => return Ok(e),
         };
-        match create_scene_from_room(&self.state, &room_id, &req.name).await {
-            Ok(scene_id) => Ok(ok_json(serde_json::json!({ "id": scene_id }))),
-            Err(SceneError::Validation(m)) => Ok(fail(m)),
-            Err(SceneError::NotFound) => Ok(fail("room not found")),
-            Err(SceneError::Db) => Err(internal("saving scene")),
-        }
+        save_scene_result(capture_scene(&self.state, &req.name, Some(&room_id)).await)
+    }
+
+    #[tool(
+        description = "Save the whole home's current full state (every light + power device) as a new named Home Scene."
+    )]
+    async fn save_home_scene(
+        &self,
+        Parameters(req): Parameters<SaveHomeSceneRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        save_scene_result(capture_scene(&self.state, &req.name, None).await)
     }
 
     #[tool(
@@ -833,7 +809,7 @@ fn remote_outcome(outcome: RemoteOutcome) -> CallToolResult {
 }
 
 async fn named_scenes(state: &AppState) -> Result<Vec<Named>, ErrorData> {
-    let scenes = list_scenes(state)
+    let scenes = list_all_scenes(state)
         .await
         .map_err(|()| internal("listing scenes"))?;
     Ok(scenes
@@ -843,6 +819,34 @@ async fn named_scenes(state: &AppState) -> Result<Vec<Named>, ErrorData> {
             name: s.name,
         })
         .collect())
+}
+
+/// Map a scene-capture outcome to the MCP tool result (shared by save_room_scene
+/// and save_home_scene).
+fn save_scene_result(
+    result: Result<crate::api::scenes::SceneCapture, SceneCaptureError>,
+) -> Result<CallToolResult, ErrorData> {
+    match result {
+        Ok(c) => Ok(ok_json(
+            serde_json::json!({ "id": c.id, "lights": c.lights, "power": c.power }),
+        )),
+        Err(SceneCaptureError::EmptyName) => Ok(fail("scene name is required")),
+        Err(SceneCaptureError::RoomNotFound) => Ok(fail("room not found")),
+        Err(SceneCaptureError::Db) => Err(internal("saving scene")),
+    }
+}
+
+/// Parse "#rrggbb" (case-insensitive) → RGB. None for anything else.
+fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
+    let hex = s.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some((
+        u8::from_str_radix(&hex[0..2], 16).ok()?,
+        u8::from_str_radix(&hex[2..4], 16).ok()?,
+        u8::from_str_radix(&hex[4..6], 16).ok()?,
+    ))
 }
 
 async fn named_query(state: &AppState, sql: &str, what: &str) -> Result<Vec<Named>, ErrorData> {

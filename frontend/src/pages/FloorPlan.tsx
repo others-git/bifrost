@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  applySceneToRoom,
-  createPaletteScene,
+  activateScene,
+  createScene,
   createPlan,
   getAudioDevices,
-  getPaletteScenes,
+  getScenes,
   getPlan,
   getPlans,
   getRooms,
@@ -15,6 +15,7 @@ import {
   putPlanRooms,
   putPlanSize,
   removePlan,
+  removeScene,
   rgbToHex,
   rgbToXy,
   setLightState,
@@ -26,11 +27,11 @@ import {
   type LightState,
   type LightStatePatch,
   type Mount,
-  type PaletteScene,
   type Placement,
   type PlanDetail,
   type PlanSummary,
   type Room,
+  type Scene,
 } from "../api";
 import { ColorWheel, hexToHs, hexToRgb, hsvToRgb, LightEditor, type LightControlChange } from "../components/LightEditor";
 import { AudioEditor } from "../components/AudioControls";
@@ -183,7 +184,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
   const [toast, setToast] = useState("");
 
   const [allRooms, setAllRooms] = useState<Room[]>([]);
-  const [scenes, setScenes] = useState<PaletteScene[]>([]);
+  const [scenes, setScenes] = useState<Scene[]>([]);
   // The room whose scene modal is open (opened from its color editor).
   const [scenesRoom, setScenesRoom] = useState<Room | null>(null);
   const [sceneBusy, setSceneBusy] = useState(false);
@@ -261,7 +262,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
     getRooms().then(setAllRooms);
   }, []);
   useEffect(() => {
-    getPaletteScenes().then(setScenes);
+    getScenes().then(setScenes);
   }, []);
   useEffect(() => {
     loadAudioDevices();
@@ -372,47 +373,36 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
     await setRoomState(room.id, { on });
   }
 
-  async function applyScene(room: Room, sceneId: string) {
+  async function applyScene(_room: Room, sceneId: string) {
     setSceneBusy(true);
     try {
-      await applySceneToRoom(room.id, sceneId);
+      await activateScene(sceneId);
     } finally {
       setSceneBusy(false);
     }
   }
 
-  /** Capture a room's current colors (as painted/lit now) into a new global scene. */
-  async function saveRoomLook(room: Room) {
-    const palette: string[] = [];
-    let brightnessSum = 0;
-    let litCount = 0;
-    for (const id of room.light_ids) {
-      const st = statesById.get(id);
-      if (!st?.on) continue;
-      litCount++;
-      brightnessSum += st.brightness ?? 100;
-      if (st.color) palette.push(rgbToHex(...xyToRgb(st.color.x, st.color.y, st.color.brightness)));
+  /** Capture the room's current full state (colours/temps/effects + power) as a
+   * new Room Scene. */
+  async function saveRoomLook(room: Room, name: string) {
+    if (!name.trim()) return;
+    setSceneBusy(true);
+    try {
+      await createScene(name.trim(), room.id);
+      setScenes(await getScenes());
+    } finally {
+      setSceneBusy(false);
     }
-    if (litCount === 0) {
-      await dialogs.alert({
-        title: "Nothing to save",
-        message: "No lights in this room are on — turn on or paint some first.",
-      });
-      return;
+  }
+
+  async function deleteScene(sceneId: string) {
+    setSceneBusy(true);
+    try {
+      await removeScene(sceneId);
+      setScenes(await getScenes());
+    } finally {
+      setSceneBusy(false);
     }
-    const name = await dialogs.prompt({
-      title: "Save room as scene",
-      message: "Saves this room's current colors and brightness as a reusable scene.",
-      placeholder: "Scene name",
-      confirmLabel: "Save",
-    });
-    if (!name?.trim()) return;
-    await createPaletteScene({
-      name: name.trim(),
-      brightness: Math.round(brightnessSum / litCount),
-      palette: [...new Set(palette)],
-    });
-    setScenes(await getPaletteScenes());
   }
 
   /** Live edits from the shared editor — optimistic locally, debounced to the API. */
@@ -946,13 +936,14 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
       {scenesRoom && (
         <SceneModal
           roomName={scenesRoom.name}
-          scenes={scenes}
+          scenes={scenes.filter((s) => s.room_id === scenesRoom.id)}
           busy={sceneBusy}
           onApply={async (id) => {
             await applyScene(scenesRoom, id);
             setScenesRoom(null);
           }}
-          onSave={() => saveRoomLook(scenesRoom)}
+          onSave={(name) => saveRoomLook(scenesRoom, name)}
+          onDelete={deleteScene}
           onClose={() => setScenesRoom(null)}
         />
       )}

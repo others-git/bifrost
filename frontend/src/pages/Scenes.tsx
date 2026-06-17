@@ -1,30 +1,23 @@
-// Scenes page: a global library of palette scenes (Hue-style presets of
-// brightness + colors). Scenes are not tied to a room — create them here, then
-// apply any scene to any room (from a room's controls on the Lights page or
-// Floor Plan, or via the per-scene "Apply to" menu here). A room's current
-// colors can also be captured as a new scene from the Lights page.
+// Scenes page: the library of saved full-state snapshots. A scene captures each
+// light's color/temperature/effect + each power device's on/off, restored in one
+// tap. Two scopes: Home scenes (whole-home; one can be the "Restore Home"
+// default) and Room scenes (a single room's members). Capture a room's current
+// state here or from the room's controls on the Control page / Floor Plan.
 
 import { useEffect, useState } from "react";
 import {
   activateScene,
-  applySceneToRoom,
-  createPaletteScene,
   createScene,
-  deletePaletteScene,
-  getPaletteScenes,
   getRooms,
   getScenes,
   removeScene,
   setDefaultScene,
-  type PaletteScene,
   type Room,
   type Scene,
 } from "../api";
-import { SceneEditor, SceneSwatch } from "../components/scenes";
 import { Glyph } from "../components/glyphs";
 import { useDialogs } from "../components/dialogs";
 import { PageHeader } from "../components/PageHeader";
-import { Select } from "../components/Select";
 import { useViewport } from "../useViewport";
 import { S } from "../styles";
 import { alpha, color, font, glow, labelType, radius } from "../theme";
@@ -32,17 +25,14 @@ import { Button } from "../components/controls";
 
 export function ScenesPage() {
   const { isMobile } = useViewport();
-  const [scenes, setScenes] = useState<PaletteScene[]>([]);
-  const [homeScenes, setHomeScenes] = useState<Scene[]>([]);
+  const [scenes, setScenes] = useState<Scene[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
   const [loading, setLoading] = useState(true);
-  const [creating, setCreating] = useState(false);
   const dialogs = useDialogs();
 
   async function load() {
-    const [s, h, r] = await Promise.all([getPaletteScenes(), getScenes(), getRooms()]);
+    const [s, r] = await Promise.all([getScenes(), getRooms()]);
     setScenes(s);
-    setHomeScenes(h);
     setRooms(r);
     setLoading(false);
   }
@@ -50,20 +40,9 @@ export function ScenesPage() {
     load();
   }, []);
 
-  // ── Home scenes (whole-home snapshot/restore) ──────────────────────────────
-  async function captureHome() {
-    const name = await dialogs.prompt({
-      title: "Save home scene",
-      message: "Snapshots every light and switch's current on/off + color state, so you can restore it in one tap (e.g. after a power outage resets them).",
-      placeholder: "e.g. Default",
-      confirmLabel: "Save",
-    });
-    if (!name?.trim()) return;
-    await createScene(name.trim());
-    await load();
-  }
+  const homeScenes = scenes.filter((s) => !s.room_id);
 
-  async function applyHome(scene: Scene) {
+  async function apply(scene: Scene) {
     try {
       await activateScene(scene.id);
     } catch (e) {
@@ -76,10 +55,10 @@ export function ScenesPage() {
     await load();
   }
 
-  async function removeHome(scene: Scene) {
+  async function remove(scene: Scene, scope: string) {
     const ok = await dialogs.confirm({
-      title: "Delete home scene",
-      message: `Delete home scene "${scene.name}"?`,
+      title: `Delete ${scope} scene`,
+      message: `Delete "${scene.name}"?`,
       confirmLabel: "Delete",
       danger: true,
     });
@@ -88,26 +67,29 @@ export function ScenesPage() {
     await load();
   }
 
-  async function remove(scene: PaletteScene) {
-    const ok = await dialogs.confirm({
-      title: "Delete scene",
-      message: `Delete scene "${scene.name}"? It will no longer be available to any room.`,
-      confirmLabel: "Delete",
-      danger: true,
+  async function capture(roomId?: string) {
+    const name = await dialogs.prompt({
+      title: roomId ? "Save room scene" : "Save home scene",
+      message: roomId
+        ? "Snapshots this room's current lights (color/temperature/effect) and switches, to restore in one tap."
+        : "Snapshots every light and switch's current state, so you can restore it in one tap (e.g. after a power outage resets them).",
+      placeholder: roomId ? "e.g. Movie Night" : "e.g. Default",
+      confirmLabel: "Save",
     });
-    if (!ok) return;
-    await deletePaletteScene(scene.id);
+    if (!name?.trim()) return;
+    await createScene(name.trim(), roomId);
     await load();
   }
 
   return (
     <div style={{ padding: isMobile ? "1rem 0.85rem" : "1.5rem 2rem", maxWidth: 1100, margin: "0 auto" }}>
-      <PageHeader title="Scenes" status="Whole-home restore presets + reusable color/brightness looks" />
+      <PageHeader title="Scenes" status="Saved full-state snapshots — whole-home or per-room" />
 
       {loading ? (
         <p style={{ color: "var(--bf-faint)" }}>Loading…</p>
       ) : (
         <>
+          {/* ── Home scenes ── */}
           <section style={{ marginBottom: "1.75rem" }}>
             <h3 style={SECTION_HEADING}><Glyph name="power" size={15} /> Home scenes</h3>
             <p style={{ color: "var(--bf-dim)", fontSize: "0.82rem", margin: "0 0 0.7rem", maxWidth: 620 }}>
@@ -125,7 +107,6 @@ export function ScenesPage() {
                     alignItems: "center",
                     gap: "0.6rem",
                     padding: "0.6rem 0.8rem",
-                    // The default preset wears a gilded edge + inner glow.
                     ...(s.is_default
                       ? { border: `1px solid ${alpha(color.gold, 0.45)}`, boxShadow: `inset 0 0 24px -14px ${color.gold}, ${glow(color.gold, 12)}` }
                       : {}),
@@ -140,13 +121,13 @@ export function ScenesPage() {
                       {s.lights} light{s.lights !== 1 ? "s" : ""} · {s.power} switch{s.power !== 1 ? "es" : ""}
                     </div>
                   </div>
-                  <Button variant="ghost" onClick={() => applyHome(s)}>Apply</Button>
+                  <Button variant="ghost" onClick={() => apply(s)}>Apply</Button>
                   <Button variant="ghost" onClick={() => toggleHomeDefault(s)}>
                     {s.is_default ? "Unset" : "Set default"}
                   </Button>
                   <Button
                     variant="ghost"
-                    onClick={() => removeHome(s)}
+                    onClick={() => remove(s, "home")}
                     title="Delete home scene"
                     style={{ color: "#c77", borderColor: "#5a3636", padding: "0 0.6rem" }}
                   >
@@ -156,7 +137,7 @@ export function ScenesPage() {
               ))}
               <Button
                 variant="ghost"
-                onClick={captureHome}
+                onClick={() => capture()}
                 style={{ borderStyle: "dashed", borderColor: alpha(color.gold, 0.4), color: color.gold, alignSelf: "flex-start" }}
               >
                 + Capture current state
@@ -164,51 +145,34 @@ export function ScenesPage() {
             </div>
           </section>
 
-          <h3 style={SECTION_HEADING}><Glyph name="scene" size={15} /> Palette scenes</h3>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
-              gap: "1rem",
-              alignItems: "start",
-            }}
-          >
-            {scenes.map((scene) => (
-            <SceneCard
-              key={scene.id}
-              scene={scene}
-              rooms={rooms}
-              onDelete={() => remove(scene)}
-            />
-          ))}
-
-          <div style={{ ...S.card, gap: "0.6rem" }}>
-            {creating ? (
-              <SceneEditor
-                onSave={async (scene) => {
-                  await createPaletteScene(scene);
-                  setCreating(false);
-                  await load();
-                }}
-                onCancel={() => setCreating(false)}
-              />
-            ) : (
-              <Button variant="ghost"
-                onClick={() => setCreating(true)} style={{ width: "100%",
-                  padding: "1.2rem",
-                  borderStyle: "dashed",
-                  color: "var(--bf-dim)" }}
-              >
-                + New scene
-              </Button>
-            )}
-            {scenes.length === 0 && !creating && (
-              <span style={{ color: "var(--bf-faint)", fontSize: "0.8rem" }}>
-                No scenes yet — create one, or save a room's current look from the Lights page.
-              </span>
-            )}
-          </div>
-          </div>
+          {/* ── Room scenes (grouped by room) ── */}
+          <h3 style={SECTION_HEADING}><Glyph name="scene" size={15} /> Room scenes</h3>
+          <p style={{ color: "var(--bf-dim)", fontSize: "0.82rem", margin: "0 0 0.9rem", maxWidth: 620 }}>
+            Per-room snapshots — exact colors, temperatures, and effects of that room's lights.
+          </p>
+          {rooms.length === 0 ? (
+            <p style={{ color: "var(--bf-faint)", fontSize: "0.85rem" }}>No rooms yet.</p>
+          ) : (
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
+                gap: "1rem",
+                alignItems: "start",
+              }}
+            >
+              {rooms.map((room) => (
+                <RoomScenesCard
+                  key={room.id}
+                  room={room}
+                  scenes={scenes.filter((s) => s.room_id === room.id)}
+                  onApply={apply}
+                  onDelete={(s) => remove(s, "room")}
+                  onCapture={() => capture(room.id)}
+                />
+              ))}
+            </div>
+          )}
         </>
       )}
 
@@ -240,53 +204,55 @@ const DEFAULT_BADGE: React.CSSProperties = {
   padding: "0.08rem 0.5rem",
 };
 
-function SceneCard({
-  scene,
-  rooms,
+function RoomScenesCard({
+  room,
+  scenes,
+  onApply,
   onDelete,
+  onCapture,
 }: {
-  scene: PaletteScene;
-  rooms: Room[];
-  onDelete: () => void;
+  room: Room;
+  scenes: Scene[];
+  onApply: (s: Scene) => void;
+  onDelete: (s: Scene) => void;
+  onCapture: () => void;
 }) {
-  const [busy, setBusy] = useState(false);
-
-  async function applyTo(roomId: string) {
-    if (!roomId) return;
-    setBusy(true);
-    try {
-      await applySceneToRoom(roomId, scene.id);
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return (
-    <div style={{ ...S.card, gap: "0.6rem" }}>
-      <SceneSwatch palette={scene.palette} width={248} height={40} radius={8} />
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "0.5rem" }}>
-        <span style={{ fontWeight: 600 }}>{scene.name}</span>
-        {scene.brightness != null && (
-          <span style={{ color: "var(--bf-faint)", fontSize: "0.75rem" }}>{Math.round(scene.brightness)}%</span>
-        )}
-      </div>
-      <div style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
-        <Select
-          value={undefined}
-          disabled={rooms.length === 0 || busy}
-          onChange={applyTo}
-          placeholder={busy ? "Applying…" : rooms.length === 0 ? "No rooms yet" : "Apply to room…"}
-          options={rooms.map((r) => ({ value: r.id, label: r.name }))}
-          style={{ flex: 1 }}
-        />
-        <Button variant="ghost"
-          onClick={onDelete}
-          title="Delete scene" style={{ padding: "0 0.6rem", color: "#c77", borderColor: "#5a3636" }}
-        >
-          ×
-        </Button>
-      </div>
+    <div style={{ ...S.card, gap: "0.55rem" }}>
+      <div style={{ fontWeight: 600 }}>{room.name}</div>
+      {scenes.length === 0 ? (
+        <span style={{ color: "var(--bf-faint)", fontSize: "0.78rem" }}>No scenes for this room yet.</span>
+      ) : (
+        scenes.map((s) => (
+          <div key={s.id} style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: "0.86rem", fontWeight: 600 }}>{s.name}</div>
+              <div style={{ color: "var(--bf-faint)", fontSize: "0.72rem" }}>
+                {s.lights} light{s.lights !== 1 ? "s" : ""}
+                {s.power > 0 ? ` · ${s.power} power` : ""}
+              </div>
+            </div>
+            <Button variant="ghost" onClick={() => onApply(s)} style={{ padding: "0.2rem 0.6rem" }}>
+              Apply
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={() => onDelete(s)}
+              title="Delete scene"
+              style={{ padding: "0 0.55rem", color: "#c77", borderColor: "#5a3636" }}
+            >
+              ×
+            </Button>
+          </div>
+        ))
+      )}
+      <Button
+        variant="ghost"
+        onClick={onCapture}
+        style={{ borderStyle: "dashed", color: "var(--bf-dim)", alignSelf: "flex-start" }}
+      >
+        + Capture current state
+      </Button>
     </div>
   );
 }
-

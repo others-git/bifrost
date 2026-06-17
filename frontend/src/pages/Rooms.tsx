@@ -8,7 +8,7 @@ import {
   createRoom,
   getAudioDevices,
   getLights,
-  getPaletteScenes,
+  getScenes,
   getPowerDevices,
   getProviderGroups,
   getRooms,
@@ -17,7 +17,7 @@ import {
   setRoomEnabled,
   type AudioDevice,
   type Light,
-  type PaletteScene,
+  type Scene,
   type PowerDevice,
   type ProviderGroupInfo,
   type Room,
@@ -41,7 +41,7 @@ export function RoomsPage() {
   const [lights, setLights] = useState<Light[]>([]);
   const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
   const [powerDevices, setPowerDevices] = useState<PowerDevice[]>([]);
-  const [scenes, setScenes] = useState<PaletteScene[]>([]);
+  const [scenes, setScenes] = useState<Scene[]>([]);
   const [showAdd, setShowAdd] = useState(false);
 
   async function load() {
@@ -49,7 +49,7 @@ export function RoomsPage() {
     setProviderGroups(await getProviderGroups());
     setAudioDevices(await getAudioDevices());
     setPowerDevices(await getPowerDevices());
-    setScenes(await getPaletteScenes());
+    setScenes(await getScenes());
     const l = await getLights();
     if (l !== "unauthorized") setLights(l);
   }
@@ -160,7 +160,7 @@ function RoomCard({
   providerGroups: ProviderGroupInfo[];
   audioDevices: AudioDevice[];
   powerDevices: PowerDevice[];
-  scenes: PaletteScene[];
+  scenes: Scene[];
   // Owned by RoomsPage (which renders `dialogs.element`). A RoomCard must NOT
   // call useDialogs() itself: that returns a separate instance whose element is
   // never mounted, so confirm()/alert() would hang forever (merge silently did

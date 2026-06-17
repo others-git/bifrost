@@ -45,13 +45,13 @@ All tools below are served natively from `src/api/mcp.rs`.
 
 | Tool | Shared service fn(s) | Notes |
 |---|---|---|
-| `get_home_state` | `list_public_rooms` + `list_all_lights` + `list_scenes` + `list_all_devices` + `list_all_power_devices` | One-call context snapshot (rooms with member ids, lights, scenes, audio devices, power devices) |
+| `get_home_state` | `list_public_rooms` + `list_all_lights` + `list_all_scenes` + `list_all_devices` + `list_all_power_devices` | One-call context snapshot (rooms with member ids, lights, scenes, audio devices, power devices) |
 | `list_lights` | `list_all_lights` | each light carries `capabilities.effects` (the dynamic-effect names it supports) |
 | `set_light` | `apply_light_state` | light by id/name; hex → CIE xy via `Color::from_rgb`; optional `effect` (a name from `capabilities.effects`, e.g. "candle"/"breathe"/"Sunrise") supersedes color/temp |
 | `set_room` | `effective_members` + `apply_uniform_state` | room by id/name; fan-out to member lights |
-| `apply_scene` | `apply_scene_to_room` | room + scene by id/name |
-| `apply_scene_all` | fan-out `apply_scene_to_room` over all enabled rooms | whole-home look |
-| `save_scene_from_room` | `create_scene_from_room` | snapshot the room's lit colors |
+| `activate_scene` | `apply_scene_entries` | scene by id/name; re-applies the captured full state (color/temp/effect + power). A Room Scene restores its room, a Home Scene the whole house |
+| `save_room_scene` | `capture_scene(room_id)` | snapshot a room's current full state (each light's color/temp/effect + power) as a new Room Scene |
+| `save_home_scene` | `capture_scene(None)` | snapshot the whole home's current state as a new Home Scene |
 | `set_audio` | `apply_audio_command` | device by id/name; power/volume/mute/source/transport |
 | `get_audio_state` | `get_device_live` | live read incl. now-playing |
 | `list_audio_favorites` | `list_device_favorites` | Sonos Favorites; empty for Onkyo |

@@ -674,7 +674,7 @@ async fn set_room_controls(
         }
         if c.kind == "scene" {
             let ok = match &c.scene_id {
-                Some(sid) => sqlx::query("SELECT 1 FROM palette_scenes WHERE id = ?")
+                Some(sid) => sqlx::query("SELECT 1 FROM scenes WHERE id = ?")
                     .bind(sid)
                     .fetch_optional(&state.db)
                     .await
@@ -1371,17 +1371,19 @@ async fn set_room_state(
     Json(serde_json::json!({ "applied": applied, "failed": failed })).into_response()
 }
 
-// ── Scene apply (global palette scenes, applied to a room) ───────────────────
+// ── Scene apply (activate a saved scene from a room control) ─────────────────
 //
-// Scene definitions live in `crate::api::palette_scenes` (global, not bound to a
-// room). Applying one to a room is the room's concern, so the route lives here.
+// Scenes (`crate::api::scenes`) are self-scoped snapshots — a Room Scene already
+// carries its room's members, so applying one is just activating it. The route
+// stays room-shaped (`/rooms/{room_id}/scenes/{scene_id}/apply`) because it backs
+// a room's `scene` quick-control button; `room_id` is informational.
 
 async fn apply_scene(
     State(state): State<Arc<AppState>>,
     _: Session,
-    Path((room_id, scene_id)): Path<(String, String)>,
+    Path((_room_id, scene_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    match crate::api::palette_scenes::apply_scene_to_room(&state, &scene_id, &room_id).await {
+    match crate::api::scenes::apply_scene_entries(&state, &scene_id, None).await {
         Some((applied, failed)) => {
             Json(serde_json::json!({ "applied": applied, "failed": failed })).into_response()
         }

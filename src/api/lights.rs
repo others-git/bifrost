@@ -152,18 +152,30 @@ pub(crate) async fn persist_light_state(db: &sqlx::SqlitePool, light_id: &str, n
     if new.brightness.is_some() {
         merged.brightness = new.brightness;
     }
-    if new.color.is_some() {
-        merged.color = new.color.clone();
-        merged.color_temp_mirek = None;
-    } else if new.color_temp_mirek.is_some() {
-        merged.color_temp_mirek = new.color_temp_mirek;
-        merged.color = None;
-    }
     if new.reachable.is_some() {
         merged.reachable = new.reachable;
     }
-    if new.effect.is_some() {
-        merged.effect = new.effect.clone();
+    // Colour, colour-temperature, and a dynamic effect are mutually exclusive
+    // modes — a light is in exactly one. Setting any one clears the other two so
+    // `last_state` always names a single honest mode; this is what lets a Home
+    // Scene snapshot capture and reapply an effect without a stale effect leaking
+    // onto a light that has since gone back to a plain colour.
+    if new.color.is_some() {
+        merged.color = new.color.clone();
+        merged.color_temp_mirek = None;
+        merged.effect = None;
+    } else if new.color_temp_mirek.is_some() {
+        merged.color_temp_mirek = new.color_temp_mirek;
+        merged.color = None;
+        merged.effect = None;
+    } else if let Some(effect) = new.effect.as_deref() {
+        if crate::models::is_clear_effect(effect) {
+            merged.effect = None;
+        } else {
+            merged.effect = Some(effect.to_string());
+            merged.color = None;
+            merged.color_temp_mirek = None;
+        }
     }
 
     let Ok(json) = serde_json::to_string(&merged) else {

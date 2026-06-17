@@ -20,9 +20,9 @@ use crate::api::apikeys::require_api_key;
 use crate::api::audio::{SetAudioOutcome, apply_audio_command};
 use crate::api::auth::require_session;
 use crate::api::lights::{SetLightOutcome, apply_light_state};
-use crate::api::palette_scenes::apply_scene_to_room;
 use crate::api::power::{SetPowerOutcome, apply_power_state};
 use crate::api::rooms::{apply_room_state, effective_members};
+use crate::api::scenes::apply_scene_entries;
 use crate::models::audio::{AudioCommand, AudioState, TransportCmd};
 use crate::models::{Color, LightState};
 use axum::{
@@ -1161,30 +1161,21 @@ async fn apply_scene(
             return Err(format!("Which scene — {}?", names.join(", ")));
         }
     };
-    let rooms: Vec<(String, String)> = match resolve_target(state, &target, context_room).await? {
-        Resolved::Room { id, name } => vec![(id, name)],
-        Resolved::Everywhere => all_rooms(state)
-            .await
-            .into_iter()
-            .map(|e| (e.id, e.name))
-            .collect(),
+    // A scene is self-scoped (a Room Scene carries its room's members; a Home
+    // Scene the whole home), so it's activated directly rather than fanned across
+    // rooms. We still resolve the target to keep "<scene> in <unknown room>" an
+    // error and to phrase the reply.
+    let where_to = match resolve_target(state, &target, context_room).await? {
+        Resolved::Room { name, .. } => Some(name),
+        Resolved::Everywhere => None,
         _ => return Err("Scenes apply to rooms.".into()),
     };
-    let mut applied = 0;
-    for (room_id, _) in &rooms {
-        if apply_scene_to_room(state, &scene_id, room_id)
-            .await
-            .is_some()
-        {
-            applied += 1;
-        }
-    }
-    if applied == 0 {
-        Err("Couldn't apply that scene.".into())
-    } else if rooms.len() == 1 {
-        Ok(format!("Applied {scene} to {}.", rooms[0].1))
-    } else {
-        Ok(format!("Applied {scene} to {applied} rooms."))
+    match apply_scene_entries(state, &scene_id, None).await {
+        Some((applied, _)) if applied > 0 => match where_to {
+            Some(room) => Ok(format!("Applied {scene} in {room}.")),
+            None => Ok(format!("Applied {scene}.")),
+        },
+        _ => Err("Couldn't apply that scene.".into()),
     }
 }
 
@@ -1364,9 +1355,6 @@ async fn rooms(state: &AppState) -> Vec<Ent> {
     )
     .await
 }
-async fn all_rooms(state: &AppState) -> Vec<Ent> {
-    rooms(state).await
-}
 async fn all_room_ids(state: &AppState) -> Vec<String> {
     rooms(state).await.into_iter().map(|e| e.id).collect()
 }
@@ -1392,11 +1380,7 @@ async fn audio(state: &AppState) -> Vec<Ent> {
     .await
 }
 async fn scenes(state: &AppState) -> Vec<Ent> {
-    ents(
-        state,
-        "SELECT id, name FROM palette_scenes ORDER BY created_at",
-    )
-    .await
+    ents(state, "SELECT id, name FROM scenes ORDER BY created_at").await
 }
 
 // ── Grammar (pure) ───────────────────────────────────────────────────────────

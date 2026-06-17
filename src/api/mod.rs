@@ -9,7 +9,6 @@ pub mod kiosk_update;
 pub mod kiosks;
 pub mod lights;
 pub mod mcp;
-pub mod palette_scenes;
 pub mod plans;
 pub mod power;
 pub mod providers;
@@ -128,7 +127,6 @@ pub fn router() -> Router<Arc<AppState>> {
         .nest("/events", events::router())
         .nest("/kiosks", kiosks::router())
         .nest("/lights", lights::router())
-        .nest("/palette-scenes", palette_scenes::router())
         .nest("/plans", plans::router())
         .nest("/power", power::router())
         .nest("/provider-groups", rooms::provider_groups_router())

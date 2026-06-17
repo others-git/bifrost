@@ -1,8 +1,11 @@
-//! Home Scenes: named **whole-home** snapshots of light + power-device state,
-//! applied all at once. One scene can be marked the **default** — the one-tap
-//! "Restore Home" preset (`POST /restore-default`), handy after a power outage
-//! resets bulbs/switches to factory state. (Room-scoped *looks* are the separate
-//! `palette_scenes` system; this one is the restore-everything surface.)
+//! Scenes: named snapshots of light + power-device state, applied all at once.
+//! A scene is scoped by `room_id`: a null `room_id` is a whole-home snapshot (a
+//! *Home Scene*), a set `room_id` scopes it to that room's effective members (a
+//! *Room Scene*). Both store each light's full `LightState` (colour, temperature,
+//! or effect) together with each power device's on/off, and share one capture
+//! (`capture_scene`) and apply (`apply_scene_entries`) engine. One home scene can
+//! be the **default** — the one-tap "Restore Home" preset
+//! (`POST /restore-default`), handy after a power outage resets bulbs/switches.
 
 use crate::AppState;
 use crate::api::auth::Session;
@@ -31,73 +34,133 @@ pub fn router() -> Router<Arc<AppState>> {
 }
 
 #[derive(Serialize)]
-struct SceneRow {
-    id: String,
-    name: String,
-    created_at: String,
-    lights: i64,
-    power: i64,
-    /// The single preset the "Restore Home" button applies.
-    is_default: bool,
+pub(crate) struct SceneRow {
+    pub id: String,
+    pub name: String,
+    pub created_at: String,
+    pub lights: i64,
+    pub power: i64,
+    /// The single preset the "Restore Home" button applies (home scenes only).
+    pub is_default: bool,
+    /// `None` = a whole-home scene; `Some(room)` = a room-scoped scene.
+    pub room_id: Option<String>,
+    /// Display name of the scoped room, for the UI grouping (None for home).
+    pub room_name: Option<String>,
 }
 
-async fn list_scenes(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
-    match sqlx::query(
-        "SELECT s.id, s.name, s.created_at, s.is_default,
+/// List every scene (home + room-scoped), newest grouping first. Shared by the
+/// session, `/api/v1`, and MCP surfaces.
+pub(crate) async fn list_all_scenes(state: &AppState) -> Result<Vec<SceneRow>, ()> {
+    sqlx::query(
+        "SELECT s.id, s.name, s.created_at, s.is_default, s.room_id, r.name AS room_name,
                 (SELECT COUNT(*) FROM scene_entries e WHERE e.scene_id = s.id) AS lights,
                 (SELECT COUNT(*) FROM scene_power_entries pe WHERE pe.scene_id = s.id) AS power
-         FROM scenes s ORDER BY s.created_at",
+         FROM scenes s LEFT JOIN rooms r ON r.id = s.room_id
+         ORDER BY s.room_id IS NOT NULL, r.name, s.created_at",
     )
     .fetch_all(&state.db)
     .await
-    {
-        Ok(rows) => Json(
-            rows.into_iter()
-                .map(|r| SceneRow {
-                    id: r.get("id"),
-                    name: r.get("name"),
-                    created_at: r.get("created_at"),
-                    lights: r.get("lights"),
-                    power: r.get("power"),
-                    is_default: r.get::<i64, _>("is_default") != 0,
-                })
-                .collect::<Vec<_>>(),
-        )
-        .into_response(),
-        Err(e) => {
-            tracing::error!("db error listing scenes: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
+    .map(|rows| {
+        rows.into_iter()
+            .map(|r| SceneRow {
+                id: r.get("id"),
+                name: r.get("name"),
+                created_at: r.get("created_at"),
+                lights: r.get("lights"),
+                power: r.get("power"),
+                is_default: r.get::<i64, _>("is_default") != 0,
+                room_id: r.get("room_id"),
+                room_name: r.get("room_name"),
+            })
+            .collect()
+    })
+    .map_err(|e| tracing::error!("db error listing scenes: {e}"))
+}
+
+async fn list_scenes(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
+    match list_all_scenes(&state).await {
+        Ok(scenes) => Json(scenes).into_response(),
+        Err(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+/// Outcome of capturing a scene snapshot.
+pub(crate) struct SceneCapture {
+    pub id: String,
+    pub lights: usize,
+    pub power: usize,
+}
+
+/// Why a capture failed (mapped to HTTP by each caller).
+pub(crate) enum SceneCaptureError {
+    /// The name was blank.
+    EmptyName,
+    /// A room scope named an unknown room.
+    RoomNotFound,
+    /// The DB write failed.
+    Db,
 }
 
 #[derive(Deserialize)]
 struct CreateSceneRequest {
     name: String,
+    /// Omit / null for a whole-home scene; a room id scopes the snapshot to that
+    /// room's effective members (Room Scene).
+    #[serde(default)]
+    room_id: Option<String>,
 }
 
-/// Snapshot the current `last_state` of every light **and** the on/off state of
-/// every enabled power device into a new whole-home scene.
-async fn create_scene(
-    State(state): State<Arc<AppState>>,
-    _: Session,
-    Json(req): Json<CreateSceneRequest>,
-) -> impl IntoResponse {
-    if req.name.trim().is_empty() {
-        return (StatusCode::UNPROCESSABLE_ENTITY, "scene name is required").into_response();
+/// Snapshot light + power state into a new scene, shared by every surface.
+/// `room_id = None` captures the whole home; `Some(room)` captures only that
+/// room's effective members (a Room Scene). Each light's full `LightState`
+/// (colour **or** temperature **or** effect) and each power device's on/off bit
+/// are stored, so the scene restores exactly what was showing — effects included.
+pub(crate) async fn capture_scene(
+    state: &AppState,
+    name: &str,
+    room_id: Option<&str>,
+) -> Result<SceneCapture, SceneCaptureError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(SceneCaptureError::EmptyName);
     }
 
-    let lights = match sqlx::query("SELECT id, last_state FROM lights WHERE last_state IS NOT NULL")
-        .fetch_all(&state.db)
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!("db error: {e}");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    // A room scene is scoped to that room's effective members; a home scene to
+    // everything. We over-fetch all devices and filter by the membership set
+    // (avoids a dynamic `IN (…)` and reuses the shared room helpers).
+    let (light_scope, power_scope) = match room_id {
+        Some(rid) => {
+            if !crate::api::rooms::room_exists(state, rid).await {
+                return Err(SceneCaptureError::RoomNotFound);
+            }
+            (
+                Some(
+                    crate::api::rooms::effective_member_ids(state, rid)
+                        .await
+                        .into_iter()
+                        .collect::<std::collections::HashSet<_>>(),
+                ),
+                Some(
+                    crate::api::rooms::effective_power_member_ids(state, rid)
+                        .await
+                        .into_iter()
+                        .collect::<std::collections::HashSet<_>>(),
+                ),
+            )
         }
+        None => (None, None),
+    };
+    let in_scope = |id: &str, scope: &Option<std::collections::HashSet<String>>| {
+        scope.as_ref().is_none_or(|s| s.contains(id))
     };
 
+    let lights = sqlx::query("SELECT id, last_state FROM lights WHERE last_state IS NOT NULL")
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!("db error: {e}");
+            SceneCaptureError::Db
+        })?;
     // Enabled, non-shadowed power devices with a known state.
     let powers = sqlx::query(
         "SELECT id, last_state FROM power_devices
@@ -108,19 +171,23 @@ async fn create_scene(
     .unwrap_or_default();
 
     let scene_id = Uuid::new_v4().to_string();
-    if let Err(e) = sqlx::query("INSERT INTO scenes (id, name) VALUES (?, ?)")
+    sqlx::query("INSERT INTO scenes (id, name, room_id) VALUES (?, ?, ?)")
         .bind(&scene_id)
-        .bind(req.name.trim())
+        .bind(name)
+        .bind(room_id)
         .execute(&state.db)
         .await
-    {
-        tracing::error!("db error: {e}");
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
+        .map_err(|e| {
+            tracing::error!("db error: {e}");
+            SceneCaptureError::Db
+        })?;
 
     let mut captured = 0usize;
     for row in &lights {
         let light_id: String = row.get("id");
+        if !in_scope(&light_id, &light_scope) {
+            continue;
+        }
         let last_state: String = row.get("last_state");
         if sqlx::query("INSERT INTO scene_entries (scene_id, light_id, state) VALUES (?, ?, ?)")
             .bind(&scene_id)
@@ -137,6 +204,9 @@ async fn create_scene(
     let mut power_captured = 0usize;
     for row in &powers {
         let id: String = row.get("id");
+        if !in_scope(&id, &power_scope) {
+            continue;
+        }
         let last_state: String = row.get("last_state");
         // Only the on/off bit matters for a power device.
         let on = serde_json::from_str::<serde_json::Value>(&last_state)
@@ -157,11 +227,38 @@ async fn create_scene(
         }
     }
 
-    (
-        StatusCode::CREATED,
-        Json(serde_json::json!({ "id": scene_id, "lights": captured, "power": power_captured })),
-    )
-        .into_response()
+    Ok(SceneCapture {
+        id: scene_id,
+        lights: captured,
+        power: power_captured,
+    })
+}
+
+async fn create_scene(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Json(req): Json<CreateSceneRequest>,
+) -> impl IntoResponse {
+    match capture_scene(&state, &req.name, req.room_id.as_deref()).await {
+        Ok(c) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "id": c.id, "lights": c.lights, "power": c.power })),
+        )
+            .into_response(),
+        Err(SceneCaptureError::EmptyName) => {
+            (StatusCode::UNPROCESSABLE_ENTITY, "scene name is required").into_response()
+        }
+        Err(SceneCaptureError::RoomNotFound) => StatusCode::NOT_FOUND.into_response(),
+        Err(SceneCaptureError::Db) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Delete a scene (its entries cascade). Shared by every surface.
+pub(crate) async fn delete_scene(state: &AppState, id: &str) {
+    let _ = sqlx::query("DELETE FROM scenes WHERE id = ?")
+        .bind(id)
+        .execute(&state.db)
+        .await;
 }
 
 async fn remove_scene(
@@ -169,11 +266,7 @@ async fn remove_scene(
     _: Session,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let _ = sqlx::query("DELETE FROM scenes WHERE id = ?")
-        .bind(&id)
-        .execute(&state.db)
-        .await;
-
+    delete_scene(&state, &id).await;
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -205,10 +298,12 @@ async fn activate_scene(
     }
 }
 
-/// Core apply shared by `activate_scene` and `restore_default`. `light_filter`
-/// scopes the lights (and, when present, suppresses power so a room scope stays
-/// lights-only). `(applied, failed)` counts both domains; `None` = empty scene.
-async fn apply_scene_entries(
+/// Core apply shared by every surface (`activate_scene`, `restore_default`, v1,
+/// MCP). `light_filter` scopes the lights (and, when present, suppresses power so
+/// a room-light scope stays lights-only — a room scene activated *without* a
+/// filter still applies its own captured power members). `(applied, failed)`
+/// counts both domains; `None` = the scene has no entries at all (→ 404).
+pub(crate) async fn apply_scene_entries(
     state: &AppState,
     scene_id: &str,
     light_filter: Option<Vec<String>>,
@@ -331,15 +426,24 @@ async fn set_default(
     Path(id): Path<String>,
     Json(req): Json<SetDefaultRequest>,
 ) -> impl IntoResponse {
-    let exists = sqlx::query("SELECT 1 FROM scenes WHERE id = ?")
-        .bind(&id)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .is_some();
-    if !exists {
-        return StatusCode::NOT_FOUND.into_response();
+    // Only a whole-home scene can be the single "Restore Home" default.
+    let room_id: Option<Option<String>> =
+        sqlx::query_scalar("SELECT room_id FROM scenes WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+    match room_id {
+        None => return StatusCode::NOT_FOUND.into_response(),
+        Some(Some(_)) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "only whole-home scenes can be the Restore Home default",
+            )
+                .into_response();
+        }
+        Some(None) => {}
     }
     // At most one default (partial-unique index); clear all first, then set.
     let _ = sqlx::query("UPDATE scenes SET is_default = 0")

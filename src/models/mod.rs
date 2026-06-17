@@ -108,19 +108,41 @@ impl LightStatePatch {
         if let Some(b) = self.brightness {
             state.brightness = Some(b);
         }
-        if let Some(c) = &self.color {
-            state.color = Some(c.clone());
-        }
-        if let Some(m) = self.color_temp_mirek {
-            state.color_temp_mirek = Some(m);
-        }
         if let Some(r) = self.reachable {
             state.reachable = Some(r);
         }
-        if let Some(e) = &self.effect {
-            state.effect = Some(e.clone());
+        // Colour, colour-temperature, and a dynamic effect are mutually exclusive
+        // modes — a light is in exactly one. A patch that sets any one clears the
+        // other two so the merged state names a single honest mode (and a scene
+        // snapshot never carries a stale effect onto a now-plain-colour light).
+        if let Some(c) = &self.color {
+            state.color = Some(c.clone());
+            state.color_temp_mirek = None;
+            state.effect = None;
+        } else if let Some(m) = self.color_temp_mirek {
+            state.color_temp_mirek = Some(m);
+            state.color = None;
+            state.effect = None;
+        } else if let Some(e) = &self.effect {
+            if is_clear_effect(e) {
+                state.effect = None;
+            } else {
+                state.effect = Some(e.clone());
+                state.color = None;
+                state.color_temp_mirek = None;
+            }
         }
     }
+}
+
+/// The provider-specific tokens that all mean "no effect is running" — Hue's
+/// `no_effect`, LIFX's `off`, HA's `None`, or an empty string. Such an effect is
+/// stored as a cleared (`None`) effect, keeping a light in exactly one mode.
+pub fn is_clear_effect(effect: &str) -> bool {
+    matches!(
+        effect.trim().to_ascii_lowercase().as_str(),
+        "" | "no_effect" | "off" | "none"
+    )
 }
 
 /// CIE 1931 xy + brightness, as used by Hue. Govee colors are converted to/from RGB.
@@ -310,5 +332,51 @@ mod tests {
         let (cx, cy) = HueGamut::C.clamp(white.x, white.y);
         assert!((cx - white.x).abs() < 0.01);
         assert!((cy - white.y).abs() < 0.01);
+    }
+
+    #[test]
+    fn clear_effect_tokens_are_recognized() {
+        for t in ["no_effect", "off", "None", "", "  OFF  "] {
+            assert!(is_clear_effect(t), "{t:?} should be a clear token");
+        }
+        assert!(!is_clear_effect("candle"));
+        assert!(!is_clear_effect("breathe"));
+    }
+
+    #[test]
+    fn patch_effect_clears_color_and_temp_and_vice_versa() {
+        // An effect patch puts the light into effect mode, dropping colour/temp.
+        let mut s = LightState {
+            on: true,
+            color: Some(Color::from_rgb(255, 0, 0)),
+            color_temp_mirek: None,
+            ..Default::default()
+        };
+        LightStatePatch {
+            effect: Some("candle".into()),
+            ..Default::default()
+        }
+        .apply_to(&mut s);
+        assert_eq!(s.effect.as_deref(), Some("candle"));
+        assert!(s.color.is_none(), "effect mode clears colour");
+
+        // A colour patch then drops the effect again.
+        LightStatePatch {
+            color: Some(Color::from_rgb(0, 255, 0)),
+            ..Default::default()
+        }
+        .apply_to(&mut s);
+        assert!(s.color.is_some());
+        assert_eq!(s.effect, None, "colour mode clears the effect");
+
+        // A clear-token effect just stops the effect without entering effect mode.
+        s.color = Some(Color::from_rgb(0, 0, 255));
+        LightStatePatch {
+            effect: Some("no_effect".into()),
+            ..Default::default()
+        }
+        .apply_to(&mut s);
+        assert_eq!(s.effect, None);
+        assert!(s.color.is_some(), "clearing an effect leaves colour intact");
     }
 }

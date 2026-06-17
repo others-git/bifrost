@@ -17,17 +17,16 @@ use crate::api::audio::{
     set_companion_status, set_receiver_status, ungroup_device,
 };
 use crate::api::lights::{apply_light_state, get_light_by_id, list_all_lights, set_light_status};
-use crate::api::palette_scenes::{
-    NewScene, SceneError, apply_scene_to_room, create_scene as create_palette_scene,
-    create_scene_from_room, delete_scene as delete_palette_scene,
-    list_scenes as list_palette_scenes,
-};
 use crate::api::power::{
     PowerCommand, apply_power_state, get_power_device_live, list_all_power_devices,
     set_power_status,
 };
 use crate::api::remote::{apply_remote_command, list_remotes, read_remote_state, remote_status};
 use crate::api::rooms::{apply_room_state, effective_members, list_public_rooms};
+use crate::api::scenes::{
+    SceneCaptureError, apply_scene_entries, capture_scene, delete_scene as delete_scene_svc,
+    list_all_scenes,
+};
 use crate::models::LightState;
 use crate::models::remote::RemoteCommand;
 use axum::{
@@ -47,9 +46,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/lights/{id}/state", put(set_light_state))
         .route("/rooms", get(list_rooms))
         .route("/rooms/{id}/state", put(set_room_state))
-        .route("/rooms/{id}/scenes/{scene_id}/apply", post(apply_scene))
         .route("/scenes", get(list_scenes).post(create_scene))
-        .route("/scenes/from-room/{room_id}", post(create_scene_from))
+        .route("/scenes/{id}/activate", post(activate_scene))
         .route("/scenes/{id}", axum::routing::delete(remove_scene))
         .route("/audio/devices", get(list_audio))
         .route("/audio/devices/{id}", get(get_audio))
@@ -144,13 +142,13 @@ async fn set_room_state(
     Json(serde_json::json!({ "applied": applied, "failed": failed })).into_response()
 }
 
-// ── Scenes (global palette presets, applied to rooms) ────────────────────────
+// ── Scenes (full-state snapshots: whole-home or room-scoped) ─────────────────
 
 async fn list_scenes(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
     if let Err(s) = auth(&state, &headers).await {
         return s.into_response();
     }
-    match list_palette_scenes(&state).await {
+    match list_all_scenes(&state).await {
         Ok(scenes) => Json(scenes).into_response(),
         Err(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
@@ -159,10 +157,9 @@ async fn list_scenes(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
 #[derive(Deserialize)]
 struct CreateSceneRequest {
     name: String,
+    /// Omit for a whole-home snapshot; a room id scopes it to that room (Room Scene).
     #[serde(default)]
-    brightness: Option<f32>,
-    #[serde(default)]
-    palette: Vec<String>,
+    room_id: Option<String>,
 }
 
 async fn create_scene(
@@ -173,41 +170,17 @@ async fn create_scene(
     if let Err(s) = auth(&state, &headers).await {
         return s.into_response();
     }
-    let input = NewScene {
-        name: req.name,
-        brightness: req.brightness,
-        palette: req.palette,
-    };
-    scene_create_response(create_palette_scene(&state, input).await)
-}
-
-#[derive(Deserialize)]
-struct FromRoomRequest {
-    name: String,
-}
-
-async fn create_scene_from(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(room_id): Path<String>,
-    Json(req): Json<FromRoomRequest>,
-) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
-    scene_create_response(create_scene_from_room(&state, &room_id, &req.name).await)
-}
-
-fn scene_create_response(result: Result<String, SceneError>) -> axum::response::Response {
-    match result {
-        Ok(scene_id) => (
+    match capture_scene(&state, &req.name, req.room_id.as_deref()).await {
+        Ok(c) => (
             StatusCode::CREATED,
-            Json(serde_json::json!({ "id": scene_id })),
+            Json(serde_json::json!({ "id": c.id, "lights": c.lights, "power": c.power })),
         )
             .into_response(),
-        Err(SceneError::Validation(m)) => (StatusCode::UNPROCESSABLE_ENTITY, m).into_response(),
-        Err(SceneError::NotFound) => StatusCode::NOT_FOUND.into_response(),
-        Err(SceneError::Db) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(SceneCaptureError::EmptyName) => {
+            (StatusCode::UNPROCESSABLE_ENTITY, "scene name is required").into_response()
+        }
+        Err(SceneCaptureError::RoomNotFound) => StatusCode::NOT_FOUND.into_response(),
+        Err(SceneCaptureError::Db) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -219,19 +192,19 @@ async fn remove_scene(
     if let Err(s) = auth(&state, &headers).await {
         return s.into_response();
     }
-    delete_palette_scene(&state, &id).await;
+    delete_scene_svc(&state, &id).await;
     StatusCode::NO_CONTENT.into_response()
 }
 
-async fn apply_scene(
+async fn activate_scene(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path((room_id, scene_id)): Path<(String, String)>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
     if let Err(s) = auth(&state, &headers).await {
         return s.into_response();
     }
-    match apply_scene_to_room(&state, &scene_id, &room_id).await {
+    match apply_scene_entries(&state, &id, None).await {
         Some((applied, failed)) => {
             Json(serde_json::json!({ "applied": applied, "failed": failed })).into_response()
         }

@@ -11,7 +11,7 @@ import {
   type ControlKind,
   type ControlTarget,
   type Light,
-  type PaletteScene,
+  type Scene,
   type PowerDevice,
   type Room,
   type RoomControl,
@@ -64,7 +64,7 @@ function targetsForKind(
   return out;
 }
 
-function summary(c: RoomControl, scenes: PaletteScene[]): string {
+function summary(c: RoomControl, scenes: Scene[]): string {
   if (c.kind === "scene") {
     return `Scene: ${scenes.find((s) => s.id === c.scene_id)?.name ?? "?"}`;
   }
@@ -86,7 +86,7 @@ export function RoomControlsPanel({
   lights: Light[];
   audioDevices: AudioDevice[];
   powerDevices: PowerDevice[];
-  scenes: PaletteScene[];
+  scenes: Scene[];
   onSaved: () => void;
   onCancel: () => void;
 }) {
@@ -222,7 +222,7 @@ function ControlEditor({
   lights: Light[];
   audioDevices: AudioDevice[];
   powerDevices: PowerDevice[];
-  scenes: PaletteScene[];
+  scenes: Scene[];
   initial?: RoomControl;
   onDone: (c: RoomControl) => void;
   onCancel: () => void;
@@ -244,6 +244,8 @@ function ControlEditor({
   }
 
   const available = targetsForKind(kind, room, lights, audioDevices, powerDevices);
+  // A scene quick-control applies one of this room's saved Room Scenes.
+  const roomScenes = scenes.filter((s) => s.room_id === room.id);
 
   const valid =
     glyph.trim().length > 0 &&
@@ -327,14 +329,16 @@ function ControlEditor({
       {kind === "scene" ? (
         <label style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
           <span style={{ fontSize: "0.76rem", color: "var(--bf-dim)" }}>Scene</span>
-          {scenes.length === 0 ? (
-            <span style={{ fontSize: "0.76rem", color: "var(--bf-faint)" }}>No scenes saved yet.</span>
+          {roomScenes.length === 0 ? (
+            <span style={{ fontSize: "0.76rem", color: "var(--bf-faint)" }}>
+              No scenes for this room yet — save one from the room's controls.
+            </span>
           ) : (
             <Select
               value={sceneId}
               onChange={(v) => setSceneId(v)}
               placeholder="Pick a scene…"
-              options={scenes.map((s) => ({ value: s.id, label: s.name }))}
+              options={roomScenes.map((s) => ({ value: s.id, label: s.name }))}
             />
           )}
         </label>
