@@ -49,13 +49,22 @@ const ONLINE_WINDOW_SECS: i64 = 90;
 
 /// Commands the app performs on check-in. (`deauth` is not here — it's an
 /// immediate key revocation, surfaced to the app as a 401, not a queued action.)
-const VALID_COMMANDS: [&str; 3] = ["sleep", "wake", "lock"];
+/// `update` tells the kiosk to pull the cached APK from the hub and self-install
+/// (see [`crate::api::kiosk_update`]).
+const VALID_COMMANDS: [&str; 4] = ["sleep", "wake", "lock", "update"];
 
 pub fn router() -> Router<Arc<AppState>> {
+    use crate::api::kiosk_update as upd;
     Router::new()
         .route("/checkin", post(checkin))
         .route("/stream", get(stream))
         .route("/", get(list))
+        // OTA relay: session triggers/inspects the cache; key-auth endpoints feed
+        // the kiosk the manifest + APK over the LAN.
+        .route("/update", get(upd::update_status).post(upd::refresh_update))
+        .route("/update/config", get(upd::get_config).put(upd::put_config))
+        .route("/update/manifest", get(upd::update_manifest))
+        .route("/update/apk", get(upd::serve_apk))
         .route("/{id}/command", post(command))
         .route("/{id}/room", axum::routing::put(set_room))
         .route("/{id}/deauth", post(deauth))

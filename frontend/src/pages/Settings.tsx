@@ -28,11 +28,16 @@ import {
   kioskDeauth,
   setKioskRoom,
   forgetKiosk,
+  getKioskUpdateConfig,
+  setKioskUpdateConfig,
+  getKioskUpdateStatus,
+  refreshKioskUpdate,
   getRooms,
   type ApiKey,
   type AiEndpoint,
   type AiRole,
   type Kiosk,
+  type KioskUpdateManifest,
   type Room,
   type ConnectionStatus,
   type CredentialField,
@@ -264,6 +269,7 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
         <>
           <ApiKeysSection dialogs={dialogs} />
           <KiosksSection dialogs={dialogs} />
+          <KioskUpdateSection dialogs={dialogs} />
         </>
       )}
 
@@ -1405,6 +1411,126 @@ function KiosksSection({ dialogs }: { dialogs: Dialogs }) {
             </div>
           </div>
         ))}
+      </div>
+    </section>
+  );
+}
+
+// ── Kiosk app updates (hub relays GitHub releases to offline LAN kiosks) ──────
+
+function KioskUpdateSection({ dialogs }: { dialogs: Dialogs }) {
+  const [repo, setRepo] = useState("");
+  const [asset, setAsset] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [cached, setCached] = useState<KioskUpdateManifest | null>(null);
+
+  useEffect(() => {
+    getKioskUpdateConfig().then((c) => {
+      setRepo(c.repo);
+      setAsset(c.asset);
+      setLoaded(true);
+    });
+    getKioskUpdateStatus().then((s) => setCached(s.cached));
+  }, []);
+
+  async function save() {
+    setSaving(true);
+    const res = await setKioskUpdateConfig(repo.trim(), asset.trim());
+    setSaving(false);
+    if ("error" in res) {
+      await dialogs.alert({ title: "Couldn't save", message: res.error });
+      return;
+    }
+    setRepo(res.repo);
+    setAsset(res.asset);
+  }
+
+  async function check() {
+    setChecking(true);
+    const res = await refreshKioskUpdate();
+    setChecking(false);
+    if ("error" in res) {
+      await dialogs.alert({ title: "Update check failed", message: res.error });
+      return;
+    }
+    setCached(res.manifest);
+    await dialogs.alert({
+      title: res.downloaded ? "Update cached" : "Already up to date",
+      message: `v${res.manifest.version_name} (build ${res.manifest.version_code}) is ${
+        res.downloaded ? "now cached on the hub" : "already cached"
+      } and ready to push to kiosks.`,
+    });
+  }
+
+  const inputStyle: React.CSSProperties = {
+    background: "var(--bf-panel, #1a1320)",
+    color: "var(--bf-text, #eee)",
+    border: "1px solid var(--bf-hairline, #333)",
+    borderRadius: 6,
+    padding: "0.4rem 0.6rem",
+    fontSize: "0.85rem",
+    width: "100%",
+    boxSizing: "border-box",
+  };
+  const labelStyle: React.CSSProperties = {
+    display: "flex",
+    flexDirection: "column",
+    gap: "0.25rem",
+    fontSize: "0.78rem",
+    color: "var(--bf-dim)",
+  };
+
+  return (
+    <section style={{ marginTop: "2.5rem" }}>
+      <SectionLabel style={{ marginBottom: "0.4rem" }}>App updates</SectionLabel>
+      <p style={{ margin: "0 0 1rem", color: "var(--bf-faint)", fontSize: "0.85rem" }}>
+        Kiosks are offline and only talk to this hub, so the hub fetches the kiosk APK from its
+        GitHub release and serves it over the LAN. Set where to pull from, then{" "}
+        <strong>Check for updates</strong> to cache the latest build here, ready to push to kiosks.
+      </p>
+      <div style={{ ...S.card, flexDirection: "column", alignItems: "stretch", gap: "0.7rem", maxWidth: 460 }}>
+        <label style={labelStyle}>
+          Source repo (owner/name)
+          <input
+            value={repo}
+            onChange={(e) => setRepo(e.target.value)}
+            placeholder="others-git/bifrost-kiosk"
+            spellCheck={false}
+            autoCapitalize="off"
+            style={inputStyle}
+          />
+        </label>
+        <label style={labelStyle}>
+          Release asset
+          <input
+            value={asset}
+            onChange={(e) => setAsset(e.target.value)}
+            placeholder="app-release.apk"
+            spellCheck={false}
+            autoCapitalize="off"
+            style={inputStyle}
+          />
+        </label>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.7rem", flexWrap: "wrap" }}>
+          <Button onClick={save} disabled={saving || !loaded || !repo.trim() || !asset.trim()}>
+            {saving ? "Saving…" : "Save source"}
+          </Button>
+          <Button variant="ghost" onClick={check} disabled={checking}>
+            {checking ? "Checking…" : "Check for updates"}
+          </Button>
+          <span style={{ fontSize: "0.78rem", color: "var(--bf-faint)" }}>
+            Cached:{" "}
+            {cached ? (
+              <strong style={{ color: "var(--bf-dim)" }}>
+                v{cached.version_name} (build {cached.version_code})
+              </strong>
+            ) : (
+              "none yet"
+            )}
+          </span>
+        </div>
       </div>
     </section>
   );

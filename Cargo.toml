@@ -1,6 +1,6 @@
 [package]
 name = "bifrost"
-version = "0.20.0"
+version = "0.21.0"
 edition = "2024"
 
 [lib]
@@ -51,6 +51,8 @@ async-trait = "0.1"
 # SSE (Hue v2 event stream)
 tokio-stream = { version = "0.1", features = ["sync"] }
 eventsource-stream = "0.2"
+# stream a cached file body (kiosk OTA APK relay)
+tokio-util = { version = "0.7", features = ["io"] }
 
 # credential encryption (AES-256-GCM)
 aes-gcm = "0.10"

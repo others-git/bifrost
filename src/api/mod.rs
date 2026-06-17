@@ -5,6 +5,7 @@ pub mod auth;
 pub mod dedup;
 pub mod enrollment;
 pub mod events;
+pub mod kiosk_update;
 pub mod kiosks;
 pub mod lights;
 pub mod mcp;

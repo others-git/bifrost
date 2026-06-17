@@ -19,6 +19,23 @@
   (hidden on kiosk via `BifrostKiosk` UA); companion-app check-in loop + command
   handling + UA suffix (other repo). Later: browser-session clients in the same
   view; server-side kiosk-kind session enforcement.
+- **M30 — Kiosk OTA update relay** *(hub backend DONE in tree; dashboard + app pending)* —
+  push app updates to offline, LAN-only wall tablets without walking to each one.
+  Kiosks never reach the internet, so the **hub** is the relay: it fetches the
+  latest signed APK from a GitHub release, resolves `versionCode`/`versionName` from
+  the tagged `build.gradle.kts`, and caches the APK on disk (`BIFROST_KIOSK_UPDATE_DIR`,
+  default `data/kiosk-update`). The **source** (repo + asset, default
+  `others-git/bifrost-kiosk` / `app-release.apk` — model bundled) is **dashboard-
+  configurable** (migration 0037, `GET/PUT /api/kiosks/update/config`, Settings →
+  Clients → App updates), not server-env. `api::kiosk_update`: `GET/POST /api/kiosks/update`
+  (session — inspect cache / fetch-from-GitHub) and key-auth `GET …/update/manifest`
+  + `…/update/apk` (the kiosk pulls these over the LAN). The push reuses the kiosk
+  command channel — new `update` verb in `VALID_COMMANDS`. Stable release signing
+  (the `SIGNING_KEYSTORE_*` secrets) makes in-place updates installable. **Remaining:**
+  kiosk side (other repo) — on `update`, pull the manifest, compare to
+  `BuildConfig.VERSION_CODE`, download + verify sha256, silent install via
+  `PackageInstaller` (device-owner privilege); dashboard "update available" + Update
+  button in the Clients view (rides on M29). Later: per-device auto-update opt-in.
 - **M28 — QR device pairing** *(backend + dashboard DONE in tree; app side pending)* —
   authorize headless devices (the wall tablet) without typing a key. An authed
   session mints a short-lived, single-use enrollment token (`POST /api/enrollment`)

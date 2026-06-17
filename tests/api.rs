@@ -3588,6 +3588,120 @@ async fn kiosk_command_rejects_unknown_verb() {
 }
 
 #[tokio::test]
+async fn kiosk_command_accepts_update() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "tablet").await;
+    app.clone()
+        .oneshot(bearer_json("POST", "/api/kiosks/checkin", &key, "{}"))
+        .await
+        .unwrap();
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let id = list.as_array().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = app
+        .oneshot(helpers::authed_post(
+            &format!("/api/kiosks/{id}/command"),
+            &cookie,
+            r#"{"command":"update"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn kiosk_update_config_roundtrips_and_validates() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Defaults are returned before anything is set.
+    let body = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks/update/config", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(body["repo"], "others-git/bifrost-kiosk");
+    assert_eq!(body["asset"], "app-release.apk");
+
+    // A bad repo slug is rejected.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/kiosks/update/config",
+            &cookie,
+            r#"{"repo":"nobody","asset":"app-release.apk"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // A valid update persists and reads back.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/kiosks/update/config",
+            &cookie,
+            r#"{"repo":"acme/kiosk","asset":"app-release-slim.apk"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(
+        app.oneshot(helpers::authed_get("/api/kiosks/update/config", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(body["repo"], "acme/kiosk");
+    assert_eq!(body["asset"], "app-release-slim.apk");
+}
+
+#[tokio::test]
+async fn kiosk_update_config_requires_session() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/kiosks/update/config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn kiosk_update_endpoints_require_api_key() {
+    let app = helpers::test_app_with_password().await;
+    for uri in ["/api/kiosks/update/manifest", "/api/kiosks/update/apk"] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "{uri} should need a key"
+        );
+    }
+}
+
+#[tokio::test]
 async fn kiosk_deauth_revokes_the_key_and_marks_unauthorized() {
     let app = helpers::test_app_with_password().await;
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;

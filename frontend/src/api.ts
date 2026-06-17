@@ -1154,8 +1154,10 @@ export async function getKiosks(): Promise<Kiosk[]> {
   return res.json();
 }
 
+export type KioskCommandVerb = "sleep" | "wake" | "lock" | "update";
+
 /** Queue a command the kiosk performs on its next check-in. */
-export async function kioskCommand(id: string, command: "sleep" | "wake" | "lock"): Promise<void> {
+export async function kioskCommand(id: string, command: KioskCommandVerb): Promise<void> {
   const res = await fetch(`/api/kiosks/${id}/command`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -1181,6 +1183,57 @@ export async function kioskDeauth(id: string): Promise<void> {
 
 export async function forgetKiosk(id: string): Promise<void> {
   await fetch(`/api/kiosks/${id}`, { method: "DELETE" });
+}
+
+// ── Kiosk OTA update source (the hub relays GitHub releases to LAN kiosks) ────
+
+/** Where the hub pulls kiosk APKs from — editable from the dashboard. */
+export interface KioskUpdateConfig {
+  repo: string;
+  asset: string;
+}
+
+/** The cached APK's identity (what a kiosk compares its installed version to). */
+export interface KioskUpdateManifest {
+  version_code: number;
+  version_name: string;
+  size: number;
+  sha256: string;
+}
+
+export async function getKioskUpdateConfig(): Promise<KioskUpdateConfig> {
+  const res = await fetch("/api/kiosks/update/config");
+  if (!res.ok) return { repo: "", asset: "" };
+  return res.json();
+}
+
+export async function setKioskUpdateConfig(
+  repo: string,
+  asset: string,
+): Promise<KioskUpdateConfig | { error: string }> {
+  const res = await fetch("/api/kiosks/update/config", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ repo, asset }),
+  });
+  if (res.ok) return res.json();
+  return { error: (await res.text()) || `HTTP ${res.status}` };
+}
+
+/** The currently-cached APK manifest on the hub (null until a fetch is run). */
+export async function getKioskUpdateStatus(): Promise<{ cached: KioskUpdateManifest | null }> {
+  const res = await fetch("/api/kiosks/update");
+  if (!res.ok) return { cached: null };
+  return res.json();
+}
+
+/** Fetch the latest release from GitHub and cache its APK on the hub. */
+export async function refreshKioskUpdate(): Promise<
+  { manifest: KioskUpdateManifest; downloaded: boolean } | { error: string }
+> {
+  const res = await fetch("/api/kiosks/update", { method: "POST" });
+  if (res.ok) return res.json();
+  return { error: (await res.text()) || `HTTP ${res.status}` };
 }
 
 // ── Floor plans ──────────────────────────────────────────────────────────────
