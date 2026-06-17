@@ -195,6 +195,8 @@ export interface Provider {
   enabled: boolean;
   /** When set, discovering this provider removes devices it no longer reports. */
   prune: boolean;
+  /** User-controlled sort position on the Devices page (ascending). */
+  display_order: number;
   created_at: string;
 }
 
@@ -648,6 +650,15 @@ export async function setProviderPrune(id: string, prune: boolean): Promise<void
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ prune }),
+  });
+}
+
+/** Persist the Devices-page ordering of provider groups (full id list, top → bottom). */
+export async function setProviderOrder(order: string[]): Promise<void> {
+  await fetch("/api/providers/order", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ order }),
   });
 }
 

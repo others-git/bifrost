@@ -17,6 +17,7 @@ use uuid::Uuid;
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(list_providers).post(add_provider))
+        .route("/order", put(reorder_providers))
         .route("/types", get(list_types))
         .route("/scan/{provider_type}", post(scan_network))
         .route("/hue/pair", post(hue_pair))
@@ -91,12 +92,15 @@ struct ProviderRow {
     enabled: bool,
     /// When set, a discover removes devices the provider no longer reports.
     prune: bool,
+    /// User-controlled sort position on the Devices page (ascending).
+    display_order: i64,
     created_at: String,
 }
 
 async fn list_providers(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
     match sqlx::query(
-        "SELECT id, provider_type, name, enabled, prune, created_at FROM providers ORDER BY created_at",
+        "SELECT id, provider_type, name, enabled, prune, display_order, created_at \
+         FROM providers ORDER BY display_order, created_at",
     )
     .fetch_all(&state.db)
     .await
@@ -124,6 +128,7 @@ async fn list_providers(State(state): State<Arc<AppState>>, _: Session) -> impl 
                         name: r.get("name"),
                         enabled: r.get::<i64, _>("enabled") != 0,
                         prune: r.get::<i64, _>("prune") != 0,
+                        display_order: r.get("display_order"),
                         created_at: r.get("created_at"),
                     }
                 })
@@ -135,6 +140,46 @@ async fn list_providers(State(state): State<Arc<AppState>>, _: Session) -> impl 
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
+}
+
+#[derive(Deserialize)]
+struct ReorderRequest {
+    /// Provider ids in the desired top-to-bottom order. The client sends the full
+    /// set; unknown ids are ignored, and any provider omitted simply keeps its
+    /// stored order (tie-broken by creation time on read).
+    order: Vec<String>,
+}
+
+/// Persist the Devices-page ordering of provider groups: each listed id gets a
+/// `display_order` equal to its index, applied in one transaction.
+async fn reorder_providers(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Json(req): Json<ReorderRequest>,
+) -> impl IntoResponse {
+    let mut tx = match state.db.begin().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("db error: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    for (idx, id) in req.order.iter().enumerate() {
+        if let Err(e) = sqlx::query("UPDATE providers SET display_order = ? WHERE id = ?")
+            .bind(idx as i64)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+        {
+            tracing::error!("db error: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+    if let Err(e) = tx.commit().await {
+        tracing::error!("db error: {e}");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(Deserialize)]
@@ -190,7 +235,8 @@ async fn add_provider(
 
     let id = Uuid::new_v4().to_string();
     match sqlx::query(
-        "INSERT INTO providers (id, provider_type, name, credentials) VALUES (?, ?, ?, ?)",
+        "INSERT INTO providers (id, provider_type, name, credentials, display_order)
+         VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(display_order), -1) + 1 FROM providers))",
     )
     .bind(&id)
     .bind(&req.provider_type)

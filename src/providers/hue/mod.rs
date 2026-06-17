@@ -23,6 +23,48 @@ use uuid::Uuid;
 /// health-check job).
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// Minimum spacing between *write* commands dispatched to a single bridge. Hue's
+/// CLIP v2 caps light commands at ~10/s per bridge and returns **429** past that,
+/// which a fan-out (e.g. Restore Home touching every bulb) trivially trips when
+/// it fires all the `set_state` calls at once. 120ms ≈ 8/s leaves headroom.
+const MIN_WRITE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// Reserve the next dispatch slot for `bridge_base` and return how long to wait
+/// before sending so writes to one bridge stay paced under Hue's rate limit.
+///
+/// The gate is keyed by bridge base URL (independent bridges aren't cross-
+/// throttled) and lives process-wide because every control call builds a fresh
+/// `HueProvider`, so a per-instance limiter would share no state across the
+/// lights of a fan-out. The brief async lock is held only for the slot
+/// arithmetic — never across the HTTP request — so a slow/unreachable bulb
+/// paces the queue without blocking it.
+async fn reserve_write_slot(bridge_base: &str) -> std::time::Duration {
+    use std::collections::HashMap;
+    use std::sync::{Mutex as StdMutex, OnceLock};
+    use std::time::Instant;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    static GATES: OnceLock<StdMutex<HashMap<String, std::sync::Arc<AsyncMutex<Instant>>>>> =
+        OnceLock::new();
+    let gate = {
+        let map = GATES.get_or_init(|| StdMutex::new(HashMap::new()));
+        let mut guard = map.lock().unwrap();
+        guard
+            .entry(bridge_base.to_string())
+            .or_insert_with(|| {
+                std::sync::Arc::new(AsyncMutex::new(Instant::now() - MIN_WRITE_INTERVAL))
+            })
+            .clone()
+    };
+
+    let mut next = gate.lock().await;
+    let now = Instant::now();
+    // Earliest this caller may dispatch: the later of "now" and the reserved slot.
+    let start = (*next).max(now);
+    *next = start + MIN_WRITE_INTERVAL;
+    start.saturating_duration_since(now)
+}
+
 pub struct HueProvider {
     client: Client,
     /// Base URL for the bridge, e.g. `https://192.168.1.10`.
@@ -297,6 +339,12 @@ impl LightProvider for HueProvider {
     }
 
     async fn set_state(&self, provider_id: &str, state: &LightState) -> Result<()> {
+        // Pace writes to the bridge so a fan-out doesn't trip Hue's 429 limit.
+        let wait = reserve_write_slot(&self.bridge_base).await;
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+
         let url = self.resource_url(&format!("/light/{provider_id}"));
         let body = HuePutLight {
             on: Some(HueOn { on: state.on }),
@@ -813,6 +861,47 @@ mod tests {
         assert_eq!(body["on"]["on"], true);
         assert_eq!(body["dimming"]["brightness"], 50.0);
         assert_eq!(body["color_temperature"]["mirek"], 370);
+    }
+
+    #[tokio::test]
+    async fn concurrent_set_state_are_paced_under_rate_limit() {
+        // Five writes fired at once to one bridge must be spaced out (not all
+        // dispatched simultaneously), so Hue's ~10/s limit isn't tripped.
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+            .mount(&server)
+            .await;
+
+        let state = LightState {
+            on: true,
+            brightness: None,
+            color: None,
+            color_temp_mirek: None,
+            reachable: None,
+        };
+
+        let start = std::time::Instant::now();
+        let jobs = (0..5).map(|i| {
+            let uri = server.uri();
+            let st = state.clone();
+            async move {
+                HueProvider::new_for_test(uri, "test-app-key")
+                    .unwrap()
+                    .set_state(&format!("light-{i}"), &st)
+                    .await
+                    .unwrap();
+            }
+        });
+        futures_util::future::join_all(jobs).await;
+
+        // 5 writes paced at 120ms ⇒ the last starts ≥ 4*120ms after the first.
+        assert!(
+            start.elapsed() >= MIN_WRITE_INTERVAL * 4,
+            "writes were not paced: {:?}",
+            start.elapsed()
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 5);
     }
 
     #[tokio::test]

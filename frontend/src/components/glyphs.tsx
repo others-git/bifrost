@@ -169,6 +169,49 @@ const BODIES: Record<string, JSX.Element> = {
       <path d="M3 3v5h5" />
     </>
   ),
+
+  // ── Floor-plan tool palette ────────────────────────────────────────────────
+  cursor: (
+    // Selection arrow — the view / select tool.
+    <path d="M5 4 18 10.5 12.6 12.1 10 18 5 4Z" />
+  ),
+  floor: (
+    // A gridded tile field — paint floor.
+    <>
+      <rect x="3.5" y="3.5" width="17" height="17" rx="1.5" />
+      <path d="M9 3.5v17M14.5 3.5v17M3.5 9h17M3.5 14.5h17" />
+    </>
+  ),
+  wall: (
+    // Brick courses — draw walls.
+    <>
+      <rect x="3.5" y="6" width="17" height="12" rx="1" />
+      <path d="M3.5 12h17M11 6v6M7 12v6M15 12v6" />
+    </>
+  ),
+  erase: (
+    // An angled eraser block on a baseline.
+    <>
+      <path d="M8.5 8 4.2 12.3a2 2 0 0 0 0 2.8l3 3h6.3l6.3-6.3a2 2 0 0 0 0-2.8l-2.7-2.7a2 2 0 0 0-2.8 0Z" />
+      <path d="M7.2 15.1h6.3" />
+      <path d="M4 21h16" />
+    </>
+  ),
+  place: (
+    // A map pin with a core — place a device.
+    <>
+      <path d="M12 21s6-5.4 6-10A6 6 0 0 0 6 11c0 4.6 6 10 6 10Z" />
+      <circle cx="12" cy="11" r="2.2" fill="currentColor" stroke="none" />
+    </>
+  ),
+  brush: (
+    // A paint roller — the live color brush.
+    <>
+      <rect x="3.5" y="4" width="13" height="5.5" rx="1.4" />
+      <path d="M10 9.5v3h3.5v2.4" />
+      <rect x="11.6" y="15.3" width="3.8" height="5.7" rx="1.1" />
+    </>
+  ),
 };
 
 /// User-pickable override glyphs, with display labels (the per-kind power glyphs

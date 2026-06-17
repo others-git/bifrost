@@ -38,7 +38,8 @@ import { RoomVolumeStrip } from "../components/RoomAudio";
 import { SceneButton, SceneModal } from "../components/scenes";
 import { Modal, useDialogs } from "../components/dialogs";
 import { ACCENT, S } from "../styles";
-import { alpha } from "../theme";
+import { alpha, color, font, glassCard, glow, labelType, radius } from "../theme";
+import { Glyph } from "../components/glyphs";
 import { Button, Switch as SharedSwitch } from "../components/controls";
 
 type Tool = "view" | "floor" | "wall" | "erase" | "place" | "room" | "paint";
@@ -52,6 +53,17 @@ const TOOLS: { id: Tool; label: string; hint: string }[] = [
   { id: "room", label: "Rooms", hint: "Pick or create a room on the right, then click-drag tiles to paint it. A tile belongs to one room." },
   { id: "paint", label: "Brush", hint: "Pick a color and brightness on the right, then click or brush across lights to color them live." },
 ];
+
+/** Glyph per tool for the icon palette. */
+const TOOL_GLYPH: Record<Tool, string> = {
+  view: "cursor",
+  floor: "floor",
+  wall: "wall",
+  erase: "erase",
+  place: "place",
+  room: "room",
+  paint: "brush",
+};
 
 /** Device category chosen under the Devices tool. */
 type PlaceCategory = "light" | "audio";
@@ -474,20 +486,27 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
     const active = tool === id;
     return (
       <button
+        key={id}
         onClick={() => { setTool(id); setPopover(null); setEditor(null); }}
-        title={t.hint}
+        title={`${t.label} — ${t.hint}`}
+        aria-label={t.label}
         style={{
-          padding: "0.28rem 0.5rem",
-          borderRadius: 6,
-          border: `1px solid ${active ? ACCENT : "#2a2030"}`,
-          background: active ? `${alpha(ACCENT, 0.10)}` : "transparent",
-          color: active ? ACCENT : "var(--bf-dim)",
+          width: 42,
+          height: 42,
+          display: "grid",
+          placeItems: "center",
+          borderRadius: radius.md,
           cursor: "pointer",
-          fontSize: "0.8rem",
-          textAlign: "left",
+          color: active ? ACCENT : color.dim,
+          background: active
+            ? `radial-gradient(130% 130% at 50% 0%, ${alpha(ACCENT, 0.16)}, transparent 62%), ${color.surface}`
+            : "transparent",
+          border: `1px solid ${active ? alpha(ACCENT, 0.5) : "transparent"}`,
+          boxShadow: active ? glow(ACCENT, 14) : "none",
+          transition: "color .15s, background .15s, border-color .15s, box-shadow .15s",
         }}
       >
-        {t.label}
+        <Glyph name={TOOL_GLYPH[id]} size={20} />
       </button>
     );
   };
@@ -554,44 +573,76 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
         </p>
       ) : (
         <>
-          <div style={{ display: "flex", gap: "1rem", alignItems: "flex-start" }}>
-            {/* Left tool rail */}
-            <div style={{ width: 92, flexShrink: 0, display: "flex", flexDirection: "column", gap: "0.15rem" }}>
-              {toolButton("view")}
-              <RailLabel>Draft</RailLabel>
-              {toolButton("floor")}
-              {toolButton("wall")}
-              {toolButton("erase")}
-              {toolButton("room")}
-              <RailLabel>Place</RailLabel>
-              {toolButton("place")}
-              {tool === "place" && (
-                <div style={{ display: "flex", flexDirection: "column", gap: "0.15rem", marginLeft: "0.15rem", paddingLeft: "0.4rem", borderLeft: `2px solid ${alpha(ACCENT, 0.33)}` }}>
-                  {(["light", "audio"] as PlaceCategory[]).map((cat) => (
+          {/* Contextual options bar — the active tool + its settings + a hint,
+              the way a drafting tool surfaces tool options above the canvas. */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "0.8rem",
+              padding: "0.4rem 0.75rem",
+              marginBottom: "0.7rem",
+              ...glassCard,
+              borderRadius: radius.md,
+            }}
+          >
+            <span style={{ display: "flex", alignItems: "center", gap: "0.45rem", color: ACCENT, fontFamily: font.display, textTransform: "uppercase", letterSpacing: "0.12em", fontSize: "0.78rem", fontWeight: 600 }}>
+              <Glyph name={TOOL_GLYPH[tool]} size={16} />
+              {TOOLS.find((t) => t.id === tool)?.label}
+            </span>
+            {tool === "place" && (
+              <div style={{ display: "inline-flex", borderRadius: radius.sm, border: `1px solid ${color.border}`, overflow: "hidden" }}>
+                {(["light", "audio"] as PlaceCategory[]).map((cat) => {
+                  const on = placeCategory === cat;
+                  return (
                     <button
                       key={cat}
                       onClick={() => { setPlaceCategory(cat); setSelected(null); }}
                       style={{
-                        padding: "0.22rem 0.4rem",
-                        borderRadius: 5,
-                        border: `1px solid ${placeCategory === cat ? ACCENT : "#2a2030"}`,
-                        background: placeCategory === cat ? `${alpha(ACCENT, 0.10)}` : "transparent",
-                        color: placeCategory === cat ? ACCENT : "var(--bf-dim)",
+                        padding: "0.3rem 0.75rem",
+                        border: "none",
                         cursor: "pointer",
-                        fontSize: "0.72rem",
-                        textAlign: "left",
+                        fontSize: "0.78rem",
+                        background: on ? alpha(ACCENT, 0.14) : "transparent",
+                        color: on ? ACCENT : color.dim,
                       }}
                     >
                       {cat === "light" ? "Lights" : "Speakers"}
                     </button>
-                  ))}
-                </div>
-              )}
-              <RailLabel>Color</RailLabel>
+                  );
+                })}
+              </div>
+            )}
+            <span style={{ flex: 1 }} />
+            <span style={{ color: color.faint, fontSize: "0.75rem", maxWidth: 540, textAlign: "right", lineHeight: 1.3 }}>
+              {TOOLS.find((t) => t.id === tool)?.hint}
+            </span>
+          </div>
+
+          <div style={{ display: "flex", gap: "1rem", alignItems: "flex-start" }}>
+            {/* Left tool palette — icon-driven, grouped like a drafting tool. */}
+            <div
+              style={{
+                flexShrink: 0,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                gap: "0.2rem",
+                padding: "0.35rem",
+                alignSelf: "flex-start",
+                ...glassCard,
+                borderRadius: radius.md,
+              }}
+            >
+              {toolButton("view")}
+              <ToolDivider />
+              {toolButton("floor")}
+              {toolButton("wall")}
+              {toolButton("erase")}
+              {toolButton("room")}
+              <ToolDivider />
+              {toolButton("place")}
               {toolButton("paint")}
-              <span style={{ color: "var(--bf-faint)", fontSize: "0.68rem", marginTop: "0.5rem", lineHeight: 1.3 }}>
-                {TOOLS.find((t) => t.id === tool)?.hint}
-              </span>
             </div>
 
             <PlanCanvas
@@ -637,9 +688,8 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
             )}
 
             {tool === "place" && placeCategory === "light" && (
-              <div style={{ width: 220, flexShrink: 0 }}>
-                <h3 style={{ margin: "0 0 0.5rem", fontSize: "0.9rem", color: "var(--bf-dim)" }}>Lights</h3>
-                <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+              <InspectorPanel title="Lights">
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem", maxHeight: "calc(100vh - 230px)", overflowY: "auto" }}>
                   {lights.map((l) => {
                     const sel = selected?.kind === "light" && selected.id === l.id;
                     return (
@@ -658,13 +708,12 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                     <span style={{ color: "var(--bf-faint)", fontSize: "0.8rem" }}>No lights discovered yet.</span>
                   )}
                 </div>
-              </div>
+              </InspectorPanel>
             )}
 
             {tool === "place" && placeCategory === "audio" && (
-              <div style={{ width: 220, flexShrink: 0 }}>
-                <h3 style={{ margin: "0 0 0.5rem", fontSize: "0.9rem", color: "var(--bf-dim)" }}>Speakers</h3>
-                <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+              <InspectorPanel title="Speakers">
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem", maxHeight: "calc(100vh - 230px)", overflowY: "auto" }}>
                   {[...audioById.values()].map((d) => {
                     const sel = selected?.kind === "audio" && selected.id === d.id;
                     return (
@@ -683,12 +732,11 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                     <span style={{ color: "var(--bf-faint)", fontSize: "0.8rem" }}>No audio devices discovered yet.</span>
                   )}
                 </div>
-              </div>
+              </InspectorPanel>
             )}
 
             {tool === "paint" && (
-              <div style={{ width: 220, flexShrink: 0, display: "flex", flexDirection: "column", gap: "0.6rem" }}>
-                <h3 style={{ margin: 0, fontSize: "0.9rem", color: "var(--bf-dim)" }}>Brush</h3>
+              <InspectorPanel title="Brush">
                 {(() => {
                   const [bh, bs] = hexToHs(paintColor);
                   return (
@@ -715,12 +763,13 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                   Brush across lights on the plan to apply. Save the result as a
                   room scene with “Save current” in View mode.
                 </span>
-              </div>
+              </InspectorPanel>
             )}
 
             {tool === "room" && (
               <RoomEditorPanel
                 rooms={rooms}
+                allRooms={allRooms}
                 selectedRoom={selectedRoom}
                 onSelect={setSelectedRoom}
                 onCreate={async () => {
@@ -732,6 +781,14 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                   if (!name?.trim()) return;
                   // Local placeholder id so selection works before save.
                   const room: EditRoom = { id: `new-${Date.now()}`, name: name.trim(), tiles: new Set() };
+                  setRooms((prev) => [...prev, room]);
+                  setSelectedRoom(room.id);
+                  setDirty(true);
+                }}
+                onAddExisting={(name) => {
+                  // Add an existing Bifrost Room as a region to paint; the backend
+                  // binds it to the same-named Room on save (no duplicate).
+                  const room: EditRoom = { id: `new-${Date.now()}`, name, tiles: new Set() };
                   setRooms((prev) => [...prev, room]);
                   setSelectedRoom(room.id);
                   setDirty(true);
@@ -964,23 +1021,31 @@ function NewPlanDialog({
   );
 }
 
-/** Small uppercase section label in the left tool rail. A hairline divider on
- * top keeps groups clearly separated without wasting vertical space. */
-function RailLabel({ children }: { children: React.ReactNode }) {
+/** A hairline separator between tool groups in the icon palette. */
+function ToolDivider() {
+  return <div style={{ width: "70%", height: 1, background: color.hairline, margin: "0.25rem 0" }} />;
+}
+
+/** A docked right-side inspector panel — glass surface + engraved header, the
+ * counterpart to the left tool palette. */
+function InspectorPanel({ title, width = 240, children }: { title: string; width?: number; children: React.ReactNode }) {
   return (
-    <span
+    <div
       style={{
-        color: "#6a675d",
-        fontSize: "0.58rem",
-        letterSpacing: "0.1em",
-        textTransform: "uppercase",
-        marginTop: "0.45rem",
-        paddingTop: "0.3rem",
-        borderTop: "1px solid #23202a",
+        width,
+        flexShrink: 0,
+        alignSelf: "flex-start",
+        display: "flex",
+        flexDirection: "column",
+        gap: "0.5rem",
+        padding: "0.7rem 0.75rem",
+        ...glassCard,
+        borderRadius: radius.md,
       }}
     >
+      <h3 style={{ ...labelType, margin: 0, fontSize: "0.76rem", color: color.dim }}>{title}</h3>
       {children}
-    </span>
+    </div>
   );
 }
 
@@ -1103,22 +1168,32 @@ function Switch({ on, onToggle, disabled }: { on: boolean; onToggle: () => void;
 
 function RoomEditorPanel({
   rooms,
+  allRooms,
   selectedRoom,
   onSelect,
   onCreate,
+  onAddExisting,
   onRename,
   onDelete,
 }: {
   rooms: EditRoom[];
+  allRooms: Room[];
   selectedRoom: string;
   onSelect: (id: string) => void;
   onCreate: () => void;
+  onAddExisting: (name: string) => void;
   onRename: (id: string) => void;
   onDelete: (id: string) => void;
 }) {
+  // Existing Bifrost Rooms not yet painted as a region here (name-matched, as
+  // the backend binds a region to a same-named Room). Offer them as one-tap adds
+  // so the user picks "Bedroom" rather than re-typing it exactly.
+  const painted = new Set(rooms.map((r) => r.name.toLowerCase()));
+  const unpainted = allRooms.filter((r) => r.enabled && !painted.has(r.name.toLowerCase()));
+
   return (
-    <div style={{ width: 220, flexShrink: 0, display: "flex", flexDirection: "column", gap: "0.4rem" }}>
-      <h3 style={{ margin: "0 0 0.2rem", fontSize: "0.9rem", color: "var(--bf-dim)" }}>Rooms</h3>
+    <div style={{ width: 240, flexShrink: 0, alignSelf: "flex-start", display: "flex", flexDirection: "column", gap: "0.4rem", padding: "0.7rem 0.75rem", ...glassCard, borderRadius: radius.md }}>
+      <h3 style={{ ...labelType, margin: 0, fontSize: "0.76rem", color: color.dim }}>Rooms</h3>
       {rooms.map((r, i) => (
         <div key={r.id} style={{ display: "flex", gap: "0.3rem", alignItems: "center" }}>
           <Button variant="ghost"
@@ -1135,6 +1210,27 @@ function RoomEditorPanel({
           <Button variant="ghost" onClick={() => onDelete(r.id)} title="Delete" style={{ padding: "0.3rem 0.5rem", color: "#866" }}>×</Button>
         </div>
       ))}
+
+      {unpainted.length > 0 && (
+        <>
+          <span style={{ color: "var(--bf-faint)", fontSize: "0.72rem", marginTop: "0.2rem" }}>
+            Your rooms — tap to add &amp; paint:
+          </span>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.3rem" }}>
+            {unpainted.map((r) => (
+              <Button
+                key={r.id}
+                variant="ghost"
+                onClick={() => onAddExisting(r.name)}
+                style={{ fontSize: "0.78rem", padding: "0.25rem 0.55rem" }}
+              >
+                + {r.name}
+              </Button>
+            ))}
+          </div>
+        </>
+      )}
+
       <Button variant="ghost" onClick={onCreate}>+ New room</Button>
       {rooms.length > 0 && !selectedRoom && (
         <span style={{ color: "var(--bf-faint)", fontSize: "0.75rem" }}>Select a room, then paint its tiles.</span>

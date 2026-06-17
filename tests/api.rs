@@ -429,6 +429,64 @@ async fn list_providers_with_valid_session_returns_empty_array() {
 }
 
 #[tokio::test]
+async fn reorder_providers_persists_display_order() {
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    for (id, name) in [("p-a", "Alpha"), ("p-b", "Bravo"), ("p-c", "Charlie")] {
+        sqlx::query("INSERT INTO providers (id, provider_type, name, credentials) VALUES (?, 'wled', ?, 'x')")
+            .bind(id)
+            .bind(name)
+            .execute(&state.db)
+            .await
+            .unwrap();
+    }
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Reorder to Charlie, Alpha, Bravo.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/providers/order",
+            &cookie,
+            r#"{"order":["p-c","p-a","p-b"]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // The list now reflects that order.
+    let resp = app
+        .oneshot(helpers::authed_get("/api/providers", &cookie))
+        .await
+        .unwrap();
+    let body = helpers::response_json(resp).await;
+    let ids: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["p-c", "p-a", "p-b"]);
+}
+
+#[tokio::test]
+async fn reorder_providers_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/providers/order")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"order":["x"]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn logout_clears_session() {
     let app = helpers::test_app_with_password().await;
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;

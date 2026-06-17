@@ -15,6 +15,7 @@ import { color, font, navAurora as NAV_AURORA, alpha } from "./theme";
 import { useViewport } from "./useViewport";
 import { useAutoReloadOnNewBuild } from "./useAutoReload";
 import { VoiceFeedback } from "./components/VoiceFeedback";
+import { PushToTalk } from "./components/PushToTalk";
 
 /** Pages reachable from the nav tray. */
 type NavPage = "dashboard" | "audio" | "devices" | "scenes" | "rooms" | "plan" | "settings";
@@ -135,6 +136,11 @@ export function App() {
         style={{
           flex: 1,
           minWidth: 0,
+          // Flex column so a page can fill the viewport height via `flex: 1`
+          // and bottom-anchor content (e.g. the Restore Home seal) reliably —
+          // percentage heights don't resolve through a flex-grown item.
+          display: "flex",
+          flexDirection: "column",
           // Clear the fixed bottom tab bar (plus the device's home-bar inset).
           paddingBottom: isCompact ? "calc(58px + env(safe-area-inset-bottom))" : 0,
         }}
@@ -162,6 +168,9 @@ export function App() {
       {/* Wake-word feedback overlay — driven by the kiosk app via
           window.bifrostVoice. Non-blocking; present on every signed-in page. */}
       <VoiceFeedback />
+
+      {/* Hold-to-talk mic: bypasses wake spotting, drives the same overlay. */}
+      <PushToTalk />
     </div>
   );
 }

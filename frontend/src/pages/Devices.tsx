@@ -11,6 +11,7 @@ import {
   getAudioDevices,
   getPowerDevices,
   getRooms,
+  getProviders,
   setPowerEnabled,
   setLightEnabled,
   setAudioEnabled,
@@ -26,11 +27,13 @@ import {
   setPowerRoom,
   setAudioReceiver,
   setAudioCompanion,
+  setProviderOrder,
   type Light,
   type AudioDevice,
   type PowerDevice,
   type PowerKind,
   type Room,
+  type Provider,
 } from "../api";
 import { Glyph, GLYPH_OPTIONS, powerKindGlyph, audioKindGlyph } from "../components/glyphs";
 import { PageHeader, SectionLabel } from "../components/PageHeader";
@@ -50,6 +53,8 @@ interface Item {
   id: string;
   name: string;
   deviceId: string;
+  /** The provider this device was imported from — the page's top-level grouping. */
+  providerId: string;
   typeLabel: string;
   enabled: boolean;
   glyph: string | null;
@@ -101,6 +106,7 @@ function lightItem(l: Light): Item {
     id: l.id,
     name: l.name,
     deviceId: l.device_id,
+    providerId: l.provider_id,
     typeLabel: "Light",
     enabled: l.enabled !== false,
     glyph: l.glyph ?? null,
@@ -121,6 +127,7 @@ function audioItem(a: AudioDevice): Item {
     id: a.id,
     name: a.name,
     deviceId: a.device_id,
+    providerId: a.provider_id,
     typeLabel: AUDIO_KIND_LABEL[a.kind] ?? "Audio",
     enabled: a.enabled !== false,
     glyph: a.glyph ?? null,
@@ -144,6 +151,7 @@ function powerItem(p: PowerDevice): Item {
     id: p.id,
     name: p.name,
     deviceId: p.device_id,
+    providerId: p.provider_id,
     typeLabel: POWER_KIND_LABEL[p.kind] ?? "Device",
     enabled: p.enabled !== false,
     glyph: p.glyph ?? null,
@@ -438,6 +446,31 @@ function MergePicker({
   );
 }
 
+/// A small uppercase status pill. `bad` (offline — a fault, red) reads louder
+/// than `muted` (disabled — a deliberate, set-aside state, neutral grey).
+function StatusPill({ label, tone }: { label: string; tone: "bad" | "muted" }) {
+  const bad = tone === "bad";
+  return (
+    <span
+      style={{
+        flexShrink: 0,
+        fontSize: "0.6rem",
+        fontWeight: 700,
+        letterSpacing: "0.07em",
+        textTransform: "uppercase",
+        color: bad ? T.bad : T.dim,
+        background: bad ? alpha(T.bad, 0.13) : "rgba(255,255,255,0.05)",
+        border: `1px solid ${bad ? alpha(T.bad, 0.4) : T.cardBorder}`,
+        borderRadius: 999,
+        padding: "0.06rem 0.42rem",
+        lineHeight: 1.35,
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
 function DeviceCard({
   item,
   rooms,
@@ -497,6 +530,25 @@ function DeviceCard({
   const clamp: React.CSSProperties = expanded
     ? { whiteSpace: "normal", overflowWrap: "break-word", wordBreak: "normal" }
     : { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
+  // Distinct visual languages so the two muted states never read alike:
+  //  • disabled — a deliberate, set-aside device: dashed border, neutral, dimmer.
+  //  • offline  — a fault that wants attention: solid red-tinted border + a red
+  //    inset edge, kept brighter than disabled so it stands out rather than hides.
+  // (disabled wins when both: we aren't managing it, so the fault is moot.)
+  const cardStyle: React.CSSProperties = disabled
+    ? { background: T.cardOff, border: `1px dashed ${T.cardBorder}`, opacity: 0.62 }
+    : offline
+      ? {
+          background: T.cardOff,
+          border: `1px solid ${alpha(T.bad, 0.45)}`,
+          boxShadow: `inset 3px 0 0 ${T.bad}`,
+          opacity: 0.92,
+        }
+      : {
+          background: on ? T.card : T.cardOff,
+          border: `1px solid ${on ? "rgba(56,189,248,0.22)" : T.cardBorder}`,
+          opacity: 1,
+        };
   return (
     <div
       style={{
@@ -505,12 +557,10 @@ function DeviceCard({
         gap: "0.7rem",
         padding: "0.85rem 1rem",
         borderRadius: 12,
-        background: on ? T.card : T.cardOff,
-        border: `1px solid ${on ? "rgba(56,189,248,0.22)" : T.cardBorder}`,
-        opacity: disabled ? 0.45 : offline ? 0.6 : 1,
         minWidth: 0,
         boxSizing: "border-box",
         position: "relative",
+        ...cardStyle,
       }}
     >
       <button
@@ -575,12 +625,8 @@ function DeviceCard({
           <span style={{ flexShrink: 0 }}>{item.typeLabel}</span>
           <span style={{ flexShrink: 0 }}>·</span>
           <span style={{ minWidth: 0, ...clamp }}>{item.deviceId}</span>
-          {offline && (
-            <>
-              <span style={{ flexShrink: 0 }}>·</span>
-              <span style={{ flexShrink: 0, color: T.bad }}>offline</span>
-            </>
-          )}
+          {disabled && <StatusPill label="Disabled" tone="muted" />}
+          {offline && <StatusPill label="Offline" tone="bad" />}
         </div>
       </div>
 
@@ -872,23 +918,40 @@ const SECTIONS: { domain: Domain; title: string }[] = [
 export function DevicesPage() {
   const [items, setItems] = useState<Item[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
+  const [providers, setProviders] = useState<Provider[]>([]);
   // Raw audio devices kept around so the receiver-binding picker has names +
   // each receiver's input list (the normalized Item drops device state).
   const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
   const [loading, setLoading] = useState(true);
+  // Live pointer-drag reordering of provider groups: `drag` drives the render
+  // (the floating section's offset + where the others make room); `sectionRefs`
+  // measure layout at grab time; `dragInfo` holds the immutable grab snapshot.
+  const [drag, setDrag] = useState<{ id: string; dy: number; target: number; h: number } | null>(
+    null,
+  );
+  const sectionRefs = useRef<Map<string, HTMLElement>>(new Map());
+  const dragInfo = useRef<{
+    id: string;
+    centers: number[];
+    originalIndex: number;
+    target: number;
+    startY: number;
+  } | null>(null);
   const { isMobile } = useViewport();
 
   const refresh = useCallback(async () => {
-    const [lights, audio, power, roomList] = await Promise.all([
+    const [lights, audio, power, roomList, providerList] = await Promise.all([
       getLights(),
       getAudioDevices(),
       getPowerDevices(),
       getRooms(),
+      getProviders(),
     ]);
     const lightItems = lights === "unauthorized" ? [] : lights.map(lightItem);
     setItems([...lightItems, ...audio.map(audioItem), ...power.map(powerItem)]);
     setAudioDevices(audio);
     setRooms(roomList);
+    setProviders(providerList);
     setLoading(false);
   }, []);
 
@@ -958,11 +1021,206 @@ export function DevicesPage() {
 
   const byId = new Map(items.map((d) => [d.id, d] as const));
 
+  // Merge (M26) matches the *same physical device*, which a different provider
+  // may also serve — so candidates are all visible audio devices, not just the
+  // current provider's (preserves behaviour from before the provider grouping).
+  const visibleAudio = items.filter(
+    (d) => d.domain === "audio" && !d.shadowedBy && !d.companionOf,
+  );
+
+  // Top-level grouping is by provider, in the user-saved `display_order` (the
+  // API already returns providers in that order). Providers with devices are the
+  // reorderable list; any provider id a device still references but that's no
+  // longer in the provider list (orphans) renders last, non-reorderable, so
+  // nothing silently disappears.
+  const hasDevices = (pid: string) => items.some((d) => d.providerId === pid);
+  const visibleProviders = providers.filter((p) => hasDevices(p.id));
+  const hiddenProviders = providers.filter((p) => !hasDevices(p.id));
+  const orphanIds = [
+    ...new Set(
+      items
+        .filter((d) => !providers.some((p) => p.id === d.providerId))
+        .map((d) => d.providerId),
+    ),
+  ];
+
+  // Persist a new provider order: visible (reordered) ahead of the
+  // device-less ones, sending the full id list so the server order is total.
+  function applyOrder(nextVisible: Provider[]) {
+    const next = [...nextVisible, ...hiddenProviders];
+    setProviders(next);
+    void setProviderOrder(next.map((p) => p.id));
+  }
+  // Move the provider at `index` one slot up (-1) or down (+1).
+  function moveProvider(index: number, dir: -1 | 1) {
+    const j = index + dir;
+    if (j < 0 || j >= visibleProviders.length) return;
+    const next = [...visibleProviders];
+    [next[index], next[j]] = [next[j], next[index]];
+    applyOrder(next);
+  }
+  const arrowBtnStyle = (disabled: boolean): React.CSSProperties => ({
+    width: 24,
+    height: 22,
+    display: "grid",
+    placeItems: "center",
+    borderRadius: 6,
+    border: `1px solid ${T.cardBorder}`,
+    background: "transparent",
+    color: disabled ? T.faint : T.dim,
+    cursor: disabled ? "default" : "pointer",
+    fontSize: "0.58rem",
+    lineHeight: 1,
+    opacity: disabled ? 0.4 : 1,
+    padding: 0,
+  });
+  const reorderable = visibleProviders.length > 1;
+
+  // ── Pointer-drag reordering ────────────────────────────────────────────────
+  // The grabbed section follows the cursor 1:1; the rest stay in their DOM slots
+  // and just slide by one section-height to open a gap where the drop will land.
+  // Layout never changes mid-drag (only transforms), so the centers captured at
+  // grab time stay valid for deciding the target index. Commit happens on release.
+  const GROUP_GAP = 32; // section marginBottom (2rem) — part of a slot's height
+  function beginDrag(e: React.PointerEvent, pid: string, index: number) {
+    if (e.button !== 0 && e.pointerType === "mouse") return;
+    e.preventDefault();
+    const order = visibleProviders.map((p) => p.id);
+    const rects = order.map((id) => sectionRefs.current.get(id)?.getBoundingClientRect());
+    if (rects.some((r) => !r)) return;
+    const centers = rects.map((r) => r!.top + r!.height / 2);
+    const h = rects[index]!.height + GROUP_GAP;
+    dragInfo.current = { id: pid, centers, originalIndex: index, target: index, startY: e.clientY };
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setDrag({ id: pid, dy: 0, target: index, h });
+  }
+  function moveDrag(e: React.PointerEvent) {
+    const info = dragInfo.current;
+    if (!info) return;
+    const dy = e.clientY - info.startY;
+    const draggedCenter = info.centers[info.originalIndex] + dy;
+    // Walk the (fixed) centers to find the slot the cursor now sits in.
+    let target = info.originalIndex;
+    while (target < info.centers.length - 1 && draggedCenter > info.centers[target + 1]) target++;
+    while (target > 0 && draggedCenter < info.centers[target - 1]) target--;
+    info.target = target;
+    setDrag((d) => (d ? { ...d, dy, target } : d));
+  }
+  function endDrag() {
+    const info = dragInfo.current;
+    if (info && info.target !== info.originalIndex) {
+      const next = [...visibleProviders];
+      const [moved] = next.splice(info.originalIndex, 1);
+      next.splice(info.target, 0, moved);
+      applyOrder(next);
+    }
+    dragInfo.current = null;
+    setDrag(null);
+  }
+  // The transform a section gets during a drag: the grabbed one floats with the
+  // cursor; the others shift by ±one slot to vacate the target gap.
+  function dragStyle(pid: string, index: number): React.CSSProperties {
+    if (!drag) return {};
+    if (drag.id === pid) {
+      return {
+        transform: `translateY(${drag.dy}px)`,
+        zIndex: 20,
+        position: "relative",
+        opacity: 0.97,
+        boxShadow: "0 14px 30px -10px rgba(0,0,0,0.65)",
+        transition: "none",
+        cursor: "grabbing",
+      };
+    }
+    const from = visibleProviders.findIndex((p) => p.id === drag.id);
+    let shift = 0;
+    if (from < drag.target && index > from && index <= drag.target) shift = -drag.h;
+    else if (from > drag.target && index < from && index >= drag.target) shift = drag.h;
+    return {
+      transform: shift ? `translateY(${shift}px)` : undefined,
+      transition: "transform .18s ease",
+      position: "relative",
+    };
+  }
+
+  // One provider's devices for a single domain: the card grid plus the collapsed
+  // hidden-duplicate and merged-companion rails. `caption` labels the domain, and
+  // is shown only when a provider spans more than one (else it's redundant with
+  // the provider header).
+  function renderDomain(group: Item[], caption: string | null) {
+    const visible = group.filter((d) => !d.shadowedBy && !d.companionOf);
+    const shadowed = group.filter((d) => d.shadowedBy);
+    const companions = group.filter((d) => d.companionOf);
+    return (
+      <div>
+        {caption && (
+          <SectionLabel style={{ marginBottom: "0.5rem", fontSize: "0.7rem", color: T.faint }}>
+            {caption}
+            <span style={{ fontWeight: 400 }}> · {visible.length}</span>
+          </SectionLabel>
+        )}
+        <div
+          style={{
+            display: "grid",
+            // Phones: one column. Everything else: cards at least 360px so the
+            // glyph + name + action cluster fit one row without crushing the
+            // name; `min(100%, …)` keeps a single card from overflowing a narrow
+            // viewport.
+            gridTemplateColumns: isMobile
+              ? "1fr"
+              : "repeat(auto-fill, minmax(min(100%, 360px), 1fr))",
+            gap: "0.7rem",
+          }}
+        >
+          {visible.map((d) => (
+            <DeviceCard
+              key={d.id}
+              item={d}
+              rooms={rooms}
+              audioDevices={audioDevices}
+              mergeCandidates={visibleAudio.filter((s) => s.id !== d.id)}
+              onToggle={(next) => toggle(d, next)}
+              onSetEnabled={(en) => setEnabled(d, en)}
+              onSetGlyph={(g) => setGlyph(d, g)}
+              onSetRoom={(r) => setRoom(d, r)}
+              onSetReceiver={(rid, rsrc) => setReceiver(d, rid, rsrc)}
+              onMerge={(primaryId) => setCompanion(d, primaryId)}
+            />
+          ))}
+        </div>
+        {shadowed.length > 0 && (
+          <div style={{ marginTop: "0.7rem" }}>
+            {shadowed.map((d) => (
+              <HiddenDuplicate
+                key={d.id}
+                item={d}
+                canonical={d.shadowedBy ? byId.get(d.shadowedBy)?.name : undefined}
+                onUnlink={() => unlink(d)}
+              />
+            ))}
+          </div>
+        )}
+        {companions.length > 0 && (
+          <div style={{ marginTop: "0.7rem" }}>
+            {companions.map((d) => (
+              <MergedCompanion
+                key={d.id}
+                item={d}
+                primary={d.companionOf ? byId.get(d.companionOf)?.name : undefined}
+                onUnmerge={() => unmerge(d)}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div style={{ padding: isMobile ? "1.2rem 1rem 2rem" : "2rem 2.5rem" }}>
       <PageHeader
         title="Devices"
-        description="Every device Bifrost has imported, of every kind. This is where you enable/disable a device and pin a glyph (click its icon). Live control lives on the Control, Audio, and Rooms pages."
+        description="Every device Bifrost has imported, grouped by the provider it came from. This is where you enable/disable a device and pin a glyph (click its icon). Live control lives on the Control, Audio, and Rooms pages."
         actions={
           <button
             onClick={() => refresh()}
@@ -998,75 +1256,86 @@ export function DevicesPage() {
           <strong>Sync</strong> on it to import its devices.
         </div>
       ) : (
-        SECTIONS.map(({ domain, title }) => {
-          const group = items.filter((d) => d.domain === domain);
-          if (group.length === 0) return null;
-          // Duplicates collapse under their canonical (shadow, lossy); merged
-          // companions (M26, lossless) collapse under their primary. Both drop
-          // from the visible grid.
-          const visible = group.filter((d) => !d.shadowedBy && !d.companionOf);
-          const shadowed = group.filter((d) => d.shadowedBy);
-          const companions = group.filter((d) => d.companionOf);
+        [
+          ...visibleProviders.map((p, i) => ({ pid: p.id, provider: p as Provider | undefined, index: i })),
+          ...orphanIds.map((pid) => ({ pid, provider: undefined as Provider | undefined, index: -1 })),
+        ].map(({ pid, provider, index }) => {
+          const provItems = items.filter((d) => d.providerId === pid);
+          if (provItems.length === 0) return null;
+          // Domains this provider actually has devices in (an integration like
+          // Home Assistant spans several; most providers just one).
+          const domainsPresent = SECTIONS.filter(({ domain }) =>
+            provItems.some((d) => d.domain === domain),
+          );
+          const multiDomain = domainsPresent.length > 1;
+          const total = provItems.filter((d) => !d.shadowedBy && !d.companionOf).length;
+          const canReorder = index >= 0 && reorderable;
           return (
-            <section key={domain} style={{ marginBottom: "1.8rem" }}>
-              <SectionLabel style={{ marginBottom: "0.7rem" }}>
-                {title}
-                <span style={{ color: T.faint, fontWeight: 400 }}> · {visible.length}</span>
-              </SectionLabel>
-              <div
-                style={{
-                  display: "grid",
-                  // Phones: one column. Everything else: cards at least 360px so
-                  // the glyph + name + action cluster fit on one row without
-                  // crushing the name; `min(100%, …)` keeps a single card from
-                  // overflowing a narrow viewport. 280px was too tight on desktop
-                  // too (the power cards' toggle + buttons left no room for names).
-                  gridTemplateColumns: isMobile
-                    ? "1fr"
-                    : "repeat(auto-fill, minmax(min(100%, 360px), 1fr))",
-                  gap: "0.7rem",
-                }}
-              >
-                {visible.map((d) => (
-                  <DeviceCard
-                    key={d.id}
-                    item={d}
-                    rooms={rooms}
-                    audioDevices={audioDevices}
-                    mergeCandidates={visible.filter((s) => s.id !== d.id)}
-                    onToggle={(next) => toggle(d, next)}
-                    onSetEnabled={(en) => setEnabled(d, en)}
-                    onSetGlyph={(g) => setGlyph(d, g)}
-                    onSetRoom={(r) => setRoom(d, r)}
-                    onSetReceiver={(rid, rsrc) => setReceiver(d, rid, rsrc)}
-                    onMerge={(primaryId) => setCompanion(d, primaryId)}
-                  />
+            <section
+              key={pid}
+              ref={(el) => {
+                if (el) sectionRefs.current.set(pid, el);
+                else sectionRefs.current.delete(pid);
+              }}
+              style={{ marginBottom: "2rem", ...dragStyle(pid, index) }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.9rem" }}>
+                {canReorder && (
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.25rem", flexShrink: 0 }}>
+                    {/* Grip = pointer-drag (mouse + touch); arrows = a11y / precise nudge. */}
+                    <span
+                      onPointerDown={(e) => beginDrag(e, pid, index)}
+                      onPointerMove={moveDrag}
+                      onPointerUp={endDrag}
+                      onPointerCancel={endDrag}
+                      title="Drag to reorder"
+                      style={{
+                        cursor: drag?.id === pid ? "grabbing" : "grab",
+                        color: T.dim,
+                        padding: "0 0.15rem",
+                        touchAction: "none",
+                        userSelect: "none",
+                        fontSize: "1.05rem",
+                        lineHeight: 1,
+                      }}
+                    >
+                      ⠿
+                    </span>
+                    <button
+                      onClick={() => moveProvider(index, -1)}
+                      disabled={index === 0}
+                      title="Move up"
+                      style={arrowBtnStyle(index === 0)}
+                    >
+                      ▲
+                    </button>
+                    <button
+                      onClick={() => moveProvider(index, 1)}
+                      disabled={index === visibleProviders.length - 1}
+                      title="Move down"
+                      style={arrowBtnStyle(index === visibleProviders.length - 1)}
+                    >
+                      ▼
+                    </button>
+                  </div>
+                )}
+                <SectionLabel style={{ fontSize: "0.95rem", color: T.text }}>
+                  {provider?.name ?? "Unknown provider"}
+                  <span style={{ color: T.faint, fontWeight: 400, letterSpacing: "0.08em" }}>
+                    {provider?.type_name ? ` · ${provider.type_name}` : ""} · {total}
+                  </span>
+                </SectionLabel>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: "1.1rem" }}>
+                {domainsPresent.map(({ domain, title }) => (
+                  <div key={domain}>
+                    {renderDomain(
+                      provItems.filter((d) => d.domain === domain),
+                      multiDomain ? title : null,
+                    )}
+                  </div>
                 ))}
               </div>
-              {shadowed.length > 0 && (
-                <div style={{ marginTop: "0.7rem" }}>
-                  {shadowed.map((d) => (
-                    <HiddenDuplicate
-                      key={d.id}
-                      item={d}
-                      canonical={d.shadowedBy ? byId.get(d.shadowedBy)?.name : undefined}
-                      onUnlink={() => unlink(d)}
-                    />
-                  ))}
-                </div>
-              )}
-              {companions.length > 0 && (
-                <div style={{ marginTop: "0.7rem" }}>
-                  {companions.map((d) => (
-                    <MergedCompanion
-                      key={d.id}
-                      item={d}
-                      primary={d.companionOf ? byId.get(d.companionOf)?.name : undefined}
-                      onUnmerge={() => unmerge(d)}
-                    />
-                  ))}
-                </div>
-              )}
             </section>
           );
         })

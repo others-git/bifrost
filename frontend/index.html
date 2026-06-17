@@ -162,11 +162,19 @@
       }
       .bifrost-seal-breathe { animation: bifrost-seal-breathe 3.6s ease-in-out infinite; }
 
+      /* While the seal is armed (waiting for the confirming second tap) its
+         glyph spins, signalling "I'm waiting" with a built-in 5s timeout. */
+      @keyframes bifrost-seal-spin {
+        from { transform: rotate(0deg); }
+        to   { transform: rotate(-360deg); }
+      }
+      .bifrost-seal-spin { animation: bifrost-seal-spin 1.4s linear infinite; }
+
       @media (prefers-reduced-motion: reduce) {
         .bifrost-aurora, .bifrost-brand, .bifrost-card { animation: none; }
         .bifrost-brand { transition: none; }
         .bifrost-voice-pulse, .bifrost-voice-edge { animation: none; }
-        .bifrost-seal-breathe { animation: none; }
+        .bifrost-seal-breathe, .bifrost-seal-spin { animation: none; }
       }
     </style>
   </head>

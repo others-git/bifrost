@@ -165,14 +165,9 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
   const empty = localLights.length === 0 && powerDevices.length === 0 && audioDevices.length === 0;
   const defaultHome = homeScenes.find((s) => s.is_default);
 
+  // Confirmation is the seal's own two-tap arm/confirm gesture, so no modal here.
   async function doRestoreHome() {
     if (!defaultHome) return;
-    const ok = await dialogs.confirm({
-      title: "Restore Home",
-      message: `Set every light and switch back to the "${defaultHome.name}" scene?`,
-      confirmLabel: "Restore",
-    });
-    if (!ok) return;
     try {
       await restoreDefaultHome();
       onRefresh();
@@ -182,7 +177,7 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
   }
 
   return (
-    <div style={{ padding: isMobile ? "1rem 0.85rem" : isCompact ? "1.1rem 1rem" : "2rem", maxWidth: 1100, margin: "0 auto", color: T.text, display: "flex", flexDirection: "column", minHeight: "100%", boxSizing: "border-box" }}>
+    <div style={{ padding: isMobile ? "1rem 0.85rem" : isCompact ? "1.1rem 1rem" : "2rem", width: "100%", maxWidth: 1100, margin: "0 auto", color: T.text, display: "flex", flexDirection: "column", flex: 1, boxSizing: "border-box" }}>
       <PageHeader
         title="Control"
         status={localLights.length > 0 ? `${onCount} of ${localLights.length} lights on` : undefined}
@@ -889,9 +884,41 @@ function RoomControlButton({
  * controls; the seal form makes the "bring everything back" action ceremonial. */
 function RestoreHomeButton({ name, onRestore }: { name: string; onRestore: () => void }) {
   const [hover, setHover] = useState(false);
+  // Two-tap safety: the first tap *arms* the seal (glyph spins, label flips to
+  // "Confirm"); a second tap within 5s fires the restore. The arm auto-clears on
+  // timeout so a stray tap never leaves it primed.
+  const [armed, setArmed] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function clearTimer() {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  }
+  // Drop the pending timeout if the seal unmounts mid-arm.
+  useEffect(() => clearTimer, []);
+
+  function handleClick() {
+    if (armed) {
+      clearTimer();
+      setArmed(false);
+      onRestore();
+      return;
+    }
+    setArmed(true);
+    clearTimer();
+    timerRef.current = setTimeout(() => {
+      setArmed(false);
+      timerRef.current = null;
+    }, 5000);
+  }
+
   // Match the app's primary accent (nav + room power buttons), not a bespoke gold.
   const g = T.accent;
   const size = 64;
+  // Armed reads "hotter": brighter fill, tighter ring, stronger glow.
+  const lit = hover || armed;
   return (
     <div
       onPointerEnter={() => setHover(true)}
@@ -908,14 +935,15 @@ function RestoreHomeButton({ name, onRestore }: { name: string; onRestore: () =>
             width: size + 26,
             height: size + 26,
             borderRadius: "50%",
-            background: `radial-gradient(circle, ${alpha(g, 0.4)}, transparent 68%)`,
+            background: `radial-gradient(circle, ${alpha(g, armed ? 0.62 : 0.4)}, transparent 68%)`,
             pointerEvents: "none",
           }}
         />
         <button
-          onClick={onRestore}
-          title={`Restore the whole home to "${name}"`}
-          aria-label="Restore Home"
+          onClick={handleClick}
+          title={armed ? "Tap again to confirm" : `Restore the whole home to "${name}"`}
+          aria-label={armed ? "Confirm restore home" : "Restore Home"}
+          aria-pressed={armed}
           style={{
             position: "relative",
             width: size,
@@ -925,21 +953,26 @@ function RestoreHomeButton({ name, onRestore }: { name: string; onRestore: () =>
             placeItems: "center",
             cursor: "pointer",
             color: g,
-            background: `radial-gradient(circle at 50% 32%, ${alpha(g, hover ? 0.3 : 0.16)}, transparent 62%), ${color.surface}`,
-            border: `1px solid ${alpha(g, hover ? 0.78 : 0.5)}`,
-            boxShadow: `${glow(g, hover ? 36 : 22)}, inset 0 0 20px -8px ${g}`,
+            background: `radial-gradient(circle at 50% 32%, ${alpha(g, lit ? 0.3 : 0.16)}, transparent 62%), ${color.surface}`,
+            border: `1px solid ${alpha(g, armed ? 0.95 : hover ? 0.78 : 0.5)}`,
+            boxShadow: `${glow(g, armed ? 44 : hover ? 36 : 22)}, inset 0 0 20px -8px ${g}`,
             backdropFilter: "blur(10px)",
             WebkitBackdropFilter: "blur(10px)",
-            transform: hover ? "scale(1.06)" : "scale(1)",
+            transform: lit ? "scale(1.06)" : "scale(1)",
             transition: "transform .2s ease, box-shadow .3s ease, border-color .3s ease, color .2s ease, background .3s ease",
           }}
         >
           {/* Inner filigree ring — the engraved-seal double edge. */}
           <span
             aria-hidden
-            style={{ position: "absolute", inset: 6, borderRadius: "50%", border: `1px solid ${alpha(g, 0.32)}`, pointerEvents: "none" }}
+            style={{ position: "absolute", inset: 6, borderRadius: "50%", border: `1px solid ${alpha(g, armed ? 0.55 : 0.32)}`, pointerEvents: "none" }}
           />
-          <Glyph name="restore" size={26} />
+          <span
+            className={armed ? "bifrost-seal-spin" : undefined}
+            style={{ display: "grid", placeItems: "center" }}
+          >
+            <Glyph name="restore" size={26} />
+          </span>
         </button>
       </div>
       <span
@@ -950,11 +983,11 @@ function RestoreHomeButton({ name, onRestore }: { name: string; onRestore: () =>
           fontSize: "0.72rem",
           fontWeight: 600,
           color: g,
-          textShadow: `0 0 12px ${alpha(g, 0.5)}`,
-          transition: "color .2s ease",
+          textShadow: `0 0 12px ${alpha(g, armed ? 0.8 : 0.5)}`,
+          transition: "color .2s ease, text-shadow .2s ease",
         }}
       >
-        Restore Home
+        {armed ? "Confirm" : "Restore Home"}
       </span>
     </div>
   );
