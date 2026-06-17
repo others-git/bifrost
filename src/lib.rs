@@ -69,7 +69,19 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .nest_service("/mcp", api::mcp::service(Arc::clone(&state)))
         .fallback(serve_frontend)
         .with_state(state)
-        .layer(TraceLayer::new_for_http())
+        // Tag every request span with method + path at INFO, so a failure log
+        // (and any error the handler emits) says *which* request failed — the
+        // default span is DEBUG-level, so at `info` the bare "502 Bad Gateway"
+        // line carried no method/path/context.
+        .layer(TraceLayer::new_for_http().make_span_with(
+            |req: &axum::http::Request<axum::body::Body>| {
+                tracing::info_span!(
+                    "http",
+                    method = %req.method(),
+                    path = %req.uri().path(),
+                )
+            },
+        ))
         .layer(CorsLayer::permissive())
 }
 

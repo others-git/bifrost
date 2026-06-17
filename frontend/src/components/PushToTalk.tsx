@@ -14,9 +14,10 @@ import { useViewport } from "../useViewport";
 
 declare global {
   interface Window {
-    /** Injected by the kiosk app (addJavascriptInterface). `start()` triggers the
-     * native voice pipeline to capture a command (skip wake word). */
-    bifrostKioskPtt?: { start: () => void };
+    /** Injected by the kiosk app (addJavascriptInterface). Hold-to-talk: `start()`
+     * on press begins native capture (skip wake word), `stop()` on release ends it
+     * and dispatches the held command. */
+    bifrostKioskPtt?: { start: () => void; stop: () => void };
   }
 }
 
@@ -54,12 +55,16 @@ export function PushToTalk() {
     if (recRef.current || sendingRef.current) return;
 
     // On the kiosk, hand off to the native voice pipeline (the WebView mic can't
-    // run over plain HTTP). One tap opens a command capture; the native side
-    // drives the listening overlay + processing.
+    // run over plain HTTP). Hold-to-talk: native captures while held; release
+    // (`stop`) dispatches. The native side drives the listening overlay.
     if (window.bifrostKioskPtt) {
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        /* not fatal */
+      }
       window.bifrostKioskPtt.start();
       setActive(true);
-      setTimeout(() => setActive(false), 800);
       return;
     }
 
@@ -104,6 +109,11 @@ export function PushToTalk() {
   function stop(e?: React.PointerEvent<HTMLButtonElement>) {
     e?.preventDefault();
     setActive(false);
+    // Kiosk hold-to-talk: release ends native capture and dispatches.
+    if (window.bifrostKioskPtt) {
+      window.bifrostKioskPtt.stop();
+      return;
+    }
     const rec = recRef.current;
     if (rec && rec.state !== "inactive") rec.stop(); // → onstop → finish()
   }
