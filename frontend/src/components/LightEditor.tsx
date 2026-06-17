@@ -363,33 +363,165 @@ export function ColorTempWheel({
   );
 }
 
-// ── Color / White mode toggle ────────────────────────────────────────────────
+// ── Mode toggle (Color / White / Effects) ────────────────────────────────────
 
-/** Segmented pill that switches the editor between the color wheel and the white
- * (color-temperature) wheel — the Hue "Color / White" tabs. Touch-sized on
- * compact viewports per the shared control conventions. */
+export type EditorMode = "color" | "white" | "effects";
+
+/** "no_effect"/"off" are the canonical clear tokens; everything else is a
+ * provider-native effect name (`color_loop`, `candle`, `Sunrise`, …) — humanize
+ * underscores/hyphens to Title Case for display. */
+export function effectLabel(e: string): string {
+  if (e === "no_effect" || e === "off" || e === "none" || e === "None") return "Off";
+  return e
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .trim();
+}
+
+/** Segmented pill that switches the editor between the color wheel, the white
+ * (color-temperature) wheel, and the effects grid. Only the modes the light
+ * supports are offered. Touch-sized on compact viewports. */
 function ModeToggle({
   mode,
+  modes,
   onChange,
   compact,
 }: {
-  mode: "color" | "white";
-  onChange: (m: "color" | "white") => void;
+  mode: EditorMode;
+  modes: EditorMode[];
+  onChange: (m: EditorMode) => void;
   compact: boolean;
 }) {
-  // Expressive tabs: the Color tab previews the spectrum, White the warm→cool
-  // range. Those gradients are intentionally literal (they aren't theme accents).
+  // Expressive tabs: Color previews the spectrum, White the warm→cool range,
+  // Effects a shimmer. Those gradients are intentionally literal (not theme accents).
+  const ALL: Record<EditorMode, { label: string; activeBg: string }> = {
+    color: { label: "Color", activeBg: "linear-gradient(90deg, #ff7d8a, #8b5cf6 55%, #38bdf8)" },
+    white: { label: "White", activeBg: "linear-gradient(90deg, #ffd9a0, #cfe4ff)" },
+    effects: { label: "Effects", activeBg: "linear-gradient(90deg, #38bdf8, #a78bfa 60%, #f0abfc)" },
+  };
   return (
     <Segmented
       value={mode}
-      onChange={onChange}
+      onChange={(m) => onChange(m as EditorMode)}
       compact={compact}
-      options={[
-        { value: "color", label: "Color", activeBg: "linear-gradient(90deg, #ff7d8a, #8b5cf6 55%, #38bdf8)" },
-        { value: "white", label: "White", activeBg: "linear-gradient(90deg, #ffd9a0, #cfe4ff)" },
-      ]}
+      options={modes.map((m) => ({ value: m, label: ALL[m].label, activeBg: ALL[m].activeBg }))}
     />
   );
+}
+
+// ── Effects grid ─────────────────────────────────────────────────────────────
+
+/** The Effects tab body: a responsive grid of effect tiles. The active effect is
+ * cyan-lit with an animated shimmer bar; the rest sit on hairline glass. Replaces
+ * the old afterthought chip row — effects are now a first-class picker. */
+function EffectsPanel({
+  effects,
+  active,
+  onPick,
+  compact,
+}: {
+  effects: string[];
+  active?: string;
+  onPick: (effect: string) => void;
+  compact: boolean;
+}) {
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: compact ? "1fr 1fr" : "repeat(auto-fill, minmax(118px, 1fr))",
+        gap: compact ? "0.55rem" : "0.45rem",
+        maxHeight: compact ? "none" : 280,
+        overflowY: "auto",
+      }}
+    >
+      {effects.map((e) => {
+        const isActive = active === e;
+        const isOff = effectLabel(e) === "Off";
+        return (
+          <button
+            key={e}
+            onClick={() => onPick(e)}
+            style={{
+              position: "relative",
+              overflow: "hidden",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "flex-start",
+              gap: "0.35rem",
+              minHeight: compact ? 60 : 52,
+              padding: compact ? "0.6rem 0.7rem" : "0.5rem 0.6rem",
+              borderRadius: 12,
+              cursor: "pointer",
+              textAlign: "left",
+              color: isActive ? color.text : color.dim,
+              background: isActive
+                ? `linear-gradient(150deg, ${alpha(color.cyan, 0.22)}, ${alpha(color.cyan, 0.05)})`
+                : `linear-gradient(${alpha(color.text, 0.05)}, ${alpha(color.text, 0.015)})`,
+              border: `1px solid ${isActive ? alpha(color.cyan, 0.7) : color.hairline}`,
+              boxShadow: isActive ? glow(color.cyan, 16) : "none",
+              transition: "background .15s ease, color .15s ease, box-shadow .2s ease, border-color .15s ease",
+            }}
+          >
+            <span
+              aria-hidden
+              style={{
+                fontSize: "0.95rem",
+                lineHeight: 1,
+                filter: isActive ? "none" : "grayscale(1) opacity(0.55)",
+              }}
+            >
+              {effectGlyph(e, isOff)}
+            </span>
+            <span
+              style={{
+                fontSize: compact ? "0.82rem" : "0.78rem",
+                fontWeight: isActive ? 600 : 500,
+                letterSpacing: "0.01em",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                width: "100%",
+              }}
+            >
+              {effectLabel(e)}
+            </span>
+            {isActive && !isOff && (
+              <span
+                aria-hidden
+                style={{
+                  position: "absolute",
+                  left: 0,
+                  bottom: 0,
+                  height: 2,
+                  width: "100%",
+                  background: `linear-gradient(90deg, transparent, ${color.cyan}, transparent)`,
+                  animation: "bifrostEffectShimmer 1.8s ease-in-out infinite",
+                }}
+              />
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** A small emoji cue for an effect tile, matched by keyword so provider-native
+ * names (Hue `candle`, LIFX `flame`, Govee `Sunrise`, …) get a fitting icon. */
+function effectGlyph(effect: string, isOff: boolean): string {
+  if (isOff) return "○";
+  const e = effect.toLowerCase();
+  if (/fire|flame|candle|ember/.test(e)) return "🔥";
+  if (/spark|glint|glisten|prism|opal|twinkl/.test(e)) return "✨";
+  if (/breath|pulse|beat/.test(e)) return "💓";
+  if (/sun|dawn|sunrise|morning/.test(e)) return "🌅";
+  if (/sunset|dusk|night/.test(e)) return "🌆";
+  if (/move|march|chase|scan|run/.test(e)) return "🌊";
+  if (/morph|loop|cycle|rainbow|color/.test(e)) return "🌈";
+  if (/cloud|sky|aurora/.test(e)) return "☁️";
+  if (/party|disco|festiv|rave/.test(e)) return "🎉";
+  return "🌟";
 }
 
 // ── Anchored editor popover ──────────────────────────────────────────────────
@@ -425,9 +557,9 @@ export function LightEditor({
   showWhite?: boolean;
   /** Which wheel to open on. Defaults to the light's current mode (white if it's
    * showing a temperature and no color), else color. */
-  initialMode?: "color" | "white";
+  initialMode?: EditorMode;
   /** Dynamic effects the light supports (provider names; "no_effect" = clear).
-   * When non-empty, an effects picker renders. */
+   * When non-empty, an Effects tab renders. */
   effects?: string[];
   /** The currently-active effect, if any. */
   initialEffect?: string;
@@ -448,11 +580,16 @@ export function LightEditor({
   const [[hue, sat], setHs] = useState<[number, number]>(() => hexToHs(initialHex));
   const [brightness, setBrightness] = useState(initialBrightness);
   const [mirek, setMirek] = useState(initialMirek);
-  // Color vs. white are mutually exclusive; only offer the toggle when the light
-  // supports both. Default to the light's current mode.
-  const canToggle = showColor && showWhite;
-  const [mode, setMode] = useState<"color" | "white">(
-    () => initialMode ?? (showColor ? "color" : "white"),
+  // The editor has up to three mutually-exclusive modes (Color wheel / White
+  // wheel / Effects grid); offer a tab only for the ones this light supports.
+  const hasEffects = !!effects && effects.length > 0;
+  const availableModes: EditorMode[] = [
+    ...(showColor ? (["color"] as const) : []),
+    ...(showWhite ? (["white"] as const) : []),
+    ...(hasEffects ? (["effects"] as const) : []),
+  ];
+  const [mode, setMode] = useState<EditorMode>(
+    () => initialMode ?? (showColor ? "color" : showWhite ? "white" : "effects"),
   );
   const hex = rgbToHex(...hsvToRgb(hue, sat, 1));
 
@@ -476,94 +613,67 @@ export function LightEditor({
     setEffect(e);
     onChange({ field: "effect", effect: e });
   }
-  /** "no_effect" is the canonical clear value; render it as "Off". */
-  const effectLabel = (e: string) =>
-    e === "no_effect" ? "Off" : e.charAt(0).toUpperCase() + e.slice(1);
 
   const whiteHex = rgbToHex(...mirekToRgb(mirek));
-  // Exactly one wheel renders for any capability combination.
-  const colorActive = showColor && (!showWhite || mode === "color");
-  const whiteActive = showWhite && (!showColor || mode === "white");
+  // Exactly one mode renders at a time; `mode` is always one of `availableModes`.
+  const colorActive = mode === "color";
+  const whiteActive = mode === "white";
+  const effectsActive = mode === "effects";
 
   return (
     <Flyout anchor={anchor} onClose={onClose}>
       {/* Lights are the cyan domain — the shared header carries that accent. */}
       <FlyoutHeader title={title ?? "Color"} accent={color.cyan} onClose={onClose} />
 
-      {canToggle && <ModeToggle mode={mode} onChange={setMode} compact={isCompact} />}
-
-      <div style={{ display: "flex", gap: isCompact ? "1.4rem" : "0.8rem", alignItems: "center", justifyContent: "center" }}>
-        {colorActive && <ColorWheel size={isCompact ? 240 : 176} hue={hue} sat={sat} onPick={applyColor} />}
-        {whiteActive && <ColorTempWheel size={isCompact ? 240 : 176} mirek={mirek} onPick={applyTemp} />}
-        {showBrightness && (
-          <BrightnessBar
-            height={isCompact ? 240 : 176}
-            width={isCompact ? 44 : 30}
-            hex={whiteActive ? whiteHex : colorActive ? hex : "#ffd9a0"}
-            value={brightness}
-            onPick={applyBrightness}
-          />
-        )}
-      </div>
-
-      {colorActive && (
-        <div style={{ display: "flex", gap: isCompact ? "0.6rem" : "0.45rem", justifyContent: "center", flexWrap: "wrap" }}>
-          {SWATCHES.map((c) => (
-            <button
-              key={c}
-              onClick={() => {
-                const [h, s] = hexToHs(c);
-                applyColor(h, s);
-              }}
-              title={c}
-              style={{
-                width: isCompact ? 40 : 18,
-                height: isCompact ? 40 : 18,
-                borderRadius: "50%",
-                border: c === hex ? `2px solid ${color.gold}` : `1px solid ${alpha(color.text, 0.22)}`,
-                background: c,
-                cursor: "pointer",
-                padding: 0,
-                boxShadow: c === hex ? glow(color.gold, 12) : "none",
-                transform: c === hex ? "scale(1.18)" : "scale(1)",
-                transition: "transform .12s ease, box-shadow .15s ease",
-              }}
-            />
-          ))}
-        </div>
+      {availableModes.length > 1 && (
+        <ModeToggle mode={mode} modes={availableModes} onChange={setMode} compact={isCompact} />
       )}
 
-      {effects && effects.length > 0 && (
-        <FlyoutSection label="Effect">
-          <div style={{ display: "flex", gap: isCompact ? "0.5rem" : "0.35rem", flexWrap: "wrap" }}>
-            {effects.map((e) => {
-              const active = effect === e;
-              return (
-                <button
-                  key={e}
-                  onClick={() => applyEffect(e)}
-                  style={{
-                    padding: isCompact ? "0.4rem 0.75rem" : "0.28rem 0.6rem",
-                    borderRadius: 999,
-                    fontSize: "0.76rem",
-                    fontWeight: active ? 600 : 400,
-                    letterSpacing: "0.02em",
-                    cursor: "pointer",
-                    color: active ? color.ink : color.dim,
-                    background: active
-                      ? color.cyan
-                      : `linear-gradient(${alpha(color.text, 0.06)}, ${alpha(color.text, 0.02)})`,
-                    border: `1px solid ${active ? color.cyan : color.hairline}`,
-                    boxShadow: active ? glow(color.cyan, 14) : "none",
-                    transition: "background .15s ease, color .15s ease, box-shadow .2s ease",
-                  }}
-                >
-                  {effectLabel(e)}
-                </button>
-              );
-            })}
+      {effectsActive ? (
+        <EffectsPanel effects={effects ?? []} active={effect} onPick={applyEffect} compact={isCompact} />
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: isCompact ? "1.4rem" : "0.8rem", alignItems: "center", justifyContent: "center" }}>
+            {colorActive && <ColorWheel size={isCompact ? 240 : 176} hue={hue} sat={sat} onPick={applyColor} />}
+            {whiteActive && <ColorTempWheel size={isCompact ? 240 : 176} mirek={mirek} onPick={applyTemp} />}
+            {showBrightness && (
+              <BrightnessBar
+                height={isCompact ? 240 : 176}
+                width={isCompact ? 44 : 30}
+                hex={whiteActive ? whiteHex : colorActive ? hex : "#ffd9a0"}
+                value={brightness}
+                onPick={applyBrightness}
+              />
+            )}
           </div>
-        </FlyoutSection>
+
+          {colorActive && (
+            <div style={{ display: "flex", gap: isCompact ? "0.6rem" : "0.45rem", justifyContent: "center", flexWrap: "wrap" }}>
+              {SWATCHES.map((c) => (
+                <button
+                  key={c}
+                  onClick={() => {
+                    const [h, s] = hexToHs(c);
+                    applyColor(h, s);
+                  }}
+                  title={c}
+                  style={{
+                    width: isCompact ? 40 : 18,
+                    height: isCompact ? 40 : 18,
+                    borderRadius: "50%",
+                    border: c === hex ? `2px solid ${color.gold}` : `1px solid ${alpha(color.text, 0.22)}`,
+                    background: c,
+                    cursor: "pointer",
+                    padding: 0,
+                    boxShadow: c === hex ? glow(color.gold, 12) : "none",
+                    transform: c === hex ? "scale(1.18)" : "scale(1)",
+                    transition: "transform .12s ease, box-shadow .15s ease",
+                  }}
+                />
+              ))}
+            </div>
+          )}
+        </>
       )}
 
       {onToggle && (

@@ -571,13 +571,16 @@ fn parse_light_state(e: &HaEntity) -> LightState {
         .map(|k| (1_000_000 / k) as u16)
         .or_else(|| attr_u64(attrs, "color_temp").map(|m| m as u16));
 
+    // HA reports the active effect by name, or the literal "None" when idle.
+    let effect = attr_str(attrs, "effect").filter(|e| e != "None" && !e.is_empty());
+
     LightState {
         on,
         brightness,
         color,
         color_temp_mirek,
         reachable: Some(e.state != "unavailable"),
-        effect: None,
+        effect,
     }
 }
 
@@ -589,7 +592,9 @@ fn light_capabilities(attrs: &Value) -> LightCapabilities {
         color_rgb: ["hs", "rgb", "rgbw", "rgbww", "xy"].iter().any(|&m| has(m)),
         color_temperature: has("color_temp"),
         hue_gamut: None, // not exposed through HA; native Hue keeps the gamut
-        effects: Vec::new(),
+        // HA surfaces the entity's supported effects as `effect_list`; pass them
+        // through verbatim (the UI humanizes "None" → "Off").
+        effects: attr_str_vec(attrs, "effect_list"),
     }
 }
 
@@ -789,8 +794,12 @@ impl LightProvider for HaProvider {
         if let Some(b) = state.brightness {
             data["brightness_pct"] = json!(b.round().clamp(0.0, 100.0) as u8);
         }
-        // Prefer explicit color; else colour temperature if present.
-        if let Some(color) = &state.color {
+        // An effect pick is its own dimension — `light.turn_on { effect }` selects
+        // it (and clears colour/temp), so route it instead of a colour/temp body.
+        if let Some(effect) = state.effect.as_deref().filter(|e| !e.is_empty()) {
+            data["effect"] = json!(effect);
+        } else if let Some(color) = &state.color {
+            // Prefer explicit color; else colour temperature if present.
             let (r, g, b) = color.to_rgb();
             data["rgb_color"] = json!([r, g, b]);
         } else if let Some(mirek) = state.color_temp_mirek {
@@ -1491,6 +1500,74 @@ mod tests {
         let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
         assert_eq!(body["entity_id"], "light.kitchen");
         assert_eq!(body["brightness_pct"], 50);
+    }
+
+    #[tokio::test]
+    async fn discover_passes_through_effect_list_and_active_effect() {
+        let server = MockServer::start().await;
+        mount_states(
+            &server,
+            json!([{
+                "entity_id": "light.strip",
+                "state": "on",
+                "attributes": {
+                    "friendly_name": "Strip",
+                    "supported_color_modes": ["rgb"],
+                    "effect_list": ["None", "Rainbow", "Colorloop"],
+                    "effect": "Rainbow"
+                }
+            }]),
+        )
+        .await;
+
+        let p = HaProvider::new_for_test(server.uri()).unwrap();
+        let lights = LightProvider::discover(&p).await.unwrap();
+        assert_eq!(
+            lights[0].capabilities.effects,
+            vec!["None", "Rainbow", "Colorloop"]
+        );
+        assert_eq!(lights[0].state.effect.as_deref(), Some("Rainbow"));
+    }
+
+    #[test]
+    fn idle_effect_reported_as_none_is_cleared() {
+        // HA reports "None" (the string) when no effect is running.
+        let e: HaEntity = serde_json::from_value(json!({
+            "entity_id": "light.x",
+            "state": "on",
+            "attributes": { "effect": "None" }
+        }))
+        .unwrap();
+        assert_eq!(parse_light_state(&e).effect, None);
+    }
+
+    #[tokio::test]
+    async fn set_light_state_with_effect_calls_turn_on_with_effect() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/services/light/turn_on"))
+            .and(body_string_contains("effect"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let state = LightState {
+            on: true,
+            effect: Some("Rainbow".to_string()),
+            // A colour is also set, but the effect wins (mutually exclusive on HA).
+            color: Some(Color::from_rgb(255, 0, 0)),
+            ..Default::default()
+        };
+        let p = HaProvider::new_for_test(server.uri()).unwrap();
+        LightProvider::set_state(&p, "light.strip", &state)
+            .await
+            .unwrap();
+
+        let reqs = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["effect"], "Rainbow");
+        assert!(body.get("rgb_color").is_none(), "effect supersedes colour");
     }
 
     #[tokio::test]

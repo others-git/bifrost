@@ -881,6 +881,8 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
               showColor={light?.capabilities.color_rgb ?? true}
               showWhite={light?.capabilities.color_temperature ?? false}
               showBrightness={light?.capabilities.dimmable ?? true}
+              effects={light?.capabilities.effects}
+              initialEffect={st?.effect}
               on={st?.on ?? false}
               onToggle={() => toggleLight(editor.id)}
               onChange={(ch) => editorChange(editor, ch)}

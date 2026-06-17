@@ -126,6 +126,10 @@ pub struct SetLightRequest {
     pub color: Option<String>,
     /// Color temperature in mirek (153–500 ≈ 6500K–2000K).
     pub color_temp_mirek: Option<u16>,
+    /// A dynamic effect name from the light's `effects` capability (e.g.
+    /// "candle", "breathe", "Sunrise"). Use the clear value the light advertises
+    /// ("no_effect"/"off") to stop one. Supersedes color/temperature.
+    pub effect: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -281,7 +285,7 @@ impl BifrostMcp {
     }
 
     #[tool(
-        description = "Set one light's state: power, brightness (0–100), hex color, and/or color temperature (mirek). Only the given fields change behaviour; omitting `on` implies on."
+        description = "Set one light's state: power, brightness (0–100), hex color, color temperature (mirek), and/or a dynamic effect. Only the given fields change behaviour; omitting `on` implies on."
     )]
     async fn set_light(
         &self,
@@ -292,11 +296,16 @@ impl BifrostMcp {
             Ok(id) => id,
             Err(e) => return Ok(e),
         };
-        let new_state =
-            match build_light_state(req.on, req.brightness, req.color, req.color_temp_mirek) {
-                Ok(s) => s,
-                Err(e) => return Ok(fail(e)),
-            };
+        let new_state = match build_light_state(
+            req.on,
+            req.brightness,
+            req.color,
+            req.color_temp_mirek,
+            req.effect,
+        ) {
+            Ok(s) => s,
+            Err(e) => return Ok(fail(e)),
+        };
         match apply_light_state(&self.state, &id, &new_state).await {
             SetLightOutcome::Ok => Ok(ok_text("ok")),
             SetLightOutcome::NotFound => Ok(fail("light not found or its provider is disabled")),
@@ -317,11 +326,16 @@ impl BifrostMcp {
             Ok(id) => id,
             Err(e) => return Ok(e),
         };
-        let new_state =
-            match build_light_state(req.on, req.brightness, req.color, req.color_temp_mirek) {
-                Ok(s) => s,
-                Err(e) => return Ok(fail(e)),
-            };
+        let new_state = match build_light_state(
+            req.on,
+            req.brightness,
+            req.color,
+            req.color_temp_mirek,
+            None,
+        ) {
+            Ok(s) => s,
+            Err(e) => return Ok(fail(e)),
+        };
         let members = effective_members(&self.state, &id).await;
         let (applied, failed) = apply_room_state(&self.state, &id, &new_state, members).await;
         if applied == 0 && failed == 0 {
@@ -859,6 +873,7 @@ fn build_light_state(
     brightness: Option<f32>,
     color: Option<String>,
     color_temp_mirek: Option<u16>,
+    effect: Option<String>,
 ) -> Result<LightState, String> {
     let color = match color {
         None => None,
@@ -878,7 +893,7 @@ fn build_light_state(
         color,
         color_temp_mirek,
         reachable: None,
-        effect: None,
+        effect: effect.filter(|e| !e.is_empty()),
     })
 }
 
@@ -968,7 +983,7 @@ mod tests {
 
     #[test]
     fn build_light_state_converts_hex_and_defaults_on() {
-        let s = build_light_state(None, Some(50.0), Some("#ff8800".into()), None).unwrap();
+        let s = build_light_state(None, Some(50.0), Some("#ff8800".into()), None, None).unwrap();
         assert!(s.on);
         assert_eq!(s.brightness, Some(50.0));
         let c = s.color.expect("color set");
@@ -977,8 +992,17 @@ mod tests {
 
     #[test]
     fn build_light_state_rejects_bad_hex_and_brightness() {
-        assert!(build_light_state(None, None, Some("nope".into()), None).is_err());
-        assert!(build_light_state(None, Some(150.0), None, None).is_err());
+        assert!(build_light_state(None, None, Some("nope".into()), None, None).is_err());
+        assert!(build_light_state(None, Some(150.0), None, None, None).is_err());
+    }
+
+    #[test]
+    fn build_light_state_carries_effect_and_drops_empty() {
+        let s = build_light_state(None, None, None, None, Some("candle".into())).unwrap();
+        assert_eq!(s.effect.as_deref(), Some("candle"));
+        // An empty effect string is treated as "no effect", not a literal "".
+        let s = build_light_state(None, None, None, None, Some(String::new())).unwrap();
+        assert_eq!(s.effect, None);
     }
 
     #[test]

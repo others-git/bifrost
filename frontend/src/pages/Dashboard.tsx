@@ -1111,8 +1111,11 @@ function LightButton({
   const whiteMode = light.last_state?.color_temp_mirek != null && !light.last_state?.color;
 
   function handleEditorChange(change: LightControlChange) {
-    // Only the moved dimension changes; color and temperature are exclusive.
-    const next: LightState = { ...(light.last_state ?? { on: true }), on: true };
+    // Only the moved dimension changes; color and temperature are exclusive. The
+    // previous `effect` is deliberately cleared (undefined → omitted from the PUT):
+    // it rides along only on an actual effect pick, so a colour/brightness tweak
+    // never re-fires a transient effect (LIFX breathe/pulse) on the provider.
+    const next: LightState = { ...(light.last_state ?? {}), on: true, effect: undefined };
     if (change.field === "brightness") {
       if (light.capabilities.dimmable) next.brightness = change.brightness;
     } else if (change.field === "color") {

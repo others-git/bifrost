@@ -44,12 +44,30 @@ fn sku_cache() -> &'static tokio::sync::RwLock<
     CACHE.get_or_init(|| tokio::sync::RwLock::new(std::collections::HashMap::new()))
 }
 
-/// Clear the process-wide SKU cache. Tests only — the cache is keyed by
+/// Process-wide `base_url → (device id → [(scene name, opaque value)])` cache.
+/// A device's dynamic light scenes live behind a *separate* `/device/scenes`
+/// call, and each scene's apply `value` is opaque (`{id, paramId}`), so we cache
+/// the name→value map per device — scenes change rarely, and this keeps discovery
+/// from paying a scenes round-trip per device on every poll.
+type SceneList = Vec<(String, Value)>;
+fn scene_cache() -> &'static tokio::sync::RwLock<
+    std::collections::HashMap<String, std::collections::HashMap<String, SceneList>>,
+> {
+    static CACHE: std::sync::OnceLock<
+        tokio::sync::RwLock<
+            std::collections::HashMap<String, std::collections::HashMap<String, SceneList>>,
+        >,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| tokio::sync::RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Clear the process-wide SKU + scene caches. Tests only — the caches are keyed by
 /// `base_url`, and wiremock reuses ephemeral ports across tests, so a stale entry
 /// from a prior (dropped) mock server could otherwise satisfy a fresh lookup.
 #[cfg(test)]
 async fn clear_sku_cache() {
     sku_cache().write().await.clear();
+    scene_cache().write().await.clear();
 }
 
 impl GoveeProvider {
@@ -120,6 +138,49 @@ impl GoveeProvider {
             .find(|d| d.device == device_id)
             .map(|d| d.sku)
             .ok_or_else(|| anyhow::anyhow!("unknown Govee device '{device_id}'"))
+    }
+
+    /// The device's dynamic light scenes (name → opaque apply value), served from
+    /// the process-wide [`scene_cache`]; on a miss, one `/device/scenes` fetch
+    /// populates it. Scenes change rarely, so this is effectively a one-time cost.
+    async fn scenes_for(&self, device_id: &str) -> Result<SceneList> {
+        if let Some(scenes) = scene_cache()
+            .read()
+            .await
+            .get(&self.base_url)
+            .and_then(|m| m.get(device_id))
+            .cloned()
+        {
+            return Ok(scenes);
+        }
+        let sku = self.sku_for(device_id).await?;
+        let body = json!({
+            "requestId": Uuid::new_v4().to_string(),
+            "payload": { "sku": sku, "device": device_id }
+        });
+        let resp: GoveeResponse<GoveeSceneData> = send_retrying(
+            self.client
+                .post(format!("{}/device/scenes", self.base_url))
+                .json(&body),
+        )
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+        if resp.code != 200 {
+            bail!("Govee scenes error {}: {}", resp.code, resp.message);
+        }
+        let scenes = resp
+            .body()
+            .map(GoveeSceneData::into_scenes)
+            .unwrap_or_default();
+        scene_cache()
+            .write()
+            .await
+            .entry(self.base_url.clone())
+            .or_default()
+            .insert(device_id.to_string(), scenes.clone());
+        Ok(scenes)
     }
 
     /// Test constructor: points at a local HTTP mock server instead of the Govee cloud.
@@ -248,6 +309,46 @@ struct GoveeStateCapability {
     state: Value,
 }
 
+/// `/device/scenes` answers with the device's `dynamic_scene` capabilities, each
+/// carrying a list of named scene `options` whose `value` is the opaque token to
+/// echo back on control.
+#[derive(Debug, Deserialize)]
+struct GoveeSceneData {
+    #[serde(default)]
+    capabilities: Vec<GoveeSceneCapability>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoveeSceneCapability {
+    instance: String,
+    #[serde(default)]
+    parameters: GoveeSceneParameters,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct GoveeSceneParameters {
+    #[serde(default)]
+    options: Vec<GoveeSceneOption>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoveeSceneOption {
+    name: String,
+    value: Value,
+}
+
+impl GoveeSceneData {
+    /// Flatten the `lightScene` options into (name, apply-value) pairs.
+    fn into_scenes(self) -> SceneList {
+        self.capabilities
+            .into_iter()
+            .filter(|c| c.instance == "lightScene")
+            .flat_map(|c| c.parameters.options)
+            .map(|o| (o.name, o.value))
+            .collect()
+    }
+}
+
 // ── Conversion helpers ──────────────────────────────────────────────────────
 
 fn govee_device_to_light(d: GoveeDevice, state: Option<LightState>) -> Light {
@@ -337,12 +438,22 @@ impl LightProvider for GoveeProvider {
     }
 
     async fn discover(&self) -> Result<Vec<Light>> {
-        Ok(self
-            .fetch_devices()
-            .await?
-            .into_iter()
-            .map(|d| govee_device_to_light(d, None))
-            .collect())
+        let devices = self.fetch_devices().await?;
+        let mut lights = Vec::with_capacity(devices.len());
+        for d in devices {
+            // Devices that advertise the dynamic-scene capability expose their
+            // scene list (the effects) behind a separate, cached call.
+            let has_scenes = d.capabilities.iter().any(|c| c.instance == "lightScene");
+            let mut light = govee_device_to_light(d, None);
+            if has_scenes {
+                // Best-effort: a scenes fetch failure must not fail discovery.
+                if let Ok(scenes) = self.scenes_for(&light.provider_id).await {
+                    light.capabilities.effects = scenes.into_iter().map(|(n, _)| n).collect();
+                }
+            }
+            lights.push(light);
+        }
+        Ok(lights)
     }
 
     async fn set_state(&self, provider_id: &str, state: &LightState) -> Result<()> {
@@ -377,6 +488,24 @@ impl LightProvider for GoveeProvider {
                 "type": "devices.capabilities.color_setting",
                 "instance": "colorTemperatureK",
                 "value": kelvin
+            }));
+        }
+
+        // A dynamic scene ("effect") is applied by echoing back its opaque value
+        // under the dynamic_scene capability. The frontend sends `effect` only on
+        // an actual scene pick, so this doesn't ride along with colour tweaks.
+        if let Some(effect) = state.effect.as_deref().filter(|e| !e.is_empty()) {
+            let value = self
+                .scenes_for(provider_id)
+                .await?
+                .into_iter()
+                .find(|(name, _)| name == effect)
+                .map(|(_, value)| value)
+                .ok_or_else(|| anyhow::anyhow!("unknown Govee scene '{effect}'"))?;
+            commands.push(json!({
+                "type": "devices.capabilities.dynamic_scene",
+                "instance": "lightScene",
+                "value": value
             }));
         }
 
@@ -538,6 +667,98 @@ mod tests {
 
         let lights = mock_provider(&server).await.discover().await.unwrap();
         assert!(lights.is_empty());
+    }
+
+    fn device_list_with_scenes() -> serde_json::Value {
+        serde_json::json!({
+            "code": 200, "message": "success",
+            "data": { "devices": [{
+                "sku": "H6159",
+                "device": "AA:BB:CC:DD:EE:FF",
+                "deviceName": "Strip Lights",
+                "capabilities": [
+                    {"type": "devices.capabilities.on_off", "instance": "powerSwitch"},
+                    {"type": "devices.capabilities.color_setting", "instance": "colorRgb"},
+                    {"type": "devices.capabilities.dynamic_scene", "instance": "lightScene"}
+                ]
+            }]}
+        })
+    }
+
+    fn scenes_response() -> serde_json::Value {
+        serde_json::json!({
+            "code": 200, "message": "success",
+            "payload": { "capabilities": [{
+                "type": "devices.capabilities.dynamic_scene",
+                "instance": "lightScene",
+                "parameters": { "options": [
+                    {"name": "Sunrise", "value": {"id": 1, "paramId": 10}},
+                    {"name": "Aurora",  "value": {"id": 2, "paramId": 20}}
+                ]}
+            }]}
+        })
+    }
+
+    #[tokio::test]
+    async fn discover_advertises_dynamic_scenes_as_effects() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/devices"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(device_list_with_scenes()))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/device/scenes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(scenes_response()))
+            .mount(&server)
+            .await;
+
+        let lights = mock_provider(&server).await.discover().await.unwrap();
+        assert_eq!(lights[0].capabilities.effects, vec!["Sunrise", "Aurora"]);
+    }
+
+    #[tokio::test]
+    async fn set_state_with_effect_applies_the_dynamic_scene() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/devices"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(device_list_with_scenes()))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/device/scenes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(scenes_response()))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/device/control"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 200, "message": "success", "data": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let state = LightState {
+            on: true,
+            effect: Some("Aurora".to_string()),
+            ..Default::default()
+        };
+        mock_provider(&server)
+            .await
+            .set_state("AA:BB:CC:DD:EE:FF", &state)
+            .await
+            .unwrap();
+
+        let bodies = control_bodies(&server).await;
+        let scene = bodies
+            .iter()
+            .find(|b| b["payload"]["capability"]["instance"] == "lightScene")
+            .expect("a dynamic_scene control was sent");
+        // The opaque value is echoed back verbatim.
+        assert_eq!(
+            scene["payload"]["capability"]["value"],
+            serde_json::json!({ "id": 2, "paramId": 20 })
+        );
     }
 
     /// Mount the devices endpoint (needed by SKU resolution) + control endpoint.

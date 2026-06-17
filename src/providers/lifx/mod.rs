@@ -63,6 +63,25 @@ impl LifxProvider {
         Ok(resp.json().await?)
     }
 
+    /// POST a firmware effect to a LIFX selector — `breathe`/`pulse`/`move`/
+    /// `morph`/`flame`, or `off` to clear. A separate endpoint from `/state`.
+    async fn apply_effect(&self, selector: &str, effect: &str, state: &LightState) -> Result<()> {
+        let mut req = self.client.post(format!(
+            "{}/lights/{selector}/effects/{effect}",
+            self.base_url
+        ));
+        if let Some(body) = lifx_effect_body(effect, state) {
+            req = req.json(&body);
+        }
+        let resp = req.send().await.context("LIFX effect request failed")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            bail!("LIFX effect error {status}: {text}");
+        }
+        Ok(())
+    }
+
     /// PUT a state body to a LIFX selector (`id:<id>`, `group_id:<id>`, …).
     /// Shared by per-light `set_state` and native group control.
     async fn put_state(&self, selector: &str, body: &serde_json::Value) -> Result<()> {
@@ -137,6 +156,66 @@ struct LifxCapabilities {
     has_color: bool,
     #[serde(default)]
     has_variable_color_temp: bool,
+    /// Linear-strip bulbs (Z / Beam) — support the `move` firmware effect.
+    #[serde(default)]
+    has_multizone: bool,
+    /// 2D matrix bulbs (Tile / Candle / Path) — support `morph` + `flame`.
+    #[serde(default)]
+    has_matrix: bool,
+}
+
+/// The firmware effects a LIFX device supports, by capability. Every colour bulb
+/// can `breathe`/`pulse`; `move` needs a multizone strip; `morph`/`flame` need a
+/// matrix. `off` clears any running effect. Names are LIFX-native (the cloud
+/// `/effects/<name>` endpoint), with `off` as the clear value.
+fn lifx_effects(caps: Option<&LifxCapabilities>, has_color: bool) -> Vec<String> {
+    if !has_color {
+        return Vec::new(); // white-only bulbs have no colour effects
+    }
+    let mut fx = vec![
+        "off".to_string(),
+        "breathe".to_string(),
+        "pulse".to_string(),
+    ];
+    if caps.map(|c| c.has_multizone).unwrap_or(false) {
+        fx.push("move".to_string());
+    }
+    if caps.map(|c| c.has_matrix).unwrap_or(false) {
+        fx.push("morph".to_string());
+        fx.push("flame".to_string());
+    }
+    fx
+}
+
+/// Build the JSON body for a LIFX `/effects/<name>` POST. `None` = the `off`
+/// endpoint (no body). Uses sensible defaults; `breathe`/`pulse` breathe toward
+/// the light's current colour (or white). See the LIFX HTTP effects docs.
+fn lifx_effect_body(effect: &str, state: &LightState) -> Option<serde_json::Value> {
+    let target = state.color.as_ref().map(|c| {
+        let (r, g, b) = c.to_rgb();
+        let (hue, sat) = rgb_to_hs(r, g, b);
+        format!("hue:{hue:.1} saturation:{sat:.4}")
+    });
+    match effect {
+        "off" => None,
+        "breathe" | "pulse" => Some(json!({
+            "color": target.unwrap_or_else(|| "white".to_string()),
+            "period": 2.0,
+            "cycles": 5,
+            "persist": false,
+            "power_on": true,
+        })),
+        "move" => {
+            Some(json!({ "direction": "forward", "period": 2.0, "cycles": 5, "power_on": true }))
+        }
+        "morph" => Some(json!({
+            "period": 5.0,
+            "palette": ["red", "orange", "yellow", "green", "blue", "purple"],
+            "power_on": true,
+        })),
+        "flame" => Some(json!({ "period": 5.0, "power_on": true })),
+        _ => Some(json!({ "power_on": true })),
+    }
 }
 
 /// HSV (h 0–360, s/v 0–1) → sRGB, for mapping a LIFX colour to Bifrost's `Color`.
@@ -204,14 +283,13 @@ fn state_to_body(state: &LightState) -> serde_json::Value {
 }
 
 fn lifx_to_light(l: LifxLight) -> Light {
-    let (has_color, has_temp) = l
-        .product
-        .as_ref()
-        .and_then(|p| p.capabilities.as_ref())
+    let caps_ref = l.product.as_ref().and_then(|p| p.capabilities.as_ref());
+    let (has_color, has_temp) = caps_ref
         .map(|c| (c.has_color, c.has_variable_color_temp))
         // The cloud API doesn't always include product metadata; assume a full
         // colour bulb (the common case) rather than hiding capabilities.
         .unwrap_or((true, true));
+    let effects = lifx_effects(caps_ref, has_color);
 
     let mut state = LightState {
         on: l.power == "on",
@@ -246,7 +324,7 @@ fn lifx_to_light(l: LifxLight) -> Light {
             color_rgb: has_color,
             color_temperature: has_temp,
             hue_gamut: None,
-            effects: Vec::new(),
+            effects,
         },
         last_seen: Utc::now(),
     }
@@ -268,10 +346,18 @@ impl LightProvider for LifxProvider {
     }
 
     async fn set_state(&self, provider_id: &str, state: &LightState) -> Result<()> {
+        let selector = format!("id:{provider_id}");
+        // A firmware effect lives on its own `/effects/<name>` endpoint, not on
+        // `/state`. When the change carries one, drive it there; the frontend only
+        // sends `effect` on an actual effect pick (it doesn't re-send the last
+        // effect on a colour/brightness change), so a transient breathe/pulse
+        // isn't re-triggered by an unrelated tweak.
+        if let Some(effect) = state.effect.as_deref().filter(|e| !e.is_empty()) {
+            return self.apply_effect(&selector, effect, state).await;
+        }
         // One PUT carries the whole state — LIFX applies power + brightness +
         // colour atomically (unlike Govee's one-request-per-capability).
-        self.put_state(&format!("id:{provider_id}"), &state_to_body(state))
-            .await
+        self.put_state(&selector, &state_to_body(state)).await
     }
 
     async fn get_state(&self, provider_id: &str) -> Result<LightState> {
@@ -556,6 +642,101 @@ mod tests {
         let req = &server.received_requests().await.unwrap()[0];
         let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
         assert_eq!(body["color"], format!("kelvin:{}", 1_000_000 / 370));
+    }
+
+    #[test]
+    fn effects_derive_from_capabilities() {
+        // White-only bulbs advertise no colour effects.
+        assert!(lifx_effects(None, false).is_empty());
+        // A plain colour bulb gets the universal off/breathe/pulse.
+        let basic = lifx_effects(None, true);
+        assert_eq!(basic, vec!["off", "breathe", "pulse"]);
+        // A multizone strip adds `move`.
+        let strip = LifxCapabilities {
+            has_color: true,
+            has_variable_color_temp: true,
+            has_multizone: true,
+            has_matrix: false,
+        };
+        assert!(lifx_effects(Some(&strip), true).contains(&"move".to_string()));
+        // A matrix bulb adds `morph` + `flame`.
+        let tile = LifxCapabilities {
+            has_color: true,
+            has_variable_color_temp: true,
+            has_multizone: false,
+            has_matrix: true,
+        };
+        let fx = lifx_effects(Some(&tile), true);
+        assert!(fx.contains(&"morph".to_string()) && fx.contains(&"flame".to_string()));
+    }
+
+    #[tokio::test]
+    async fn discover_advertises_effects_for_a_colour_bulb() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/lights/all"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([light_json(
+                "d073d5000001",
+                "Kitchen",
+                true,
+                1.0,
+                3500
+            )])))
+            .mount(&server)
+            .await;
+        let lights = mock_provider(&server).await.discover().await.unwrap();
+        assert_eq!(
+            lights[0].capabilities.effects,
+            vec!["off", "breathe", "pulse"]
+        );
+    }
+
+    #[tokio::test]
+    async fn set_state_with_effect_posts_to_the_effect_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/lights/id:d073d5000001/effects/breathe"))
+            .and(header("authorization", "Bearer tok"))
+            .respond_with(ResponseTemplate::new(207))
+            .mount(&server)
+            .await;
+        let state = LightState {
+            on: true,
+            effect: Some("breathe".to_string()),
+            ..Default::default()
+        };
+        mock_provider(&server)
+            .await
+            .set_state("d073d5000001", &state)
+            .await
+            .unwrap();
+        let req = &server.received_requests().await.unwrap()[0];
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        // No colour set → breathes toward white, powering the bulb on.
+        assert_eq!(body["color"], "white");
+        assert_eq!(body["power_on"], true);
+    }
+
+    #[tokio::test]
+    async fn set_state_with_off_effect_hits_the_off_endpoint_with_no_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/lights/id:x/effects/off"))
+            .respond_with(ResponseTemplate::new(207))
+            .mount(&server)
+            .await;
+        let state = LightState {
+            on: true,
+            effect: Some("off".to_string()),
+            ..Default::default()
+        };
+        mock_provider(&server)
+            .await
+            .set_state("x", &state)
+            .await
+            .unwrap();
+        let req = &server.received_requests().await.unwrap()[0];
+        assert!(req.body.is_empty(), "the off endpoint takes no body");
     }
 
     #[tokio::test]

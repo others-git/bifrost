@@ -170,6 +170,14 @@
       }
       .bifrost-seal-spin { animation: bifrost-seal-spin 1.4s linear infinite; }
 
+      /* The underline on an active effect tile sweeps left→right, hinting that the
+         effect is a *running* animation rather than a static preset. */
+      @keyframes bifrostEffectShimmer {
+        0%   { opacity: 0.25; transform: translateX(-40%); }
+        50%  { opacity: 1; }
+        100% { opacity: 0.25; transform: translateX(40%); }
+      }
+
       @media (prefers-reduced-motion: reduce) {
         .bifrost-aurora, .bifrost-brand, .bifrost-card { animation: none; }
         .bifrost-brand { transition: none; }
