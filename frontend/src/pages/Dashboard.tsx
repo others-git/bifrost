@@ -987,7 +987,7 @@ function RestoreHomeButton({ name, onRestore }: { name: string; onRestore: () =>
           transition: "color .2s ease, text-shadow .2s ease",
         }}
       >
-        {armed ? "Confirm" : "Restore Home"}
+        {armed ? "Confirm" : name}
       </span>
     </div>
   );

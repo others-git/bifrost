@@ -65,6 +65,12 @@ const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: "appearance", label: "Appearance" },
 ];
 
+/** Served inside the kiosk WebView (it appends `BifrostKiosk/<v>` to the UA).
+ * The Clients tab manages *other* kiosks remotely — a wall fixture shouldn't be
+ * managing the fleet from its own face, so we hide it there. */
+const IS_KIOSK = /\bBifrostKiosk\//.test(navigator.userAgent);
+const VISIBLE_TABS = SETTINGS_TABS.filter((t) => t.id !== "clients" || !IS_KIOSK);
+
 export function SettingsPage({ onNavigate: _onNavigate }: Props) {
   const dialogs = useDialogs();
   const { isMobile } = useViewport();
@@ -169,7 +175,7 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
           overflowY: "hidden",
         }}
       >
-        {SETTINGS_TABS.map((t) => {
+        {VISIBLE_TABS.map((t) => {
           const active = tab === t.id;
           return (
             <button
@@ -1296,12 +1302,15 @@ function AiEndpointCard({
 function KiosksSection({ dialogs }: { dialogs: Dialogs }) {
   const [kiosks, setKiosks] = useState<Kiosk[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
+  // Latest APK the hub has cached, so each row can show up-to-date vs Update.
+  const [latest, setLatest] = useState<KioskUpdateManifest | null>(null);
   async function load() {
     setKiosks(await getKiosks());
   }
   useEffect(() => {
     load();
     getRooms().then(setRooms);
+    getKioskUpdateStatus().then((s) => setLatest(s.cached));
   }, []);
 
   async function assignRoom(k: Kiosk, roomId: string | null) {
@@ -1309,7 +1318,7 @@ function KiosksSection({ dialogs }: { dialogs: Dialogs }) {
     await load();
   }
 
-  async function send(k: Kiosk, command: "sleep" | "wake" | "lock") {
+  async function send(k: Kiosk, command: "sleep" | "wake" | "lock" | "update") {
     await kioskCommand(k.id, command);
     await load();
   }
@@ -1408,6 +1417,24 @@ function KiosksSection({ dialogs }: { dialogs: Dialogs }) {
               <Button variant="danger" onClick={() => forget(k)} style={{ padding: "0.3rem 0.7rem", fontSize: "0.78rem" }}>
                 Forget
               </Button>
+              {/* Update status: compare the kiosk's reported version to the APK the
+                  hub has cached. Offer the push when they differ; else say so. */}
+              {latest &&
+                k.app_version &&
+                (k.app_version === latest.version_name ? (
+                  <span style={{ fontSize: "0.74rem", color: "var(--bf-good)", whiteSpace: "nowrap" }}>
+                    ✓ up to date
+                  </span>
+                ) : (
+                  <Button
+                    onClick={() => send(k, "update")}
+                    disabled={!k.online || !k.authorized}
+                    title={`Push v${latest.version_name} to this kiosk (it pulls + installs)`}
+                    style={{ padding: "0.3rem 0.7rem", fontSize: "0.78rem" }}
+                  >
+                    Update → {latest.version_name}
+                  </Button>
+                ))}
             </div>
           </div>
         ))}
