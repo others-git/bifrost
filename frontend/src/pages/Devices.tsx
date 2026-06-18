@@ -636,13 +636,23 @@ function DeviceCard({
         ...cardStyle,
       }}
     >
-      {/* Face — glyph · name + meta (tap to expand) · status + enable/disable + chevron.
-          Secondary config (room, receiver, merge) lives in the detail panel so the
-          face stays uncrowded at narrow widths. */}
-      <div style={{ display: "flex", alignItems: "center", gap: "0.7rem", padding: "0.75rem 0.9rem", minWidth: 0 }}>
+      {/* Face — the whole row toggles the detail panel; the interactive controls
+          (glyph, enable/disable, power, chevron) stop propagation so they act on
+          their own and aren't swallowed by the row click. Secondary config (room,
+          receiver, merge) lives in the detail panel so the face stays uncrowded. */}
+      <div
+        onClick={() => setExpanded((v) => !v)}
+        role="button"
+        aria-expanded={expanded}
+        title={expanded ? "Hide details" : `${item.name} — tap for details`}
+        style={{ display: "flex", alignItems: "center", gap: "0.7rem", padding: "0.75rem 0.9rem", minWidth: 0, cursor: "pointer" }}
+      >
         <button
           ref={glyphBtnRef}
-          onClick={() => setPicking((v) => !v)}
+          onClick={(e) => {
+            e.stopPropagation();
+            setPicking((v) => !v);
+          }}
           title={`Glyph: ${item.glyph ?? "type default"} — click to change`}
           style={{
             flexShrink: 0,
@@ -672,11 +682,7 @@ function DeviceCard({
           />
         )}
 
-        <div
-          onClick={() => setExpanded((v) => !v)}
-          title={expanded ? "Hide details" : `${item.name} — tap for details`}
-          style={{ minWidth: 0, flex: 1, cursor: "pointer" }}
-        >
+        <div style={{ minWidth: 0, flex: 1 }}>
           {/* Name + status: the device's state (offline/disabled) sits right beside
               the name, not buried after the truncated id. */}
           <div style={{ display: "flex", alignItems: "center", gap: "0.45rem", minWidth: 0 }}>
@@ -705,7 +711,10 @@ function DeviceCard({
           </div>
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: "0.45rem", flexShrink: 0 }}>
+        <div
+          onClick={(e) => e.stopPropagation()}
+          style={{ display: "flex", alignItems: "center", gap: "0.45rem", flexShrink: 0 }}
+        >
           <span
             aria-hidden
             title={offline ? "Unreachable" : on ? "On" : "Off"}

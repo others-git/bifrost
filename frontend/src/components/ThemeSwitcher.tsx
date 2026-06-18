@@ -17,6 +17,7 @@ import {
 } from "../theme";
 import { color, font, labelType, radius } from "../theme";
 import { Button } from "./controls";
+import { Glyph } from "./glyphs";
 
 export function ThemeSwitcher() {
   const [list, setList] = useState<Theme[]>(() => allThemes());
@@ -100,8 +101,8 @@ export function ThemeSwitcher() {
         ))}
       </div>
       <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.85rem", alignItems: "center" }}>
-        <Button variant="ghost" onClick={generate}>
-          🎲 Generate
+        <Button variant="ghost" onClick={generate} style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}>
+          <Glyph name="dice" size={15} /> Generate
         </Button>
         {unsaved && (
           <Button variant="accent" onClick={keep}>

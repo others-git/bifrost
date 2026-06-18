@@ -5,6 +5,7 @@
 
 import { useState, type ButtonHTMLAttributes, type CSSProperties, type ReactNode } from "react";
 import { color, alpha, glow, radius } from "../theme";
+import { Glyph } from "./glyphs";
 
 // ── Button ───────────────────────────────────────────────────────────────────
 
@@ -177,11 +178,12 @@ export function Segmented<T extends string>({
             aria-pressed={active}
             style={{
               flex: 1,
-              padding: compact ? "0.55rem 0" : "0.3rem 0",
+              padding: compact ? "0.55rem 0.4rem" : "0.3rem 0.4rem",
               minHeight: compact ? 40 : undefined,
               fontSize: compact ? "0.9rem" : "0.78rem",
               fontWeight: 600,
               letterSpacing: "0.02em",
+              whiteSpace: "nowrap",
               borderRadius: 9,
               border: "none",
               cursor: "pointer",
@@ -194,5 +196,53 @@ export function Segmented<T extends string>({
         );
       })}
     </div>
+  );
+}
+
+// ── Power toggle ─────────────────────────────────────────────────────────────
+
+/** The shared **power button** — a round, glyph-based on/off control lit in its
+ * domain accent when on (cyan = light, violet = audio, gold = power), dim and
+ * outlined when off. Lives in a fly-out header (`FlyoutHeader` actions) so every
+ * device type powers on/off the same way and in the same place. */
+export function PowerToggle({
+  on,
+  onToggle,
+  accent = color.cyan,
+  disabled = false,
+  size = 34,
+}: {
+  on: boolean;
+  onToggle: () => void;
+  accent?: string;
+  disabled?: boolean;
+  size?: number;
+}) {
+  // Default sized a touch larger than the close button — it's the primary control.
+  return (
+    <button
+      onClick={() => !disabled && onToggle()}
+      disabled={disabled}
+      aria-label={on ? "Turn off" : "Turn on"}
+      aria-pressed={on}
+      title="Power"
+      style={{
+        display: "grid",
+        placeItems: "center",
+        width: size,
+        height: size,
+        flexShrink: 0,
+        borderRadius: "50%",
+        background: on ? alpha(accent, 0.16) : "transparent",
+        border: `1px solid ${on ? accent : color.hairline}`,
+        color: on ? accent : color.faint,
+        boxShadow: on ? glow(accent, 10) : "none",
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.5 : 1,
+        padding: 0,
+      }}
+    >
+      <Glyph name="power" size={Math.round(size * 0.54)} />
+    </button>
   );
 }

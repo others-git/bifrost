@@ -44,6 +44,17 @@ export interface LightCapabilities {
   color_temperature: boolean;
   /** Dynamic effects this light supports (provider names; includes "no_effect"). */
   effects?: string[];
+  /** Number of independently addressable colour segments (e.g. a Govee strip's
+   * sections); absent when the light has none. */
+  segments?: number;
+}
+
+/** One segment's target for a per-segment write: a colour (`rgb`, 24-bit
+ * `0xRRGGBB`) and/or a brightness (0–100). Both optional — omitted = leave it. */
+export interface SegmentColor {
+  segment: number;
+  rgb?: number;
+  brightness?: number;
 }
 
 export interface Light {
@@ -396,6 +407,15 @@ export async function setLightState(id: string, state: LightState): Promise<void
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(state),
+  });
+}
+
+/** Set per-segment colours on a strip (write-only; not reflected in light state). */
+export async function setLightSegments(id: string, segments: SegmentColor[]): Promise<void> {
+  await fetch(`/api/lights/${id}/segments`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ segments }),
   });
 }
 

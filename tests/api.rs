@@ -8163,3 +8163,40 @@ async fn cast_requires_session() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
+
+// ── Light segments (per-segment colour control) ──────────────────────────────
+
+#[tokio::test]
+async fn v1_segments_without_key_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/lights/some-id/segments")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"segments":[{"segment":0,"rgb":255}]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn segments_on_provider_without_support_returns_502() {
+    // The route is wired through to the provider; WLED has no segment control, so
+    // its default `set_segments` errors → BAD_GATEWAY (proves the call reaches it).
+    let (app, light_id) = helpers::test_app_with_light("http://127.0.0.1:1").await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/lights/{light_id}/segments"),
+            &cookie,
+            r#"{"segments":[{"segment":0,"rgb":16711680}]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+}

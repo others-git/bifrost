@@ -25,6 +25,7 @@ import {
 import { RoomVolumeStrip } from "../components/RoomAudio";
 import { RoomDevicesPanel } from "../components/RoomDevices";
 import { RoomControlsPanel } from "../components/RoomControls";
+import { Glyph } from "../components/glyphs";
 import { SelectRow } from "../components/SelectRow";
 import { useDialogs, type Dialogs } from "../components/dialogs";
 import { PageHeader } from "../components/PageHeader";
@@ -229,7 +230,10 @@ function RoomCard({
             title={l.domain === "audio" ? "Synced audio room/zone" : "Synced provider room/zone"}
             style={{ border: "1px solid var(--bf-border)", borderRadius: 4, padding: "0 0.35rem", color: "#9a9", fontSize: "0.72rem" }}
           >
-            {l.domain === "audio" ? "♪" : "⇄"} {l.name}
+            <span style={{ display: "inline-grid", placeItems: "center", verticalAlign: "-2px" }}>
+              <Glyph name={l.domain === "audio" ? "speaker" : "link"} size={13} />
+            </span>{" "}
+            {l.name}
           </span>
         ))}
       </div>
@@ -377,7 +381,8 @@ function RoomEditForm({
             .filter((pg) => pg.domain === "light")
             .map((pg) => (
               <SelectRow key={pg.id} checked={links.has(pg.id)} onToggle={() => toggleSet(setLinks, pg.id)}>
-                ⇄ {pg.name}
+                <span style={{ display: "inline-grid", placeItems: "center", verticalAlign: "-2px" }}><Glyph name="link" size={13} /></span>{" "}
+                {pg.name}
                 <span style={{ color: "var(--bf-faint)", fontSize: "0.75rem" }}>
                   {pg.light_ids.length} light{pg.light_ids.length !== 1 ? "s" : ""}
                 </span>
@@ -395,7 +400,8 @@ function RoomEditForm({
             .filter((pg) => pg.domain === "audio")
             .map((pg) => (
               <SelectRow key={pg.id} checked={links.has(pg.id)} onToggle={() => toggleSet(setLinks, pg.id)}>
-                ♪ {pg.name}
+                <span style={{ display: "inline-grid", placeItems: "center", verticalAlign: "-2px" }}><Glyph name="speaker" size={13} /></span>{" "}
+                {pg.name}
                 <span style={{ color: "var(--bf-faint)", fontSize: "0.75rem" }}>
                   {pg.audio_device_ids.length} device{pg.audio_device_ids.length !== 1 ? "s" : ""}
                 </span>

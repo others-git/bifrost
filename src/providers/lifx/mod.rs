@@ -336,6 +336,7 @@ fn lifx_to_light(l: LifxLight) -> Light {
             color_temperature: has_temp,
             hue_gamut: None,
             effects,
+            segments: None,
         },
         last_seen: Utc::now(),
     }

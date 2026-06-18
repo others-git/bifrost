@@ -16,7 +16,10 @@ use crate::api::audio::{
     play_favorite_response, set_audio_companion, set_audio_receiver, set_audio_status,
     set_companion_status, set_receiver_status, ungroup_device,
 };
-use crate::api::lights::{apply_light_state, get_light_by_id, list_all_lights, set_light_status};
+use crate::api::lights::{
+    SegmentsRequest, apply_light_segments, apply_light_state, get_light_by_id, list_all_lights,
+    set_light_status,
+};
 use crate::api::power::{
     PowerCommand, apply_power_state, get_power_device_live, list_all_power_devices,
     set_power_status,
@@ -44,6 +47,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/lights", get(list_lights))
         .route("/lights/{id}", get(get_light))
         .route("/lights/{id}/state", put(set_light_state))
+        .route("/lights/{id}/segments", put(set_light_segments))
         .route("/rooms", get(list_rooms))
         .route("/rooms/{id}/state", put(set_room_state))
         .route("/scenes", get(list_scenes).post(create_scene))
@@ -114,6 +118,18 @@ async fn set_light_state(
         return s.into_response();
     }
     set_light_status(apply_light_state(&state, &id, &new_state).await).into_response()
+}
+
+async fn set_light_segments(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<SegmentsRequest>,
+) -> impl IntoResponse {
+    if let Err(s) = auth(&state, &headers).await {
+        return s.into_response();
+    }
+    set_light_status(apply_light_segments(&state, &id, &req.segments).await).into_response()
 }
 
 // ── Rooms ────────────────────────────────────────────────────────────────────

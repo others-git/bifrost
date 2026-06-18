@@ -10,6 +10,7 @@
 
 import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { useViewport } from "../useViewport";
 import { sheetStyle } from "./sheet";
 import { menuSurface } from "./Select";
 
@@ -26,6 +27,7 @@ export function AnchoredPanel({
   onClose: () => void;
   children: ReactNode;
 }) {
+  const { isMobile } = useViewport();
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
 
@@ -42,7 +44,39 @@ export function AnchoredPanel({
     setPos({ left, top });
   }, [anchor, isCompact]);
 
-  const panelStyle: CSSProperties = isCompact
+  // Tablet: a screen-centred modal over a dimming scrim — matching `Flyout`, so
+  // the pickers don't read as a different element than the control fly-outs.
+  if (isCompact && !isMobile) {
+    return createPortal(
+      <div
+        onClick={onClose}
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 60,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: "1.5rem",
+          background: "rgba(0,0,0,0.5)",
+          backdropFilter: "blur(3px)",
+          WebkitBackdropFilter: "blur(3px)",
+        }}
+      >
+        <div
+          ref={ref}
+          onClick={(e) => e.stopPropagation()}
+          style={{ width: "70%", maxWidth: 360, maxHeight: "70vh", overflowY: "auto", ...menuSurface }}
+        >
+          {children}
+        </div>
+      </div>,
+      document.body,
+    );
+  }
+
+  // Phone: full-width bottom sheet. Desktop: anchored dropdown.
+  const panelStyle: CSSProperties = isMobile
     ? { ...sheetStyle, zIndex: 61, maxHeight: "60vh" }
     : {
         position: "fixed",

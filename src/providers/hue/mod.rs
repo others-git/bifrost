@@ -334,6 +334,9 @@ fn hue_resource_to_light(r: HueLightResource, hw_id: Option<String>) -> Light {
             color_temperature: true,
             hue_gamut: gamut,
             effects,
+            // Hue gradient lightstrips expose segments via a separate capability;
+            // not modelled yet (tracked as a follow-up). Plain bulbs have none.
+            segments: None,
         },
         last_seen: Utc::now(),
         hw_id,

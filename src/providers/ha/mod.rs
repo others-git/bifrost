@@ -600,6 +600,9 @@ fn light_capabilities(attrs: &Value) -> LightCapabilities {
         // HA surfaces the entity's supported effects as `effect_list`; pass them
         // through verbatim (the UI humanizes "None" → "Off").
         effects: attr_str_vec(attrs, "effect_list"),
+        // HA doesn't surface a per-segment colour capability uniformly; native
+        // providers (Govee) own segment control.
+        segments: None,
     }
 }
 

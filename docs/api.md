@@ -40,7 +40,8 @@ curl -H "Authorization: Bearer $BIFROST_KEY" http://bifrost.local:3000/api/v1/li
     "color_rgb": true,
     "color_temperature": true,
     "hue_gamut": "C",            // A | B | C | null
-    "effects": ["no_effect", "candle", "fire"]  // supported dynamic effects; omitted when none
+    "effects": ["no_effect", "candle", "fire"], // supported dynamic effects; omitted when none
+    "segments": 15              // addressable colour segments (Govee strips); omitted when none
   },
   "last_seen": "2026-06-11T12:00:00Z"
 }
@@ -95,6 +96,7 @@ was captured.
 | `GET` | `/api/v1/lights` | All lights with current state |
 | `GET` | `/api/v1/lights/{id}` | One light (404 if unknown) |
 | `PUT` | `/api/v1/lights/{id}/state` | Set state; body is a full `LightState` |
+| `PUT` | `/api/v1/lights/{id}/segments` | Set per-segment colours (strips with `capabilities.segments`) |
 
 `PUT …/state` responds `204 No Content` on success, `404` for an unknown light,
 `502` if the provider could not be reached.
@@ -104,6 +106,22 @@ was captured.
 curl -X PUT -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   -d '{"on":true,"brightness":50,"color":{"x":0.675,"y":0.322,"brightness":1.0}}' \
   http://bifrost.local:3000/api/v1/lights/$LIGHT_ID/state
+```
+
+`PUT …/segments` sets individual LED segments on an addressable strip (only lights
+that advertise `capabilities.segments`; Govee today). Each entry carries a 0-indexed
+`segment` plus an optional `rgb` (packed 24-bit `0xRRGGBB`) and/or optional
+`brightness` (0–100) — set either or both. Same status codes as `…/state` (`502`
+if the light has no segment support). Write-only — segment state isn't reported
+back in `LightState`.
+
+```bash
+# Paint segments 0–2 red, 3–5 blue
+curl -X PUT -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"segments":[{"segment":0,"rgb":16711680},{"segment":1,"rgb":16711680},
+                   {"segment":2,"rgb":16711680},{"segment":3,"rgb":255},
+                   {"segment":4,"rgb":255},{"segment":5,"rgb":255}]}' \
+  http://bifrost.local:3000/api/v1/lights/$LIGHT_ID/segments
 ```
 
 ### Rooms

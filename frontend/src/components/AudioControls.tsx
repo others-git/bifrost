@@ -17,9 +17,10 @@ import {
 } from "../api";
 import { DisableRow } from "./PowerFlyout";
 import { BifrostRemote } from "./BifrostRemote";
-import { Switch } from "./controls";
+import { PowerToggle } from "./controls";
 import { Flyout, FlyoutHeader } from "./Flyout";
 import { Select } from "./Select";
+import { Glyph } from "./glyphs";
 import { T, domain, color, alpha, labelType } from "../theme";
 
 const ACCENT = domain.audio; // violet — audio's accent
@@ -120,9 +121,9 @@ export function AudioControls({
       {/* Transport */}
       {cap.transport && !offline && (
         <div style={{ display: "flex", justifyContent: "center", gap: compact ? "0.4rem" : "0.6rem", alignItems: "center" }}>
-          <TransportButton glyph="⏮" title="Previous" compact={compact} onClick={() => send({ transport: "previous" })} />
-          <TransportButton glyph={playing ? "⏸" : "▶"} title="Play / pause" big compact={compact} onClick={() => send({ transport: "toggle" })} />
-          <TransportButton glyph="⏭" title="Next" compact={compact} onClick={() => send({ transport: "next" })} />
+          <TransportButton glyph="prev" title="Previous" compact={compact} onClick={() => send({ transport: "previous" })} />
+          <TransportButton glyph={playing ? "pause" : "play"} title="Play / pause" big compact={compact} onClick={() => send({ transport: "toggle" })} />
+          <TransportButton glyph="next" title="Next" compact={compact} onClick={() => send({ transport: "next" })} />
         </div>
       )}
 
@@ -132,9 +133,9 @@ export function AudioControls({
           <button
             onClick={toggleMute}
             title={s.mute ? "Unmute" : "Mute"}
-            style={{ background: "none", border: "none", cursor: "pointer", fontSize: "1rem", padding: 0, opacity: s.mute ? 1 : 0.6 }}
+            style={{ background: "none", border: "none", cursor: "pointer", padding: 0, color: T.text, display: "grid", placeItems: "center", opacity: s.mute ? 1 : 0.6 }}
           >
-            {s.mute ? "🔇" : "🔊"}
+            <Glyph name={s.mute ? "mute" : "volume"} size={18} />
           </button>
           <input
             type="range"
@@ -176,9 +177,12 @@ export function AudioControls({
         <div style={{ borderTop: `1px solid ${color.hairline}`, paddingTop: "0.6rem" }}>
           <button
             onClick={toggleFavorites}
-            style={{ ...labelType, background: "none", border: "none", color: T.dim, cursor: "pointer", fontSize: "0.62rem", padding: 0, display: "flex", alignItems: "center", gap: "0.35rem" }}
+            style={{ ...labelType, background: "none", border: "none", color: T.dim, cursor: "pointer", fontSize: "0.62rem", padding: 0, display: "flex", alignItems: "center", gap: "0.4rem" }}
           >
-            ♥ Favorites <span style={{ fontSize: "0.6rem" }}>{favOpen ? "▲" : "▼"}</span>
+            <Glyph name="favorite" size={13} /> Favorites
+            <span style={{ display: "grid", transform: favOpen ? "rotate(180deg)" : "none" }}>
+              <Glyph name="chevron" size={13} />
+            </span>
           </button>
           {favOpen && (
             <div style={{ marginTop: "0.5rem", display: "flex", flexDirection: "column", gap: "0.25rem" }}>
@@ -192,7 +196,7 @@ export function AudioControls({
                     title={`Play "${f.title}"`}
                     style={{ textAlign: "left", background: "rgba(255,255,255,0.03)", border: `1px solid ${T.cardBorder}`, borderRadius: 8, color: T.text, cursor: "pointer", padding: "0.4rem 0.6rem", display: "flex", alignItems: "center", gap: "0.5rem" }}
                   >
-                    <span style={{ color: ACCENT, fontSize: "0.8rem" }}>▶</span>
+                    <span style={{ color: ACCENT, display: "grid", placeItems: "center" }}><Glyph name="play" size={13} /></span>
                     <span style={{ minWidth: 0, flex: 1 }}>
                       <span style={{ display: "block", fontSize: "0.85rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {f.title}
@@ -250,9 +254,10 @@ export function TransportButton({
   );
 }
 
-/** Power for receivers/zones: a glassy electric pill, matching the light toggles. */
+/** Power for receivers/zones — the shared power button, lit violet (audio domain),
+ * so every device type powers on/off identically. */
 export function PowerButton({ on, onToggle }: { on: boolean; onToggle: () => void }) {
-  return <Switch on={on} onChange={() => onToggle()} accent={domain.audio} />;
+  return <PowerToggle on={on} accent={domain.audio} onToggle={onToggle} />;
 }
 
 /**
@@ -309,7 +314,7 @@ export function AudioEditor({
         title={device.name}
         subtitle={KIND_LABEL[device.kind] ?? device.kind}
         accent={color.violet}
-        actions={cap.sources && !offline ? <PowerButton on={device.state.power} onToggle={togglePower} /> : undefined}
+        leading={cap.sources && !offline ? <PowerButton on={device.state.power} onToggle={togglePower} /> : undefined}
         onClose={onClose}
       />
       {pairedRemote && !offline && (
@@ -330,7 +335,7 @@ export function AudioEditor({
             fontSize: "0.85rem",
           }}
         >
-          <span style={{ fontSize: "1rem" }}>📺</span> Remote
+          <Glyph name="tv" size={16} /> Remote
         </button>
       )}
       {offline ? (
@@ -343,6 +348,7 @@ export function AudioEditor({
           remoteId={pairedRemote.id}
           name={device.name}
           initialOn={device.state.power}
+          anchor={anchor}
           onClose={() => setRemoteOpen(false)}
           // Bound to a receiver (M22): the remote's volume/mute drive the device,
           // which the backend routes to the receiver — not the TV's own volume.

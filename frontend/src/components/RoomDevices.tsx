@@ -22,6 +22,7 @@ import {
 } from "../api";
 import { SelectRow } from "./SelectRow";
 import { Button } from "./controls";
+import { Glyph } from "./glyphs";
 
 // Lights/power rows use SelectRow's default sky accent; speakers use violet to
 // match the Audio page.
@@ -157,7 +158,10 @@ export function RoomDevicesPanel({
               checked={links.has(pg.id)}
               onToggle={() => setLinks((s) => toggle(s, pg.id))}
             >
-              {pg.domain === "audio" ? "♪" : "⇄"} {pg.name}
+              <span style={{ display: "inline-grid", placeItems: "center", verticalAlign: "-2px" }}>
+                <Glyph name={pg.domain === "audio" ? "speaker" : "link"} size={14} />
+              </span>{" "}
+              {pg.name}
               <span style={{ color: "var(--bf-faint)", fontSize: "0.75rem" }}>{groupSummary(pg)}</span>
             </SelectRow>
           ))}

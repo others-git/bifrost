@@ -5,7 +5,7 @@
 //!
 //! Rate limit: ~10 req/s; 10,000 req/day per API key.
 
-use crate::models::{Color, Light, LightCapabilities, LightState, Provider};
+use crate::models::{Color, Light, LightCapabilities, LightState, Provider, SegmentColor};
 use crate::providers::LightProvider;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -13,6 +13,7 @@ use chrono::Utc;
 use reqwest::{Client, header};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 const BASE_URL: &str = "https://openapi.api.govee.com/router/api/v1";
@@ -145,6 +146,8 @@ impl GoveeCloud {
             "diyScene",
             "online",
             "dynamic_scene",
+            "segmentedColorRgb",
+            "segmentedBrightness",
         ];
         let devices = self.fetch_devices().await?;
         let report: Vec<Value> = devices
@@ -265,6 +268,29 @@ impl GoveeCloud {
         Ok(scenes)
     }
 
+    /// Send one capability command to a device (`/device/control`). The unit of
+    /// Govee control — `set_state` and `set_segments` fan several of these out
+    /// concurrently. `send_retrying` handles per-request 429s.
+    async fn send_control(&self, sku: &str, device: &str, capability: Value) -> Result<()> {
+        let body = json!({
+            "requestId": Uuid::new_v4().to_string(),
+            "payload": { "sku": sku, "device": device, "capability": capability }
+        });
+        let resp: GoveeResponse<Value> = send_retrying(
+            self.client
+                .post(format!("{}/device/control", self.base_url))
+                .json(&body),
+        )
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+        if resp.code != 200 {
+            bail!("Govee control error {}: {}", resp.code, resp.message);
+        }
+        Ok(())
+    }
+
     /// Test constructor: points at a local HTTP mock server instead of the Govee cloud.
     #[cfg(test)]
     pub fn new_for_test(base_url: impl Into<String>, api_key: impl AsRef<str>) -> Result<Self> {
@@ -382,6 +408,59 @@ struct GoveeCapability {
     /// captured for dev-mode debug (to see what a device exposes vs what we model).
     #[serde(rename = "type", default)]
     cap_type: Option<String>,
+    /// Capability shape descriptor. We only read it for `segmentedColorRgb` (to
+    /// learn the segment count); other capabilities' parameters parse to an empty
+    /// struct and are ignored (serde drops unknown fields).
+    #[serde(default)]
+    parameters: Option<GoveeCapParameters>,
+}
+
+/// Minimal view of a capability's `parameters` — just the STRUCT `fields` we need
+/// to size a segmented capability. Permissive: any `parameters` shape that lacks
+/// `fields` (range caps, scene `options`, …) yields an empty list.
+#[derive(Debug, Deserialize, Default)]
+struct GoveeCapParameters {
+    #[serde(default)]
+    fields: Vec<GoveeCapField>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoveeCapField {
+    #[serde(rename = "fieldName", default)]
+    field_name: String,
+    /// For an Array field: the per-element value range (segment indices `0..=max`).
+    #[serde(rename = "elementRange", default)]
+    element_range: Option<GoveeRange>,
+    /// For an Array field: the allowed length range.
+    #[serde(default)]
+    size: Option<GoveeRange>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+struct GoveeRange {
+    #[serde(default)]
+    max: i64,
+}
+
+/// Segment count from a device's `segmentedColorRgb` capability, if it has one:
+/// the `segment` array field's element range gives indices `0..=max`, so the count
+/// is `max + 1`. Falls back to the array's max length. `None` = no segment control.
+fn segment_count(caps: &[GoveeCapability]) -> Option<u16> {
+    let seg = caps
+        .iter()
+        .find(|c| c.instance == "segmentedColorRgb")?
+        .parameters
+        .as_ref()?
+        .fields
+        .iter()
+        .find(|f| f.field_name == "segment")?;
+    let n = seg
+        .element_range
+        .map(|r| r.max + 1)
+        .or_else(|| seg.size.map(|r| r.max))?;
+    u16::try_from(n.clamp(0, u16::MAX as i64))
+        .ok()
+        .filter(|n| *n > 0)
 }
 
 #[derive(Debug, Deserialize)]
@@ -452,6 +531,7 @@ fn govee_device_to_light(d: GoveeDevice, state: Option<LightState>) -> Light {
         .iter()
         .any(|c| c.instance == "colorTemperatureK");
     let has_dim = d.capabilities.iter().any(|c| c.instance == "brightness");
+    let segments = segment_count(&d.capabilities);
 
     Light {
         id: Uuid::new_v4(),
@@ -467,6 +547,7 @@ fn govee_device_to_light(d: GoveeDevice, state: Option<LightState>) -> Light {
             color_temperature: has_color_temp,
             hue_gamut: None,
             effects: Vec::new(),
+            segments,
         },
         last_seen: Utc::now(),
     }
@@ -608,35 +689,53 @@ impl LightProvider for GoveeCloud {
         // capabilities with no ordering dependency, so fire them **concurrently**:
         // a multi-capability change (power + brightness + colour) then costs ~one
         // cloud round-trip instead of three sequential ones — the bulk of the
-        // cloud-path lag. `send_retrying` still handles any per-request 429s.
-        let sends = commands.into_iter().map(|cmd| {
-            let body = json!({
-                "requestId": Uuid::new_v4().to_string(),
-                "payload": {
-                    "sku": sku.clone(),
-                    "device": provider_id,
-                    "capability": cmd
-                }
-            });
-            async move {
-                let resp: GoveeResponse<Value> = send_retrying(
-                    self.client
-                        .post(format!("{}/device/control", self.base_url))
-                        .json(&body),
-                )
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
-
-                if resp.code != 200 {
-                    bail!("Govee control error {}: {}", resp.code, resp.message);
-                }
-                Ok::<(), anyhow::Error>(())
-            }
-        });
+        // cloud-path lag.
+        let sends = commands
+            .into_iter()
+            .map(|cmd| self.send_control(&sku, provider_id, cmd));
         futures_util::future::try_join_all(sends).await?;
 
+        Ok(())
+    }
+
+    async fn set_segments(&self, provider_id: &str, segments: &[SegmentColor]) -> Result<()> {
+        if segments.is_empty() {
+            return Ok(());
+        }
+        let sku = self.sku_for(provider_id).await?;
+        // `segmentedColorRgb` / `segmentedBrightness` each set one value across a
+        // *list* of segments, so group by value: each distinct colour and each
+        // distinct brightness is one command. (Govee indexes segments from 0.)
+        let mut by_rgb: HashMap<u32, Vec<u16>> = HashMap::new();
+        let mut by_brightness: HashMap<u8, Vec<u16>> = HashMap::new();
+        for s in segments {
+            if let Some(rgb) = s.rgb {
+                by_rgb.entry(rgb).or_default().push(s.segment);
+            }
+            if let Some(b) = s.brightness {
+                by_brightness.entry(b).or_default().push(s.segment);
+            }
+        }
+        let mut capabilities: Vec<Value> = Vec::new();
+        for (rgb, segs) in by_rgb {
+            capabilities.push(json!({
+                "type": "devices.capabilities.segment_color_setting",
+                "instance": "segmentedColorRgb",
+                "value": { "segment": segs, "rgb": rgb }
+            }));
+        }
+        for (brightness, segs) in by_brightness {
+            capabilities.push(json!({
+                "type": "devices.capabilities.segment_color_setting",
+                "instance": "segmentedBrightness",
+                "value": { "segment": segs, "brightness": brightness }
+            }));
+        }
+        // Fan the (independent) segment commands out concurrently.
+        let sends = capabilities
+            .into_iter()
+            .map(|c| self.send_control(&sku, provider_id, c));
+        futures_util::future::try_join_all(sends).await?;
         Ok(())
     }
 
@@ -852,6 +951,21 @@ impl LightProvider for GoveeProvider {
         self.cloud_set(mac, state).await
     }
 
+    async fn set_segments(&self, mac: &str, segments: &[SegmentColor]) -> Result<()> {
+        // Segment control is **cloud-only** — the Govee LAN API has no
+        // per-segment command, and capability discovery (segment count) comes
+        // from the cloud device list anyway.
+        match &self.cloud {
+            Some(c) => {
+                tracing::debug!(target: "bifrost::govee", %mac, segments = segments.len(), "set_segments → cloud");
+                c.set_segments(mac, segments).await
+            }
+            None => bail!(
+                "Govee device {mac} segment control needs a cloud API key (the LAN API has no segment command)"
+            ),
+        }
+    }
+
     async fn get_state(&self, mac: &str) -> Result<LightState> {
         if let Some(lan) = &self.lan
             && let Some(ip) = self.lan_ip_for(mac).await
@@ -922,6 +1036,9 @@ fn lan_only_light(s: &LanScan) -> Light {
             color_temperature: true,
             hue_gamut: None,
             effects: Vec::new(),
+            // A LAN-only device (no cloud row) reports no capability list, so we
+            // can't know its segment count — segment control needs the cloud anyway.
+            segments: None,
         },
         last_seen: Utc::now(),
     }
@@ -1058,7 +1175,7 @@ mod tests {
     async fn debug_devices_flags_unsupported_capabilities() {
         let server = MockServer::start().await;
         // A strip exposing one capability we model (brightness) and one we don't
-        // (segmentedColorRgb — per-segment color).
+        // (musicMode — react-to-music; not modelled yet).
         Mock::given(method("GET"))
             .and(path("/user/devices"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -1069,7 +1186,7 @@ mod tests {
                     "deviceName": "Strip Lights",
                     "capabilities": [
                         {"type": "devices.capabilities.range", "instance": "brightness"},
-                        {"type": "devices.capabilities.segment_color_setting", "instance": "segmentedColorRgb"}
+                        {"type": "devices.capabilities.music_setting", "instance": "musicMode"}
                     ]
                 }]}
             })))
@@ -1080,16 +1197,13 @@ mod tests {
         let dev = &report["devices"][0];
         assert_eq!(dev["name"], "Strip Lights");
         // The unmodelled capability is surfaced for the dev to see.
-        assert_eq!(dev["unsupported_capabilities"][0], "segmentedColorRgb");
+        assert_eq!(dev["unsupported_capabilities"][0], "musicMode");
         let caps = dev["capabilities"].as_array().unwrap();
         let brightness = caps.iter().find(|c| c["instance"] == "brightness").unwrap();
         assert_eq!(brightness["supported"], true);
-        let seg = caps
-            .iter()
-            .find(|c| c["instance"] == "segmentedColorRgb")
-            .unwrap();
-        assert_eq!(seg["supported"], false);
-        assert_eq!(seg["type"], "devices.capabilities.segment_color_setting");
+        let music = caps.iter().find(|c| c["instance"] == "musicMode").unwrap();
+        assert_eq!(music["supported"], false);
+        assert_eq!(music["type"], "devices.capabilities.music_setting");
     }
 
     fn device_list_with_scenes() -> serde_json::Value {
@@ -1335,6 +1449,116 @@ mod tests {
         // Two control requests: power + brightness.
         let bodies = control_bodies(&server).await;
         assert_eq!(bodies.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn discover_reads_segment_count_from_capability() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/devices"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 200, "message": "success",
+                "data": { "devices": [{
+                    "sku": "H6159", "device": "AA:BB:CC:DD:EE:FF", "deviceName": "Strip",
+                    "capabilities": [
+                        {"type": "devices.capabilities.on_off", "instance": "powerSwitch"},
+                        {"type": "devices.capabilities.segment_color_setting", "instance": "segmentedColorRgb",
+                         "parameters": {"dataType": "STRUCT", "fields": [
+                            {"fieldName": "segment", "dataType": "Array", "elementRange": {"min": 0, "max": 14}, "size": {"min": 1, "max": 15}},
+                            {"fieldName": "rgb", "dataType": "INTEGER", "range": {"min": 0, "max": 16777215}}
+                         ]}}
+                    ]
+                }]}
+            })))
+            .mount(&server)
+            .await;
+
+        let lights = mock_provider(&server).await.discover().await.unwrap();
+        // elementRange 0..=14 → 15 addressable segments.
+        assert_eq!(lights[0].capabilities.segments, Some(15));
+    }
+
+    #[tokio::test]
+    async fn set_segments_groups_segments_by_colour() {
+        let server = MockServer::start().await;
+        mount_control_mocks(&server).await;
+
+        let segs = vec![
+            SegmentColor {
+                segment: 0,
+                rgb: Some(0xFF0000),
+                brightness: None,
+            },
+            SegmentColor {
+                segment: 1,
+                rgb: Some(0xFF0000),
+                brightness: None,
+            },
+            SegmentColor {
+                segment: 2,
+                rgb: Some(0x00FF00),
+                brightness: None,
+            },
+        ];
+        mock_provider(&server)
+            .await
+            .set_segments("AA:BB:CC:DD:EE:FF", &segs)
+            .await
+            .unwrap();
+
+        // One command per distinct colour (red over [0,1], green over [2]).
+        let bodies = control_bodies(&server).await;
+        assert_eq!(bodies.len(), 2);
+        for b in &bodies {
+            assert_eq!(
+                b["payload"]["capability"]["instance"], "segmentedColorRgb",
+                "wrong capability: {b}"
+            );
+        }
+        let red = bodies
+            .iter()
+            .find(|b| b["payload"]["capability"]["value"]["rgb"] == 0xFF0000)
+            .expect("red group missing");
+        let mut red_segs: Vec<u64> = red["payload"]["capability"]["value"]["segment"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap())
+            .collect();
+        red_segs.sort_unstable();
+        assert_eq!(red_segs, vec![0, 1]);
+        let green = bodies
+            .iter()
+            .find(|b| b["payload"]["capability"]["value"]["rgb"] == 0x00FF00)
+            .expect("green group missing");
+        assert_eq!(green["payload"]["capability"]["value"]["segment"][0], 2);
+    }
+
+    #[tokio::test]
+    async fn set_segments_sends_brightness_via_segmented_brightness() {
+        let server = MockServer::start().await;
+        mount_control_mocks(&server).await;
+
+        // A segment carrying both colour and brightness → two commands.
+        let segs = vec![SegmentColor {
+            segment: 3,
+            rgb: Some(0x0000FF),
+            brightness: Some(40),
+        }];
+        mock_provider(&server)
+            .await
+            .set_segments("AA:BB:CC:DD:EE:FF", &segs)
+            .await
+            .unwrap();
+
+        let bodies = control_bodies(&server).await;
+        assert_eq!(bodies.len(), 2);
+        let bri = bodies
+            .iter()
+            .find(|b| b["payload"]["capability"]["instance"] == "segmentedBrightness")
+            .expect("brightness command missing");
+        assert_eq!(bri["payload"]["capability"]["value"]["brightness"], 40);
+        assert_eq!(bri["payload"]["capability"]["value"]["segment"][0], 3);
     }
 
     #[tokio::test]

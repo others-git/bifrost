@@ -18,6 +18,7 @@ import {
   removeScene,
   rgbToHex,
   rgbToXy,
+  setLightSegments,
   setLightState,
   setRoomState,
   xyToRgb,
@@ -902,6 +903,8 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
               showBrightness={light?.capabilities.dimmable ?? true}
               effects={light?.capabilities.effects}
               initialEffect={st?.effect}
+              segments={light?.capabilities.segments}
+              onSegments={(segs) => setLightSegments(editor.id, segs)}
               on={st?.on ?? false}
               onToggle={() => toggleLight(editor.id)}
               onChange={(ch) => editorChange(editor, ch)}

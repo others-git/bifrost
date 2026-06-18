@@ -37,16 +37,12 @@ const BODIES: Record<string, JSX.Element> = {
     </>
   ),
   led_strip: (
-    // A thin, wavy length of flexible LED tape (the two edges) with its LED
-    // chips dotted along it — reads as a soft ribbon, never a rigid power strip.
+    // A serpentine length of LED strip (a winding ribbon, drawn thick) with a
+    // thin connecting wire trailing off the bottom end — reads as a flexible
+    // addressable strip with its lead, never a rigid power strip.
     <>
-      <path d="M1.5 11 C6 8.5 8.5 8.5 12 11 S18 13.5 22.5 11" />
-      <path d="M1.5 12.8 C6 10.3 8.5 10.3 12 12.8 S18 15.3 22.5 12.8" />
-      <circle cx="3.8" cy="10.4" r="0.6" fill="currentColor" stroke="none" />
-      <circle cx="7.9" cy="9.7" r="0.6" fill="currentColor" stroke="none" />
-      <circle cx="12" cy="11.9" r="0.6" fill="currentColor" stroke="none" />
-      <circle cx="16.1" cy="14.1" r="0.6" fill="currentColor" stroke="none" />
-      <circle cx="20.2" cy="13.4" r="0.6" fill="currentColor" stroke="none" />
+      <path d="M7 6 H17 A3 3 0 0 1 17 12 H7 A3 3 0 0 0 7 18 H17" strokeWidth={2.8} />
+      <path d="M17 18q2.6.5 2.8 3.4" strokeWidth={1.2} />
     </>
   ),
   speaker: (
@@ -168,6 +164,92 @@ const BODIES: Record<string, JSX.Element> = {
       <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
       <path d="M3 3v5h5" />
     </>
+  ),
+
+  // ── Smart-remote keys (themed, replacing emoji) ──────────────────────────────
+  chevron: (
+    // A down chevron — the d-pad rotates it for up/left/right.
+    <path d="M5 9l7 7 7-7" />
+  ),
+  back: (
+    // Curved return arrow.
+    <>
+      <path d="M9 7 4 12l5 5" />
+      <path d="M4 12h10a5 5 0 0 1 0 10h-1" />
+    </>
+  ),
+  home: (
+    <>
+      <path d="M3.5 11.5 12 4l8.5 7.5" />
+      <path d="M5.5 10.5V20h13v-9.5" />
+    </>
+  ),
+  menu: <path d="M4 7h16M4 12h16M4 17h16" />,
+  mute: (
+    // Speaker with a cross — muted.
+    <>
+      <path d="M4 9.5v5h3.5L13 19V5L7.5 9.5H4Z" />
+      <path d="M16.5 9.5l4.5 5M21 9.5l-4.5 5" />
+    </>
+  ),
+  volume_down: (
+    // Speaker with one wave — quieter.
+    <>
+      <path d="M4 9.5v5h3.5L13 19V5L7.5 9.5H4Z" />
+      <path d="M16.5 9.2a4 4 0 0 1 0 5.6" />
+    </>
+  ),
+  play_pause: (
+    // Play triangle alongside pause bars.
+    <>
+      <path d="M4 6l7 5-7 5V6Z" fill="currentColor" stroke="none" />
+      <path d="M15 6.5v9M19 6.5v9" />
+    </>
+  ),
+  prev: (
+    <>
+      <path d="M17 6l-7 6 7 6V6Z" fill="currentColor" stroke="none" />
+      <path d="M7 6v12" />
+    </>
+  ),
+  next: (
+    <>
+      <path d="M7 6l7 6-7 6V6Z" fill="currentColor" stroke="none" />
+      <path d="M17 6v12" />
+    </>
+  ),
+  play: <path d="M7 5l11 7-11 7V5Z" fill="currentColor" stroke="none" />,
+  pause: (
+    <>
+      <rect x="6.5" y="5" width="3.4" height="14" rx="1" fill="currentColor" stroke="none" />
+      <rect x="14.1" y="5" width="3.4" height="14" rx="1" fill="currentColor" stroke="none" />
+    </>
+  ),
+  favorite: (
+    // A heart — favourites.
+    <path d="M12 20.5 4.6 13a4.6 4.6 0 0 1 7.4-5.3A4.6 4.6 0 0 1 19.4 13L12 20.5Z" />
+  ),
+  star: <path d="M12 3.6l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.6 9.7l5.8-.8L12 3.6Z" />,
+  link: (
+    // A chain link — a synced provider group / linkage.
+    <>
+      <path d="M10 13.5a3.5 3.5 0 0 0 5 0l2.5-2.5a3.5 3.5 0 0 0-5-5L11.2 7.3" />
+      <path d="M14 10.5a3.5 3.5 0 0 0-5 0L6.5 13a3.5 3.5 0 0 0 5 5l1.3-1.3" />
+    </>
+  ),
+  dice: (
+    // A die — randomise / generate.
+    <>
+      <rect x="4" y="4" width="16" height="16" rx="3.5" />
+      <circle cx="9" cy="9" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="9" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="12" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="9" cy="15" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="15" r="1.1" fill="currentColor" stroke="none" />
+    </>
+  ),
+  star_fill: (
+    <path d="M12 3.6l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.6 9.7l5.8-.8L12 3.6Z" fill="currentColor" stroke="none" />
   ),
 
   // ── Floor-plan tool palette ────────────────────────────────────────────────

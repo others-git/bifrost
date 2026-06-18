@@ -15,6 +15,7 @@ import {
   setAudioEnabled,
   setAudioState,
   setLightEnabled,
+  setLightSegments,
   setLightState,
   setPowerEnabled,
   setPowerState,
@@ -1207,6 +1208,8 @@ function LightButton({
           showBrightness={light.capabilities.dimmable}
           effects={light.capabilities.effects}
           initialEffect={light.last_state?.effect}
+          segments={light.capabilities.segments}
+          onSegments={(segs) => setLightSegments(light.id, segs)}
           on={isOn}
           onToggle={toggle}
           onChange={handleEditorChange}

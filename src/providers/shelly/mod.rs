@@ -131,6 +131,7 @@ impl LightProvider for ShellyProvider {
                 color_temperature: false,
                 hue_gamut: None,
                 effects: Vec::new(),
+                segments: None,
             },
             last_seen: Utc::now(),
             hw_id: None,

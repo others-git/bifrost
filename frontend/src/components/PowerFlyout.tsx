@@ -5,8 +5,9 @@
 import type { PowerDevice } from "../api";
 import { Glyph, powerKindGlyph } from "./glyphs";
 import { useViewport } from "../useViewport";
-import { color, alpha } from "../theme";
+import { color } from "../theme";
 import { Flyout, FlyoutHeader } from "./Flyout";
+import { PowerToggle } from "./controls";
 
 const KIND_LABEL: Record<string, string> = {
   switch: "Switch",
@@ -30,12 +31,15 @@ export function PowerFlyout({
   onSetEnabled?: (enabled: boolean) => void;
   onClose: () => void;
 }) {
+  const { isCompact } = useViewport();
   const on = device.state.on;
   const offline = device.state.reachable === false;
 
   return (
     <Flyout anchor={anchor} onClose={onClose} width={240} gap="0.8rem">
-      {/* Power is the gold domain — tint the shared header gold when on. */}
+      {/* Power is the gold domain. For a power-only device, on/off is the whole
+          control, so the power button is the body hero (big), with the device's
+          kind glyph identifying it in the header. */}
       <FlyoutHeader
         title={device.name}
         subtitle={
@@ -44,34 +48,30 @@ export function PowerFlyout({
             {offline && <span style={{ color: color.rose }}> · offline</span>}
           </>
         }
-        icon={<Glyph name={device.glyph ?? powerKindGlyph(device.kind)} size={24} />}
+        icon={<Glyph name={device.glyph ?? powerKindGlyph(device.kind)} size={22} />}
         accent={on ? color.gold : color.dim}
         onClose={onClose}
       />
 
-      <button
-        onClick={() => onToggle(!on)}
-        disabled={offline}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: "0.5rem",
-          padding: "0.7rem",
-          borderRadius: 10,
-          border: `1px solid ${on ? alpha(color.gold, 0.55) : alpha(color.text, 0.14)}`,
-          background: on
-            ? `linear-gradient(180deg, ${alpha(color.gold, 0.26)}, ${alpha(color.gold, 0.07)})`
-            : alpha(color.text, 0.05),
-          color: on ? color.goldBright : color.dim,
-          cursor: offline ? "not-allowed" : "pointer",
-          opacity: offline ? 0.5 : 1,
-          fontSize: "0.9rem",
-          fontWeight: 600,
-        }}
-      >
-        {on ? "On" : "Off"} — tap to turn {on ? "off" : "on"}
-      </button>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "0.55rem", padding: "0.5rem 0 0.3rem" }}>
+        <PowerToggle
+          on={on}
+          accent={color.gold}
+          disabled={offline}
+          onToggle={() => onToggle(!on)}
+          size={isCompact ? 84 : 64}
+        />
+        <span
+          style={{
+            fontSize: "0.9rem",
+            fontWeight: 600,
+            letterSpacing: "0.05em",
+            color: offline ? color.rose : on ? color.goldBright : color.dim,
+          }}
+        >
+          {offline ? "Offline" : on ? "On" : "Off"}
+        </span>
+      </div>
 
       {onSetEnabled && (
         <DisableRow
@@ -96,6 +96,8 @@ export function DisableRow({
 }) {
   const { isCompact } = useViewport();
   const tone = enabled ? "#9a6b5a" : "#6fae84";
+  // A secondary action — a quiet text link, centred + roomier to tap on compact,
+  // never a heavy full-width button that dominates a sparse fly-out.
   return (
     <button
       onClick={() => onSetEnabled(!enabled)}
@@ -104,30 +106,15 @@ export function DisableRow({
           ? "Stop sending commands and hide from room control (stays in the room)"
           : "Resume control of this device"
       }
-      style={
-        isCompact
-          ? {
-              background: "rgba(255,255,255,0.04)",
-              border: `1px solid ${alpha(tone, 0.33)}`,
-              borderRadius: 10,
-              color: tone,
-              cursor: "pointer",
-              fontSize: "0.9rem",
-              padding: "0.7rem 1rem",
-              minHeight: 44,
-              width: "100%",
-              textAlign: "center",
-            }
-          : {
-              background: "none",
-              border: "none",
-              color: tone,
-              cursor: "pointer",
-              fontSize: "0.74rem",
-              padding: "0.2rem 0",
-              alignSelf: "flex-start",
-            }
-      }
+      style={{
+        background: "none",
+        border: "none",
+        color: tone,
+        cursor: "pointer",
+        fontSize: isCompact ? "0.85rem" : "0.74rem",
+        padding: isCompact ? "0.5rem 0.8rem" : "0.2rem 0",
+        alignSelf: isCompact ? "center" : "flex-start",
+      }}
     >
       {enabled ? "Disable device" : "Enable device"}
     </button>

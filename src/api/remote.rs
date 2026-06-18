@@ -249,10 +249,14 @@ pub(crate) async fn record_app_seen(state: &AppState, remote_id: &str, package: 
     .await;
 }
 
-/// Launchable apps for a remote: pinned first, then recents by most-recent.
+/// Launchable apps for a remote: pinned first, then recents by most-recent. The
+/// display name is **re-derived from the package on read** (not read from the
+/// stored `name`), so the brand-keyword/prettify logic is always authoritative —
+/// an app recorded before a keyword existed shows its friendly name immediately,
+/// without waiting to be re-seen on the device.
 pub(crate) async fn list_remote_apps(state: &AppState, remote_id: &str) -> Vec<RemoteApp> {
     sqlx::query(
-        "SELECT package, name, pinned, last_seen FROM remote_apps
+        "SELECT package, pinned, last_seen FROM remote_apps
          WHERE remote_id = ? ORDER BY pinned DESC, last_seen DESC",
     )
     .bind(remote_id)
@@ -260,11 +264,14 @@ pub(crate) async fn list_remote_apps(state: &AppState, remote_id: &str) -> Vec<R
     .await
     .unwrap_or_default()
     .iter()
-    .map(|r| RemoteApp {
-        package: r.get("package"),
-        name: r.get("name"),
-        pinned: r.get::<i64, _>("pinned") != 0,
-        last_seen: r.get("last_seen"),
+    .map(|r| {
+        let package: String = r.get("package");
+        RemoteApp {
+            name: app_display_name(&package),
+            pinned: r.get::<i64, _>("pinned") != 0,
+            last_seen: r.get("last_seen"),
+            package,
+        }
     })
     .collect()
 }

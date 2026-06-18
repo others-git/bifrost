@@ -21,6 +21,8 @@ export function Flyout({
   width,
   gap = "0.7rem",
   closeGuard,
+  ambientColor,
+  ambientStrength = 0.22,
   children,
 }: {
   anchor: HTMLElement | { x: number; y: number };
@@ -31,9 +33,14 @@ export function Flyout({
   /** When it returns true, suppress outside-click / Escape close (e.g. a nested
    * overlay like the remote owns input while open). */
   closeGuard?: () => boolean;
+  /** Soft colour wash behind the whole fly-out — the light "casting" its colour
+   * onto the panel. Applies under every tab. Omit for no cast. */
+  ambientColor?: string;
+  /** 0–1 opacity of the ambient cast (callers scale it by brightness). */
+  ambientStrength?: number;
   children: ReactNode;
 }) {
-  const { isCompact } = useViewport();
+  const { isCompact, isMobile } = useViewport();
   const panelRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
 
@@ -79,29 +86,91 @@ export function Flyout({
     };
   }, [onClose, anchor]);
 
+  // The ambient cast is a radial colour layer composited over the panel's base
+  // background, so it sits behind every tab's content and doesn't scroll or need
+  // extra DOM. It fades to transparent well inside the panel, so the rounded
+  // corners stay clean.
+  const ambient = ambientColor
+    ? `radial-gradient(135% 88% at 50% 0%, ${alpha(ambientColor, ambientStrength)} 0%, transparent 56%)`
+    : null;
+
+  // Phones keep the full-width bottom sheet (thumb-reachable, screen-wide);
+  // tablets get a centred modal over a scrim; desktop is an anchored popover.
+  if (isCompact && isMobile) {
+    return createPortal(
+      <div
+        ref={panelRef}
+        style={{
+          ...sheetStyle,
+          ...(ambient ? { background: `${ambient}, ${sheetStyle.background}` } : {}),
+        }}
+      >
+        {children}
+      </div>,
+      document.body,
+    );
+  }
+
+  if (isCompact) {
+    // Tablet: a screen-centred modal with a dimming scrim.
+    return createPortal(
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 60,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: "1.5rem",
+          background: "rgba(0,0,0,0.55)",
+          backdropFilter: "blur(3px)",
+          WebkitBackdropFilter: "blur(3px)",
+        }}
+      >
+        <div
+          ref={panelRef}
+          style={{
+            width: "70%",
+            maxWidth: 560,
+            maxHeight: "85vh",
+            overflowY: "auto",
+            background: ambient ? `${ambient}, ${color.surface}` : color.surface,
+            border: `1px solid ${color.hairline}`,
+            borderRadius: radius.frame,
+            padding: "0.9rem",
+            boxShadow: "0 20px 60px rgba(0,0,0,0.75)",
+            display: "flex",
+            flexDirection: "column",
+            gap,
+          }}
+        >
+          {children}
+        </div>
+      </div>,
+      document.body,
+    );
+  }
+
   return createPortal(
     <div
       ref={panelRef}
-      style={
-        isCompact
-          ? sheetStyle
-          : {
-              position: "fixed",
-              left: pos?.left ?? 0,
-              top: pos?.top ?? 0,
-              visibility: pos ? "visible" : "hidden",
-              zIndex: 60,
-              width,
-              background: color.surface,
-              border: `1px solid ${color.hairline}`,
-              borderRadius: radius.frame,
-              padding: "0.9rem",
-              boxShadow: "0 12px 34px rgba(0,0,0,0.7)",
-              display: "flex",
-              flexDirection: "column",
-              gap,
-            }
-      }
+      style={{
+        position: "fixed",
+        left: pos?.left ?? 0,
+        top: pos?.top ?? 0,
+        visibility: pos ? "visible" : "hidden",
+        zIndex: 60,
+        width,
+        background: ambient ? `${ambient}, ${color.surface}` : color.surface,
+        border: `1px solid ${color.hairline}`,
+        borderRadius: radius.frame,
+        padding: "0.9rem",
+        boxShadow: "0 12px 34px rgba(0,0,0,0.7)",
+        display: "flex",
+        flexDirection: "column",
+        gap,
+      }}
     >
       {children}
     </div>,
@@ -117,6 +186,7 @@ export function FlyoutHeader({
   title,
   subtitle,
   icon,
+  leading,
   accent = color.gold,
   actions,
   onClose,
@@ -124,15 +194,19 @@ export function FlyoutHeader({
   title: string;
   subtitle?: ReactNode;
   icon?: ReactNode;
+  /** Element pinned at the far left, before the title — the power button lives
+   * here so every device type powers on/off in the same spot. */
+  leading?: ReactNode;
   /** Domain tint for the title glow: cyan = light, violet = audio, gold = power. */
   accent?: string;
-  /** Controls rendered left of the close button (e.g. a power toggle). */
+  /** Controls rendered left of the close button. */
   actions?: ReactNode;
   onClose: () => void;
 }) {
   return (
     <>
       <div style={{ display: "flex", alignItems: "center", gap: "0.7rem" }}>
+        {leading}
         {icon && (
           <span style={{ color: accent, flexShrink: 0, display: "grid", placeItems: "center" }}>
             {icon}

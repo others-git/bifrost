@@ -248,6 +248,30 @@ pub struct LightCapabilities {
     /// "candle"/"fire"; includes "no_effect" to clear). Empty = no effects.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<String>,
+    /// Number of independently addressable colour **segments** this light exposes
+    /// (e.g. a Govee strip's per-section LEDs), or `None` when it has none. The UI
+    /// shows a per-segment editor only when this is set. Segment colours are a
+    /// write-only control (providers don't report them back), so they live outside
+    /// [`LightState`] — see [`SegmentColor`] and `LightProvider::set_segments`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segments: Option<u16>,
+}
+
+/// One segment's target for a per-segment write (`LightProvider::set_segments`):
+/// a colour, a brightness, or both. Colour and brightness are independent Govee
+/// capabilities, so each field is optional — a colour pick sets `rgb`, the
+/// relative-brightness slider sets `brightness`. Write-only: providers expose
+/// segment *control* but not segment *readback*, so this isn't part of [`LightState`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SegmentColor {
+    /// Zero-based segment index (`0..capabilities.segments`).
+    pub segment: u16,
+    /// Packed 24-bit colour, `0xRRGGBB`. `None` = leave this segment's colour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rgb: Option<u32>,
+    /// Per-segment brightness 0–100. `None` = leave this segment's brightness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brightness: Option<u8>,
 }
 
 /// Hue color gamut bounds in CIE xy.

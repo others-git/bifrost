@@ -105,6 +105,21 @@ pub trait LightProvider: Send + Sync {
         Ok(false)
     }
 
+    /// Set individual colour **segments** (e.g. a Govee strip's sections). Only
+    /// providers that advertise `LightCapabilities::segments` implement this; the
+    /// default errors so a UI that offers it on the wrong device fails loudly.
+    /// Write-only — there's no segment readback.
+    async fn set_segments(
+        &self,
+        _device_id: &str,
+        _segments: &[crate::models::SegmentColor],
+    ) -> Result<()> {
+        Err(anyhow!(
+            "{} does not support per-segment control",
+            self.name()
+        ))
+    }
+
     /// Developer-mode diagnostics — raw upstream data, capabilities we *see* vs
     /// the ones we actually *support*, etc. Surfaced via `/api/dev` only when dev
     /// mode is on; never used in a normal deploy. Default: none. Implement to

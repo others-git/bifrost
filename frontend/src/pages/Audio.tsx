@@ -15,6 +15,7 @@ import {
 import { AudioControls, KIND_LABEL, PowerButton } from "../components/AudioControls";
 import { SelectRow } from "../components/SelectRow";
 import { PageHeader } from "../components/PageHeader";
+import { Glyph } from "../components/glyphs";
 import { useViewport } from "../useViewport";
 import { T, domain, alpha } from "../theme";
 
@@ -121,7 +122,9 @@ export function AudioPage() {
         <p style={{ color: T.faint }}>Loading…</p>
       ) : devices.length === 0 ? (
         <div style={{ textAlign: "center", padding: "4rem 0", color: T.faint }}>
-          <p style={{ margin: "0 0 0.5rem", fontSize: "1.4rem" }}>🔇</p>
+          <p style={{ margin: "0 0 0.6rem", display: "flex", justifyContent: "center", opacity: 0.6 }}>
+            <Glyph name="speaker" size={34} />
+          </p>
           <p style={{ margin: "0 0 0.4rem" }}>No audio devices yet.</p>
           <p style={{ margin: 0, fontSize: "0.875rem" }}>
             Add a Sonos or Onkyo provider in Settings, then run Discover.
@@ -264,7 +267,7 @@ function AudioDeviceCard({
               flexShrink: 0,
             }}
           >
-            <span style={{ fontSize: "0.85rem", lineHeight: 1 }}>⛓</span>
+            <span style={{ display: "grid", placeItems: "center" }}><Glyph name="link" size={15} /></span>
             {!compact && "Group"}
           </button>
         )}

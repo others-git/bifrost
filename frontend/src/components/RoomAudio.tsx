@@ -12,6 +12,7 @@ import {
   type RoomAudioMember,
 } from "../api";
 import { Button } from "./controls";
+import { Glyph } from "./glyphs";
 import { alpha } from "../theme";
 
 const ACCENT = "#a78bfa";
@@ -61,15 +62,15 @@ export function RoomVolumeStrip({ room, devices }: { room: Room; devices: AudioD
 
   return (
     <div style={{ display: "flex", alignItems: "center", gap: "0.45rem" }}>
-      <span style={{ fontSize: "0.85rem", color: ACCENT }} title={`Room volume → ${mem.length} speaker${mem.length !== 1 ? "s" : ""}`}>
-        ♪
+      <span style={{ color: ACCENT, display: "grid", placeItems: "center" }} title={`Room volume → ${mem.length} speaker${mem.length !== 1 ? "s" : ""}`}>
+        <Glyph name="speaker_group" size={15} />
       </span>
       <button
         onClick={toggleMute}
         title={mute ? "Unmute room" : "Mute room"}
-        style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: "0.8rem", opacity: mute ? 1 : 0.5 }}
+        style={{ background: "none", border: "none", cursor: "pointer", padding: 0, color: "inherit", display: "grid", placeItems: "center", opacity: mute ? 1 : 0.5 }}
       >
-        {mute ? "🔇" : "🔊"}
+        <Glyph name={mute ? "mute" : "volume"} size={15} />
       </button>
       <input
         type="range"

@@ -252,6 +252,7 @@ fn lan_light(mac: &str, label: &str) -> Light {
             color_temperature: true,
             hue_gamut: None,
             effects: Vec::new(),
+            segments: None,
         },
         state: LightState {
             transport: Some("lan".to_string()),

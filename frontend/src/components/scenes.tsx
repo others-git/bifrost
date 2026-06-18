@@ -5,6 +5,7 @@
 
 import { useState } from "react";
 import { Modal } from "./dialogs";
+import { Glyph } from "./glyphs";
 import type { Scene } from "../api";
 
 /** The pretty "open scenes" button shown inside a room's color editor. */
@@ -32,7 +33,7 @@ export function SceneButton({ onClick }: { onClick: () => void }) {
         boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
       }}
     >
-      <span aria-hidden style={{ fontSize: "0.9rem" }}>✦</span>
+      <span aria-hidden style={{ display: "grid", placeItems: "center" }}><Glyph name="scene" size={15} /></span>
       Scenes
     </button>
   );

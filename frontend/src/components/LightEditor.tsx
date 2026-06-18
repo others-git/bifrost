@@ -6,8 +6,8 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { rgbToHex } from "../api";
 import { useViewport } from "../useViewport";
 import { color, glow, alpha } from "../theme";
-import { Segmented, Switch } from "./controls";
-import { Flyout, FlyoutHeader, FlyoutSection } from "./Flyout";
+import { Segmented, PowerToggle } from "./controls";
+import { Flyout, FlyoutHeader } from "./Flyout";
 
 // ── HSV color math (h in degrees, s/v in 0..1) ──────────────────────────────
 
@@ -201,21 +201,49 @@ export function ColorWheel({
 
 // ── Brightness slider (horizontal) ───────────────────────────────────────────
 
-/** A full-width brightness slider that sits directly under the mode tabs and is
- * shown in **every** mode (Color / White / Effects). Brightness is independent of
- * which colour mode is active, so it lives next to the tab selector — you can dim
- * a running effect or a colour alike, without it disappearing when you switch to
- * the Effects tab (where there's no wheel to hang a vertical bar beside). */
+/** A small sun mark for the brightness control — a filled disc with eight rays. */
+function SunGlyph({ size, tint }: { size: number; tint: string }) {
+  const c = size / 2;
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ flexShrink: 0 }} aria-hidden>
+      <circle cx={c} cy={c} r={size * 0.24} fill={tint} />
+      {Array.from({ length: 8 }, (_, i) => {
+        const a = (i * Math.PI) / 4;
+        return (
+          <line
+            key={i}
+            x1={c + Math.cos(a) * size * 0.36}
+            y1={c + Math.sin(a) * size * 0.36}
+            x2={c + Math.cos(a) * size * 0.5}
+            y2={c + Math.sin(a) * size * 0.5}
+            stroke={tint}
+            strokeWidth={size * 0.08}
+            strokeLinecap="round"
+          />
+        );
+      })}
+    </svg>
+  );
+}
+
+/** The brightness control: a single tactile row — a sun mark, a thick rounded
+ * track that fills from off → the current colour, an overhanging lit knob, and the
+ * live value. Sits under the mode tabs and shows in **every** mode (Color / White /
+ * Effects / Segments), since brightness is independent of which one is active.
+ * Pass `label` (e.g. "Relative brightness") to caption it; the default is unlabelled
+ * (the sun says it all). */
 export function BrightnessSlider({
   hex,
   value,
   onPick,
   compact,
+  label = "Brightness",
 }: {
   hex: string;
   value: number; // 1..100
   onPick: (value: number) => void;
   compact: boolean;
+  label?: string;
 }) {
   const trackRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
@@ -226,64 +254,71 @@ export function BrightnessSlider({
     onPick(Math.max(1, Math.min(100, Math.round(f * 100))));
   }
 
-  const h = compact ? 30 : 22;
-  const knob = h - 6;
+  const h = compact ? 24 : 18;
+  const knob = h + 8; // overhangs the track for a tactile, modern handle
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          fontSize: compact ? "0.8rem" : "0.72rem",
-          color: color.dim,
-          letterSpacing: "0.02em",
-        }}
-      >
-        <span>Brightness</span>
-        <span style={{ color: color.text, fontVariantNumeric: "tabular-nums" }}>{value}%</span>
-      </div>
-      <div
-        ref={trackRef}
-        title={`${value}%`}
-        onPointerDown={(e) => {
-          dragging.current = true;
-          e.currentTarget.setPointerCapture(e.pointerId);
-          pick(e);
-        }}
-        onPointerMove={(e) => {
-          if (dragging.current) pick(e);
-        }}
-        onPointerUp={() => {
-          dragging.current = false;
-        }}
-        style={{
-          position: "relative",
-          height: h,
-          borderRadius: h / 2,
-          border: `1px solid ${color.hairline}`,
-          background: `linear-gradient(to right, ${color.surfaceOff}, ${hex})`,
-          boxShadow: "inset 0 0 14px -8px #000",
-          touchAction: "none",
-          cursor: "pointer",
-        }}
-      >
+    <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+      {label !== "Brightness" && (
+        <span style={{ fontSize: compact ? "0.72rem" : "0.66rem", color: color.dim, letterSpacing: "0.06em", textTransform: "uppercase" }}>
+          {label}
+        </span>
+      )}
+      <div style={{ display: "flex", alignItems: "center", gap: compact ? 12 : 9 }}>
+        <SunGlyph size={compact ? 19 : 15} tint={color.dim} />
         <div
-          style={{
-            position: "absolute",
-            top: (h - knob) / 2,
-            left: `${value}%`,
-            transform: "translateX(-50%)",
-            width: knob,
-            height: knob,
-            borderRadius: "50%",
-            background: "#fff",
-            // Haloed in the current color, ringed for contrast — matches the wheel thumb.
-            boxShadow: `0 0 0 1px rgba(0,0,0,0.4), 0 0 10px ${hex}, 0 1px 5px rgba(0,0,0,0.6)`,
-            pointerEvents: "none",
+          ref={trackRef}
+          title={`${value}%`}
+          onPointerDown={(e) => {
+            dragging.current = true;
+            e.currentTarget.setPointerCapture(e.pointerId);
+            pick(e);
           }}
-        />
+          onPointerMove={(e) => {
+            if (dragging.current) pick(e);
+          }}
+          onPointerUp={() => {
+            dragging.current = false;
+          }}
+          style={{
+            position: "relative",
+            flex: 1,
+            height: h,
+            borderRadius: h / 2,
+            border: `1px solid ${color.hairline}`,
+            background: `linear-gradient(to right, ${color.surfaceOff}, ${hex})`,
+            boxShadow: "inset 0 0 14px -8px #000",
+            touchAction: "none",
+            cursor: "pointer",
+          }}
+        >
+          <div
+            style={{
+              position: "absolute",
+              top: (h - knob) / 2,
+              left: `${value}%`,
+              transform: "translateX(-50%)",
+              width: knob,
+              height: knob,
+              borderRadius: "50%",
+              background: "#fff",
+              boxShadow: `0 0 0 1px rgba(0,0,0,0.45), 0 0 12px ${hex}, 0 2px 6px rgba(0,0,0,0.6)`,
+              pointerEvents: "none",
+            }}
+          />
+        </div>
+        <span
+          style={{
+            minWidth: 38,
+            textAlign: "right",
+            fontSize: compact ? "0.9rem" : "0.8rem",
+            fontWeight: 600,
+            color: color.text,
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          {value}%
+        </span>
       </div>
     </div>
   );
@@ -382,7 +417,7 @@ export function ColorTempWheel({
 
 // ── Mode toggle (Color / White / Effects) ────────────────────────────────────
 
-export type EditorMode = "color" | "white" | "effects";
+export type EditorMode = "color" | "white" | "effects" | "segments";
 
 /** "no_effect"/"off" are the canonical clear tokens; everything else is a
  * provider-native effect name (`color_loop`, `candle`, `Sunrise`, …) — humanize
@@ -415,6 +450,8 @@ function ModeToggle({
     color: { label: "Color", activeBg: "linear-gradient(90deg, #ff7d8a, #8b5cf6 55%, #38bdf8)" },
     white: { label: "White", activeBg: "linear-gradient(90deg, #ffd9a0, #cfe4ff)" },
     effects: { label: "Effects", activeBg: "linear-gradient(90deg, #38bdf8, #a78bfa 60%, #f0abfc)" },
+    // A smooth spectrum — the addressable strip, without the noisy hard stripes.
+    segments: { label: "Segments", activeBg: "linear-gradient(90deg, #ff6b6b, #ffd23d, #4ade80, #38bdf8, #a78bfa)" },
   };
   return (
     <Segmented
@@ -659,6 +696,351 @@ function effectGlyph(effect: string, isOff: boolean): string {
   return "🌟";
 }
 
+// ── Segment editor (addressable LED strips) ──────────────────────────────────
+
+/** A per-segment write: a colour (`rgb`, 24-bit) and/or a brightness (0–100). */
+export type SegmentColorChange = { segment: number; rgb?: number; brightness?: number };
+
+/** Pack a `#rrggbb` hex into the 24-bit `0xRRGGBB` int Govee's segment API wants. */
+export function hexToRgbInt(hex: string): number {
+  const [r, g, b] = hexToRgb(hex);
+  return (r << 16) | (g << 8) | b;
+}
+
+/** Render a segment colour at a given brightness (0–100) by scaling toward black,
+ * with a floor so a dim segment still reads as lit rather than off. */
+function dimColor(hex: string, pct: number): string {
+  const [r, g, b] = hexToRgb(hex);
+  const f = 0.22 + 0.78 * (Math.max(0, Math.min(100, pct)) / 100);
+  return `rgb(${Math.round(r * f)}, ${Math.round(g * f)}, ${Math.round(b * f)})`;
+}
+
+// Govee-style fixed palette + the wheel; the last entry is a "clear" sentinel.
+const SEG_SWATCHES = ["#ff2d2d", "#ff8a2b", "#ffe23d", "#42dd56", "#2238ff", "#3ee8ff", "#9b2bff", "#ffffff"];
+// How many cells per row in the serpentine strip layout (mirrors the Govee app).
+const SEGMENT_COLS = 5;
+
+/** Per-segment editor for addressable strips (Govee), modelled on the Govee app:
+ * the strip is drawn as a **serpentine** grid of segment cells, each with a
+ * selection check and its own brightness %. Tap cells (or "Select all") to choose
+ * a set, then a colour (swatch/wheel) or the relative-brightness slider applies to
+ * the selection. Segment state isn't reported back by the provider, so cells track
+ * only what's been set this session (display-only); writes are debounced. */
+function SegmentEditor({
+  count,
+  onApply,
+  compact,
+}: {
+  count: number;
+  onApply: (segments: SegmentColorChange[]) => void;
+  compact: boolean;
+}) {
+  // `null` = an unset segment (shows the neutral ribbon, like the Govee app's
+  // uncoloured strip); a hex string = a colour the user applied this session.
+  const [colors, setColors] = useState<(string | null)[]>(() => Array(count).fill(null));
+  const [brightness, setBrightness] = useState<number[]>(() => Array(count).fill(100));
+  const [selected, setSelected] = useState<Set<number>>(() => new Set());
+  const [[hue, sat], setHs] = useState<[number, number]>(() => hexToHs("#ff5e9c"));
+  const [relBrightness, setRelBrightness] = useState(100);
+  const allSelected = selected.size === count && count > 0;
+
+  // Debounce network writes so a wheel/slider drag doesn't spam the strip; a
+  // discrete pick (swatch/clear) sends immediately.
+  const sendTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  function send(segs: SegmentColorChange[], immediate = false) {
+    if (segs.length === 0) return;
+    clearTimeout(sendTimer.current);
+    if (immediate) onApply(segs);
+    else sendTimer.current = setTimeout(() => onApply(segs), 150);
+  }
+
+  function toggle(i: number) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(i)) next.delete(i);
+      else next.add(i);
+      const first = [...next].sort((a, b) => a - b)[0];
+      if (first !== undefined) setRelBrightness(brightness[first]);
+      return next;
+    });
+  }
+
+  function selectAllOrNone() {
+    setSelected(allSelected ? new Set() : new Set(Array.from({ length: count }, (_, i) => i)));
+  }
+
+  function applyColor(hex: string, immediate = false) {
+    if (selected.size === 0) return;
+    const idxs = [...selected];
+    setColors((prev) => {
+      const next = [...prev];
+      for (const i of idxs) next[i] = hex;
+      return next;
+    });
+    send(idxs.map((i) => ({ segment: i, rgb: hexToRgbInt(hex) })), immediate);
+  }
+
+  function clearSelected() {
+    if (selected.size === 0) return;
+    const idxs = [...selected];
+    setColors((prev) => {
+      const next = [...prev];
+      for (const i of idxs) next[i] = null; // back to the neutral ribbon
+      return next;
+    });
+    send(idxs.map((i) => ({ segment: i, rgb: 0 })), true);
+  }
+
+  function applyBrightness(b: number) {
+    setRelBrightness(b);
+    if (selected.size === 0) return;
+    const idxs = [...selected];
+    setBrightness((prev) => {
+      const next = [...prev];
+      for (const i of idxs) next[i] = b;
+      return next;
+    });
+    send(idxs.map((i) => ({ segment: i, brightness: b })));
+  }
+
+  // ── LED-strip geometry (SVG), modelled on the Govee app ───────────────────
+  // A clean, flat winding ribbon (one continuous tangent path — straight runs +
+  // semicircular U-bends), divided into thin rectangular segments by dashed
+  // dividers, with a select checkbox above each segment and its brightness %
+  // below. No glow. A set segment tints its slice of the ribbon. Fixed viewBox
+  // scaled to the container, so it sizes up cleanly on a mobile sheet.
+  const cols = Math.max(1, Math.min(count, SEGMENT_COLS));
+  const numRows = Math.ceil(count / cols);
+  const RIB = 20; // ribbon thickness (thin → rectangular segments)
+  const SEGH = RIB - 6; // tinted-segment height (inset, so the ribbon frames it)
+  const PCT = 11; // brightness-% label height (sits below the ribbon)
+  const BELOW = 4 + PCT; // % band below the ribbon
+  const TOPPAD = 8; // room above the first row so a selection glow can breathe
+  const PITCH = RIB + BELOW + 14; // row-to-row spacing
+  const TURN = PITCH / 2; // U-bend radius (chord = PITCH = diameter → semicircle)
+  const VW = 300;
+  const MX = TURN + RIB / 2 + 3;
+  const innerW = VW - 2 * MX;
+  const step = innerW / cols;
+  const segW = step - 4; // a segment's tinted width
+  const rowY = (r: number) => TOPPAD + RIB / 2 + r * PITCH;
+  const colX = (k: number) => MX + (k + 0.5) * step;
+  const ledX = (i: number) => {
+    const r = Math.floor(i / cols);
+    const k = r % 2 === 1 ? cols - 1 - (i % cols) : i % cols; // serpentine
+    return colX(k);
+  };
+  const rowOf = (i: number) => Math.floor(i / cols);
+  const VH = rowY(numRows - 1) + RIB / 2 + BELOW + 6;
+
+  // One continuous ribbon centreline. The last row stops just past its final
+  // segment so a short row leaves no dangling tail.
+  let ribbonPath = `M ${MX} ${rowY(0)}`;
+  for (let r = 0; r < numRows; r++) {
+    const right = r % 2 === 0;
+    let farX: number;
+    if (r === numRows - 1) {
+      const m = count - r * cols;
+      farX = right ? colX(m - 1) + segW / 2 + 4 : colX(cols - m) - segW / 2 - 4;
+    } else {
+      farX = right ? MX + innerW : MX;
+    }
+    ribbonPath += ` L ${farX.toFixed(1)} ${rowY(r)}`;
+    if (r < numRows - 1) {
+      const turnX = right ? MX + innerW : MX;
+      ribbonPath += ` A ${TURN} ${TURN} 0 0 ${right ? 1 : 0} ${turnX} ${rowY(r + 1)}`;
+    }
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: compact ? "0.7rem" : "0.55rem" }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          fontSize: compact ? "0.82rem" : "0.74rem",
+          color: color.dim,
+        }}
+      >
+        <span>{selected.size > 0 ? `${selected.size} of ${count} selected` : "Segments"}</span>
+        <button
+          onClick={selectAllOrNone}
+          style={{ background: "none", border: "none", cursor: "pointer", color: color.cyan, fontSize: "inherit", padding: 0 }}
+        >
+          {allSelected ? "Clear selection" : "Select all"}
+        </button>
+      </div>
+
+      {/* The strip: a clean winding ribbon split into segments, each with a select
+          checkbox above and its brightness % below. */}
+      <div
+        style={{
+          padding: compact ? "0.5rem 0.4rem" : "0.4rem 0.3rem",
+          borderRadius: 14,
+          background: "#0c0c12",
+          border: `1px solid ${color.hairline}`,
+        }}
+      >
+        <svg viewBox={`0 0 ${VW} ${VH}`} width="100%" style={{ display: "block", height: "auto" }}>
+          <defs>
+            {/* Soft cyan halo for a selected segment. */}
+            <filter id="bf-seg-glow" x="-80%" y="-80%" width="260%" height="260%">
+              <feGaussianBlur stdDeviation="2.6" />
+            </filter>
+          </defs>
+
+          {/* The ribbon: a flat slate band (darker edge + lighter face), one path. */}
+          <path d={ribbonPath} fill="none" stroke="#2f3344" strokeWidth={RIB} strokeLinecap="round" strokeLinejoin="round" />
+          <path d={ribbonPath} fill="none" stroke="#3c4154" strokeWidth={RIB - 5} strokeLinecap="round" strokeLinejoin="round" />
+
+          {/* Tinted slices for segments the user has coloured. */}
+          {Array.from({ length: count }, (_, i) =>
+            colors[i] ? (
+              <rect
+                key={`seg${i}`}
+                x={ledX(i) - segW / 2}
+                y={rowY(rowOf(i)) - SEGH / 2}
+                width={segW}
+                height={SEGH}
+                rx={3}
+                fill={dimColor(colors[i]!, brightness[i])}
+              />
+            ) : null,
+          )}
+
+          {/* Dashed dividers between adjacent same-row segments. */}
+          {Array.from({ length: Math.max(0, count - 1) }, (_, i) =>
+            rowOf(i) === rowOf(i + 1) ? (
+              <line
+                key={`div${i}`}
+                x1={(ledX(i) + ledX(i + 1)) / 2}
+                x2={(ledX(i) + ledX(i + 1)) / 2}
+                y1={rowY(rowOf(i)) - RIB / 2 + 2}
+                y2={rowY(rowOf(i)) + RIB / 2 - 2}
+                stroke="rgba(255,255,255,0.22)"
+                strokeWidth={1}
+                strokeDasharray="2 2.5"
+              />
+            ) : null,
+          )}
+
+          {/* Selection: a cyan glow + crisp outline around the segment itself. */}
+          {Array.from({ length: count }, (_, i) => {
+            if (!selected.has(i)) return null;
+            const x = ledX(i);
+            const ry = rowY(rowOf(i));
+            const sx = x - segW / 2 - 1.5;
+            const sy = ry - RIB / 2 - 1.5;
+            const sw = segW + 3;
+            const sh = RIB + 3;
+            return (
+              <g key={`sel${i}`} style={{ pointerEvents: "none" }}>
+                <rect x={sx} y={sy} width={sw} height={sh} rx={5} fill="none" stroke={color.cyan} strokeWidth={4} opacity={0.7} filter="url(#bf-seg-glow)" />
+                <rect x={sx} y={sy} width={sw} height={sh} rx={5} fill="none" stroke={color.cyan} strokeWidth={1.6} />
+              </g>
+            );
+          })}
+
+          {/* Per segment: brightness % below, plus a full-column hit target. */}
+          {Array.from({ length: count }, (_, i) => {
+            const x = ledX(i);
+            const ry = rowY(rowOf(i));
+            const on = selected.has(i);
+            const pctY = ry + RIB / 2 + 4 + PCT * 0.75;
+            return (
+              <g key={`seg-ctl${i}`} onClick={() => toggle(i)} style={{ cursor: "pointer" }}>
+                <title>{`Segment ${i + 1} · ${brightness[i]}%`}</title>
+                <text
+                  x={x}
+                  y={pctY}
+                  textAnchor="middle"
+                  style={{
+                    fontSize: 10,
+                    fontWeight: on ? 600 : 400,
+                    fill: on ? color.cyan : color.dim,
+                    fontVariantNumeric: "tabular-nums",
+                  }}
+                >
+                  {brightness[i]}%
+                </text>
+                <rect
+                  x={x - step / 2}
+                  y={ry - RIB / 2 - 4}
+                  width={step}
+                  height={pctY - (ry - RIB / 2) + 4}
+                  fill="transparent"
+                />
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+
+      {/* Relative brightness for the selection (Govee's "Relative brightness"). */}
+      <BrightnessSlider
+        hex="#ffd9a0"
+        value={relBrightness}
+        onPick={applyBrightness}
+        compact={compact}
+        label="Relative brightness"
+      />
+
+      {/* Fixed palette + a clear ("no colour") swatch. */}
+      <div style={{ display: "flex", gap: compact ? "0.55rem" : "0.4rem", justifyContent: "center", flexWrap: "wrap" }}>
+        {SEG_SWATCHES.map((c) => (
+          <button
+            key={c}
+            onClick={() => applyColor(c, true)}
+            title={c}
+            style={{
+              width: compact ? 38 : 26,
+              height: compact ? 38 : 26,
+              borderRadius: 8,
+              border: `1px solid ${alpha(color.text, 0.22)}`,
+              background: c,
+              cursor: "pointer",
+              padding: 0,
+            }}
+          />
+        ))}
+        <button
+          onClick={clearSelected}
+          title="Clear colour"
+          style={{
+            width: compact ? 38 : 26,
+            height: compact ? 38 : 26,
+            borderRadius: 8,
+            border: `1px solid ${alpha(color.text, 0.22)}`,
+            background: `linear-gradient(135deg, transparent 47%, #e0506a 47%, #e0506a 53%, transparent 53%), ${color.surfaceOff}`,
+            cursor: "pointer",
+            padding: 0,
+          }}
+        />
+      </div>
+
+      {/* Fine colour control. */}
+      <div style={{ display: "flex", justifyContent: "center" }}>
+        <ColorWheel
+          size={compact ? 220 : 168}
+          hue={hue}
+          sat={sat}
+          onPick={(h, s) => {
+            setHs([h, s]);
+            applyColor(rgbToHex(...hsvToRgb(h, s, 1)));
+          }}
+        />
+      </div>
+
+      {selected.size === 0 && (
+        <div style={{ textAlign: "center", fontSize: compact ? "0.78rem" : "0.72rem", color: color.faint }}>
+          Tap segments (or “Select all”) to colour them.
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Anchored editor popover ──────────────────────────────────────────────────
 
 export function LightEditor({
@@ -673,6 +1055,8 @@ export function LightEditor({
   initialMode,
   effects,
   initialEffect,
+  segments,
+  onSegments,
   on,
   onToggle,
   onChange,
@@ -698,6 +1082,11 @@ export function LightEditor({
   effects?: string[];
   /** The currently-active effect, if any. */
   initialEffect?: string;
+  /** Number of addressable colour segments (Govee strips). With `onSegments`, a
+   * Segments tab renders. */
+  segments?: number;
+  /** Apply per-segment colour/brightness (write-only). Required for the Segments tab. */
+  onSegments?: (segments: SegmentColorChange[]) => void;
   /** When provided, the editor shows a power switch row. */
   on?: boolean;
   onToggle?: () => void;
@@ -718,10 +1107,12 @@ export function LightEditor({
   // The editor has up to three mutually-exclusive modes (Color wheel / White
   // wheel / Effects grid); offer a tab only for the ones this light supports.
   const hasEffects = !!effects && effects.length > 0;
+  const hasSegments = !!segments && segments > 0 && !!onSegments;
   const availableModes: EditorMode[] = [
     ...(showColor ? (["color"] as const) : []),
     ...(showWhite ? (["white"] as const) : []),
     ...(hasEffects ? (["effects"] as const) : []),
+    ...(hasSegments ? (["segments"] as const) : []),
   ];
   const [mode, setMode] = useState<EditorMode>(
     () => initialMode ?? (showColor ? "color" : showWhite ? "white" : "effects"),
@@ -754,11 +1145,27 @@ export function LightEditor({
   const colorActive = mode === "color";
   const whiteActive = mode === "white";
   const effectsActive = mode === "effects";
+  const segmentsActive = mode === "segments";
+
+  // The light "casts" its current colour onto the whole fly-out, under every tab,
+  // dimmer as brightness drops. White mode casts its warm/cool white; effects and
+  // segments inherit the base colour.
+  const castColor = whiteActive ? whiteHex : hex;
+  const castStrength = showBrightness ? 0.06 + 0.3 * (brightness / 100) : 0.26;
+  // Size the desktop popover to the tabs (3–4 modes don't fit beside a 176px
+  // wheel, which left them squished); the compact sheet is always full-width.
+  const flyoutWidth = availableModes.length >= 3 ? Math.max(268, availableModes.length * 78) : undefined;
 
   return (
-    <Flyout anchor={anchor} onClose={onClose}>
-      {/* Lights are the cyan domain — the shared header carries that accent. */}
-      <FlyoutHeader title={title ?? "Color"} accent={color.cyan} onClose={onClose} />
+    <Flyout anchor={anchor} onClose={onClose} width={flyoutWidth} ambientColor={castColor} ambientStrength={castStrength}>
+      {/* Lights are the cyan domain — the shared header carries that accent.
+          Power is the glyph button at the far left, lit cyan when on. */}
+      <FlyoutHeader
+        title={title ?? "Color"}
+        accent={color.cyan}
+        leading={onToggle ? <PowerToggle on={!!on} accent={color.cyan} onToggle={onToggle} /> : undefined}
+        onClose={onClose}
+      />
 
       {availableModes.length > 1 && (
         <ModeToggle mode={mode} modes={availableModes} onChange={setMode} compact={isCompact} />
@@ -777,46 +1184,66 @@ export function LightEditor({
 
       {effectsActive ? (
         <EffectsPanel effects={effects ?? []} active={effect} onPick={applyEffect} compact={isCompact} />
+      ) : segmentsActive ? (
+        <SegmentEditor count={segments ?? 0} onApply={onSegments!} compact={isCompact} />
       ) : (
         <>
-          <div style={{ display: "flex", gap: isCompact ? "1.4rem" : "0.8rem", alignItems: "center", justifyContent: "center" }}>
-            {colorActive && <ColorWheel size={isCompact ? 240 : 176} hue={hue} sat={sat} onPick={applyColor} />}
-            {whiteActive && <ColorTempWheel size={isCompact ? 240 : 176} mirek={mirek} onPick={applyTemp} />}
-          </div>
+          {(() => {
+            const wheelSize = isCompact ? 240 : 176;
+            const bf = brightness / 100;
+            return (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: isCompact ? "0.6rem 0" : "0.4rem 0" }}>
+                <div style={{ position: "relative", lineHeight: 0 }}>
+                  {colorActive && <ColorWheel size={wheelSize} hue={hue} sat={sat} onPick={applyColor} />}
+                  {whiteActive && <ColorTempWheel size={wheelSize} mirek={mirek} onPick={applyTemp} />}
+                  {/* Gentle WYSIWYG dim so a low brightness reads on the wheel too
+                      — kept light so the hues stay easy to pick. */}
+                  <div
+                    aria-hidden
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      borderRadius: "50%",
+                      background: "#000",
+                      opacity: (1 - bf) * 0.22,
+                      pointerEvents: "none",
+                    }}
+                  />
+                </div>
+              </div>
+            );
+          })()}
 
           {colorActive && (
-            <div style={{ display: "flex", gap: isCompact ? "0.6rem" : "0.45rem", justifyContent: "center", flexWrap: "wrap" }}>
-              {SWATCHES.map((c) => (
-                <button
-                  key={c}
-                  onClick={() => {
-                    const [h, s] = hexToHs(c);
-                    applyColor(h, s);
-                  }}
-                  title={c}
-                  style={{
-                    width: isCompact ? 40 : 18,
-                    height: isCompact ? 40 : 18,
-                    borderRadius: "50%",
-                    border: c === hex ? `2px solid ${color.gold}` : `1px solid ${alpha(color.text, 0.22)}`,
-                    background: c,
-                    cursor: "pointer",
-                    padding: 0,
-                    boxShadow: c === hex ? glow(color.gold, 12) : "none",
-                    transform: c === hex ? "scale(1.18)" : "scale(1)",
-                    transition: "transform .12s ease, box-shadow .15s ease",
-                  }}
-                />
-              ))}
+            <div style={{ display: "flex", gap: isCompact ? "0.6rem" : "0.5rem", justifyContent: "center", flexWrap: "wrap" }}>
+              {SWATCHES.map((c) => {
+                const active = c === hex;
+                return (
+                  <button
+                    key={c}
+                    onClick={() => {
+                      const [h, s] = hexToHs(c);
+                      applyColor(h, s);
+                    }}
+                    title={c}
+                    style={{
+                      width: isCompact ? 40 : 26,
+                      height: isCompact ? 40 : 26,
+                      borderRadius: isCompact ? 12 : 8,
+                      border: active ? `2px solid ${color.gold}` : `1px solid ${alpha(color.text, 0.22)}`,
+                      background: c,
+                      cursor: "pointer",
+                      padding: 0,
+                      boxShadow: active ? glow(color.gold, 12) : "inset 0 0 8px -5px #000",
+                      transform: active ? "scale(1.12)" : "scale(1)",
+                      transition: "transform .12s ease, box-shadow .15s ease",
+                    }}
+                  />
+                );
+              })}
             </div>
           )}
         </>
-      )}
-
-      {onToggle && (
-        <FlyoutSection label="Power" inline>
-          <Switch on={!!on} onChange={() => onToggle()} />
-        </FlyoutSection>
       )}
 
       {children}

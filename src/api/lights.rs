@@ -1,6 +1,6 @@
 use crate::AppState;
 use crate::api::auth::Session;
-use crate::models::LightState;
+use crate::models::{LightState, SegmentColor};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -8,7 +8,7 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::sync::Arc;
 
@@ -20,6 +20,13 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{id}/glyph", axum::routing::put(set_light_glyph))
         .route("/{id}/shadow", axum::routing::put(set_light_shadow))
         .route("/{id}/room", axum::routing::put(set_light_room))
+        .route("/{id}/segments", axum::routing::put(set_light_segments))
+}
+
+/// Body for a per-segment colour write: `{ "segments": [{"segment":0,"rgb":16711680}, …] }`.
+#[derive(Deserialize)]
+pub(crate) struct SegmentsRequest {
+    pub segments: Vec<SegmentColor>,
 }
 
 #[derive(Serialize)]
@@ -189,14 +196,14 @@ pub(crate) async fn persist_light_state(db: &sqlx::SqlitePool, light_id: &str, n
             .await;
 }
 
-/// Send `new_state` to the light's provider and cache it as `last_state`.
-pub(crate) async fn apply_light_state(
+/// Resolve a controllable light to its provider device id + a freshly built
+/// provider, or an [`SetLightOutcome`] failure. A disabled/shadowed light (or a
+/// disabled provider) is not controllable — a shadowed duplicate defers to its
+/// native canonical.
+async fn controllable_provider(
     state: &AppState,
     id: &str,
-    new_state: &LightState,
-) -> SetLightOutcome {
-    // A disabled or shadowed light (or disabled provider) receives no commands —
-    // a shadowed duplicate defers to its native canonical.
+) -> Result<(String, Box<dyn crate::providers::LightProvider>), SetLightOutcome> {
     let row = sqlx::query(
         "SELECT l.device_id, p.provider_type, p.credentials
          FROM lights l JOIN providers p ON l.provider_id = p.id
@@ -208,23 +215,32 @@ pub(crate) async fn apply_light_state(
 
     let row = match row {
         Ok(Some(r)) => r,
-        Ok(None) => return SetLightOutcome::NotFound,
+        Ok(None) => return Err(SetLightOutcome::NotFound),
         Err(e) => {
             tracing::error!("db error: {e}");
-            return SetLightOutcome::Db;
+            return Err(SetLightOutcome::Db);
         }
     };
 
     let device_id: String = row.get("device_id");
     let provider_type: String = row.get("provider_type");
     let credentials_enc: String = row.get("credentials");
+    let provider = build_provider(state, &provider_type, &credentials_enc).map_err(|e| {
+        tracing::error!("failed to build provider: {e}");
+        SetLightOutcome::Db
+    })?;
+    Ok((device_id, provider))
+}
 
-    let provider = match build_provider(state, &provider_type, &credentials_enc) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!("failed to build provider: {e}");
-            return SetLightOutcome::Db;
-        }
+/// Send `new_state` to the light's provider and cache it as `last_state`.
+pub(crate) async fn apply_light_state(
+    state: &AppState,
+    id: &str,
+    new_state: &LightState,
+) -> SetLightOutcome {
+    let (device_id, provider) = match controllable_provider(state, id).await {
+        Ok(v) => v,
+        Err(outcome) => return outcome,
     };
 
     match provider.set_state(&device_id, new_state).await {
@@ -234,6 +250,28 @@ pub(crate) async fn apply_light_state(
         }
         Err(e) => {
             tracing::error!("provider set_state error: {e:#}");
+            SetLightOutcome::ProviderError
+        }
+    }
+}
+
+/// Send per-segment colours to the light's provider (e.g. a Govee strip). Not
+/// persisted: providers expose segment *control* but not *readback*, so there's
+/// no segment state to cache or snapshot.
+pub(crate) async fn apply_light_segments(
+    state: &AppState,
+    id: &str,
+    segments: &[crate::models::SegmentColor],
+) -> SetLightOutcome {
+    let (device_id, provider) = match controllable_provider(state, id).await {
+        Ok(v) => v,
+        Err(outcome) => return outcome,
+    };
+
+    match provider.set_segments(&device_id, segments).await {
+        Ok(()) => SetLightOutcome::Ok,
+        Err(e) => {
+            tracing::error!("provider set_segments error: {e:#}");
             SetLightOutcome::ProviderError
         }
     }
@@ -277,6 +315,15 @@ async fn set_light_state(
     Json(new_state): Json<LightState>,
 ) -> impl IntoResponse {
     set_light_status(apply_light_state(&state, &id, &new_state).await).into_response()
+}
+
+async fn set_light_segments(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+    Json(req): Json<SegmentsRequest>,
+) -> impl IntoResponse {
+    set_light_status(apply_light_segments(&state, &id, &req.segments).await).into_response()
 }
 
 async fn set_light_enabled(
