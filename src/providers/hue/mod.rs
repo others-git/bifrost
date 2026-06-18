@@ -92,20 +92,29 @@ impl HueProvider {
         accept_invalid_certs: bool,
     ) -> Result<Self> {
         let app_key = app_key.into();
-        let mut headers = header::HeaderMap::new();
-        headers.insert(
-            "hue-application-key",
-            header::HeaderValue::from_str(&app_key)?,
-        );
-        // connect_timeout only bounds connection establishment, so it is safe
-        // for the long-lived SSE stream; without it a powered-off bridge (or a
-        // host that rebooted before the network came up) leaves connect
-        // attempts hanging in TCP retries for minutes per attempt.
-        let client = Client::builder()
-            .default_headers(headers)
-            .danger_accept_invalid_certs(accept_invalid_certs)
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .build()?;
+        // Shared, pooled client keyed by app-key + TLS mode (the only things that
+        // vary between bridges' clients; the base URL lives on the struct). Keeps
+        // the bridge connection warm across per-request rebuilds rather than
+        // re-handshaking every control. See [`crate::providers::cached_client`].
+        let client = crate::providers::cached_client(
+            &format!("hue:{accept_invalid_certs}:{app_key}"),
+            || {
+                let mut headers = header::HeaderMap::new();
+                headers.insert(
+                    "hue-application-key",
+                    header::HeaderValue::from_str(&app_key)?,
+                );
+                // connect_timeout only bounds connection establishment, so it is safe
+                // for the long-lived SSE stream; without it a powered-off bridge (or a
+                // host that rebooted before the network came up) leaves connect
+                // attempts hanging in TCP retries for minutes per attempt.
+                Ok(Client::builder()
+                    .default_headers(headers)
+                    .danger_accept_invalid_certs(accept_invalid_certs)
+                    .connect_timeout(std::time::Duration::from_secs(10))
+                    .build()?)
+            },
+        )?;
         Ok(Self {
             client,
             bridge_base: bridge_base.into(),

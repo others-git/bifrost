@@ -224,10 +224,16 @@ const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl SonosProvider {
     fn new_with_base(seed_url: impl Into<String>) -> Result<Self> {
-        let client = Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(5))
-            .timeout(std::time::Duration::from_secs(10))
-            .build()?;
+        // Sonos clients carry no auth or per-device config, so every provider
+        // shares one pooled client (keyed `"sonos"`) — keeping UPnP/SOAP
+        // connections warm across the many per-request rebuilds rather than
+        // re-handshaking each call. See [`crate::providers::cached_client`].
+        let client = crate::providers::cached_client("sonos", || {
+            Ok(Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(10))
+                .build()?)
+        })?;
         Ok(Self {
             client,
             seed_url: seed_url.into(),

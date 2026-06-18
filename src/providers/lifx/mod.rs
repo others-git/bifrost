@@ -39,17 +39,23 @@ impl LifxCloud {
     }
 
     fn new_with_base(token: impl AsRef<str>, base_url: impl Into<String>) -> Result<Self> {
-        let mut headers = header::HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            header::HeaderValue::from_str(&format!("Bearer {}", token.as_ref()))?,
-        );
-        // Bounded so a cloud outage fails the poll fast instead of hanging it.
-        let client = Client::builder()
-            .default_headers(headers)
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(30))
-            .build()?;
+        // Shared, pooled client keyed by token (the base URL lives on the struct),
+        // so per-request rebuilds reuse one warm connection to the LIFX cloud
+        // instead of re-handshaking each control. See [`crate::providers::cached_client`].
+        let token = token.as_ref();
+        let client = crate::providers::cached_client(&format!("lifx:{token}"), || {
+            let mut headers = header::HeaderMap::new();
+            headers.insert(
+                header::AUTHORIZATION,
+                header::HeaderValue::from_str(&format!("Bearer {token}"))?,
+            );
+            // Bounded so a cloud outage fails the poll fast instead of hanging it.
+            Ok(Client::builder()
+                .default_headers(headers)
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(30))
+                .build()?)
+        })?;
         Ok(Self {
             client,
             base_url: base_url.into(),

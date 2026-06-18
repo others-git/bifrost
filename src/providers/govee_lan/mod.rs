@@ -83,6 +83,15 @@ impl GoveeLanProvider {
         }
     }
 
+    /// Test helper: pin the receive port to a specific value so a test can
+    /// simulate the well-known `:4002` port already being held by the persistent
+    /// polling provider (the production EADDRINUSE contention).
+    #[cfg(test)]
+    pub(crate) fn with_listen_port(mut self, port: u16) -> Self {
+        self.listen_port = port;
+        self
+    }
+
     async fn socket(&self) -> Result<&UdpSocket> {
         self.socket
             .get_or_try_init(|| async {
@@ -206,8 +215,19 @@ impl GoveeLanProvider {
             ));
         }
 
-        let sock = self.socket().await?;
-        let _guard = self.exchange.lock().await;
+        // Control is **fire-and-forget** — we don't read the device's ack — so
+        // send from a throwaway **ephemeral** socket rather than the shared
+        // `:4002` receive socket. That well-known port is held for the whole
+        // process by the polling manager's long-lived provider instance; a
+        // per-request control (the provider is rebuilt per request) that also
+        // tried to bind 4002 hits `EADDRINUSE`, the LAN send fails, and the
+        // command silently falls back to the **slow cloud** path — which is why
+        // LAN control felt laggy. An ephemeral source port sidesteps the
+        // contention entirely; the device accepts commands on 4003 regardless of
+        // our source port. (Reads — scan/get_state — still use `socket()`:4002.)
+        let sock = UdpSocket::bind((self.bind_addr, 0))
+            .await
+            .context("binding Govee LAN send socket")?;
         for pkt in packets {
             sock.send_to(&pkt, target)
                 .await
@@ -586,6 +606,40 @@ mod tests {
         assert_eq!(turn["data"]["value"], 1);
         let bright = got.iter().find(|c| c["cmd"] == "brightness").unwrap();
         assert_eq!(bright["data"]["value"], 60);
+    }
+
+    #[tokio::test]
+    async fn set_state_works_while_the_receive_port_is_held() {
+        // Regression: the persistent polling provider holds the well-known
+        // receive port for the whole process; a per-request control provider
+        // must not need to (re)bind it. Occupy a port, point a fresh provider's
+        // receive port at it, and confirm control still reaches the device —
+        // proving the send path uses an ephemeral socket, not the held port.
+        let mock = spawn_mock_device().await;
+        let squatter = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let held = squatter.local_addr().unwrap().port();
+
+        let provider = GoveeLanProvider::new_for_test(mock.addr, Duration::from_millis(400))
+            .with_listen_port(held);
+
+        provider
+            .set_state(
+                "127.0.0.1",
+                &LightState {
+                    on: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("control must not depend on binding the held receive port");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let got = mock.received.lock().await;
+        let cmds: Vec<&str> = got.iter().map(|c| c["cmd"].as_str().unwrap()).collect();
+        assert!(
+            cmds.contains(&"turn"),
+            "command never reached the device: {cmds:?}"
+        );
     }
 
     #[tokio::test]

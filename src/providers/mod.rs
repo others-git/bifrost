@@ -38,6 +38,35 @@ pub fn mac_hw_id(raw: &str) -> Option<String> {
     (hex.len() == 12 || hex.len() == 16).then(|| format!("mac:{hex}"))
 }
 
+/// A process-wide cache of `reqwest::Client`s keyed by an opaque config signature.
+///
+/// HTTP providers are **rebuilt per request** (`build_provider`/`build_audio_provider`
+/// decrypt creds and construct a fresh provider on every control). A new `Client`
+/// each time opens a new TCP+TLS connection per command — no keep-alive, so every
+/// control pays a handshake. A `Client` owns its connection pool and is cheap to
+/// clone (`Arc` inside), so caching one per distinct config keeps the pool warm
+/// across requests, cutting the handshake off all but the first call.
+///
+/// `key` must capture everything that distinguishes the client — auth headers
+/// (token/app-key), TLS mode, timeouts — so two providers that need different
+/// clients never share one. Prefix it per provider (`"hue:"`, `"ha:"`, …) to keep
+/// namespaces from colliding. `build` runs only on a cache miss.
+pub fn cached_client(
+    key: &str,
+    build: impl FnOnce() -> Result<reqwest::Client>,
+) -> Result<reqwest::Client> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, reqwest::Client>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut map = cache.lock().expect("HTTP client cache poisoned");
+    if let Some(client) = map.get(key) {
+        return Ok(client.clone());
+    }
+    let client = build()?;
+    map.insert(key.to_string(), client.clone());
+    Ok(client)
+}
+
 // ── Core provider trait ─────────────────────────────────────────────────────
 
 /// A light group defined inside the provider's own ecosystem (e.g. a Hue

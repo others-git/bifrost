@@ -91,17 +91,20 @@ impl GoveeCloud {
     }
 
     fn new_with_base(api_key: impl AsRef<str>, base_url: impl Into<String>) -> Result<Self> {
-        let mut headers = header::HeaderMap::new();
-        headers.insert(
-            "Govee-API-Key",
-            header::HeaderValue::from_str(api_key.as_ref())?,
-        );
-        // Bounded so a cloud outage fails the poll fast instead of hanging it.
-        let client = Client::builder()
-            .default_headers(headers)
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(30))
-            .build()?;
+        // Shared, pooled client keyed by API key (not base URL) so test wiremock
+        // servers on ephemeral ports share correctly; the base URL lives on the
+        // struct, not the client. See [`crate::providers::cached_client`].
+        let api_key = api_key.as_ref();
+        let client = crate::providers::cached_client(&format!("govee:{api_key}"), || {
+            let mut headers = header::HeaderMap::new();
+            headers.insert("Govee-API-Key", header::HeaderValue::from_str(api_key)?);
+            // Bounded so a cloud outage fails the poll fast instead of hanging it.
+            Ok(Client::builder()
+                .default_headers(headers)
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(30))
+                .build()?)
+        })?;
         Ok(Self {
             client,
             base_url: base_url.into(),
@@ -601,30 +604,38 @@ impl LightProvider for GoveeCloud {
 
         let sku = self.sku_for(provider_id).await?;
 
-        for cmd in commands {
+        // Govee needs one HTTP call per capability. They target independent
+        // capabilities with no ordering dependency, so fire them **concurrently**:
+        // a multi-capability change (power + brightness + colour) then costs ~one
+        // cloud round-trip instead of three sequential ones — the bulk of the
+        // cloud-path lag. `send_retrying` still handles any per-request 429s.
+        let sends = commands.into_iter().map(|cmd| {
             let body = json!({
                 "requestId": Uuid::new_v4().to_string(),
                 "payload": {
-                    "sku": sku,
+                    "sku": sku.clone(),
                     "device": provider_id,
                     "capability": cmd
                 }
             });
+            async move {
+                let resp: GoveeResponse<Value> = send_retrying(
+                    self.client
+                        .post(format!("{}/device/control", self.base_url))
+                        .json(&body),
+                )
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
 
-            let resp: GoveeResponse<Value> = send_retrying(
-                self.client
-                    .post(format!("{}/device/control", self.base_url))
-                    .json(&body),
-            )
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-
-            if resp.code != 200 {
-                bail!("Govee control error {}: {}", resp.code, resp.message);
+                if resp.code != 200 {
+                    bail!("Govee control error {}: {}", resp.code, resp.message);
+                }
+                Ok::<(), anyhow::Error>(())
             }
-        }
+        });
+        futures_util::future::try_join_all(sends).await?;
 
         Ok(())
     }

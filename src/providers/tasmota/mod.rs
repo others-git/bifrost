@@ -28,11 +28,16 @@ pub struct TasmotaProvider {
 
 impl TasmotaProvider {
     fn new_with_base(base_url: impl Into<String>) -> Result<Self> {
-        // Bounded so a powered-off device fails the poll fast instead of hanging it.
-        let client = Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(15))
-            .build()?;
+        // One pooled client shared across all Tasmota devices (no per-device
+        // config; it pools per-host internally), so per-request rebuilds reuse
+        // warm connections. See [`crate::providers::cached_client`].
+        let client = crate::providers::cached_client("tasmota", || {
+            // Bounded so a powered-off device fails the poll fast instead of hanging it.
+            Ok(Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(15))
+                .build()?)
+        })?;
         Ok(Self {
             client,
             base_url: base_url.into(),

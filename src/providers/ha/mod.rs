@@ -178,18 +178,22 @@ impl HaProvider {
     fn new_with(base_url: &str, token: &str) -> Result<Self> {
         let base_url = normalise_base_url(base_url);
 
-        let mut headers = HeaderMap::new();
-        let mut auth = HeaderValue::from_str(&format!("Bearer {token}"))
-            .context("invalid Home Assistant token (not a valid header value)")?;
-        auth.set_sensitive(true);
-        headers.insert(AUTHORIZATION, auth);
-
-        let client = Client::builder()
-            .default_headers(headers)
-            // Bounded so an unreachable HA fails a poll fast instead of hanging.
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(15))
-            .build()?;
+        // Shared, pooled client keyed by token (the base URL lives on the struct),
+        // so per-request rebuilds reuse one warm connection to HA instead of
+        // re-handshaking each control. See [`crate::providers::cached_client`].
+        let client = crate::providers::cached_client(&format!("ha:{token}"), || {
+            let mut headers = HeaderMap::new();
+            let mut auth = HeaderValue::from_str(&format!("Bearer {token}"))
+                .context("invalid Home Assistant token (not a valid header value)")?;
+            auth.set_sensitive(true);
+            headers.insert(AUTHORIZATION, auth);
+            Ok(Client::builder()
+                .default_headers(headers)
+                // Bounded so an unreachable HA fails a poll fast instead of hanging.
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(15))
+                .build()?)
+        })?;
 
         Ok(Self {
             client,
