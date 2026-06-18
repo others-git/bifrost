@@ -69,8 +69,8 @@ All tools below are served natively from `src/api/mcp.rs`.
 | Tool | Maps to | When |
 |---|---|---|
 | `list_audio_devices` | `list_all_devices` | If a standalone audio list is wanted beyond `get_home_state`. |
-| Tier-2 music search/play | a future music-service API | After PLAN.md Milestone 12.2 (Spotify OAuth + Connect) lands. |
-| Audio-in-scenes awareness | scene snapshot incl. audio source/volume | After PLAN.md Milestone 15. |
+| Tier-2 music search/play | a future music-service API | After the Spotify OAuth + Connect music-service work lands. |
+| Audio-in-scenes awareness | scene snapshot incl. audio source/volume | After audio is captured in scenes. |
 
 ## Why embedded
 
