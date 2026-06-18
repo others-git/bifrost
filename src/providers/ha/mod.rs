@@ -882,6 +882,23 @@ impl AudioProvider for HaProvider {
         Ok(())
     }
 
+    /// Cast: raw passthrough to HA `media_player.play_media`. `content_type` maps
+    /// to HA's `media_content_type` (`music`/`url`/`app`/`channel`/…).
+    async fn play_media(
+        &self,
+        device_id: &str,
+        content_id: &str,
+        content_type: &str,
+    ) -> Result<()> {
+        self.call_service(
+            "media_player",
+            "play_media",
+            device_id,
+            json!({ "media_content_id": content_id, "media_content_type": content_type }),
+        )
+        .await
+    }
+
     async fn group(&self, device_id: &str, coordinator_id: &str) -> Result<()> {
         if device_id == coordinator_id {
             return Err(anyhow!("a speaker cannot be grouped with itself"));
@@ -1647,6 +1664,28 @@ mod tests {
         let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
         assert_eq!(body["entity_id"], "media_player.office");
         assert!((body["volume_level"].as_f64().unwrap() - 0.4).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn play_media_passes_content_through_to_play_media_service() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/services/media_player/play_media"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let p = HaProvider::new_for_test(server.uri()).unwrap();
+        AudioProvider::play_media(&p, "media_player.tv", "https://example/stream.m3u8", "url")
+            .await
+            .unwrap();
+
+        let reqs = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["entity_id"], "media_player.tv");
+        assert_eq!(body["media_content_id"], "https://example/stream.m3u8");
+        assert_eq!(body["media_content_type"], "url");
     }
 
     #[tokio::test]

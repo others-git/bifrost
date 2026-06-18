@@ -20,6 +20,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/order", put(reorder_providers))
         .route("/types", get(list_types))
         .route("/scan/{provider_type}", post(scan_network))
+        .route("/discover-all", get(discover_all))
         .route("/hue/pair", post(hue_pair))
         .route("/{id}", delete(remove_provider))
         .route("/{id}/config", get(provider_config))
@@ -70,6 +71,115 @@ async fn scan_network(
             Json(Vec::<crate::providers::discovery::DiscoveredDevice>::new()).into_response()
         }
     }
+}
+
+// ── Auto-discovery: scan every discoverable type for unconfigured devices ────
+
+/// A device found on the LAN that isn't yet behind a configured provider — the
+/// "found devices" surface (à la Home Assistant's discovered integrations). Each
+/// carries the provider type it answered for plus pre-shaped credentials, so the
+/// add-provider form opens pre-filled with one click.
+#[derive(Serialize)]
+struct FoundDevice {
+    provider_type: &'static str,
+    type_name: &'static str,
+    host: String,
+    label: Option<String>,
+    credentials: serde_json::Value,
+}
+
+/// Pull the host-ish fields out of a decrypted credentials blob, so a found
+/// device already covered by a configured provider can be filtered out. Covers
+/// the field names the various schemas use for an address.
+fn hosts_from_credentials(json: &str) -> Vec<String> {
+    const HOST_KEYS: &[&str] = &["host", "bridge_ip", "ip", "host_ip", "address"];
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+        .map(|obj| {
+            HOST_KEYS
+                .iter()
+                .filter_map(|k| obj.get(*k).and_then(|v| v.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Scan **every** discoverable provider type at once and return the devices that
+/// aren't already configured — the one-button "find what's on my network" flow.
+/// Credential-free LAN discovery only (SSDP/eISCP/Govee-LAN), so it surfaces
+/// gear like Sonos and Onkyo without the user picking a type first. Like
+/// [`scan_network`], a probe that can't reach the network degrades to "found
+/// nothing" rather than erroring.
+async fn discover_all(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
+    // Addresses already behind a configured provider — so we only surface *new*
+    // devices. Decrypt each provider's creds and collect its host fields.
+    let mut known_hosts = std::collections::HashSet::new();
+    if let Ok(rows) = sqlx::query("SELECT credentials FROM providers")
+        .fetch_all(&state.db)
+        .await
+    {
+        for row in &rows {
+            let enc: String = row.get("credentials");
+            if let Ok(json) = state.decrypt_credentials(&enc) {
+                known_hosts.extend(hosts_from_credentials(&json));
+            }
+        }
+    }
+
+    let extra_subnets = crate::api::settings::expanded_subnets(&state).await;
+    let budget = if extra_subnets.is_empty() {
+        std::time::Duration::from_secs(3)
+    } else {
+        std::time::Duration::from_secs(8)
+    };
+
+    // Every type that advertises auto-detect. Scan them concurrently.
+    let types: Vec<(&'static str, &'static str)> = state
+        .registry
+        .all_types()
+        .into_iter()
+        .filter(|t| t.supports_discovery)
+        .map(|t| (t.provider_type, t.display_name))
+        .collect();
+
+    let scans = types.into_iter().map(|(ptype, type_name)| {
+        let registry = &state.registry;
+        let opts = crate::providers::discovery::ScanOptions {
+            timeout: budget,
+            extra_subnets: extra_subnets.clone(),
+        };
+        async move {
+            let Some(discoverer) = registry.discoverer(ptype) else {
+                return Vec::new();
+            };
+            match discoverer.scan(&opts).await {
+                Ok(devices) => devices
+                    .into_iter()
+                    .map(|d| FoundDevice {
+                        provider_type: ptype,
+                        type_name,
+                        host: d.host,
+                        label: d.label,
+                        credentials: d.credentials,
+                    })
+                    .collect(),
+                Err(e) => {
+                    tracing::warn!("auto-discovery scan for '{ptype}' could not probe: {e:#}");
+                    Vec::new()
+                }
+            }
+        }
+    });
+
+    let found: Vec<FoundDevice> = futures_util::future::join_all(scans)
+        .await
+        .into_iter()
+        .flatten()
+        .filter(|d| !known_hosts.contains(&d.host))
+        .collect();
+
+    Json(found).into_response()
 }
 
 // ── List available provider types (for the setup UI) ───────────────────────

@@ -7997,3 +7997,169 @@ async fn voice_listen_transcribes_then_drives_the_light() {
         "transcribed command never drove the device"
     );
 }
+
+// ── Developer mode (/api/dev, gated behind config.dev_mode) ──────────────────
+
+/// Flip dev mode on via the partial settings PUT (session-authed, ungated).
+async fn enable_dev_mode(app: &Router, cookie: &str) {
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/settings",
+            cookie,
+            r#"{"dev_mode":true}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "enabling dev mode failed");
+}
+
+#[tokio::test]
+async fn dev_routes_404_when_dev_mode_off() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    // Even a valid session gets 404 — the surface doesn't exist in production.
+    let resp = app
+        .oneshot(helpers::authed_get("/api/dev/info", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn dev_routes_401_when_on_but_unauthenticated() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    enable_dev_mode(&app, &cookie).await;
+    // No cookie, no bearer key.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/dev/info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn dev_info_ok_with_session_when_on() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    enable_dev_mode(&app, &cookie).await;
+    let resp = app
+        .oneshot(helpers::authed_get("/api/dev/info", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["dev_mode"], true);
+    assert!(body["version"].is_string(), "missing version: {body}");
+}
+
+#[tokio::test]
+async fn dev_info_ok_with_bearer_when_on() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    enable_dev_mode(&app, &cookie).await;
+    let key = create_api_key(&app, &cookie, "dev script").await;
+    let resp = app
+        .oneshot(bearer_get("/api/dev/info", &key))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn settings_partial_put_preserves_other_field() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Save a subnet (dev_mode omitted — should stay default false).
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/settings",
+            &cookie,
+            r#"{"expanded_lan_scan":["192.168.5.0/24"]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["dev_mode"], false);
+    assert_eq!(body["expanded_lan_scan"][0], "192.168.5.0/24");
+
+    // Toggle dev_mode only — the subnet must survive (partial update).
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/settings",
+            &cookie,
+            r#"{"dev_mode":true}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["dev_mode"], true, "dev_mode not set: {body}");
+    assert_eq!(
+        body["expanded_lan_scan"][0], "192.168.5.0/24",
+        "subnet clobbered by a dev_mode-only PUT: {body}"
+    );
+}
+
+// ── Auto-discovery (/api/providers/discover-all) ─────────────────────────────
+
+#[tokio::test]
+async fn discover_all_requires_session() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/providers/discover-all")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn discover_all_returns_a_json_array_when_authed() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .oneshot(helpers::authed_get("/api/providers/discover-all", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    // No devices on the test host's LAN — but the shape is always an array.
+    assert!(body.is_array(), "expected an array, got {body}");
+}
+
+// ── Casting (/api/audio/devices/{id}/cast) ───────────────────────────────────
+
+#[tokio::test]
+async fn cast_requires_session() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/audio/devices/some-id/cast")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"content_id":"x","content_type":"url"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}

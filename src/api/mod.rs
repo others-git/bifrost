@@ -3,6 +3,7 @@ pub mod apikeys;
 pub mod audio;
 pub mod auth;
 pub mod dedup;
+pub mod dev;
 pub mod enrollment;
 pub mod events;
 pub mod kiosk_update;
@@ -123,6 +124,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .nest("/api-keys", apikeys::router())
         .nest("/audio", audio::router())
         .nest("/auth", auth::router())
+        .nest("/dev", dev::router())
         .nest("/enrollment", enrollment::router())
         .nest("/events", events::router())
         .nest("/kiosks", kiosks::router())

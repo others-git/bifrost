@@ -249,11 +249,31 @@ export async function scanForDevices(providerType: string): Promise<DiscoveredDe
   return res.json();
 }
 
+/** A device found on the LAN that isn't behind a configured provider yet. */
+export interface FoundDevice {
+  provider_type: string;
+  type_name: string;
+  host: string;
+  label?: string | null;
+  credentials: Record<string, unknown>;
+}
+
+/** Scan every discoverable provider type at once for unconfigured devices —
+ * the "found devices" flow (no provider type to pick first). */
+export async function discoverAllDevices(): Promise<FoundDevice[]> {
+  const res = await fetch("/api/providers/discover-all");
+  if (!res.ok) return [];
+  return res.json();
+}
+
 // ── App settings ──────────────────────────────────────────────────────────────
 
 export interface AppSettings {
   /** Extra private /24 subnets auto-detect should also sweep (Expanded-LAN). */
   expanded_lan_scan: string[];
+  /** Developer mode — exposes contributor/dev-only surfaces (provider debug, the
+   * `/api/dev` API). Omit on a partial PUT to leave it unchanged. */
+  dev_mode?: boolean;
 }
 
 export async function getSettings(): Promise<AppSettings> {
@@ -262,9 +282,43 @@ export async function getSettings(): Promise<AppSettings> {
   return res.json();
 }
 
-/** Save settings. Returns the normalised settings, or an error message. */
+/** Dev-mode only: a provider's debug diagnostics (raw upstream capabilities, the
+ * ones we don't model yet, etc.). 404s when dev mode is off. */
+export async function getDevProviderDebug(id: string): Promise<unknown | null> {
+  const res = await fetch(`/api/dev/providers/${id}/debug`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export interface DevProvider {
+  id: string;
+  name: string;
+  provider_type: string;
+  enabled: boolean;
+  /** Whether this provider exposes `debug_info` (light providers, for now). */
+  has_debug: boolean;
+}
+
+/** Dev-mode only: server build/runtime info (version, build profile, counts). */
+export async function getDevInfo(): Promise<Record<string, unknown> | null> {
+  const res = await fetch("/api/dev/info");
+  if (!res.ok) return null;
+  return res.json();
+}
+
+/** Dev-mode only: the provider list with debug-availability flags. */
+export async function getDevProviders(): Promise<DevProvider[]> {
+  const res = await fetch("/api/dev/providers");
+  if (!res.ok) return [];
+  const body = await res.json();
+  return body.providers ?? [];
+}
+
+/** Save settings — a **partial** update; omitted fields keep their stored value
+ * (a dev-mode toggle won't clobber the subnet list, and vice-versa). Returns the
+ * normalised settings, or an error message. */
 export async function updateSettings(
-  settings: AppSettings,
+  settings: Partial<AppSettings>,
 ): Promise<AppSettings | { error: string }> {
   const res = await fetch("/api/settings", {
     method: "PUT",

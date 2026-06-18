@@ -315,7 +315,7 @@ pub(crate) async fn apply_remote_command(
     cmd: &RemoteCommand,
 ) -> RemoteOutcome {
     let row = sqlx::query(
-        "SELECT r.device_id, p.provider_type, p.credentials
+        "SELECT r.device_id, r.hw_id, p.provider_type, p.credentials
            FROM remote_devices r JOIN providers p ON r.provider_id = p.id
           WHERE r.id = ? AND p.enabled = 1 AND r.enabled = 1",
     )
@@ -346,7 +346,18 @@ pub(crate) async fn apply_remote_command(
         }
         RemoteCommand::Text { text } => provider.send_text(&device_id, text).await,
         RemoteCommand::LaunchApp { activity } => provider.launch_app(&device_id, activity).await,
-        RemoteCommand::Power { on } => provider.set_power(&device_id, *on).await,
+        RemoteCommand::Power { on } => {
+            // Wake-on-LAN nudge first: a TV in network standby won't answer the
+            // provider's `turn_on`, but its NIC will answer a magic packet. No-op
+            // for non-MAC ids; failures are non-fatal (the turn_on still runs).
+            if *on
+                && let Some(hw) = row.get::<Option<String>, _>("hw_id")
+                && let Err(e) = crate::wol::wake(&hw).await
+            {
+                tracing::debug!("WoL nudge for {device_id} failed (non-fatal): {e:#}");
+            }
+            provider.set_power(&device_id, *on).await
+        }
     };
     match result {
         Ok(()) => {

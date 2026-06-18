@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   addProvider,
   discoverProvider,
@@ -10,7 +10,9 @@ import {
   syncProviderGroups,
   pairHueBridge,
   scanForDevices,
+  discoverAllDevices,
   type DiscoveredDevice,
+  type FoundDevice,
   removeProvider,
   updateProviderCredentials,
   getApiKeys,
@@ -19,6 +21,10 @@ import {
   createEnrollmentToken,
   getSettings,
   updateSettings,
+  getDevInfo,
+  getDevProviders,
+  getDevProviderDebug,
+  type DevProvider,
   getAiEndpoints,
   putAiEndpoint,
   deleteAiEndpoint,
@@ -57,12 +63,13 @@ interface Props {
   onNavigate: (page: "dashboard") => void;
 }
 
-type SettingsTab = "providers" | "voice" | "clients" | "appearance";
+type SettingsTab = "providers" | "voice" | "clients" | "appearance" | "developer";
 const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: "providers", label: "Providers" },
   { id: "voice", label: "Voice & AI" },
   { id: "clients", label: "Clients" },
   { id: "appearance", label: "Appearance" },
+  { id: "developer", label: "Developer" },
 ];
 
 /** Served inside the kiosk WebView (it appends `BifrostKiosk/<v>` to the UA).
@@ -77,8 +84,15 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [types, setTypes] = useState<ProviderType[]>([]);
   const [showAdd, setShowAdd] = useState(false);
+  // When the user clicks "Add" on a found device, the add form opens pre-filled.
+  const [prefill, setPrefill] = useState<AddPrefill | null>(null);
   const [toast, setToast] = useState("");
   const [tab, setTab] = useState<SettingsTab>("providers");
+
+  function openAdd(p: AddPrefill | null) {
+    setPrefill(p);
+    setShowAdd(true);
+  }
 
   async function loadProviders() {
     setProviders(await getProviders());
@@ -257,13 +271,27 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
 
           {showAdd ? (
             <div style={{ marginTop: "1.5rem" }}>
-              <AddProviderForm types={types} onAdded={handleAdded} onCancel={() => setShowAdd(false)} />
+              <AddProviderForm
+                key={prefill ? `${prefill.provider_type}:${prefill.name}` : "blank"}
+                types={types}
+                prefill={prefill}
+                onAdded={(id) => {
+                  setPrefill(null);
+                  handleAdded(id);
+                }}
+                onCancel={() => {
+                  setPrefill(null);
+                  setShowAdd(false);
+                }}
+              />
             </div>
           ) : (
-            <Button onClick={() => setShowAdd(true)} style={{ marginTop: "1.5rem" }}>
+            <Button onClick={() => openAdd(null)} style={{ marginTop: "1.5rem" }}>
               + Add Provider
             </Button>
           )}
+
+          {!showAdd && <FoundDevicesSection onAdd={openAdd} />}
 
           <ExpandedLanSection />
         </>
@@ -279,7 +307,91 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
         </div>
       )}
 
+      {tab === "developer" && <DeveloperTab />}
+
       {dialogs.element}
+    </div>
+  );
+}
+
+// ── Found devices (auto-discovery) ───────────────────────────────────────────
+
+/** Pre-fills the add-provider form from a found device. */
+interface AddPrefill {
+  provider_type: string;
+  name: string;
+  credentials: Record<string, string>;
+}
+
+/**
+ * One-button "find what's on my network": scans every discoverable provider
+ * type at once (no type to pick first) and lists devices not yet configured.
+ * Clicking one opens the add-provider form pre-filled. Credential-free LAN
+ * discovery only (SSDP/eISCP/Govee-LAN) — cloud providers still need a key.
+ */
+function FoundDevicesSection({ onAdd }: { onAdd: (p: AddPrefill) => void }) {
+  const [scanning, setScanning] = useState(false);
+  const [scanned, setScanned] = useState(false);
+  const [found, setFound] = useState<FoundDevice[]>([]);
+
+  async function scan() {
+    setScanning(true);
+    setScanned(false);
+    setFound(await discoverAllDevices());
+    setScanned(true);
+    setScanning(false);
+  }
+
+  return (
+    <div style={{ marginTop: "1.5rem" }}>
+      <Button variant="ghost" onClick={scan} disabled={scanning}>
+        {scanning ? "Scanning network…" : "Scan for new devices"}
+      </Button>
+      {found.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", marginTop: "0.75rem" }}>
+          {found.map((d) => (
+            <div
+              key={`${d.provider_type}:${d.host}`}
+              style={{
+                ...S.card,
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "0.6rem 0.9rem",
+                gap: "1rem",
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 600, fontSize: "0.9rem" }}>{d.label ?? d.host}</div>
+                <div style={{ color: "var(--bf-faint)", fontSize: "0.75rem" }}>
+                  {d.type_name} · {d.host}
+                </div>
+              </div>
+              <Button
+                onClick={() =>
+                  onAdd({
+                    provider_type: d.provider_type,
+                    name: d.label ?? d.host,
+                    credentials: Object.fromEntries(
+                      Object.entries(d.credentials).map(([k, v]) => [k, String(v)]),
+                    ),
+                  })
+                }
+                style={{ flexShrink: 0 }}
+              >
+                Add
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+      {scanned && found.length === 0 && (
+        <p style={{ color: "var(--bf-faint)", fontSize: "0.78rem", margin: "0.6rem 0 0", maxWidth: 560 }}>
+          No new devices found. Auto-discovery finds credential-free LAN gear (Sonos, Onkyo) and
+          needs host networking in Docker; cloud providers (Hue, Govee, LIFX) still need a key —
+          add those with <strong>+ Add Provider</strong>.
+        </p>
+      )}
     </div>
   );
 }
@@ -378,6 +490,184 @@ function ExpandedLanSection() {
             </span>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+// ── Developer mode ──────────────────────────────────────────────────────────
+
+/**
+ * Developer tab: a global **dev-mode** switch plus contributor diagnostics that a
+ * normal deploy never needs. When on, the backend's `/api/dev` surface is exposed
+ * (provider debug, build info) — reachable from here AND directly over the API
+ * (session or Bearer key) so tooling and the assistant can read it too.
+ */
+function DeveloperTab() {
+  const [devMode, setDevMode] = useState<boolean | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    getSettings().then((s) => setDevMode(!!s.dev_mode));
+  }, []);
+
+  async function toggle(next: boolean) {
+    setSaving(true);
+    const res = await updateSettings({ dev_mode: next });
+    setSaving(false);
+    if (!("error" in res)) setDevMode(!!res.dev_mode);
+  }
+
+  return (
+    <section style={{ marginTop: "0.25rem" }}>
+      <SectionLabel style={{ marginBottom: "0.4rem" }}>Developer mode</SectionLabel>
+      <p style={{ margin: "0 0 1rem", color: "var(--bf-faint)", fontSize: "0.85rem", maxWidth: 560 }}>
+        Surfaces contributor diagnostics a live deploy has no use for: per-provider debug
+        (raw upstream capabilities, the ones Bifrost doesn't model yet), build info, and the{" "}
+        <code style={{ color: "#9ab" }}>/api/dev</code> API (session or Bearer key). Leave it{" "}
+        <strong>off</strong> on a normal hub — every dev surface is invisible while it's off.
+      </p>
+
+      <label
+        style={{
+          ...S.card,
+          flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "0.8rem 1rem",
+          cursor: devMode === null ? "default" : "pointer",
+          gap: "1rem",
+        }}
+      >
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontWeight: 600, fontSize: "0.92rem" }}>Enable developer mode</div>
+          <div style={{ color: "var(--bf-faint)", fontSize: "0.76rem", marginTop: "0.15rem" }}>
+            {devMode ? "On — dev surfaces and /api/dev are live." : "Off — production behaviour."}
+          </div>
+        </div>
+        <input
+          type="checkbox"
+          disabled={devMode === null || saving}
+          checked={!!devMode}
+          onChange={(e) => toggle(e.target.checked)}
+          style={{ width: 20, height: 20, accentColor: ACCENT, flexShrink: 0, cursor: "pointer" }}
+        />
+      </label>
+
+      {devMode && (
+        <>
+          <DevInfoCard />
+          <DevProviderDebugSection />
+        </>
+      )}
+    </section>
+  );
+}
+
+/** Compact build/runtime readout (version, debug vs release, provider count). */
+function DevInfoCard() {
+  const [info, setInfo] = useState<Record<string, unknown> | null>(null);
+  useEffect(() => {
+    getDevInfo().then(setInfo);
+  }, []);
+  if (!info) return null;
+  return (
+    <div style={{ ...S.card, marginTop: "1rem", gap: "0.3rem" }}>
+      <SectionLabel style={{ marginBottom: "0.3rem" }}>Build</SectionLabel>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem 1.2rem", fontSize: "0.8rem", color: "var(--bf-dim)" }}>
+        {Object.entries(info)
+          .filter(([k]) => k !== "dev_mode")
+          .map(([k, v]) => (
+            <span key={k}>
+              <span style={{ color: "var(--bf-faint)" }}>{k}</span>{" "}
+              <code style={{ color: ACCENT }}>{String(v)}</code>
+            </span>
+          ))}
+      </div>
+    </div>
+  );
+}
+
+/** Per-provider debug expanders. Lazily fetches a provider's `debug_info` only
+ * when its row is expanded (a debug fetch may hit the provider's cloud API). */
+function DevProviderDebugSection() {
+  const [providers, setProviders] = useState<DevProvider[]>([]);
+  useEffect(() => {
+    getDevProviders().then(setProviders);
+  }, []);
+
+  return (
+    <div style={{ marginTop: "1.25rem" }}>
+      <SectionLabel style={{ marginBottom: "0.4rem" }}>Provider debug</SectionLabel>
+      {providers.length === 0 ? (
+        <p style={{ color: "var(--bf-faint)", margin: 0, fontSize: "0.85rem" }}>No providers configured.</p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+          {providers.map((p) => (
+            <DevProviderRow key={p.id} provider={p} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DevProviderRow({ provider }: { provider: DevProvider }) {
+  const [open, setOpen] = useState(false);
+  const [data, setData] = useState<unknown | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  async function expand() {
+    const next = !open;
+    setOpen(next);
+    if (next && data === null && provider.has_debug) {
+      setLoading(true);
+      setData(await getDevProviderDebug(provider.id));
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div style={{ ...S.card, gap: "0.5rem", padding: "0.7rem 1rem" }}>
+      <button
+        onClick={expand}
+        style={{
+          background: "none",
+          border: "none",
+          cursor: "pointer",
+          padding: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          width: "100%",
+          color: "inherit",
+        }}
+      >
+        <span style={{ minWidth: 0, textAlign: "left" }}>
+          <span style={{ fontWeight: 600, fontSize: "0.9rem" }}>{provider.name}</span>{" "}
+          <span style={{ color: "var(--bf-faint)", fontSize: "0.76rem" }}>{provider.provider_type}</span>
+        </span>
+        <span style={{ color: "var(--bf-faint)", fontSize: "0.78rem", flexShrink: 0 }}>
+          {provider.has_debug ? (open ? "▾" : "▸") : "no debug"}
+        </span>
+      </button>
+      {open && provider.has_debug && (
+        <pre
+          style={{
+            margin: 0,
+            background: "var(--bf-void, #0b0b10)",
+            border: "1px solid var(--bf-hairline, #333)",
+            borderRadius: 6,
+            padding: "0.6rem 0.7rem",
+            fontSize: "0.74rem",
+            color: "#cdd",
+            overflowX: "auto",
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+          }}
+        >
+          {loading ? "Loading…" : data === null ? "No debug info." : JSON.stringify(data, null, 2)}
+        </pre>
       )}
     </div>
   );
@@ -897,16 +1187,22 @@ function StatusBadge({ state }: { state: string }) {
 
 function AddProviderForm({
   types,
+  prefill,
   onAdded,
   onCancel,
 }: {
   types: ProviderType[];
+  prefill?: AddPrefill | null;
   onAdded: (id: string) => void;
   onCancel: () => void;
 }) {
-  const [selectedType, setSelectedType] = useState(types[0]?.provider_type ?? "");
-  const [name, setName] = useState("");
-  const [credentials, setCredentials] = useState<Record<string, string>>({});
+  const [selectedType, setSelectedType] = useState(
+    prefill?.provider_type ?? types[0]?.provider_type ?? "",
+  );
+  const [name, setName] = useState(prefill?.name ?? "");
+  const [credentials, setCredentials] = useState<Record<string, string>>(
+    prefill?.credentials ?? {},
+  );
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [pairing, setPairing] = useState(false);
@@ -918,8 +1214,14 @@ function AddProviderForm({
   const selected = types.find((t) => t.provider_type === selectedType);
   const schema: CredentialField[] = selected?.schema ?? [];
 
-  // Clear per-type state when the provider type changes.
+  // Clear per-type state when the user switches the provider type — but not on
+  // the first render, so a prefilled (found-device) form keeps its credentials.
+  const firstRun = useRef(true);
   useEffect(() => {
+    if (firstRun.current) {
+      firstRun.current = false;
+      return;
+    }
     setCredentials({});
     setPairMsg("");
     setScanned(false);

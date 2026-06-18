@@ -25,6 +25,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/devices", get(list_devices_handler))
         .route("/devices/{id}", get(get_device_handler))
         .route("/devices/{id}/state", put(set_device_handler))
+        .route("/devices/{id}/cast", post(cast_handler))
         .route("/devices/{id}/favorites", get(list_favorites_handler))
         .route("/devices/{id}/favorites/play", post(play_favorite_handler))
         .route("/devices/{id}/group", post(group_handler))
@@ -992,6 +993,57 @@ pub(crate) fn group_response(outcome: GroupOutcome) -> axum::response::Response 
     }
 }
 
+/// Cast content to an audio device (the casting seam — a TV/media_player).
+/// Resolves the device's provider and calls `play_media` (raw `content_id` +
+/// `content_type` passthrough). Skeleton: HA implements it via
+/// `media_player.play_media`; richer resolution (app deep-links, title search,
+/// the "play X on the bedroom TV" voice path) is future work.
+pub(crate) async fn cast_to_device(
+    state: &AppState,
+    id: &str,
+    content_id: &str,
+    content_type: &str,
+) -> SetAudioOutcome {
+    let row = sqlx::query(
+        "SELECT a.device_id, p.provider_type, p.credentials
+         FROM audio_devices a JOIN providers p ON a.provider_id = p.id
+         WHERE a.id = ? AND p.enabled = 1 AND a.enabled = 1 AND a.shadowed_by IS NULL",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await;
+    let row = match row {
+        Ok(Some(r)) => r,
+        Ok(None) => return SetAudioOutcome::NotFound,
+        Err(e) => {
+            tracing::error!("db error: {e}");
+            return SetAudioOutcome::Db;
+        }
+    };
+    let device_id: String = row.get("device_id");
+    let provider_type: String = row.get("provider_type");
+    let credentials: String = row.get("credentials");
+    let provider = match build_audio_provider(state, &provider_type, &credentials) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("failed to build audio provider: {e:#}");
+            return SetAudioOutcome::Db;
+        }
+    };
+    match provider
+        .play_media(&device_id, content_id, content_type)
+        .await
+    {
+        Ok(()) => SetAudioOutcome::Ok,
+        // "does not support casting" is the caller's mistake (wrong device), 422.
+        Err(e) if e.to_string().contains("support") => SetAudioOutcome::BadCommand(e.to_string()),
+        Err(e) => {
+            tracing::error!("cast error: {e:#}");
+            SetAudioOutcome::ProviderError
+        }
+    }
+}
+
 pub(crate) fn set_audio_status(outcome: SetAudioOutcome) -> axum::response::Response {
     match outcome {
         SetAudioOutcome::Ok => StatusCode::NO_CONTENT.into_response(),
@@ -1091,6 +1143,23 @@ async fn set_device_handler(
     Json(cmd): Json<AudioCommand>,
 ) -> impl IntoResponse {
     set_audio_status(apply_audio_command(&state, &id, &cmd).await)
+}
+
+/// Body for casting content to a device (the casting seam). `content_type` is the
+/// provider-native kind (HA: `music`/`url`/`app`/`channel`/…).
+#[derive(serde::Deserialize)]
+struct CastRequest {
+    content_id: String,
+    content_type: String,
+}
+
+async fn cast_handler(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+    Json(req): Json<CastRequest>,
+) -> impl IntoResponse {
+    set_audio_status(cast_to_device(&state, &id, &req.content_id, &req.content_type).await)
 }
 
 async fn list_favorites_handler(

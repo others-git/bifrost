@@ -23,10 +23,44 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new().route("/", get(get_settings).put(put_settings))
 }
 
+// Both fields are `Option` so a PUT is a **partial update** — sending only one
+// leaves the other untouched (a dev-mode toggle doesn't need to know the subnets,
+// and a subnet save doesn't clobber dev mode). GET always returns both as `Some`.
 #[derive(Serialize, Deserialize)]
 struct Settings {
     /// Extra private /24 subnets to scan, as `a.b.c.0/24` strings.
-    expanded_lan_scan: Vec<String>,
+    #[serde(default)]
+    expanded_lan_scan: Option<Vec<String>>,
+    /// Developer mode: exposes contributor/dev-only surfaces (provider debug,
+    /// the `/api/dev` API). Off in a normal deploy.
+    #[serde(default)]
+    dev_mode: Option<bool>,
+}
+
+/// Read the current settings (shared by GET and the PUT response).
+async fn read_settings(state: &AppState) -> Settings {
+    let row = sqlx::query("SELECT scan_subnets, dev_mode FROM config WHERE id = 1")
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+    let raw: String = row
+        .as_ref()
+        .map(|r| r.get::<String, _>("scan_subnets"))
+        .unwrap_or_default();
+    let dev_mode = row
+        .map(|r| r.get::<i64, _>("dev_mode") != 0)
+        .unwrap_or(false);
+    Settings {
+        expanded_lan_scan: Some(
+            raw.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect(),
+        ),
+        dev_mode: Some(dev_mode),
+    }
 }
 
 /// Parse and validate one configured subnet, returning its /24 base address.
@@ -78,23 +112,7 @@ pub(crate) async fn expanded_subnets(state: &AppState) -> Vec<Ipv4Addr> {
 }
 
 async fn get_settings(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
-    let raw: String = sqlx::query("SELECT scan_subnets FROM config WHERE id = 1")
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .map(|r| r.get::<String, _>("scan_subnets"))
-        .unwrap_or_default();
-    let list = raw
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .collect();
-    Json(Settings {
-        expanded_lan_scan: list,
-    })
-    .into_response()
+    Json(read_settings(&state).await).into_response()
 }
 
 async fn put_settings(
@@ -102,34 +120,43 @@ async fn put_settings(
     _: Session,
     Json(req): Json<Settings>,
 ) -> impl IntoResponse {
-    if req.expanded_lan_scan.len() > MAX_SUBNETS {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("at most {MAX_SUBNETS} subnets allowed"),
-        )
-            .into_response();
-    }
-
-    // Validate + normalise every entry to a private /24 base.
-    let mut normalised = Vec::new();
-    for entry in &req.expanded_lan_scan {
-        match parse_private_subnet(entry) {
-            Ok(base) => normalised.push(format!("{base}/24")),
-            Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, e).into_response(),
+    // Subnets: validate + normalise only when the field is present (a dev-mode
+    // toggle omits it). `None` → leave the stored value untouched.
+    let stored: Option<String> = match &req.expanded_lan_scan {
+        Some(list) => {
+            if list.len() > MAX_SUBNETS {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("at most {MAX_SUBNETS} subnets allowed"),
+                )
+                    .into_response();
+            }
+            let mut normalised = Vec::new();
+            for entry in list {
+                match parse_private_subnet(entry) {
+                    Ok(base) => normalised.push(format!("{base}/24")),
+                    Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, e).into_response(),
+                }
+            }
+            normalised.dedup();
+            Some(normalised.join(","))
         }
-    }
-    normalised.dedup();
-    let stored = normalised.join(",");
+        None => None,
+    };
 
-    let res = sqlx::query("UPDATE config SET scan_subnets = ? WHERE id = 1")
-        .bind(&stored)
-        .execute(&state.db)
-        .await;
+    // COALESCE: an omitted field keeps its stored value (partial update).
+    let res = sqlx::query(
+        "UPDATE config
+            SET scan_subnets = COALESCE(?, scan_subnets),
+                dev_mode     = COALESCE(?, dev_mode)
+          WHERE id = 1",
+    )
+    .bind(stored)
+    .bind(req.dev_mode.map(i64::from))
+    .execute(&state.db)
+    .await;
     match res {
-        Ok(_) => Json(Settings {
-            expanded_lan_scan: normalised,
-        })
-        .into_response(),
+        Ok(_) => Json(read_settings(&state).await).into_response(),
         Err(e) => {
             tracing::error!("db error saving settings: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()

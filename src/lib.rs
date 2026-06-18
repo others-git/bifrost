@@ -5,6 +5,7 @@ pub mod crypto;
 pub mod db;
 pub mod models;
 pub mod providers;
+pub mod wol;
 
 use aes_gcm::Aes256Gcm;
 use anyhow::Result;

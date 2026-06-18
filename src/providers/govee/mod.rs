@@ -127,6 +127,55 @@ impl GoveeCloud {
             .unwrap_or_default())
     }
 
+    /// Dev-mode debug: the account's devices with their **full** capability list,
+    /// flagging each capability as supported (we model it) or not. Surfaces the
+    /// Govee features we don't build yet — segments (`segmentedColorRgb`), music
+    /// mode, gradient, nightlight, snapshot, etc. — so we can see what a strip
+    /// actually exposes before building.
+    async fn debug_devices(&self) -> Result<Value> {
+        const SUPPORTED: &[&str] = &[
+            "powerSwitch",
+            "brightness",
+            "colorRgb",
+            "colorTemperatureK",
+            "lightScene",
+            "diyScene",
+            "online",
+            "dynamic_scene",
+        ];
+        let devices = self.fetch_devices().await?;
+        let report: Vec<Value> = devices
+            .iter()
+            .map(|d| {
+                let caps: Vec<Value> = d
+                    .capabilities
+                    .iter()
+                    .map(|c| {
+                        json!({
+                            "instance": c.instance,
+                            "type": c.cap_type,
+                            "supported": SUPPORTED.contains(&c.instance.as_str()),
+                        })
+                    })
+                    .collect();
+                let unsupported: Vec<&str> = d
+                    .capabilities
+                    .iter()
+                    .map(|c| c.instance.as_str())
+                    .filter(|i| !SUPPORTED.contains(i))
+                    .collect();
+                json!({
+                    "name": d.device_name,
+                    "sku": d.sku,
+                    "device": d.device,
+                    "capabilities": caps,
+                    "unsupported_capabilities": unsupported,
+                })
+            })
+            .collect();
+        Ok(json!({ "devices": report }))
+    }
+
     /// The SKU for a device — required by control/state payloads. Served from
     /// the process-wide [`sku_cache`]; on a miss, one device-list fetch
     /// populates every device's SKU so subsequent commands are round-trip-free.
@@ -326,6 +375,10 @@ struct GoveeDevice {
 #[derive(Debug, Deserialize)]
 struct GoveeCapability {
     instance: String,
+    /// The capability category (`devices.capabilities.*`). Unused in control —
+    /// captured for dev-mode debug (to see what a device exposes vs what we model).
+    #[serde(rename = "type", default)]
+    cap_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -811,6 +864,20 @@ impl LightProvider for GoveeProvider {
             ..Default::default()
         })
     }
+
+    async fn debug_info(&self) -> Option<Value> {
+        let mut out = json!({
+            "transport": { "cloud": self.cloud.is_some(), "lan": self.lan.is_some() },
+            "lan_cached_devices": lan_ip_cache().read().await.len(),
+        });
+        if let Some(cloud) = &self.cloud {
+            match cloud.debug_devices().await {
+                Ok(d) => out["cloud"] = d,
+                Err(e) => out["cloud_error"] = json!(e.to_string()),
+            }
+        }
+        Some(out)
+    }
 }
 
 /// Synthesize a `Light` for a device seen only on the LAN (no cloud row). Keyed
@@ -974,6 +1041,44 @@ mod tests {
 
         let lights = mock_provider(&server).await.discover().await.unwrap();
         assert!(lights.is_empty());
+    }
+
+    #[tokio::test]
+    async fn debug_devices_flags_unsupported_capabilities() {
+        let server = MockServer::start().await;
+        // A strip exposing one capability we model (brightness) and one we don't
+        // (segmentedColorRgb — per-segment color).
+        Mock::given(method("GET"))
+            .and(path("/user/devices"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 200, "message": "success",
+                "data": { "devices": [{
+                    "sku": "H6159",
+                    "device": "AA:BB:CC:DD:EE:FF",
+                    "deviceName": "Strip Lights",
+                    "capabilities": [
+                        {"type": "devices.capabilities.range", "instance": "brightness"},
+                        {"type": "devices.capabilities.segment_color_setting", "instance": "segmentedColorRgb"}
+                    ]
+                }]}
+            })))
+            .mount(&server)
+            .await;
+
+        let report = mock_provider(&server).await.debug_devices().await.unwrap();
+        let dev = &report["devices"][0];
+        assert_eq!(dev["name"], "Strip Lights");
+        // The unmodelled capability is surfaced for the dev to see.
+        assert_eq!(dev["unsupported_capabilities"][0], "segmentedColorRgb");
+        let caps = dev["capabilities"].as_array().unwrap();
+        let brightness = caps.iter().find(|c| c["instance"] == "brightness").unwrap();
+        assert_eq!(brightness["supported"], true);
+        let seg = caps
+            .iter()
+            .find(|c| c["instance"] == "segmentedColorRgb")
+            .unwrap();
+        assert_eq!(seg["supported"], false);
+        assert_eq!(seg["type"], "devices.capabilities.segment_color_setting");
     }
 
     fn device_list_with_scenes() -> serde_json::Value {

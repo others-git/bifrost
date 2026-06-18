@@ -75,6 +75,15 @@ pub trait LightProvider: Send + Sync {
     async fn set_group_state(&self, _grouped_ref: &str, _state: &LightState) -> Result<bool> {
         Ok(false)
     }
+
+    /// Developer-mode diagnostics — raw upstream data, capabilities we *see* vs
+    /// the ones we actually *support*, etc. Surfaced via `/api/dev` only when dev
+    /// mode is on; never used in a normal deploy. Default: none. Implement to
+    /// expose provider internals (e.g. Govee's full per-device capability list,
+    /// flagging the ones we don't model yet) for development + contributors.
+    async fn debug_info(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 // ── Audio provider trait ────────────────────────────────────────────────────
@@ -110,6 +119,20 @@ pub trait AudioProvider: Send + Sync {
     /// `list_favorites`) on this device. Default: unsupported.
     async fn play_favorite(&self, _device_id: &str, _favorite_id: &str) -> Result<()> {
         Err(anyhow!("{} does not support favorites", self.name()))
+    }
+
+    /// **Cast** content to this device — a raw `(content_id, content_type)`
+    /// passthrough (the casting seam; richer resolution like app deep-links /
+    /// title search is future work). `content_type` is provider-native (HA's
+    /// `media_content_type`: `music`/`url`/`app`/`channel`/…). Default:
+    /// unsupported. Implemented by HA today (`media_player.play_media`).
+    async fn play_media(
+        &self,
+        _device_id: &str,
+        _content_id: &str,
+        _content_type: &str,
+    ) -> Result<()> {
+        Err(anyhow!("{} does not support casting", self.name()))
     }
 
     /// Join `device_id` into the playback group coordinated by `coordinator_id`
