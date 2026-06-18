@@ -22,13 +22,18 @@ use uuid::Uuid;
 
 const BASE_URL: &str = "https://api.lifx.com/v1";
 
-pub struct LifxProvider {
+pub mod lan;
+
+/// The LIFX cloud transport (`api.lifx.com`). One of the two transports the
+/// unified [`LifxProvider`] owns; reached for any bulb not locally reachable, and
+/// for effects/groups (the LAN transport handles plain colour/brightness/power).
+pub struct LifxCloud {
     client: Client,
     /// Base URL for the API; overridden in tests to point at a wiremock server.
     base_url: String,
 }
 
-impl LifxProvider {
+impl LifxCloud {
     pub fn new(token: impl AsRef<str>) -> Result<Self> {
         Self::new_with_base(token, BASE_URL)
     }
@@ -331,9 +336,9 @@ fn lifx_to_light(l: LifxLight) -> Light {
 }
 
 #[async_trait]
-impl LightProvider for LifxProvider {
+impl LightProvider for LifxCloud {
     fn name(&self) -> &str {
-        "lifx"
+        "lifx-cloud"
     }
 
     async fn discover(&self) -> Result<Vec<Light>> {
@@ -429,9 +434,161 @@ impl LightProvider for LifxProvider {
     }
 }
 
+// ── Unified provider (LAN-preferred, cloud fallback) ─────────────────────────
+
+/// LIFX with **both transports**: a per-bulb LAN-preferred, cloud-fallback light
+/// provider, mirroring the unified Govee provider. Plain colour/brightness/power
+/// goes over the local network whenever the bulb answered a scan (faster, no quota,
+/// works offline); everything else — an unscanned bulb, a failed LAN send, or an
+/// **effect** (LAN effects aren't implemented) — uses the cloud. Groups stay
+/// cloud-only (the LIFX cloud's one-call group selector). Either transport may be
+/// absent: cloud-only (no LAN interface) and LAN-only (no token) both work.
+pub struct LifxProvider {
+    cloud: Option<LifxCloud>,
+    lan: Option<lan::LifxLanProvider>,
+}
+
+impl LifxProvider {
+    pub fn new(cloud: Option<LifxCloud>, lan: Option<lan::LifxLanProvider>) -> Self {
+        Self { cloud, lan }
+    }
+
+    /// Cloud control, or a clear "unreachable" error when there's no token.
+    async fn cloud_set(&self, id: &str, state: &LightState) -> Result<()> {
+        match &self.cloud {
+            Some(c) => c.set_state(id, state).await,
+            None => {
+                bail!("LIFX bulb {id} is not reachable on the LAN and no cloud token is configured")
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl LightProvider for LifxProvider {
+    fn name(&self) -> &str {
+        "lifx"
+    }
+
+    async fn discover(&self) -> Result<Vec<Light>> {
+        // The LAN scan tags which bulbs are locally reachable; the cloud (when
+        // present) is the source of truth for names/groups/effects.
+        let scanned: std::collections::HashSet<String> = match &self.lan {
+            Some(lan) => lan
+                .scan()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|(mac, _)| crate::providers::mac_hw_id(&mac))
+                .collect(),
+            None => std::collections::HashSet::new(),
+        };
+        if let Some(cloud) = &self.cloud {
+            match cloud.discover().await {
+                Ok(mut lights) => {
+                    for l in &mut lights {
+                        let on_lan = crate::providers::mac_hw_id(&l.provider_id)
+                            .is_some_and(|k| scanned.contains(&k));
+                        l.state.transport = Some(if on_lan { "lan" } else { "cloud" }.to_string());
+                    }
+                    let on_lan = lights
+                        .iter()
+                        .filter(|l| l.state.transport.as_deref() == Some("lan"))
+                        .count();
+                    tracing::debug!(
+                        target: "bifrost::lifx",
+                        lan_enabled = self.lan.is_some(),
+                        lan_scanned = scanned.len(),
+                        total = lights.len(),
+                        on_lan,
+                        on_cloud = lights.len() - on_lan,
+                        "LIFX discover: {} bulb(s) — {on_lan} via LAN, {} via cloud",
+                        lights.len(),
+                        lights.len() - on_lan,
+                    );
+                    return Ok(lights);
+                }
+                Err(e) => {
+                    // Resilient: with the LAN up, a cloud blip falls back to LAN.
+                    if let Some(lan) = &self.lan {
+                        tracing::warn!("LIFX cloud discovery failed, using LAN only: {e:#}");
+                        return lan.discover().await;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        // LAN-only: the LAN transport is the source of truth.
+        match &self.lan {
+            Some(lan) => lan.discover().await,
+            None => Ok(vec![]),
+        }
+    }
+
+    async fn set_state(&self, id: &str, state: &LightState) -> Result<()> {
+        // Effects only exist on the cloud `/effects` endpoint.
+        if state.effect.as_deref().is_some_and(|e| !e.is_empty()) {
+            tracing::debug!(target: "bifrost::lifx", bulb = %id, "set_state: effect → cloud (LAN effects not implemented)");
+            return self.cloud_set(id, state).await;
+        }
+        // LAN-preferred: a `set_state` that can't resolve the bulb on the LAN
+        // returns an error, which we treat as "fall back to the cloud".
+        if let Some(lan) = &self.lan {
+            match lan.set_state(id, state).await {
+                Ok(()) => {
+                    tracing::debug!(target: "bifrost::lifx", bulb = %id, "set_state: → LAN");
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::debug!(target: "bifrost::lifx", bulb = %id, "set_state: not reachable on LAN → cloud ({e:#})")
+                }
+            }
+        }
+        tracing::debug!(target: "bifrost::lifx", bulb = %id, lan_enabled = self.lan.is_some(), "set_state: → cloud");
+        self.cloud_set(id, state).await
+    }
+
+    async fn get_state(&self, id: &str) -> Result<LightState> {
+        if let Some(lan) = &self.lan
+            && let Ok(state) = lan.get_state(id).await
+            && state.reachable != Some(false)
+        {
+            tracing::debug!(target: "bifrost::lifx", bulb = %id, "get_state: via LAN");
+            return Ok(state); // already stamped transport = "lan"
+        }
+        if let Some(c) = &self.cloud {
+            let mut state = c.get_state(id).await?;
+            state.transport = Some("cloud".to_string());
+            tracing::debug!(target: "bifrost::lifx", bulb = %id, "get_state: via cloud");
+            return Ok(state);
+        }
+        Ok(LightState {
+            on: false,
+            reachable: Some(false),
+            ..Default::default()
+        })
+    }
+
+    async fn discover_groups(&self) -> Result<Vec<ProviderGroup>> {
+        // Native group control is a cloud feature; the LAN transport has none.
+        match &self.cloud {
+            Some(c) => c.discover_groups().await,
+            None => Ok(vec![]),
+        }
+    }
+
+    async fn set_group_state(&self, grouped_ref: &str, state: &LightState) -> Result<bool> {
+        match &self.cloud {
+            Some(c) => c.set_group_state(grouped_ref, state).await,
+            None => Ok(false), // no cloud → caller fans out per light (LAN)
+        }
+    }
+}
+
 // ── Factory ──────────────────────────────────────────────────────────────────
 
 use crate::providers::{CredentialField, FieldKind, ProviderFactory};
+use std::net::IpAddr;
 
 pub struct LifxProviderFactory;
 
@@ -441,26 +598,51 @@ impl ProviderFactory for LifxProviderFactory {
     }
 
     fn display_name(&self) -> &'static str {
-        "LIFX (Cloud)"
+        "LIFX"
     }
 
     fn build(&self, credentials_json: &str) -> Result<Box<dyn LightProvider>> {
         let creds: serde_json::Value = serde_json::from_str(credentials_json)?;
-        let token = creds["token"]
+        // Cloud when a token is supplied. LAN is **on by default** (LIFX LAN is on
+        // by default on the bulbs); `bind_addr` only picks the interface, defaulting
+        // to 0.0.0.0. A host that can't reach the LAN finds nothing on a scan and
+        // falls back to the cloud, so defaulting it on is safe.
+        let cloud = match creds["token"].as_str().filter(|t| !t.is_empty()) {
+            Some(t) => Some(LifxCloud::new(t)?),
+            None => None,
+        };
+        let bind = creds["bind_addr"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("lifx credentials missing token"))?
-            .to_string();
-        Ok(Box::new(LifxProvider::new(&token)?))
+            .filter(|b| !b.is_empty())
+            .unwrap_or("0.0.0.0");
+        let addr: IpAddr = bind
+            .parse()
+            .with_context(|| format!("invalid LIFX LAN bind address '{bind}'"))?;
+        let lan = Some(lan::LifxLanProvider::new(addr));
+        Ok(Box::new(LifxProvider::new(cloud, lan)))
     }
 
     fn credentials_schema(&self) -> &'static [CredentialField] {
-        &[CredentialField {
-            name: "token",
-            label: "Token",
-            kind: FieldKind::Password,
-            required: true,
-            hint: Some("Generate a personal access token at cloud.lifx.com/settings"),
-        }]
+        &[
+            CredentialField {
+                name: "token",
+                label: "Token",
+                kind: FieldKind::Password,
+                required: false,
+                hint: Some(
+                    "Personal access token from cloud.lifx.com/settings. Optional if you only use LAN control.",
+                ),
+            },
+            CredentialField {
+                name: "bind_addr",
+                label: "LAN interface (advanced)",
+                kind: FieldKind::IpAddress,
+                required: false,
+                hint: Some(
+                    "Local control is on by default (preferred over the cloud whenever a bulb is reachable; LIFX LAN is on by default on the bulbs). Leave blank for all interfaces (0.0.0.0); set a specific IP only if multi-homed.",
+                ),
+            },
+        ]
     }
 }
 
@@ -470,8 +652,8 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    async fn mock_provider(server: &MockServer) -> LifxProvider {
-        LifxProvider::new_for_test(server.uri(), "tok").unwrap()
+    async fn mock_provider(server: &MockServer) -> LifxCloud {
+        LifxCloud::new_for_test(server.uri(), "tok").unwrap()
     }
 
     fn light_json(id: &str, label: &str, on: bool, sat: f32, kelvin: u32) -> serde_json::Value {
@@ -718,6 +900,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_state_with_effect_and_color_breathes_that_colour() {
+        // A breathe/pulse carries the light's current colour, so a red light pulses
+        // red — not white. The room + single-light editors send the colour along
+        // with the effect for exactly this reason (regression: room effects reset
+        // the colour to white because the colour wasn't forwarded).
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/lights/id:d073d5000002/effects/pulse"))
+            .respond_with(ResponseTemplate::new(207))
+            .mount(&server)
+            .await;
+        let state = LightState {
+            on: true,
+            color: Some(Color::from_rgb(255, 0, 0)),
+            effect: Some("pulse".to_string()),
+            ..Default::default()
+        };
+        mock_provider(&server)
+            .await
+            .set_state("d073d5000002", &state)
+            .await
+            .unwrap();
+        let req = &server.received_requests().await.unwrap()[0];
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        let color = body["color"].as_str().unwrap();
+        assert!(color.starts_with("hue:0."), "red → hue 0: {color}");
+        assert!(
+            color.contains("saturation:1"),
+            "red is fully saturated: {color}"
+        );
+    }
+
+    #[tokio::test]
     async fn set_state_with_off_effect_hits_the_off_endpoint_with_no_body() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -787,22 +1002,30 @@ mod tests {
             .build(r#"{"token":"tok"}"#)
             .expect("factory build");
         assert_eq!(built.name(), "lifx");
-        // And the test-constructed provider talks to the mock successfully.
-        let p = LifxProvider::new_for_test(server.uri(), "tok").unwrap();
+        // And the cloud transport talks to the mock successfully.
+        let p = LifxCloud::new_for_test(server.uri(), "tok").unwrap();
         assert_eq!(p.discover().await.unwrap().len(), 0);
     }
 
     #[test]
-    fn factory_credentials_schema_requires_a_token() {
-        let schema = LifxProviderFactory.credentials_schema();
-        assert_eq!(schema.len(), 1);
-        assert_eq!(schema[0].name, "token");
-        assert!(schema[0].required);
-    }
-
-    #[test]
-    fn factory_build_rejects_missing_token() {
-        assert!(LifxProviderFactory.build(r#"{}"#).is_err());
+    fn factory_defaults_lan_on() {
+        let f = LifxProviderFactory;
+        // LAN is on by default (0.0.0.0), so even an empty config builds (LAN-only).
+        assert!(f.build("{}").is_ok(), "LAN-only by default");
+        assert!(f.build(r#"{"token":"tok"}"#).is_ok(), "cloud + default LAN");
+        assert!(
+            f.build(r#"{"token":"tok","bind_addr":"192.168.1.5"}"#)
+                .is_ok(),
+            "cloud + explicit interface"
+        );
+        assert!(
+            f.build(r#"{"bind_addr":"not-an-ip"}"#).is_err(),
+            "malformed LAN address is rejected"
+        );
+        // Schema offers both fields, neither hard-required.
+        let schema = f.credentials_schema();
+        assert_eq!(schema.len(), 2);
+        assert!(schema.iter().all(|c| !c.required));
     }
 
     fn light_json_in_group(id: &str, group_id: &str, group_name: &str) -> serde_json::Value {

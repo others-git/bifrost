@@ -120,6 +120,7 @@ fn parse_tasmota_state(s: &TasmotaState) -> LightState {
         color_temp_mirek: None,
         reachable: None,
         effect: None,
+        transport: None,
     }
 }
 
@@ -428,6 +429,7 @@ mod tests {
             color_temp_mirek: None,
             reachable: None,
             effect: None,
+            transport: None,
         };
         TasmotaProvider::new_for_test(server.uri())
             .unwrap()

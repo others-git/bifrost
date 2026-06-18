@@ -6464,6 +6464,76 @@ async fn voice_room_color_touches_lights_not_audio() {
     assert!(!powered, "room color must not power on the room's audio");
 }
 
+#[tokio::test]
+async fn room_effect_drives_lights_not_audio() {
+    // A room-wide dynamic effect (the room editor's Effects tab) is a lighting
+    // attribute like color — it must reach the member lights but never power on
+    // the room's speakers (an effect-only patch has no brightness/color/temp, so
+    // it must not be mistaken for a pure on/off power command).
+    let (port, audio_cmds) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let bridge = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let audio_id = add_onkyo_device(&app, &cookie, port, "AV", &[]).await;
+
+    let room_id = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_json(
+                "POST",
+                "/api/rooms",
+                &cookie,
+                &format!(r#"{{"name":"Studio","light_ids":["{light_id}"]}}"#),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    app.clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/audio/devices/{audio_id}/room"),
+            &cookie,
+            &format!(r#"{{"room_id":"{room_id}"}}"#),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/state"),
+            &cookie,
+            r#"{"on":true,"effect":"candle"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The effect was persisted onto the member light …
+    let light = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get(
+                &format!("/api/lights/{light_id}"),
+                &cookie,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(light["last_state"]["effect"], "candle", "{light}");
+    // … but the audio member was never powered on (no PWR set command).
+    let powered = audio_cmds
+        .lock()
+        .await
+        .iter()
+        .any(|m| m.starts_with("PWR") && !m.contains("QSTN"));
+    assert!(!powered, "room effect must not power on the room's audio");
+}
+
 // ── Power devices (HA multi-domain discover/control) ─────────────────────────
 
 /// A wiremock HA serving power entities plus the domain-agnostic toggle service.

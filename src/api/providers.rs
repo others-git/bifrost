@@ -953,6 +953,13 @@ async fn discover(
     // lights + power from one row); discover each domain it's registered for and
     // sum the counts. A hard failure in any domain aborts the whole discover.
     let mut discovered = 0usize;
+    tracing::debug!(
+        target: "bifrost::discover",
+        provider = %id,
+        %provider_type,
+        prune,
+        "discovery started"
+    );
 
     // Light domain.
     if state.registry.is_known(&provider_type) {
@@ -970,6 +977,7 @@ async fn discover(
                 return StatusCode::BAD_GATEWAY.into_response();
             }
         };
+        tracing::debug!(target: "bifrost::discover", %provider_type, lights = lights.len(), "discovered lights");
         // One transaction for the whole batch: in WAL mode each loose INSERT is
         // its own commit/fsync, so a bridge with dozens of bulbs paid dozens of
         // round-trips. Begin failure falls back to no-op (discovery just reports 0).

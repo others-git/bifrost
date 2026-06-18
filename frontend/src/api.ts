@@ -9,6 +9,9 @@ export interface LightState {
   reachable?: boolean;
   /** Active dynamic effect (a name from `capabilities.effects`, "no_effect" = none). */
   effect?: string;
+  /** How the device is currently reached, for multi-transport providers (Govee):
+   * "lan" = local network, "cloud" = cloud API. Undefined for single-transport. */
+  transport?: string;
 }
 
 /** Partial state carried by live events — absent fields are unchanged. */
@@ -19,6 +22,7 @@ export interface LightStatePatch {
   color_temp_mirek?: number;
   reachable?: boolean;
   effect?: string;
+  transport?: string;
 }
 
 /** Merge a live-event patch into an existing state without losing fields. */
@@ -30,6 +34,7 @@ export function mergePatch(base: LightState | undefined, patch: LightStatePatch)
     color_temp_mirek: patch.color_temp_mirek ?? base?.color_temp_mirek,
     reachable: patch.reachable ?? base?.reachable,
     effect: patch.effect ?? base?.effect,
+    transport: patch.transport ?? base?.transport,
   };
 }
 

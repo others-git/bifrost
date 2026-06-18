@@ -80,8 +80,8 @@ IP-addressable types offer a **Scan network** button that auto-fills the address
 | Provider | Category | You'll need |
 |---|---|---|
 | Philips Hue | Light | Bridge IP (auto-detectable) + press the bridge **link button** to mint an app key |
-| Govee (Cloud) | Light | API key — Govee Home app → Profile → About Us → Apply for API Key |
-| LIFX (Cloud) | Light | Personal access token from [cloud.lifx.com/settings](https://cloud.lifx.com/settings) |
+| Govee | Light | An API key (Govee Home app → Profile → About Us → Apply for API Key). Local LAN-preferred control is **on by default** — enable **“LAN Control”** per device in the Govee Home app |
+| LIFX | Light | An access token ([cloud.lifx.com/settings](https://cloud.lifx.com/settings)). Local LAN-preferred control is **on by default** (LIFX LAN is on by default on the bulbs) |
 | Onkyo / Integra | Audio | Receiver IP (auto-detectable) + optional port (eISCP, default 60128). Enable **Network Standby** for remote power-on |
 | Sonos | Audio | Any one player's IP (auto-detectable) — the household is discovered from it |
 | Home Assistant | Integration | Base URL (e.g. `http://homeassistant.local:8123`) + a **Long-Lived Access Token** (HA → Profile → Security → Long-Lived Access Tokens) |

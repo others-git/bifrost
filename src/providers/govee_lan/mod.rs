@@ -68,9 +68,10 @@ impl GoveeLanProvider {
     }
 
     /// Test constructor: point discovery + control at a loopback mock device and
-    /// use ephemeral ports so the socket binds cleanly under test.
+    /// use ephemeral ports so the socket binds cleanly under test. `pub(crate)` so
+    /// the unified Govee provider's tests can drive a LAN transport against a mock.
     #[cfg(test)]
-    fn new_for_test(mock_addr: SocketAddr, timeout: Duration) -> Self {
+    pub(crate) fn new_for_test(mock_addr: SocketAddr, timeout: Duration) -> Self {
         Self {
             bind_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
             listen_port: 0, // OS-assigned
@@ -85,16 +86,91 @@ impl GoveeLanProvider {
     async fn socket(&self) -> Result<&UdpSocket> {
         self.socket
             .get_or_try_init(|| async {
-                UdpSocket::bind((self.bind_addr, self.listen_port))
+                // Govee devices send scan/devStatus replies to the **multicast
+                // group** 239.255.255.250:4002, so the socket must *join* that group
+                // to receive them — binding the port alone isn't enough (the bug
+                // that left LAN discovery finding nothing). To receive multicast we
+                // bind the wildcard address; `bind_addr` selects the joining NIC.
+                let multicast =
+                    matches!(self.discovery_target.ip(), IpAddr::V4(ip) if ip.is_multicast());
+                let bind_ip = if multicast {
+                    IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+                } else {
+                    self.bind_addr
+                };
+                let sock = UdpSocket::bind((bind_ip, self.listen_port))
                     .await
                     .with_context(|| {
                         format!(
-                            "binding Govee LAN socket to {}:{} (port 4002 must be free)",
-                            self.bind_addr, self.listen_port
+                            "binding Govee LAN socket to {bind_ip}:{} (port 4002 must be free)",
+                            self.listen_port
                         )
-                    })
+                    })?;
+                if multicast {
+                    let iface = match self.bind_addr {
+                        IpAddr::V4(v4) => v4,
+                        _ => Ipv4Addr::UNSPECIFIED,
+                    };
+                    sock.join_multicast_v4(MULTICAST_ADDR, iface)
+                        .with_context(|| {
+                            format!("joining Govee multicast group {MULTICAST_ADDR} on {iface}")
+                        })?;
+                }
+                Ok::<_, anyhow::Error>(sock)
             })
             .await
+    }
+
+    /// Multicast a scan and collect device replies until the timeout window
+    /// closes, deduping by IP. Each reply carries the device's MAC, IP, and SKU.
+    /// This is the unified provider's LAN-capability probe: only devices that
+    /// answer (LAN Control supported + enabled) are LAN-eligible.
+    pub async fn scan(&self) -> Result<Vec<LanScan>> {
+        let sock = self.socket().await?;
+        let _guard = self.exchange.lock().await;
+
+        sock.send_to(
+            &command("scan", json!({ "account_topic": "reserve" })),
+            self.discovery_target,
+        )
+        .await
+        .context("sending Govee LAN scan")?;
+
+        let deadline = Instant::now() + self.timeout;
+        let mut found: HashMap<String, LanScan> = HashMap::new();
+        let mut buf = [0u8; 2048];
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, sock.recv_from(&mut buf)).await {
+                Ok(Ok((n, _src))) => {
+                    if let Ok(env) = serde_json::from_slice::<Envelope>(&buf[..n])
+                        && env.msg.cmd == "scan"
+                        && let Ok(d) = serde_json::from_value::<ScanData>(env.msg.data)
+                    {
+                        found.entry(d.ip.clone()).or_insert(LanScan {
+                            mac: d.device,
+                            ip: d.ip,
+                            sku: d.sku,
+                        });
+                    }
+                }
+                Ok(Err(e)) => return Err(e).context("receiving Govee LAN scan reply"),
+                Err(_) => break, // window elapsed
+            }
+        }
+        let devices: Vec<LanScan> = found.into_values().collect();
+        tracing::debug!(
+            target: "bifrost::govee",
+            target_addr = %self.discovery_target,
+            replies = devices.len(),
+            macs = ?devices.iter().map(|d| format!("{}@{}", d.mac, d.ip)).collect::<Vec<_>>(),
+            "Govee LAN scan: {} device(s) answered",
+            devices.len(),
+        );
+        Ok(devices)
     }
 
     /// Send the control commands a `LightState` implies to one device.
@@ -165,6 +241,21 @@ struct ScanData {
     ip: String,
     #[serde(default)]
     sku: String,
+    /// The device's MAC (Govee's stable id, same value the cloud API keys on).
+    /// Present in the scan reply; lets the unified provider match a LAN device to
+    /// its cloud row and address it cross-transport.
+    #[serde(default)]
+    device: String,
+}
+
+/// One device found by a LAN scan: its MAC (cross-transport id), current LAN IP,
+/// and SKU. The unified Govee provider uses this to map a cloud device (keyed by
+/// MAC) to a LAN address, and to gate LAN eligibility (only scanned devices).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanScan {
+    pub mac: String,
+    pub ip: String,
+    pub sku: String,
 }
 
 #[derive(Deserialize)]
@@ -238,41 +329,12 @@ impl LightProvider for GoveeLanProvider {
     }
 
     async fn discover(&self) -> Result<Vec<Light>> {
-        let sock = self.socket().await?;
-        let _guard = self.exchange.lock().await;
-
-        sock.send_to(
-            &command("scan", json!({ "account_topic": "reserve" })),
-            self.discovery_target,
-        )
-        .await
-        .context("sending Govee LAN scan")?;
-
-        // Collect replies until the timeout window closes, deduping by IP.
-        let deadline = Instant::now() + self.timeout;
-        let mut found: HashMap<String, Light> = HashMap::new();
-        let mut buf = [0u8; 2048];
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            match tokio::time::timeout(remaining, sock.recv_from(&mut buf)).await {
-                Ok(Ok((n, _src))) => {
-                    if let Ok(env) = serde_json::from_slice::<Envelope>(&buf[..n])
-                        && env.msg.cmd == "scan"
-                        && let Ok(d) = serde_json::from_value::<ScanData>(env.msg.data)
-                    {
-                        found
-                            .entry(d.ip.clone())
-                            .or_insert_with(|| scan_to_light(&d.ip, &d.sku));
-                    }
-                }
-                Ok(Err(e)) => return Err(e).context("receiving Govee LAN scan reply"),
-                Err(_) => break, // window elapsed
-            }
-        }
-        Ok(found.into_values().collect())
+        Ok(self
+            .scan()
+            .await?
+            .into_iter()
+            .map(|s| scan_to_light(&s.ip, &s.sku))
+            .collect())
     }
 
     async fn set_state(&self, device_id: &str, state: &LightState) -> Result<()> {
@@ -372,20 +434,22 @@ impl ProviderFactory for GoveeLanProviderFactory {
     }
 }
 
+/// Loopback LAN-device mocks, shared by this provider's tests and the unified
+/// Govee provider's tests (which drive a LAN transport against a mock device).
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
     use std::sync::Arc;
     use tokio::sync::Mutex as AsyncMutex;
 
     /// A loopback stand-in for a Govee device: answers `scan` and `devStatus`,
     /// and records control commands it receives for assertions.
-    struct MockDevice {
-        addr: SocketAddr,
-        received: Arc<AsyncMutex<Vec<serde_json::Value>>>,
+    pub(crate) struct MockDevice {
+        pub(crate) addr: SocketAddr,
+        pub(crate) received: Arc<AsyncMutex<Vec<serde_json::Value>>>,
     }
 
-    async fn spawn_mock_device() -> MockDevice {
+    pub(crate) async fn spawn_mock_device() -> MockDevice {
         let sock = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let addr = sock.local_addr().unwrap();
         let received = Arc::new(AsyncMutex::new(Vec::new()));
@@ -431,9 +495,15 @@ mod tests {
         MockDevice { addr, received }
     }
 
-    fn test_provider(mock: &MockDevice) -> GoveeLanProvider {
+    pub(crate) fn test_provider(mock: &MockDevice) -> GoveeLanProvider {
         GoveeLanProvider::new_for_test(mock.addr, Duration::from_millis(400))
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::*;
+    use super::*;
 
     #[tokio::test]
     async fn discover_returns_devices_from_scan_reply() {
@@ -447,6 +517,19 @@ mod tests {
         assert!(lights[0].capabilities.color_rgb);
         assert!(lights[0].capabilities.dimmable);
         assert!(lights[0].capabilities.color_temperature);
+    }
+
+    #[tokio::test]
+    async fn scan_returns_mac_ip_and_sku() {
+        let mock = spawn_mock_device().await;
+        let provider = test_provider(&mock);
+
+        let found = provider.scan().await.unwrap();
+        assert_eq!(found.len(), 1);
+        // The MAC is the cross-transport id the unified provider matches on.
+        assert_eq!(found[0].mac, "AA:BB:CC:DD:EE:FF");
+        assert_eq!(found[0].ip, "127.0.0.1");
+        assert_eq!(found[0].sku, "H6159");
     }
 
     #[tokio::test]

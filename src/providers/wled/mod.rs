@@ -105,6 +105,7 @@ fn parse_wled_state(s: &WledState) -> LightState {
         color_temp_mirek: None,
         reachable: None,
         effect: None,
+        transport: None,
     }
 }
 
@@ -386,6 +387,7 @@ mod tests {
             color_temp_mirek: None,
             reachable: None,
             effect: None,
+            transport: None,
         };
         WledProvider::new_for_test(server.uri())
             .unwrap()

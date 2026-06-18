@@ -839,6 +839,13 @@ pub(crate) mod tests {
                 "provider '{}' has no credential fields",
                 t.provider_type
             );
+            // Govee and LIFX are "at least one of N" providers — a cloud
+            // credential (key/token) and/or a LAN interface, neither individually
+            // required; their `build` enforces that one is present. Every other
+            // provider has a hard field.
+            if t.provider_type == "govee" || t.provider_type == "lifx" {
+                continue;
+            }
             assert!(
                 t.schema.iter().any(|f| f.required),
                 "provider '{}' has no required fields",

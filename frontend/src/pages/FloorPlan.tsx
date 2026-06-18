@@ -407,29 +407,42 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
 
   /** Live edits from the shared editor — optimistic locally, debounced to the API. */
   function editorChange(target: EditorTarget, change: LightControlChange) {
-    // Effects are a per-light control not surfaced on the plan's editor yet.
-    if (change.field === "effect") return;
     // Adjust only the dimension the user moved (see Dashboard's `cascade`): a room
-    // brightness change must not stomp each light's own color, color and white are
-    // mutually exclusive, and the backend merges the partial patch into each light.
-    const apply = (cur: Partial<LightState>): LightState => {
+    // brightness change must not stomp each light's own color; color/white/effect
+    // are the three mutually-exclusive modes (set one, clear the others); the
+    // backend merges the partial patch into each light. `supportsEffect` gates the
+    // effect mode per light so a room fan-out only effects lights that support it.
+    const apply = (cur: Partial<LightState>, supportsEffect = true): LightState => {
       const next: LightState = { ...cur, on: true };
-      if (change.field === "brightness") next.brightness = change.brightness;
-      else if (change.field === "color") {
+      if (change.field === "brightness") {
+        next.brightness = change.brightness;
+        next.effect = undefined;
+      } else if (change.field === "color") {
         next.color = rgbToXy(...hexToRgb(change.hex));
         next.color_temp_mirek = undefined;
-      } else {
+        next.effect = undefined;
+      } else if (change.field === "temp") {
         next.color_temp_mirek = change.mirek;
         next.color = undefined;
+        next.effect = undefined;
+      } else if (supportsEffect) {
+        // Effect is the third exclusive mode, but it must keep the current color
+        // so the provider renders the effect in it (e.g. a LIFX pulse pulses the
+        // light's color, not white). The backend stores it as effect-mode.
+        next.effect = change.effect;
       }
       return next;
     };
+    // The uniform room PUT body for a color/brightness/temp change. Effects don't
+    // use it (they fan out per light, below), so the effect case is a no-op shape.
     const patch: LightState =
       change.field === "color"
         ? { on: true, color: rgbToXy(...hexToRgb(change.hex)) }
         : change.field === "temp"
           ? { on: true, color_temp_mirek: change.mirek }
-          : { on: true, brightness: change.brightness };
+          : change.field === "brightness"
+            ? { on: true, brightness: change.brightness }
+            : { on: true };
     if (target.kind === "light") {
       const next = apply(statesById.get(target.id) ?? {});
       setStatesById((prevMap) => new Map(prevMap).set(target.id, next));
@@ -438,14 +451,30 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
     } else if (target.kind === "room") {
       const room = allRooms.find((r) => r.id === target.roomId);
       if (!room) return;
+      // Compute each member's next state up front (read from current state), so we
+      // can both update the map and drive the network from the same values.
+      const perLight: [string, LightState][] = [];
+      for (const id of room.light_ids) {
+        const supportsEffect =
+          change.field !== "effect" ||
+          !!lights.find((l) => l.id === id)?.capabilities.effects?.includes(change.effect);
+        if (change.field === "effect" && !supportsEffect) continue;
+        perLight.push([id, apply(statesById.get(id) ?? {}, supportsEffect)]);
+      }
       setStatesById((prev) => {
         const next = new Map(prev);
-        for (const id of room.light_ids) next.set(id, apply(next.get(id) ?? {}));
+        for (const [id, st] of perLight) next.set(id, st);
         return next;
       });
       clearTimeout(editTimer.current);
       editTimer.current = setTimeout(() => {
-        setRoomState(room.id, patch);
+        // An effect carries each light's own color, so fan it out per light; a
+        // color/brightness/temp change is uniform and uses the native room PUT.
+        if (change.field === "effect") {
+          for (const [id, st] of perLight) setLightState(id, st);
+        } else {
+          setRoomState(room.id, patch);
+        }
       }, 250);
     }
   }
@@ -910,6 +939,19 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
         const roomMirek =
           room.light_ids.map((id) => statesById.get(id)?.color_temp_mirek).find((m) => m != null) ??
           366;
+        // Effects offered room-wide only when every member light shares a common
+        // set (the intersection) — see Dashboard's `roomEffects`.
+        const roomEffects = room.light_ids.reduce<string[]>((acc, id, i) => {
+          const e = lights.find((l) => l.id === id)?.capabilities.effects ?? [];
+          return i === 0 ? [...e] : acc.filter((x) => e.includes(x));
+        }, []);
+        const roomEffect =
+          roomEffects.length > 0 &&
+          room.light_ids.every(
+            (id) => statesById.get(id)?.effect === statesById.get(room.light_ids[0] ?? "")?.effect,
+          )
+            ? statesById.get(room.light_ids[0] ?? "")?.effect
+            : undefined;
         return (
           <LightEditor
             anchor={editor.anchor}
@@ -918,6 +960,8 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
             initialBrightness={statesById.get(room.light_ids[0] ?? "")?.brightness ?? 100}
             initialMirek={roomMirek}
             showWhite={roomSupportsWhite}
+            effects={roomEffects.length > 0 ? roomEffects : undefined}
+            initialEffect={roomEffect}
             on={anyOn}
             onToggle={() => setRoom(room, !anyOn)}
             onChange={(ch) => editorChange(editor, ch)}

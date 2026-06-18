@@ -1315,12 +1315,14 @@ pub(crate) async fn apply_room_state(
 ) -> (usize, usize) {
     let (applied, failed) = apply_uniform_state(state, room_id, new_state, members).await;
     // Only a *pure* power change (on/off with no light attributes) fans out to
-    // the room's audio + power members. A brightness/color/temp change is a
+    // the room's audio + power members. A brightness/color/temp/effect change is a
     // lighting-attribute command — its implicit `on: true` must NOT power on the
-    // room's speakers/switches (e.g. "make the room blue" shouldn't start Sonos).
+    // room's speakers/switches (e.g. "make the room blue" shouldn't start Sonos,
+    // and a room-wide effect pick shouldn't either).
     let pure_power = new_state.brightness.is_none()
         && new_state.color.is_none()
-        && new_state.color_temp_mirek.is_none();
+        && new_state.color_temp_mirek.is_none()
+        && new_state.effect.is_none();
     if !pure_power {
         return (applied, failed);
     }

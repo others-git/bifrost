@@ -898,6 +898,7 @@ fn build_light_state(
         color_temp_mirek,
         reachable: None,
         effect: effect.filter(|e| !e.is_empty()),
+        transport: None,
     })
 }
 

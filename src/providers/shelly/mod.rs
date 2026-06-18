@@ -177,6 +177,7 @@ fn shelly_to_light_state(l: &ShellyLight) -> LightState {
         color_temp_mirek: None,
         reachable: None,
         effect: None,
+        transport: None,
     }
 }
 

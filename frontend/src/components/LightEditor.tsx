@@ -199,75 +199,92 @@ export function ColorWheel({
   );
 }
 
-// ── Vertical brightness bar ──────────────────────────────────────────────────
+// ── Brightness slider (horizontal) ───────────────────────────────────────────
 
-export function BrightnessBar({
-  height = 176,
-  width = 30,
+/** A full-width brightness slider that sits directly under the mode tabs and is
+ * shown in **every** mode (Color / White / Effects). Brightness is independent of
+ * which colour mode is active, so it lives next to the tab selector — you can dim
+ * a running effect or a colour alike, without it disappearing when you switch to
+ * the Effects tab (where there's no wheel to hang a vertical bar beside). */
+export function BrightnessSlider({
   hex,
   value,
   onPick,
+  compact,
 }: {
-  height?: number;
-  width?: number;
   hex: string;
   value: number; // 1..100
   onPick: (value: number) => void;
+  compact: boolean;
 }) {
   const trackRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
 
   function pick(e: React.PointerEvent) {
     const rect = trackRef.current!.getBoundingClientRect();
-    const f = 1 - (e.clientY - rect.top) / rect.height;
+    const f = (e.clientX - rect.left) / rect.width;
     onPick(Math.max(1, Math.min(100, Math.round(f * 100))));
   }
 
-  const knob = width - 6;
-  const knobTop = 3 + (1 - value / 100) * (height - knob - 6);
+  const h = compact ? 30 : 22;
+  const knob = h - 6;
 
   return (
-    <div
-      ref={trackRef}
-      title={`${value}%`}
-      style={{
-        position: "relative",
-        width,
-        height,
-        borderRadius: width / 2,
-        border: `1px solid ${color.hairline}`,
-        background: `linear-gradient(to bottom, ${hex}, ${color.surfaceOff})`,
-        boxShadow: "inset 0 0 14px -8px #000",
-        touchAction: "none",
-        cursor: "pointer",
-        flexShrink: 0,
-      }}
-      onPointerDown={(e) => {
-        dragging.current = true;
-        e.currentTarget.setPointerCapture(e.pointerId);
-        pick(e);
-      }}
-      onPointerMove={(e) => {
-        if (dragging.current) pick(e);
-      }}
-      onPointerUp={() => {
-        dragging.current = false;
-      }}
-    >
+    <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
       <div
         style={{
-          position: "absolute",
-          left: 3,
-          top: knobTop,
-          width: knob,
-          height: knob,
-          borderRadius: "50%",
-          background: "#fff",
-          // Haloed in the current color, ringed for contrast — matches the wheel thumb.
-          boxShadow: `0 0 0 1px rgba(0,0,0,0.4), 0 0 10px ${hex}, 0 1px 5px rgba(0,0,0,0.6)`,
-          pointerEvents: "none",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          fontSize: compact ? "0.8rem" : "0.72rem",
+          color: color.dim,
+          letterSpacing: "0.02em",
         }}
-      />
+      >
+        <span>Brightness</span>
+        <span style={{ color: color.text, fontVariantNumeric: "tabular-nums" }}>{value}%</span>
+      </div>
+      <div
+        ref={trackRef}
+        title={`${value}%`}
+        onPointerDown={(e) => {
+          dragging.current = true;
+          e.currentTarget.setPointerCapture(e.pointerId);
+          pick(e);
+        }}
+        onPointerMove={(e) => {
+          if (dragging.current) pick(e);
+        }}
+        onPointerUp={() => {
+          dragging.current = false;
+        }}
+        style={{
+          position: "relative",
+          height: h,
+          borderRadius: h / 2,
+          border: `1px solid ${color.hairline}`,
+          background: `linear-gradient(to right, ${color.surfaceOff}, ${hex})`,
+          boxShadow: "inset 0 0 14px -8px #000",
+          touchAction: "none",
+          cursor: "pointer",
+        }}
+      >
+        <div
+          style={{
+            position: "absolute",
+            top: (h - knob) / 2,
+            left: `${value}%`,
+            transform: "translateX(-50%)",
+            width: knob,
+            height: knob,
+            borderRadius: "50%",
+            background: "#fff",
+            // Haloed in the current color, ringed for contrast — matches the wheel thumb.
+            boxShadow: `0 0 0 1px rgba(0,0,0,0.4), 0 0 10px ${hex}, 0 1px 5px rgba(0,0,0,0.6)`,
+            pointerEvents: "none",
+          }}
+        />
+      </div>
     </div>
   );
 }
@@ -747,6 +764,17 @@ export function LightEditor({
         <ModeToggle mode={mode} modes={availableModes} onChange={setMode} compact={isCompact} />
       )}
 
+      {/* Brightness lives next to the tab selector and persists across every mode
+          (Color / White / Effects), since it's an independent dimension. */}
+      {showBrightness && (
+        <BrightnessSlider
+          hex={whiteActive ? whiteHex : colorActive ? hex : "#ffd9a0"}
+          value={brightness}
+          onPick={applyBrightness}
+          compact={isCompact}
+        />
+      )}
+
       {effectsActive ? (
         <EffectsPanel effects={effects ?? []} active={effect} onPick={applyEffect} compact={isCompact} />
       ) : (
@@ -754,15 +782,6 @@ export function LightEditor({
           <div style={{ display: "flex", gap: isCompact ? "1.4rem" : "0.8rem", alignItems: "center", justifyContent: "center" }}>
             {colorActive && <ColorWheel size={isCompact ? 240 : 176} hue={hue} sat={sat} onPick={applyColor} />}
             {whiteActive && <ColorTempWheel size={isCompact ? 240 : 176} mirek={mirek} onPick={applyTemp} />}
-            {showBrightness && (
-              <BrightnessBar
-                height={isCompact ? 240 : 176}
-                width={isCompact ? 44 : 30}
-                hex={whiteActive ? whiteHex : colorActive ? hex : "#ffd9a0"}
-                value={brightness}
-                onPick={applyBrightness}
-              />
-            )}
           </div>
 
           {colorActive && (

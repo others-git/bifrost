@@ -56,6 +56,13 @@ pub struct LightState {
     /// a `set_state` applies the effect (the device animates color/brightness).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effect: Option<String>,
+    /// How the device is currently being reached, for providers that have more
+    /// than one transport (today: Govee — `"lan"` when controlled over the local
+    /// network, `"cloud"` when via the cloud API). `None` = single-transport
+    /// provider / not reported. Read-only status (like [`reachable`]); never sent
+    /// on a control write — the frontend surfaces it on the Devices page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
 }
 
 /// A partial light-state update. Hue SSE events only carry the fields that
@@ -75,6 +82,8 @@ pub struct LightStatePatch {
     pub reachable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effect: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
 }
 
 impl LightStatePatch {
@@ -88,6 +97,7 @@ impl LightStatePatch {
             color_temp_mirek: s.color_temp_mirek,
             reachable: s.reachable,
             effect: s.effect.clone(),
+            transport: s.transport.clone(),
         }
     }
 
@@ -98,6 +108,7 @@ impl LightStatePatch {
             && self.color_temp_mirek.is_none()
             && self.reachable.is_none()
             && self.effect.is_none()
+            && self.transport.is_none()
     }
 
     /// Merge this patch into an existing state, leaving absent fields untouched.
@@ -110,6 +121,9 @@ impl LightStatePatch {
         }
         if let Some(r) = self.reachable {
             state.reachable = Some(r);
+        }
+        if let Some(t) = &self.transport {
+            state.transport = Some(t.clone());
         }
         // Colour, colour-temperature, and a dynamic effect are mutually exclusive
         // modes — a light is in exactly one. A patch that sets any one clears the

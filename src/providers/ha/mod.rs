@@ -581,6 +581,7 @@ fn parse_light_state(e: &HaEntity) -> LightState {
         color_temp_mirek,
         reachable: Some(e.state != "unavailable"),
         effect,
+        transport: None,
     }
 }
 

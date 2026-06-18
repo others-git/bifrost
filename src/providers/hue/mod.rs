@@ -317,6 +317,7 @@ fn hue_resource_to_light(r: HueLightResource, hw_id: Option<String>) -> Light {
             color_temp_mirek: r.color_temperature.and_then(|ct| ct.mirek),
             reachable: None,
             effect,
+            transport: None,
         },
         capabilities: LightCapabilities {
             dimmable: true,
@@ -753,6 +754,7 @@ pub fn parse_patch_from_event(item: &serde_json::Value) -> crate::models::LightS
         color_temp_mirek,
         reachable: None,
         effect,
+        transport: None,
     }
 }
 
@@ -886,6 +888,7 @@ mod tests {
             color_temp_mirek: Some(370),
             reachable: None,
             effect: None,
+            transport: None,
         };
         mock_provider(&server)
             .await
@@ -964,6 +967,7 @@ mod tests {
             color_temp_mirek: None,
             reachable: None,
             effect: None,
+            transport: None,
         };
 
         let start = std::time::Instant::now();

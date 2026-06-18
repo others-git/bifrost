@@ -449,7 +449,23 @@ function RoomBox({
   const showColor = lights.some((l) => l.capabilities.color_rgb);
   const showWhite = lights.some((l) => l.capabilities.color_temperature);
   const showBrightness = lights.some((l) => l.capabilities.dimmable);
-  const tunable = !!roomId && (showColor || showWhite || showBrightness);
+  // Effects are offered room-wide only when EVERY member light supports them and
+  // they share a common set (e.g. all Hue, or all LIFX): the intersection across
+  // members, so a chosen effect applies to every light. A single non-effect light
+  // (empty/absent set) collapses the intersection to nothing and hides the tab.
+  const roomEffects = lights.reduce<string[]>(
+    (acc, l, i) => {
+      const e = l.capabilities.effects ?? [];
+      return i === 0 ? [...e] : acc.filter((x) => e.includes(x));
+    },
+    [],
+  );
+  // Pre-select the running effect only when the whole room agrees on one.
+  const roomEffect =
+    roomEffects.length > 0 && lights.every((l) => l.last_state?.effect === lights[0].last_state?.effect)
+      ? lights[0].last_state?.effect
+      : undefined;
+  const tunable = !!roomId && (showColor || showWhite || showBrightness || roomEffects.length > 0);
   const roomMirek =
     lit.map((l) => l.last_state?.color_temp_mirek).find((m): m is number => m != null) ?? 366;
 
@@ -468,26 +484,46 @@ function RoomBox({
 
   function cascade(change: LightControlChange) {
     if (!roomId) return;
-    // Effects are a per-light control (each light's supported set differs), not a
-    // room-wide cascade — the room editor doesn't surface them.
-    if (change.field === "effect") return;
+    // An effect is inherently per-light: it must carry each light's *own* current
+    // color so the provider renders the effect in that color (e.g. a LIFX pulse on
+    // a red light pulses red, not white). A uniform room PUT can't express
+    // per-light color, so fan the effect out per light, keeping each one's color.
+    if (change.field === "effect") {
+      const updates: [string, LightState][] = [];
+      for (const l of lights) {
+        if (!(l.capabilities.effects ?? []).includes(change.effect)) continue;
+        const next: LightState = { ...(l.last_state ?? { on: true }), on: true, effect: change.effect };
+        onLightUpdate(l.id, next);
+        updates.push([l.id, next]);
+      }
+      clearTimeout(commitTimer.current);
+      commitTimer.current = setTimeout(() => {
+        for (const [id, s] of updates) setLightState(id, s);
+      }, 200);
+      return;
+    }
     // Adjust only the dimension the user moved, per light by capability. A room
     // brightness change must not overwrite each member's own color (e.g. set by a
-    // scene); a color or white change is mutually exclusive (set one, clear the
-    // other). The room PUT carries just the changed field — the backend merges it
-    // into each light's cached state and preserves the untouched dimensions.
+    // scene); color/white/effect are the three mutually-exclusive modes (set one,
+    // clear the others). The room PUT carries just the changed field — the backend
+    // merges it into each light's cached state and preserves untouched dimensions.
     for (const l of lights) {
       const next: LightState = { ...(l.last_state ?? { on: true }), on: true };
       if (change.field === "brightness") {
         if (l.capabilities.dimmable) next.brightness = change.brightness;
+        next.effect = undefined;
       } else if (change.field === "color") {
         if (l.capabilities.color_rgb) {
           next.color = rgbToXy(...hexToRgb(change.hex));
           next.color_temp_mirek = undefined;
         }
-      } else if (l.capabilities.color_temperature) {
-        next.color_temp_mirek = change.mirek;
-        next.color = undefined;
+        next.effect = undefined;
+      } else if (change.field === "temp") {
+        if (l.capabilities.color_temperature) {
+          next.color_temp_mirek = change.mirek;
+          next.color = undefined;
+        }
+        next.effect = undefined;
       }
       onLightUpdate(l.id, next);
     }
@@ -686,6 +722,8 @@ function RoomBox({
           showColor={showColor}
           showWhite={showWhite}
           showBrightness={showBrightness}
+          effects={roomEffects.length > 0 ? roomEffects : undefined}
+          initialEffect={roomEffect}
           on={anyOn}
           onToggle={toggleAll}
           onChange={cascade}

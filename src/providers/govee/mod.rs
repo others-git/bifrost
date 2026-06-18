@@ -17,7 +17,11 @@ use uuid::Uuid;
 
 const BASE_URL: &str = "https://openapi.api.govee.com/router/api/v1";
 
-pub struct GoveeProvider {
+/// The Govee cloud transport (`openapi.api.govee.com`). One of the two transports
+/// the unified [`GoveeProvider`] owns; reached for any device whose commands can't
+/// (or shouldn't) go over the LAN — no LAN reply, a LAN send that failed, or an
+/// effect/dynamic-scene (LAN has no scene catalogue).
+pub struct GoveeCloud {
     client: Client,
     /// Base URL for the API; overridden in tests to point at a wiremock server.
     base_url: String,
@@ -81,7 +85,7 @@ async fn clear_sku_cache() {
     scene_cache().write().await.clear();
 }
 
-impl GoveeProvider {
+impl GoveeCloud {
     pub fn new(api_key: impl AsRef<str>) -> Result<Self> {
         Self::new_with_base(api_key, BASE_URL)
     }
@@ -466,9 +470,9 @@ fn parse_govee_state(caps: Vec<GoveeStateCapability>) -> LightState {
 // ── Provider impl ───────────────────────────────────────────────────────────
 
 #[async_trait]
-impl LightProvider for GoveeProvider {
+impl LightProvider for GoveeCloud {
     fn name(&self) -> &str {
-        "govee"
+        "govee-cloud"
     }
 
     async fn discover(&self) -> Result<Vec<Light>> {
@@ -600,6 +604,251 @@ impl LightProvider for GoveeProvider {
     }
 }
 
+// ── Unified provider (LAN-preferred, cloud fallback) ─────────────────────────
+
+use crate::providers::govee_lan::{GoveeLanProvider, LanScan};
+use crate::providers::mac_hw_id;
+use std::net::IpAddr;
+
+/// Process-wide `normalized-MAC → LAN IP` map. Populated by [`GoveeProvider`]'s
+/// discovery/scan; read by control + state to address a device over the LAN.
+/// Global (MACs are unique) and process-lived because `build_provider` rebuilds
+/// the provider per request, so a per-instance map would never survive to the
+/// next control call. Only devices that answered a LAN scan appear here — that
+/// membership IS the per-device LAN-eligibility gate (not every Govee supports LAN).
+fn lan_ip_cache() -> &'static tokio::sync::RwLock<std::collections::HashMap<String, String>> {
+    static CACHE: std::sync::OnceLock<
+        tokio::sync::RwLock<std::collections::HashMap<String, String>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| tokio::sync::RwLock::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+async fn clear_lan_ip_cache() {
+    lan_ip_cache().write().await.clear();
+}
+
+/// Govee with **both transports**: a per-device LAN-preferred, cloud-fallback
+/// light provider. The LAN path (local UDP — no quota, low latency) is used for
+/// any device that answered a LAN scan; everything else — an unscanned device, a
+/// LAN send that failed, or an effect/dynamic-scene (LAN has no scene catalogue)
+/// — goes over the cloud. Either transport may be absent: cloud-only (no LAN
+/// interface configured) and LAN-only (no API key) both work.
+pub struct GoveeProvider {
+    cloud: Option<GoveeCloud>,
+    lan: Option<GoveeLanProvider>,
+}
+
+impl GoveeProvider {
+    pub fn new(cloud: Option<GoveeCloud>, lan: Option<GoveeLanProvider>) -> Self {
+        Self { cloud, lan }
+    }
+
+    /// Fold a batch of LAN scan results into the process-wide MAC→IP cache.
+    async fn cache_scans(scans: &[LanScan]) {
+        if scans.is_empty() {
+            return;
+        }
+        let mut cache = lan_ip_cache().write().await;
+        for s in scans {
+            if let Some(k) = mac_hw_id(&s.mac) {
+                cache.insert(k, s.ip.clone());
+            }
+        }
+    }
+
+    /// Resolve a device's current LAN IP from its MAC, refreshing the cache with a
+    /// live scan on a miss (a control may arrive before the first poll populated
+    /// it). `None` means the device isn't LAN-eligible right now → use the cloud.
+    async fn lan_ip_for(&self, mac: &str) -> Option<String> {
+        let lan = self.lan.as_ref()?;
+        let key = mac_hw_id(mac)?;
+        if let Some(ip) = lan_ip_cache().read().await.get(&key).cloned() {
+            return Some(ip);
+        }
+        // Miss: re-scan, refill, look again.
+        let scans = lan.scan().await.ok()?;
+        let ip = {
+            Self::cache_scans(&scans).await;
+            lan_ip_cache().read().await.get(&key).cloned()
+        };
+        tracing::debug!(
+            target: "bifrost::govee",
+            %mac,
+            scanned = scans.len(),
+            resolved = ip.is_some(),
+            "LAN address cache miss — re-scanned ({} device(s) replied)",
+            scans.len(),
+        );
+        ip
+    }
+
+    /// Cloud control, or a clear "unreachable" error when there's no cloud key.
+    async fn cloud_set(&self, mac: &str, state: &LightState) -> Result<()> {
+        match &self.cloud {
+            Some(c) => c.set_state(mac, state).await,
+            None => bail!(
+                "Govee device {mac} is not reachable on the LAN and no cloud API key is configured"
+            ),
+        }
+    }
+}
+
+#[async_trait]
+impl LightProvider for GoveeProvider {
+    fn name(&self) -> &str {
+        "govee"
+    }
+
+    async fn discover(&self) -> Result<Vec<Light>> {
+        // LAN scan first: it both refills the MAC→IP cache and surfaces LAN-only
+        // devices (no cloud row). A scan failure is non-fatal.
+        let scans = match &self.lan {
+            Some(lan) => lan.scan().await.unwrap_or_default(),
+            None => Vec::new(),
+        };
+        Self::cache_scans(&scans).await;
+
+        // Cloud devices carry the richer metadata (name, capabilities, effects).
+        let cloud_lights = match &self.cloud {
+            Some(c) => match c.discover().await {
+                Ok(l) => l,
+                // Stay resilient: with the LAN up, a cloud blip shouldn't wipe the
+                // device list. With no LAN, propagate (cloud is all we have).
+                Err(e) if self.lan.is_some() => {
+                    tracing::warn!("Govee cloud discovery failed, using LAN only: {e:#}");
+                    Vec::new()
+                }
+                Err(e) => return Err(e),
+            },
+            None => Vec::new(),
+        };
+
+        // Union: keep every cloud light; append LAN-only devices (a scanned MAC
+        // with no cloud row), keyed by MAC so they're stable across IP changes.
+        let cloud_macs: std::collections::HashSet<String> = cloud_lights
+            .iter()
+            .filter_map(|l| mac_hw_id(&l.provider_id))
+            .collect();
+        let scanned_macs: std::collections::HashSet<String> =
+            scans.iter().filter_map(|s| mac_hw_id(&s.mac)).collect();
+        let mut lights = cloud_lights;
+        // Stamp how each cloud device will be reached so the UI shows it up front
+        // (control prefers LAN whenever the device answered a scan).
+        for l in &mut lights {
+            let on_lan = mac_hw_id(&l.provider_id).is_some_and(|k| scanned_macs.contains(&k));
+            l.state.transport = Some(if on_lan { "lan" } else { "cloud" }.to_string());
+        }
+        for s in scans {
+            let known = mac_hw_id(&s.mac).is_some_and(|k| cloud_macs.contains(&k));
+            if !known {
+                lights.push(lan_only_light(&s));
+            }
+        }
+        let on_lan = lights
+            .iter()
+            .filter(|l| l.state.transport.as_deref() == Some("lan"))
+            .count();
+        tracing::debug!(
+            target: "bifrost::govee",
+            lan_enabled = self.lan.is_some(),
+            cloud_enabled = self.cloud.is_some(),
+            lan_scanned = scanned_macs.len(),
+            cloud_devices = cloud_macs.len(),
+            total = lights.len(),
+            on_lan,
+            on_cloud = lights.len() - on_lan,
+            "Govee discover: {} device(s) — {on_lan} via LAN, {} via cloud",
+            lights.len(),
+            lights.len() - on_lan,
+        );
+        Ok(lights)
+    }
+
+    async fn set_state(&self, mac: &str, state: &LightState) -> Result<()> {
+        // A dynamic scene ("effect") only exists in the cloud catalogue.
+        if state.effect.as_deref().is_some_and(|e| !e.is_empty()) {
+            tracing::debug!(target: "bifrost::govee", %mac, "set_state: effect → cloud (LAN has no scene catalogue)");
+            return self.cloud_set(mac, state).await;
+        }
+        // LAN-preferred: only when this device actually answered a scan.
+        if let Some(lan) = &self.lan
+            && let Some(ip) = self.lan_ip_for(mac).await
+        {
+            tracing::debug!(target: "bifrost::govee", %mac, %ip, "set_state: → LAN (device answered a scan)");
+            match lan.set_state(&ip, state).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    tracing::warn!("Govee LAN control failed for {mac}, trying cloud: {e:#}")
+                }
+            }
+        } else {
+            tracing::debug!(target: "bifrost::govee", %mac, lan_enabled = self.lan.is_some(), "set_state: → cloud (device not reachable on LAN)");
+        }
+        self.cloud_set(mac, state).await
+    }
+
+    async fn get_state(&self, mac: &str) -> Result<LightState> {
+        if let Some(lan) = &self.lan
+            && let Some(ip) = self.lan_ip_for(mac).await
+            && let Ok(mut state) = lan.get_state(&ip).await
+            && state.reachable != Some(false)
+        {
+            state.transport = Some("lan".to_string());
+            tracing::debug!(target: "bifrost::govee", %mac, %ip, "get_state: via LAN");
+            return Ok(state);
+        }
+        // LAN unavailable/unreachable → cloud if we have it.
+        if let Some(c) = &self.cloud {
+            let mut state = c.get_state(mac).await?;
+            state.transport = Some("cloud".to_string());
+            tracing::debug!(target: "bifrost::govee", %mac, "get_state: via cloud");
+            return Ok(state);
+        }
+        Ok(LightState {
+            on: false,
+            reachable: Some(false),
+            ..Default::default()
+        })
+    }
+}
+
+/// Synthesize a `Light` for a device seen only on the LAN (no cloud row). Keyed
+/// by MAC (stable) when the scan reported one, else the IP. Govee LAN devices are
+/// RGBWW: dimmable + colour + tunable white; effects are a cloud-only feature.
+fn lan_only_light(s: &LanScan) -> Light {
+    let provider_id = if s.mac.is_empty() {
+        s.ip.clone()
+    } else {
+        s.mac.clone()
+    };
+    let name = if s.sku.is_empty() {
+        format!("Govee @ {}", s.ip)
+    } else {
+        format!("Govee {} @ {}", s.sku, s.ip)
+    };
+    Light {
+        id: Uuid::new_v4(),
+        hw_id: mac_hw_id(&s.mac),
+        provider_id,
+        provider: Provider::Govee,
+        name,
+        // Seen only on the LAN → that's how it's reached.
+        state: LightState {
+            transport: Some("lan".to_string()),
+            ..Default::default()
+        },
+        capabilities: LightCapabilities {
+            dimmable: true,
+            color_rgb: true,
+            color_temperature: true,
+            hue_gamut: None,
+            effects: Vec::new(),
+        },
+        last_seen: Utc::now(),
+    }
+}
+
 // ── Factory ─────────────────────────────────────────────────────────────────
 
 use crate::providers::{CredentialField, FieldKind, ProviderFactory};
@@ -612,26 +861,51 @@ impl ProviderFactory for GoveeProviderFactory {
     }
 
     fn display_name(&self) -> &'static str {
-        "Govee (Cloud)"
+        "Govee"
     }
 
     fn build(&self, credentials_json: &str) -> Result<Box<dyn crate::providers::LightProvider>> {
         let creds: serde_json::Value = serde_json::from_str(credentials_json)?;
-        let api_key = creds["api_key"]
+        // Cloud when an API key is supplied. LAN is **on by default** (preferred,
+        // no quota) — `bind_addr` only picks the interface, defaulting to 0.0.0.0
+        // (all NICs). A host that can't reach the LAN simply finds nothing on a
+        // scan and falls back to the cloud, so defaulting it on is safe.
+        let cloud = match creds["api_key"].as_str().filter(|k| !k.is_empty()) {
+            Some(k) => Some(GoveeCloud::new(k)?),
+            None => None,
+        };
+        let bind = creds["bind_addr"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("govee credentials missing api_key"))?
-            .to_string();
-        Ok(Box::new(GoveeProvider::new(&api_key)?))
+            .filter(|b| !b.is_empty())
+            .unwrap_or("0.0.0.0");
+        let addr: IpAddr = bind
+            .parse()
+            .with_context(|| format!("invalid Govee LAN bind address '{bind}'"))?;
+        let lan = Some(GoveeLanProvider::new(addr));
+        Ok(Box::new(GoveeProvider::new(cloud, lan)))
     }
 
     fn credentials_schema(&self) -> &'static [CredentialField] {
-        &[CredentialField {
-            name: "api_key",
-            label: "API Key",
-            kind: FieldKind::Password,
-            required: true,
-            hint: Some("Govee Home app → Profile → About Us → Apply for API Key"),
-        }]
+        &[
+            CredentialField {
+                name: "api_key",
+                label: "API Key",
+                kind: FieldKind::Password,
+                required: false,
+                hint: Some(
+                    "Govee Home app → Profile → About Us → Apply for API Key. Optional if you only use LAN control.",
+                ),
+            },
+            CredentialField {
+                name: "bind_addr",
+                label: "LAN interface (advanced)",
+                kind: FieldKind::IpAddress,
+                required: false,
+                hint: Some(
+                    "Local LAN control is on by default (preferred over the cloud whenever a device is reachable) — just turn on 'LAN Control' for each device in the Govee Home app. Leave blank for all interfaces (0.0.0.0); set a specific IP only if multi-homed.",
+                ),
+            },
+        ]
     }
 }
 
@@ -641,8 +915,8 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    async fn mock_provider(server: &MockServer) -> GoveeProvider {
-        GoveeProvider::new_for_test(server.uri(), "test-govee-key").unwrap()
+    async fn mock_provider(server: &MockServer) -> GoveeCloud {
+        GoveeCloud::new_for_test(server.uri(), "test-govee-key").unwrap()
     }
 
     fn device_list_response() -> serde_json::Value {
@@ -1189,5 +1463,200 @@ mod tests {
             .mount(&server)
             .await;
         assert!(mock_provider(&server).await.discover().await.is_err());
+    }
+
+    // ── Unified provider (LAN-preferred, cloud fallback) ─────────────────────
+
+    use crate::providers::govee_lan::test_support::{spawn_mock_device, test_provider};
+    use std::net::{Ipv4Addr, SocketAddr};
+    use std::time::Duration;
+
+    const MAC: &str = "AA:BB:CC:DD:EE:FF"; // the shared id used by both mocks
+
+    /// A LAN transport pointed at a dead port: no device answers a scan, so every
+    /// device is LAN-ineligible and control falls through to the cloud.
+    fn dead_lan() -> GoveeLanProvider {
+        let dead = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4);
+        GoveeLanProvider::new_for_test(dead, Duration::from_millis(150))
+    }
+
+    #[tokio::test]
+    async fn set_state_falls_back_to_cloud_when_device_not_on_lan() {
+        // The headline guarantee: a Govee light that isn't reachable on the LAN
+        // (didn't answer a scan) is still controllable — its command goes cloud.
+        // (No clear_sku_cache: it's a process-wide map shared with the SKU-cache
+        // test; this test's unique mock URL + identical SKU make a clear needless.)
+        clear_lan_ip_cache().await;
+        let server = MockServer::start().await;
+        mount_control_mocks(&server).await;
+
+        let provider = GoveeProvider::new(Some(mock_provider(&server).await), Some(dead_lan()));
+        provider
+            .set_state(
+                MAC,
+                &LightState {
+                    on: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // The cloud control endpoint carried the command.
+        let bodies = control_bodies(&server).await;
+        assert_eq!(bodies.len(), 1, "expected one cloud control request");
+        assert_eq!(
+            bodies[0]["payload"]["capability"]["instance"],
+            "powerSwitch"
+        );
+        assert_eq!(bodies[0]["payload"]["device"], MAC);
+    }
+
+    #[tokio::test]
+    async fn set_state_prefers_lan_when_device_is_on_lan() {
+        // A scanned device is controlled over the LAN; the cloud is never touched.
+        clear_lan_ip_cache().await;
+        let server = MockServer::start().await;
+        mount_control_mocks(&server).await;
+        let mock = spawn_mock_device().await;
+
+        let provider = GoveeProvider::new(
+            Some(mock_provider(&server).await),
+            Some(test_provider(&mock)),
+        );
+        provider
+            .set_state(
+                MAC,
+                &LightState {
+                    on: true,
+                    brightness: Some(60.0),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let got = mock.received.lock().await;
+        let cmds: Vec<&str> = got.iter().map(|c| c["cmd"].as_str().unwrap()).collect();
+        assert!(
+            cmds.contains(&"turn"),
+            "LAN device should get a turn: {cmds:?}"
+        );
+        assert!(cmds.contains(&"brightness"), "LAN brightness: {cmds:?}");
+        assert!(
+            control_bodies(&server).await.is_empty(),
+            "the cloud must not be used when the device is on the LAN"
+        );
+    }
+
+    #[tokio::test]
+    async fn effect_routes_to_cloud_and_errors_without_one() {
+        // Dynamic scenes only exist in the cloud catalogue, so an effect on a
+        // LAN-only provider (no cloud key) is a clear error, never sent to the LAN.
+        clear_lan_ip_cache().await;
+        let mock = spawn_mock_device().await;
+        let provider = GoveeProvider::new(None, Some(test_provider(&mock)));
+
+        let err = provider
+            .set_state(
+                MAC,
+                &LightState {
+                    on: true,
+                    effect: Some("candle".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("cloud"),
+            "effect without cloud should mention the missing cloud key: {err}"
+        );
+        // And nothing was sent over the LAN.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(mock.received.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn discover_surfaces_lan_only_device_without_cloud() {
+        clear_lan_ip_cache().await;
+        let mock = spawn_mock_device().await;
+        let provider = GoveeProvider::new(None, Some(test_provider(&mock)));
+
+        let lights = provider.discover().await.unwrap();
+        assert_eq!(lights.len(), 1);
+        // LAN-only devices are keyed by MAC (stable across IP changes).
+        assert_eq!(lights[0].provider_id, MAC);
+        assert!(lights[0].hw_id.is_some(), "MAC should yield an hw_id");
+        assert!(lights[0].name.contains("H6159"));
+        assert!(lights[0].capabilities.color_rgb);
+        assert!(lights[0].capabilities.color_temperature);
+        // Seen only on the LAN → reported as LAN-connected.
+        assert_eq!(lights[0].state.transport.as_deref(), Some("lan"));
+    }
+
+    #[tokio::test]
+    async fn discover_dedupes_cloud_and_lan_by_mac() {
+        // The same physical device on both transports is one light — the cloud
+        // row (richer name/caps) wins, and the LAN address is cached for control.
+        // (discover uses fetch_devices directly, not the SKU cache, so no clear.)
+        clear_lan_ip_cache().await;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/devices"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(device_list_response()))
+            .mount(&server)
+            .await;
+        let mock = spawn_mock_device().await;
+
+        let provider = GoveeProvider::new(
+            Some(mock_provider(&server).await),
+            Some(test_provider(&mock)),
+        );
+        let lights = provider.discover().await.unwrap();
+        assert_eq!(
+            lights.len(),
+            1,
+            "same MAC on both transports collapses to one"
+        );
+        assert_eq!(lights[0].name, "Strip Lights", "cloud metadata wins");
+        // The device answered the LAN scan, so it's surfaced as LAN-connected even
+        // though its metadata came from the cloud.
+        assert_eq!(lights[0].state.transport.as_deref(), Some("lan"));
+    }
+
+    #[tokio::test]
+    async fn discover_marks_cloud_only_device_as_cloud() {
+        // LAN is configured but the device doesn't answer a scan → it's reached
+        // (and reported) over the cloud.
+        clear_lan_ip_cache().await;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/devices"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(device_list_response()))
+            .mount(&server)
+            .await;
+        let provider = GoveeProvider::new(Some(mock_provider(&server).await), Some(dead_lan()));
+        let lights = provider.discover().await.unwrap();
+        assert_eq!(lights.len(), 1);
+        assert_eq!(lights[0].state.transport.as_deref(), Some("cloud"));
+    }
+
+    #[test]
+    fn factory_defaults_lan_on() {
+        let f = GoveeProviderFactory;
+        // LAN is on by default (0.0.0.0), so even an empty config builds (LAN-only).
+        assert!(f.build("{}").is_ok(), "LAN-only by default");
+        assert!(f.build(r#"{"api_key":"k"}"#).is_ok(), "cloud + default LAN");
+        assert!(
+            f.build(r#"{"api_key":"k","bind_addr":"192.168.1.5"}"#)
+                .is_ok(),
+            "cloud + explicit interface"
+        );
+        assert!(
+            f.build(r#"{"bind_addr":"not-an-ip"}"#).is_err(),
+            "malformed LAN address is rejected"
+        );
     }
 }

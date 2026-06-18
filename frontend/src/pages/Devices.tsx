@@ -83,6 +83,9 @@ interface Item {
   receiverId?: string | null;
   /** Audio only (M22): the receiver input to select when this source plays. */
   receiverSource?: string | null;
+  /** How a multi-transport provider (Govee) is reaching this device: "lan" |
+   * "cloud". Undefined for single-transport providers. */
+  transport?: string | null;
 }
 
 const POWER_KIND_LABEL: Record<PowerKind, string> = {
@@ -118,6 +121,7 @@ function lightItem(l: Light): Item {
     companionOf: null,
     roomId: l.room_id ?? null,
     inheritedRoomId: l.inherited_room_id ?? null,
+    transport: l.last_state?.transport ?? null,
   };
 }
 
@@ -471,6 +475,74 @@ function StatusPill({ label, tone }: { label: string; tone: "bad" | "muted" }) {
   );
 }
 
+/** Map the per-device transport (multi-transport providers only) to display text.
+ * LAN is the preferred, local path; cloud is the fallback. */
+function connectionInfo(
+  transport: string | null | undefined,
+): { short: string; long: string; lan: boolean } | null {
+  if (transport === "lan") return { short: "LAN", long: "Local network (LAN)", lan: true };
+  if (transport === "cloud") return { short: "Cloud", long: "Cloud API", lan: false };
+  return null;
+}
+
+/** A small pill on the card face showing how the device is reached. */
+function ConnectionPill({ info }: { info: { short: string; lan: boolean } }) {
+  return (
+    <span
+      title={info.lan ? "Controlled over your local network" : "Controlled via the cloud API"}
+      style={{
+        flexShrink: 0,
+        fontSize: "0.6rem",
+        fontWeight: 700,
+        letterSpacing: "0.07em",
+        textTransform: "uppercase",
+        color: info.lan ? ACCENT : T.dim,
+        background: info.lan ? alpha(ACCENT, 0.12) : "rgba(255,255,255,0.05)",
+        border: `1px solid ${info.lan ? alpha(ACCENT, 0.4) : T.cardBorder}`,
+        borderRadius: 999,
+        padding: "0.06rem 0.42rem",
+        lineHeight: 1.35,
+      }}
+    >
+      {info.short}
+    </span>
+  );
+}
+
+const detailBtnStyle: React.CSSProperties = {
+  background: "rgba(255,255,255,0.04)",
+  border: `1px solid ${T.cardBorder}`,
+  borderRadius: 8,
+  color: T.text,
+  cursor: "pointer",
+  fontSize: "0.78rem",
+  padding: "0.22rem 0.55rem",
+};
+
+/** One labelled line inside a device's expanded detail panel. */
+function DetailRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ display: "flex", gap: "0.7rem", alignItems: "baseline" }}>
+      <span
+        style={{
+          flexShrink: 0,
+          width: 78,
+          color: T.faint,
+          fontSize: "0.64rem",
+          fontWeight: 600,
+          textTransform: "uppercase",
+          letterSpacing: "0.05em",
+        }}
+      >
+        {label}
+      </span>
+      <span style={{ minWidth: 0, flex: 1, color: T.text, fontSize: "0.82rem", overflowWrap: "anywhere" }}>
+        {children}
+      </span>
+    </div>
+  );
+}
+
 function DeviceCard({
   item,
   rooms,
@@ -525,11 +597,7 @@ function DeviceCard({
   const boundReceiver = item.receiverId
     ? (audioDevices.find((a) => a.id === item.receiverId)?.name ?? null)
     : null;
-  // When expanded, wrap at word boundaries — never mid-word (`anywhere` shreds a
-  // name into single letters once the column is narrow).
-  const clamp: React.CSSProperties = expanded
-    ? { whiteSpace: "normal", overflowWrap: "break-word", wordBreak: "normal" }
-    : { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
+  const conn = connectionInfo(item.transport);
   // Distinct visual languages so the two muted states never read alike:
   //  • disabled — a deliberate, set-aside device: dashed border, neutral, dimmer.
   //  • offline  — a fault that wants attention: solid red-tinted border + a red
@@ -549,13 +617,18 @@ function DeviceCard({
           border: `1px solid ${on ? "rgba(56,189,248,0.22)" : T.cardBorder}`,
           opacity: 1,
         };
+  const statusText = disabled
+    ? "Disabled"
+    : offline
+      ? "Offline — unreachable"
+      : on
+        ? "On"
+        : "Off";
   return (
     <div
       style={{
         display: "flex",
-        alignItems: "center",
-        gap: "0.7rem",
-        padding: "0.85rem 1rem",
+        flexDirection: "column",
         borderRadius: 12,
         minWidth: 0,
         boxSizing: "border-box",
@@ -563,244 +636,213 @@ function DeviceCard({
         ...cardStyle,
       }}
     >
-      <button
-        ref={glyphBtnRef}
-        onClick={() => setPicking((v) => !v)}
-        title={`Glyph: ${item.glyph ?? "type default"} — click to change`}
-        style={{
-          flexShrink: 0,
-          width: 38,
-          height: 38,
-          borderRadius: 9,
-          display: "grid",
-          placeItems: "center",
-          color: on ? ACCENT : T.dim,
-          background: on ? "rgba(56,189,248,0.10)" : "rgba(255,255,255,0.03)",
-          border: item.glyph ? `1px solid rgba(56,189,248,0.35)` : "1px solid transparent",
-          cursor: "pointer",
-        }}
-      >
-        <Glyph name={effectiveGlyph} />
-      </button>
-      {picking && (
-        <GlyphPicker
-          anchor={glyphBtnRef.current}
-          isCompact={isCompact}
-          current={item.glyph}
-          onPick={(g) => {
-            onSetGlyph(g);
-            setPicking(false);
-          }}
-          onClose={() => setPicking(false)}
-        />
-      )}
-
-      <div
-        onClick={() => setExpanded((v) => !v)}
-        title={expanded ? item.name : `${item.name} — tap to expand`}
-        style={{ minWidth: 0, flex: 1, cursor: "pointer" }}
-      >
-        <div
-          style={{
-            color: T.text,
-            fontSize: "0.95rem",
-            fontWeight: 600,
-            ...clamp,
-          }}
-        >
-          {item.name}
-        </div>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "0.4rem",
-            fontSize: "0.72rem",
-            color: T.faint,
-            marginTop: 2,
-            minWidth: 0,
-            flexWrap: expanded ? "wrap" : "nowrap",
-          }}
-        >
-          <span style={{ flexShrink: 0 }}>{item.typeLabel}</span>
-          <span style={{ flexShrink: 0 }}>·</span>
-          <span style={{ minWidth: 0, ...clamp }}>{item.deviceId}</span>
-          {disabled && <StatusPill label="Disabled" tone="muted" />}
-          {offline && <StatusPill label="Offline" tone="bad" />}
-        </div>
-      </div>
-
-      {/* Action cluster: tight internal gap + fixed width so it never crushes
-          the name (the cause of the per-letter wrapping). */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "0.4rem",
-          flexShrink: 0,
-          marginLeft: "auto",
-        }}
-      >
-      {isAudioSource && (
-        <>
-          <button
-            ref={receiverBtnRef}
-            onClick={() => setReceiverPicking((v) => !v)}
-            title={
-              boundReceiver
-                ? `Volume → ${boundReceiver} — click to change`
-                : "Bind to a receiver (route volume)"
-            }
-            style={{
-              flexShrink: 0,
-              width: 34,
-              height: 34,
-              borderRadius: 9,
-              display: "grid",
-              placeItems: "center",
-              color: item.receiverId ? ACCENT : T.faint,
-              background: item.receiverId ? "rgba(56,189,248,0.10)" : "rgba(255,255,255,0.03)",
-              border: item.receiverId
-                ? `1px solid rgba(56,189,248,0.35)`
-                : `1px solid ${T.cardBorder}`,
-              cursor: "pointer",
-            }}
-          >
-            <Glyph name="receiver" size={18} />
-          </button>
-          {receiverPicking && (
-            <ReceiverPicker
-              anchor={receiverBtnRef.current}
-              isCompact={isCompact}
-              sourceId={item.id}
-              devices={audioDevices}
-              currentReceiver={item.receiverId ?? null}
-              currentSource={item.receiverSource ?? null}
-              onPick={(rid, rsrc) => {
-                onSetReceiver(rid, rsrc);
-                if (!rid) setReceiverPicking(false);
-              }}
-              onClose={() => setReceiverPicking(false)}
-            />
-          )}
-        </>
-      )}
-
-      {item.domain === "audio" && mergeCandidates.length > 0 && (
-        <>
-          <button
-            ref={mergeBtnRef}
-            onClick={() => setMergePicking((v) => !v)}
-            title="Merge into another device (same physical device — combines controls, nothing hidden)"
-            style={{
-              flexShrink: 0,
-              width: 34,
-              height: 34,
-              borderRadius: 9,
-              display: "grid",
-              placeItems: "center",
-              color: ACCENT,
-              background: alpha(ACCENT, 0.08),
-              border: `1px solid ${mergePicking ? ACCENT : T.cardBorder}`,
-              cursor: "pointer",
-              fontSize: "1rem",
-              lineHeight: 1,
-            }}
-          >
-            ⧉
-          </button>
-          {mergePicking && (
-            <MergePicker
-              anchor={mergeBtnRef.current}
-              isCompact={isCompact}
-              candidates={mergeCandidates}
-              onPick={(primaryId) => {
-                onMerge(primaryId);
-                setMergePicking(false);
-              }}
-              onClose={() => setMergePicking(false)}
-            />
-          )}
-        </>
-      )}
-
-      <button
-        ref={roomBtnRef}
-        onClick={() => setRoomPicking((v) => !v)}
-        title={
-          roomName
-            ? `Room: ${roomName}${isInheritedRoom ? " (via synced group)" : ""} — click to ${isInheritedRoom ? "override" : "change"}`
-            : "Assign to a room"
-        }
-        style={{
-          flexShrink: 0,
-          width: 34,
-          height: 34,
-          borderRadius: 9,
-          display: "grid",
-          placeItems: "center",
-          // An inherited (linked) room shows assigned but muted, to distinguish
-          // it from a direct assignment.
-          color: item.roomId ? ACCENT : effectiveRoomId ? T.dim : T.faint,
-          background: item.roomId ? "rgba(56,189,248,0.10)" : "rgba(255,255,255,0.03)",
-          border: item.roomId
-            ? `1px solid rgba(56,189,248,0.35)`
-            : `1px solid ${T.cardBorder}`,
-          cursor: "pointer",
-        }}
-      >
-        <Glyph name="room" size={18} />
-      </button>
-      {roomPicking && (
-        <RoomPicker
-          anchor={roomBtnRef.current}
-          rooms={rooms}
-          current={effectiveRoomId}
-          inherited={isInheritedRoom}
-          isCompact={isCompact}
-          onPick={(r) => {
-            onSetRoom(r);
-            setRoomPicking(false);
-          }}
-          onClose={() => setRoomPicking(false)}
-        />
-      )}
-
-      <span
-        aria-hidden
-        title={offline ? "Unreachable" : on ? "On" : "Off"}
-        style={{
-          flexShrink: 0,
-          width: 8,
-          height: 8,
-          borderRadius: "50%",
-          background: offline ? T.bad : on ? T.good : "rgba(255,255,255,0.18)",
-          boxShadow: !offline && on ? `0 0 8px ${T.good}` : "none",
-        }}
-      />
-      {disabled ? (
+      {/* Face — glyph · name + meta (tap to expand) · status + enable/disable + chevron.
+          Secondary config (room, receiver, merge) lives in the detail panel so the
+          face stays uncrowded at narrow widths. */}
+      <div style={{ display: "flex", alignItems: "center", gap: "0.7rem", padding: "0.75rem 0.9rem", minWidth: 0 }}>
         <button
-          onClick={() => onSetEnabled(true)}
-          title="Resume control of this device"
-          style={{ flexShrink: 0, background: "none", border: `1px solid ${T.cardBorder}`, borderRadius: 8, color: "#6fae84", cursor: "pointer", fontSize: "0.74rem", padding: "0.3rem 0.55rem" }}
+          ref={glyphBtnRef}
+          onClick={() => setPicking((v) => !v)}
+          title={`Glyph: ${item.glyph ?? "type default"} — click to change`}
+          style={{
+            flexShrink: 0,
+            width: 38,
+            height: 38,
+            borderRadius: 9,
+            display: "grid",
+            placeItems: "center",
+            color: on ? ACCENT : T.dim,
+            background: on ? "rgba(56,189,248,0.10)" : "rgba(255,255,255,0.03)",
+            border: item.glyph ? `1px solid rgba(56,189,248,0.35)` : "1px solid transparent",
+            cursor: "pointer",
+          }}
         >
-          Enable
+          <Glyph name={effectiveGlyph} />
         </button>
-      ) : (
-        <>
-          <button
-            onClick={() => onSetEnabled(false)}
-            title="Stop sending commands and hide from room control (stays in its room)"
-            style={{ flexShrink: 0, background: "none", border: "none", color: T.faint, cursor: "pointer", fontSize: "0.74rem", padding: "0 0.2rem" }}
+        {picking && (
+          <GlyphPicker
+            anchor={glyphBtnRef.current}
+            isCompact={isCompact}
+            current={item.glyph}
+            onPick={(g) => {
+              onSetGlyph(g);
+              setPicking(false);
+            }}
+            onClose={() => setPicking(false)}
+          />
+        )}
+
+        <div
+          onClick={() => setExpanded((v) => !v)}
+          title={expanded ? "Hide details" : `${item.name} — tap for details`}
+          style={{ minWidth: 0, flex: 1, cursor: "pointer" }}
+        >
+          <div style={{ color: T.text, fontSize: "0.95rem", fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+            {item.name}
+          </div>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "0.4rem",
+              fontSize: "0.72rem",
+              color: T.faint,
+              marginTop: 2,
+              minWidth: 0,
+            }}
           >
-            Disable
-          </button>
-          {item.togglePower && (
-            <Toggle on={on} disabled={offline} onToggle={() => onToggle(!on)} />
+            <span style={{ flexShrink: 0 }}>{item.typeLabel}</span>
+            <span style={{ minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              · {item.deviceId}
+            </span>
+            {conn && <ConnectionPill info={conn} />}
+            {disabled && <StatusPill label="Disabled" tone="muted" />}
+            {offline && <StatusPill label="Offline" tone="bad" />}
+          </div>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: "0.45rem", flexShrink: 0 }}>
+          <span
+            aria-hidden
+            title={offline ? "Unreachable" : on ? "On" : "Off"}
+            style={{
+              flexShrink: 0,
+              width: 8,
+              height: 8,
+              borderRadius: "50%",
+              background: offline ? T.bad : on ? T.good : "rgba(255,255,255,0.18)",
+              boxShadow: !offline && on ? `0 0 8px ${T.good}` : "none",
+            }}
+          />
+          {disabled ? (
+            <button
+              onClick={() => onSetEnabled(true)}
+              title="Resume control of this device"
+              style={{ flexShrink: 0, background: "none", border: `1px solid ${T.cardBorder}`, borderRadius: 8, color: "#6fae84", cursor: "pointer", fontSize: "0.74rem", padding: "0.3rem 0.55rem" }}
+            >
+              Enable
+            </button>
+          ) : (
+            <>
+              <button
+                onClick={() => onSetEnabled(false)}
+                title="Stop sending commands and hide from room control (stays in its room)"
+                style={{ flexShrink: 0, background: "none", border: "none", color: T.faint, cursor: "pointer", fontSize: "0.74rem", padding: "0 0.2rem" }}
+              >
+                Disable
+              </button>
+              {item.togglePower && <Toggle on={on} disabled={offline} onToggle={() => onToggle(!on)} />}
+            </>
           )}
-        </>
-      )}
+          <button
+            onClick={() => setExpanded((v) => !v)}
+            aria-label={expanded ? "Hide details" : "Show details"}
+            style={{
+              flexShrink: 0,
+              background: "none",
+              border: "none",
+              color: T.faint,
+              cursor: "pointer",
+              fontSize: "0.9rem",
+              lineHeight: 1,
+              padding: "0 0.1rem",
+              transform: expanded ? "rotate(180deg)" : "none",
+              transition: "transform .15s ease",
+            }}
+          >
+            ⌄
+          </button>
+        </div>
       </div>
+
+      {/* Detail drop-down: identity, connection, and the device's configuration. */}
+      {expanded && (
+        <div
+          style={{
+            borderTop: `1px solid ${T.cardBorder}`,
+            padding: "0.7rem 0.9rem 0.85rem",
+            display: "flex",
+            flexDirection: "column",
+            gap: "0.5rem",
+          }}
+        >
+          <DetailRow label="Name">{item.name}</DetailRow>
+          <DetailRow label="Device ID">
+            <span style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "0.78rem" }}>
+              {item.deviceId}
+            </span>
+          </DetailRow>
+          {conn && (
+            <DetailRow label="Connection">
+              {conn.long}
+              <span style={{ color: T.faint, fontSize: "0.72rem" }}>
+                {conn.lan ? " · preferred (local)" : " · fallback"}
+              </span>
+            </DetailRow>
+          )}
+          <DetailRow label="Status">{statusText}</DetailRow>
+          <DetailRow label="Room">
+            <button ref={roomBtnRef} onClick={() => setRoomPicking((v) => !v)} style={detailBtnStyle}>
+              {roomName ? (isInheritedRoom ? `${roomName} · linked` : roomName) : "Assign…"}
+            </button>
+            {roomPicking && (
+              <RoomPicker
+                anchor={roomBtnRef.current}
+                rooms={rooms}
+                current={effectiveRoomId}
+                inherited={isInheritedRoom}
+                isCompact={isCompact}
+                onPick={(r) => {
+                  onSetRoom(r);
+                  setRoomPicking(false);
+                }}
+                onClose={() => setRoomPicking(false)}
+              />
+            )}
+          </DetailRow>
+          {isAudioSource && (
+            <DetailRow label="Receiver">
+              <button ref={receiverBtnRef} onClick={() => setReceiverPicking((v) => !v)} style={detailBtnStyle}>
+                {boundReceiver ? `Volume → ${boundReceiver}` : "Bind receiver…"}
+              </button>
+              {receiverPicking && (
+                <ReceiverPicker
+                  anchor={receiverBtnRef.current}
+                  isCompact={isCompact}
+                  sourceId={item.id}
+                  devices={audioDevices}
+                  currentReceiver={item.receiverId ?? null}
+                  currentSource={item.receiverSource ?? null}
+                  onPick={(rid, rsrc) => {
+                    onSetReceiver(rid, rsrc);
+                    if (!rid) setReceiverPicking(false);
+                  }}
+                  onClose={() => setReceiverPicking(false)}
+                />
+              )}
+            </DetailRow>
+          )}
+          {item.domain === "audio" && mergeCandidates.length > 0 && (
+            <DetailRow label="Merge">
+              <button ref={mergeBtnRef} onClick={() => setMergePicking((v) => !v)} style={detailBtnStyle}>
+                Merge into…
+              </button>
+              {mergePicking && (
+                <MergePicker
+                  anchor={mergeBtnRef.current}
+                  isCompact={isCompact}
+                  candidates={mergeCandidates}
+                  onPick={(primaryId) => {
+                    onMerge(primaryId);
+                    setMergePicking(false);
+                  }}
+                  onClose={() => setMergePicking(false)}
+                />
+              )}
+            </DetailRow>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1168,8 +1210,8 @@ export function DevicesPage() {
             // — because that `min()` form trips an auto-fill column-count quirk
             // that packs an extra, overflowing column on desktop; the guard is
             // moot here since this grid only renders above the mobile breakpoint.)
-            gridTemplateColumns: isMobile ? "1fr" : "repeat(auto-fill, minmax(360px, 1fr))",
-            gap: "0.7rem",
+            gridTemplateColumns: isMobile ? "1fr" : "repeat(auto-fill, minmax(380px, 1fr))",
+            gap: "0.8rem",
           }}
         >
           {visible.map((d) => (
@@ -1322,7 +1364,13 @@ export function DevicesPage() {
                 <SectionLabel style={{ fontSize: "0.95rem", color: T.text }}>
                   {provider?.name ?? "Unknown provider"}
                   <span style={{ color: T.faint, fontWeight: 400, letterSpacing: "0.08em" }}>
-                    {provider?.type_name ? ` · ${provider.type_name}` : ""} · {total}
+                    {/* Only show the type when it differs from the instance name, so
+                        a provider the user named after its type doesn't read
+                        "Govee · Govee". */}
+                    {provider?.type_name && provider.type_name !== provider.name
+                      ? ` · ${provider.type_name}`
+                      : ""}{" "}
+                    · {total}
                   </span>
                 </SectionLabel>
               </div>

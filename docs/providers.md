@@ -12,8 +12,8 @@ remotes.
 | Provider | Category | Devices | Transport | Live updates | Credentials |
 |---|---|---|---|---|---|
 | Philips Hue | Light | Lights | LAN (CLIP v2) | SSE push | Bridge IP + link-button app key |
-| Govee | Light | Lights | Cloud API | Poll (≈2 min) | API key |
-| LIFX | Light | Lights | Cloud API | Poll (≈2 min) | Account token |
+| Govee | Light | Lights | Cloud API + LAN (UDP) | Poll (≈2 min) | API key and/or LAN interface |
+| LIFX | Light | Lights | Cloud API + LAN (UDP) | Poll (≈2 min) | Account token and/or LAN interface |
 | Onkyo / Integra | Audio | Receivers + zones | LAN (eISCP) | Push | Receiver IP |
 | Sonos | Audio | Speakers | LAN (UPnP) | Push (events + poll) | Any player's IP |
 | Home Assistant | Integration | Lights · audio · power · remotes | REST + WebSocket | WebSocket push | Base URL + long-lived token |
@@ -29,17 +29,19 @@ remotes.
 Hue's ~10 req/s rate limit is handled with a per-bridge write pacer, so room-wide
 fan-outs don't drop commands.
 
-## Govee (Cloud)
+## Govee
 
-- **Category** Light · **Transport** Govee Cloud API · **Live** polling.
-- **Setup** API key — Govee Home app → Profile → About Us → Apply for API Key.
-- **Capabilities** RGB color, color temperature, brightness, and **effects** = the device's **dynamic light scenes** — the built-in catalogue *plus* your own DIY scenes (often 100+ on a strip; the effects picker has search + categories for this). No native rooms.
+- **Category** Light · **Transport** Govee Cloud API **and/or local LAN (UDP)** · **Live** polling.
+- **Setup** Supply your **API key** (Govee Home app → Profile → About Us → Apply for API Key). **Local LAN control is on by default** — just turn on **“LAN Control”** for each device in the Govee Home app. (The LAN-interface field is advanced: leave blank for all interfaces / `0.0.0.0`, set a specific IP only if multi-homed.)
+- **LAN-preferred control** — Bifrost controls each device over your **local network** whenever that device supports and has LAN Control enabled (faster, no cloud round-trip, no daily quota), and automatically **falls back to the cloud** for any device that isn't LAN-reachable. Only *some* Govee models support LAN, so this is decided per device. A host that can't reach the LAN (or has no API key) still works — it just uses whichever transport is available. The **Devices page shows how each device is reached** (a `LAN`/`Cloud` pill on the card, with detail in the expandable row).
+- **Capabilities** RGB color, color temperature, brightness, and **effects** = the device's **dynamic light scenes** — the built-in catalogue *plus* your own DIY scenes (often 100+ on a strip; the effects picker has search + categories for this). Effects are applied via the cloud. No native rooms.
 
-## LIFX (Cloud)
+## LIFX
 
-- **Category** Light · **Transport** LIFX Cloud API (Bearer token) · **Live** polling.
-- **Setup** Personal access token from [cloud.lifx.com/settings](https://cloud.lifx.com/settings).
-- **Capabilities** RGB color, color temperature, brightness, and **firmware effects** — `off`/`breathe`/`pulse` on every color bulb, `move` on multizone strips (Z/Beam), and `morph`/`flame` on matrix bulbs (Tile/Candle). **LIFX groups import as Bifrost Rooms** with one-call group control.
+- **Category** Light · **Transport** LIFX Cloud API **and/or local LAN (UDP)** · **Live** polling.
+- **Setup** Supply your **access token** ([cloud.lifx.com/settings](https://cloud.lifx.com/settings)). **Local LAN control is on by default** (LIFX LAN is on by default on the bulbs — no per-device toggle needed). (The LAN-interface field is advanced: blank = all interfaces / `0.0.0.0`.)
+- **LAN-preferred control** — plain colour/brightness/power goes over your **local network** whenever a bulb is reachable (faster, no quota, works during a cloud outage), falling back to the **cloud** for any bulb that isn't, and for **effects** (effects run via the cloud). The Devices page shows each bulb's `LAN`/`Cloud` connection. A host that can't reach the LAN (or has no token) still works on whichever transport is available.
+- **Capabilities** RGB color, color temperature, brightness, and **firmware effects** — `off`/`breathe`/`pulse` on every color bulb, `move` on multizone strips (Z/Beam), and `morph`/`flame` on matrix bulbs (Tile/Candle). **LIFX groups import as Bifrost Rooms** with one-call group control (cloud).
 
 ## Onkyo / Integra
 
