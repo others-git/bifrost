@@ -64,6 +64,7 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Setup guide: setup.md
   - Providers: providers.md
   - Public API: api.md
   - MCP server: mcp.md

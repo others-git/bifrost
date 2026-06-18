@@ -21,8 +21,9 @@ than failing.
 
 📖 **Full docs: <https://others-git.github.io/bifrost/>**
 
-- [Overview, install & configuration](docs/index.md)
-- [Providers](docs/providers.md) — Hue, Govee, LIFX, Onkyo/Integra, Home Assistant
+- [Overview](docs/index.md) — what Bifrost is and how it's built
+- [Setup guide](docs/setup.md) — install, configuration, first-run, voice, the wall tablet
+- [Providers](docs/providers.md) — Hue, Govee, LIFX, Onkyo/Integra, Sonos, Home Assistant
 - [Public API](docs/api.md) — the Bearer-key `/api/v1` REST surface
 - [MCP server](docs/mcp.md) — the embedded assistant tool catalogue
 

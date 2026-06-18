@@ -4,7 +4,7 @@ Bifrost embeds a [Model Context Protocol](https://modelcontextprotocol.io)
 server **inside the Bifrost binary** so an AI assistant can control the whole
 home in natural language. It is the **third surface over the shared service
 layer**, alongside the session API (`/api/*`) and the public API (`/api/v1/*`) —
-the tools call the same `api::{lights,audio,rooms,palette_scenes}` service
+the tools call the same `api::{lights,audio,rooms,scenes}` service
 functions directly (no HTTP hop, no Bearer round-trip), so they can't drift from
 the REST surface and reuse the real color math (`models::Color`).
 
@@ -48,7 +48,7 @@ All tools below are served natively from `src/api/mcp.rs`.
 | `get_home_state` | `list_public_rooms` + `list_all_lights` + `list_all_scenes` + `list_all_devices` + `list_all_power_devices` | One-call context snapshot (rooms with member ids, lights, scenes, audio devices, power devices) |
 | `list_lights` | `list_all_lights` | each light carries `capabilities.effects` (the dynamic-effect names it supports) |
 | `set_light` | `apply_light_state` | light by id/name; hex → CIE xy via `Color::from_rgb`; optional `effect` (a name from `capabilities.effects`, e.g. "candle"/"breathe"/"Sunrise") supersedes color/temp |
-| `set_room` | `effective_members` + `apply_uniform_state` | room by id/name; fan-out to member lights |
+| `set_room` | `effective_members` + `apply_room_state` | room by id/name; fan-out to member lights |
 | `activate_scene` | `apply_scene_entries` | scene by id/name; re-applies the captured full state (color/temp/effect + power). A Room Scene restores its room, a Home Scene the whole house |
 | `save_room_scene` | `capture_scene(room_id)` | snapshot a room's current full state (each light's color/temp/effect + power) as a new Room Scene |
 | `save_home_scene` | `capture_scene(None)` | snapshot the whole home's current state as a new Home Scene |

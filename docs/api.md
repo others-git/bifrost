@@ -32,7 +32,7 @@ curl -H "Authorization: Bearer $BIFROST_KEY" http://bifrost.local:3000/api/v1/li
 {
   "id": "8b7f…",                 // Bifrost UUID — use this in all /lights/{id} calls
   "provider_id": "ab12…",        // provider-native identifier (informational)
-  "provider": "hue",             // hue | govee | wled | tasmota | shelly | lifx | govee-lan
+  "provider": "hue",             // hue | govee | lifx | wled | tasmota | shelly | ha
   "name": "Desk lamp",
   "state": { … LightState … },
   "capabilities": {
@@ -130,9 +130,10 @@ results, since a room can span providers and some members may be offline.
 | `POST` | `/api/v1/scenes/{id}/activate` | Re-apply the scene → `200 { applied, failed }` (`404` if unknown/empty) |
 | `DELETE` | `/api/v1/scenes/{id}` | Delete → `204` |
 
-`POST /scenes` validates: name required, brightness 1–100 if present, palette
-entries must be `#rrggbb`, max 6 colors → `422` with a message on violation.
-`from-room` returns `422` if nothing in the room is currently lit.
+`POST /scenes` snapshots **current live state** — it has no color/brightness
+inputs of its own; the body is only `{ name, room_id? }`. A blank `name` →
+`422` ("scene name is required"); an unknown `room_id` → `404`. `DELETE` is
+idempotent (always `204`, even for an unknown id).
 
 ### Audio devices
 
@@ -143,7 +144,7 @@ Receivers and networked speakers (Onkyo via eISCP, Sonos via local UPnP).
   "id": "c41a…",
   "provider_id": "9b2e…",
   "name": "Onkyo receiver (192.168.1.40)",
-  "kind": "receiver",              // receiver | speaker | zone
+  "kind": "receiver",              // receiver | speaker | tv | zone
   "capabilities": { "sources": true, "transport": true, "now_playing": true },
   "state": {
     "power": true,
@@ -158,8 +159,7 @@ Receivers and networked speakers (Onkyo via eISCP, Sonos via local UPnP).
       "play_state": "playing"      // playing | paused | stopped
     },
     "reachable": true
-  },
-  "last_seen": "2026-06-12 05:30:00"
+  }
 }
 ```
 
@@ -300,12 +300,10 @@ glyph) and is one of `switch | outlet | fan | toggle | generic`.
 ```json
 {
   "id": "5d2f…",
-  "provider_id": "c09e…",
-  "device_id": "switch.porch",   // provider-native id (HA entity_id)
+  "provider_id": "switch.porch",  // provider-native id (e.g. HA entity_id)
   "name": "Porch",
   "kind": "switch",
-  "state": { "on": true, "reachable": true },
-  "last_seen": "2026-06-13 04:39:28"
+  "state": { "on": true, "reachable": true }
 }
 ```
 
@@ -322,20 +320,18 @@ device could not be reached.
 
 A virtual smart-remote for a TV / streamer (Android TV Remote via Home Assistant
 today). State is `on` plus the foreground app (`current_app`, a package id).
-`paired_audio_id` links the remote to its TV's audio device when they share
-hardware.
 
 ```json
 {
   "id": "9a1b…",
-  "provider_id": "c09e…",
-  "device_id": "remote.bedroom_tv",
+  "provider_id": "remote.bedroom_tv",  // provider-native id (e.g. HA entity_id)
   "name": "Bedroom TV",
-  "state": { "on": true, "current_app": "com.netflix.ninja", "reachable": true },
-  "enabled": true,
-  "paired_audio_id": "7c3d…"
+  "state": { "on": true, "current_app": "com.netflix.ninja", "reachable": true }
 }
 ```
+
+`GET /remote/devices/{id}` returns just the live `state` object (the
+`RemoteState`), not the full device record.
 
 | Method | Path | Description |
 |---|---|---|
