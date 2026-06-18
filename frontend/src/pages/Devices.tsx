@@ -677,8 +677,14 @@ function DeviceCard({
           title={expanded ? "Hide details" : `${item.name} — tap for details`}
           style={{ minWidth: 0, flex: 1, cursor: "pointer" }}
         >
-          <div style={{ color: T.text, fontSize: "0.95rem", fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-            {item.name}
+          {/* Name + status: the device's state (offline/disabled) sits right beside
+              the name, not buried after the truncated id. */}
+          <div style={{ display: "flex", alignItems: "center", gap: "0.45rem", minWidth: 0 }}>
+            <span style={{ color: T.text, fontSize: "0.95rem", fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>
+              {item.name}
+            </span>
+            {offline && <StatusPill label="Offline" tone="bad" />}
+            {disabled && <StatusPill label="Disabled" tone="muted" />}
           </div>
           <div
             style={{
@@ -696,8 +702,6 @@ function DeviceCard({
               · {item.deviceId}
             </span>
             {conn && <ConnectionPill info={conn} />}
-            {disabled && <StatusPill label="Disabled" tone="muted" />}
-            {offline && <StatusPill label="Offline" tone="bad" />}
           </div>
         </div>
 
@@ -1212,6 +1216,10 @@ export function DevicesPage() {
             // moot here since this grid only renders above the mobile breakpoint.)
             gridTemplateColumns: isMobile ? "1fr" : "repeat(auto-fill, minmax(380px, 1fr))",
             gap: "0.8rem",
+            // Each card sizes to its own content — without this, grid rows stretch
+            // every card to the tallest, so expanding one card's detail panel makes
+            // its row-mates grow too (the phantom "expand").
+            alignItems: "start",
           }}
         >
           {visible.map((d) => (

@@ -187,7 +187,8 @@ const SECTION_HEADING: React.CSSProperties = {
   alignItems: "center",
   gap: "0.45rem",
   fontSize: "0.82rem",
-  color: color.gold,
+  // Themeable engraved-label colour (defaults to gold; a theme can recolour it).
+  color: color.textAccent,
   margin: "0 0 0.6rem",
 };
 

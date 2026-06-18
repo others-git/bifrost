@@ -31,6 +31,10 @@ export const color = {
   violet: v("violet"), // secondary accent / audio
   gold: v("gold"), // ornament / highlight / power
   goldBright: v("goldBright"),
+  /** Engraved section-header text (e.g. "HOME SCENES"). Its own themeable knob,
+   * defaulting to `gold` — a theme can recolour these labels without moving the
+   * ornament gold. Falls back to gold if a theme predates the token. */
+  textAccent: "var(--bf-textAccent, var(--bf-gold))",
   oxblood: v("oxblood"), // depth / gothic shadow
   rose: v("rose"), // danger
   good: v("good"), // success / online
@@ -161,6 +165,8 @@ export interface ThemeColors {
   violet: string; // secondary accent
   gold: string; // ornament
   goldBright: string;
+  /** Engraved section-header text colour. Optional — defaults to `gold`. */
+  textAccent?: string;
   oxblood: string;
   rose: string;
   good: string;
@@ -173,8 +179,19 @@ export interface Theme {
   name: string;
   /** Built-ins ship with the app; `custom` themes live in localStorage. */
   custom?: boolean;
+  /** Selector grouping (e.g. "Sacred Gothic"). Absent → the "Custom" set. */
+  category?: string;
   colors: ThemeColors;
 }
+
+/** Order the appearance selector renders its theme sets in. */
+export const THEME_CATEGORIES = [
+  "Sacred Gothic",
+  "Deep Water",
+  "Verdant",
+  "Industrial",
+  "Warm Dusk",
+] as const;
 
 // ── colour math (no deps) ────────────────────────────────────────────────────
 const clampByte = (n: number) => Math.max(0, Math.min(255, Math.round(n)));
@@ -217,6 +234,8 @@ function deriveVars(c: ThemeColors): Record<string, string> {
     violet: c.violet,
     gold: c.gold,
     goldBright: c.goldBright,
+    // Engraved-label text: its own knob, defaulting to the theme's gold.
+    textAccent: c.textAccent ?? c.gold,
     oxblood: c.oxblood,
     rose: c.rose,
     good: c.good,
@@ -253,44 +272,240 @@ export function applyTheme(theme: Theme) {
 // ── Built-in themes ──────────────────────────────────────────────────────────
 
 export const THEMES: Theme[] = [
+  // ── Sacred Gothic ──────────────────────────────────────────────────────────
   {
     id: "candlelit",
     name: "Candlelit Cathedral",
+    category: "Sacred Gothic",
     colors: {
-      void: "#09080b", panel: "#121116", surface: "#19171d", surfaceHi: "#23202a", surfaceOff: "#121016",
-      text: "#ece6f0", dim: "#a6a1ab", faint: "#6f6772",
-      cyan: "#38bdf8", violet: "#a78bfa", gold: "#c8a24b", goldBright: "#e6c878",
-      oxblood: "#6e1f2e", rose: "#f43f5e", good: "#5fb87a", ink: "#04121b", tarnish: "#8a7647",
+      void: "#0a0806", panel: "#14110d", surface: "#1c1814", surfaceHi: "#29241c", surfaceOff: "#141009",
+      text: "#efe9e2", dim: "#aaa49a", faint: "#726b60",
+      cyan: "#38bdf8", violet: "#a78bfa", gold: "#c8a24b", goldBright: "#e6c878", textAccent: "#e8cd8a",
+      oxblood: "#6e1f2e", rose: "#d23651", good: "#5fb87a", ink: "#140d04", tarnish: "#8a7647",
     },
   },
   {
+    id: "obsidian-vespers",
+    name: "Obsidian Vespers",
+    category: "Sacred Gothic",
+    colors: {
+      void: "#08070b", panel: "#100d15", surface: "#16121e", surfaceHi: "#211a2c", surfaceOff: "#0d0a12",
+      text: "#ece7f3", dim: "#a39bb2", faint: "#695f76",
+      cyan: "#7c9cff", violet: "#b385ff", gold: "#c7b06e", goldBright: "#e6cf95", textAccent: "#ddc98f",
+      oxblood: "#4a2b5e", rose: "#f04a6e", good: "#5fb887", ink: "#0a0712", tarnish: "#7c6c52",
+    },
+  },
+  {
+    id: "sanguine-choir",
+    name: "Sanguine Choir",
+    category: "Sacred Gothic",
+    colors: {
+      void: "#0c0708", panel: "#160d0f", surface: "#1e1316", surfaceHi: "#2b1a1e", surfaceOff: "#130a0c",
+      text: "#f1e7e6", dim: "#b59a9c", faint: "#705c5e",
+      cyan: "#ef5566", violet: "#c178b0", gold: "#cda152", goldBright: "#ecc77f", textAccent: "#e7b58f",
+      oxblood: "#6e1f2e", rose: "#ff6f5b", good: "#6fc488", ink: "#160808", tarnish: "#8a6a4a",
+    },
+  },
+  {
+    id: "velvet-eclipse",
+    name: "Velvet Eclipse",
+    category: "Sacred Gothic",
+    colors: {
+      void: "#0a0810", panel: "#120f1d", surface: "#181428", surfaceHi: "#241d3a", surfaceOff: "#0f0c1a",
+      text: "#ece9f6", dim: "#a39fbb", faint: "#686284",
+      cyan: "#6f7bff", violet: "#b07cff", gold: "#e0b964", goldBright: "#f5d68c", textAccent: "#ecd18a",
+      oxblood: "#3f2a66", rose: "#f24a7a", good: "#5fc0a0", ink: "#0a0810", tarnish: "#7e6c54",
+    },
+  },
+  {
+    id: "cinder-reliquary",
+    name: "Cinder Reliquary",
+    category: "Sacred Gothic",
+    colors: {
+      void: "#0a0908", panel: "#141210", surface: "#1b1714", surfaceHi: "#27231e", surfaceOff: "#110e0c",
+      text: "#efebe1", dim: "#aaa194", faint: "#6c6457",
+      cyan: "#ff7a52", violet: "#b78fa8", gold: "#cbb588", goldBright: "#e6d3a4", textAccent: "#ddcc9e",
+      oxblood: "#6a2a22", rose: "#ff6f5b", good: "#9bbf6f", ink: "#140b06", tarnish: "#8a7a55",
+    },
+  },
+  // ── Deep Water ─────────────────────────────────────────────────────────────
+  {
     id: "abyssal",
     name: "Abyssal Bloom",
+    category: "Deep Water",
     colors: {
       void: "#04100f", panel: "#07191a", surface: "#0b2122", surfaceHi: "#123032", surfaceOff: "#061616",
       text: "#e6f7f4", dim: "#8fb3ad", faint: "#4f6f6b",
-      cyan: "#5eead4", violet: "#38bdf8", gold: "#9fe0b0", goldBright: "#c7f0d0",
+      cyan: "#5eead4", violet: "#38bdf8", gold: "#9fe0b0", goldBright: "#c7f0d0", textAccent: "#a9efd0",
       oxblood: "#1e6b5e", rose: "#ff6b6b", good: "#5fe0a0", ink: "#03100e", tarnish: "#4a7a6a",
     },
   },
   {
+    id: "tidepool-dusk",
+    name: "Tidepool Dusk",
+    category: "Deep Water",
+    colors: {
+      void: "#06100f", panel: "#0a1a1b", surface: "#0f2426", surfaceHi: "#173336", surfaceOff: "#081617",
+      text: "#e7f3f2", dim: "#93b2b2", faint: "#556f70",
+      cyan: "#45d3da", violet: "#ff9180", gold: "#d7b98a", goldBright: "#efd6a8", textAccent: "#e8d3a0",
+      oxblood: "#2a5e66", rose: "#ff6f6f", good: "#5fe0a0", ink: "#06100f", tarnish: "#7e8a6e",
+    },
+  },
+  {
+    id: "halcyon-drift",
+    name: "Halcyon Drift",
+    category: "Deep Water",
+    colors: {
+      void: "#060f12", panel: "#0a181c", surface: "#0f2127", surfaceHi: "#182f37", surfaceOff: "#081519",
+      text: "#e6f1f5", dim: "#93acb6", faint: "#556a74",
+      cyan: "#6fc8e0", violet: "#8fb6e8", gold: "#9fc0c0", goldBright: "#c6dede", textAccent: "#bcd8da",
+      oxblood: "#2a5560", rose: "#ec8a8a", good: "#7fd0b0", ink: "#061214", tarnish: "#6a8088",
+    },
+  },
+  {
+    id: "aurora-mire",
+    name: "Aurora Mire",
+    category: "Deep Water",
+    colors: {
+      void: "#060c08", panel: "#0b150e", surface: "#101e14", surfaceHi: "#1a2e20", surfaceOff: "#0a130d",
+      text: "#e8f2e8", dim: "#97b29c", faint: "#586e5c",
+      cyan: "#4fe0b0", violet: "#9f7cff", gold: "#a8c878", goldBright: "#cde6a0", textAccent: "#bfe0a0",
+      oxblood: "#2a5e3e", rose: "#ff6f6f", good: "#5fe07a", ink: "#060c08", tarnish: "#6a8a5a",
+    },
+  },
+  // ── Verdant ────────────────────────────────────────────────────────────────
+  {
+    id: "witchlight",
+    name: "Witchlight",
+    category: "Verdant",
+    colors: {
+      void: "#060a07", panel: "#0c130d", surface: "#121b14", surfaceHi: "#1d291f", surfaceOff: "#0a110c",
+      text: "#e8f2e6", dim: "#9ab39a", faint: "#5b6f5b",
+      cyan: "#6bff9f", violet: "#b07cff", gold: "#9fd07a", goldBright: "#c6eca0", textAccent: "#b6f0a0",
+      oxblood: "#2e5e3a", rose: "#ff5f7f", good: "#5fe07a", ink: "#060c07", tarnish: "#6e8a55",
+    },
+  },
+  {
+    id: "verdigris-crypt",
+    name: "Verdigris Crypt",
+    category: "Verdant",
+    colors: {
+      void: "#07100e", panel: "#0c1a17", surface: "#112320", surfaceHi: "#1b322d", surfaceOff: "#0a1714",
+      text: "#e4f2ee", dim: "#8fb2a8", faint: "#506f68",
+      cyan: "#4fd0b8", violet: "#6fb0d0", gold: "#c08a5a", goldBright: "#e0ad7c", textAccent: "#a8e0c0",
+      oxblood: "#2a5e52", rose: "#f06a6a", good: "#5fd09a", ink: "#07100e", tarnish: "#7a8a6a",
+    },
+  },
+  {
+    id: "mossgrave",
+    name: "Mossgrave",
+    category: "Verdant",
+    colors: {
+      void: "#090a07", panel: "#11140d", surface: "#171b12", surfaceHi: "#23291c", surfaceOff: "#0f120b",
+      text: "#edf0e2", dim: "#a6ad93", faint: "#686d56",
+      cyan: "#8fc24f", violet: "#7fb0a0", gold: "#cabf94", goldBright: "#e6dcae", textAccent: "#cdd6a0",
+      oxblood: "#4a5e2a", rose: "#e07a6a", good: "#8fcf5f", ink: "#0a0c06", tarnish: "#8a8a5a",
+    },
+  },
+  // ── Industrial ─────────────────────────────────────────────────────────────
+  {
+    id: "frostpunk",
+    name: "Frostpunk",
+    category: "Industrial",
+    colors: {
+      void: "#080a0f", panel: "#10141c", surface: "#161c26", surfaceHi: "#222b38", surfaceOff: "#0d1119",
+      text: "#eaf1fb", dim: "#9aa8bd", faint: "#5a6678",
+      cyan: "#7dd3fc", violet: "#a5b4fc", gold: "#b9c4d4", goldBright: "#dde6f0", textAccent: "#c6d4e8",
+      oxblood: "#3a4a66", rose: "#f87171", good: "#6ee7b7", ink: "#07101a", tarnish: "#6a7686",
+    },
+  },
+  {
+    id: "stormglass",
+    name: "Stormglass",
+    category: "Industrial",
+    colors: {
+      void: "#070a0e", panel: "#0e131b", surface: "#141b25", surfaceHi: "#202a38", surfaceOff: "#0c1019",
+      text: "#eaf0fa", dim: "#9aa7bd", faint: "#59657a",
+      cyan: "#4fa8ff", violet: "#8f9cff", gold: "#aebccf", goldBright: "#d6e2f0", textAccent: "#cfe0ff",
+      oxblood: "#2e4060", rose: "#ff5f6f", good: "#5fd0a0", ink: "#060a10", tarnish: "#6a7888",
+    },
+  },
+  {
+    id: "plasma-vault",
+    name: "Plasma Vault",
+    category: "Industrial",
+    colors: {
+      void: "#08070c", panel: "#100e16", surface: "#16141f", surfaceHi: "#221e2e", surfaceOff: "#0d0b14",
+      text: "#efeaf4", dim: "#a89fb0", faint: "#665f70",
+      cyan: "#3fe0ff", violet: "#ff5fd0", gold: "#c0a8d0", goldBright: "#e0cdee", textAccent: "#ecb0e6",
+      oxblood: "#5a2a5e", rose: "#ff5f8f", good: "#5fe0c0", ink: "#08070c", tarnish: "#7a6c84",
+    },
+  },
+  {
+    id: "ironbloom",
+    name: "Ironbloom",
+    category: "Industrial",
+    colors: {
+      void: "#0a0807", panel: "#14110e", surface: "#1b1713", surfaceHi: "#28221c", surfaceOff: "#110d0a",
+      text: "#efe9e3", dim: "#aaa093", faint: "#6c6355",
+      cyan: "#ff4d88", violet: "#7aaecf", gold: "#b8945e", goldBright: "#e0b888", textAccent: "#e0b890",
+      oxblood: "#7a2e1e", rose: "#ff6f5b", good: "#9bbf6f", ink: "#140b06", tarnish: "#8a6a48",
+    },
+  },
+  {
+    id: "neon-monastery",
+    name: "Neon Monastery",
+    category: "Industrial",
+    colors: {
+      void: "#0a0a0c", panel: "#131316", surface: "#1a1a1f", surfaceHi: "#26262d", surfaceOff: "#111114",
+      text: "#eceaf0", dim: "#a4a2ab", faint: "#67646f",
+      cyan: "#34e0ff", violet: "#ff4df0", gold: "#b8b0c4", goldBright: "#ddd6e8", textAccent: "#d8c0f0",
+      oxblood: "#4a2e5e", rose: "#ff5f7f", good: "#5fe0b0", ink: "#0a0a0c", tarnish: "#7a7684",
+    },
+  },
+  {
+    id: "voidbloom",
+    name: "Voidbloom",
+    category: "Industrial",
+    colors: {
+      void: "#050407", panel: "#0d0a12", surface: "#14101c", surfaceHi: "#1f1a2c", surfaceOff: "#0b0810",
+      text: "#efe8f6", dim: "#a89eb6", faint: "#675d78",
+      cyan: "#7c5cff", violet: "#ff5fe0", gold: "#c79ad0", goldBright: "#e6c4ec", textAccent: "#e6a0f0",
+      oxblood: "#4a2060", rose: "#ff5fa0", good: "#5fe0c0", ink: "#050407", tarnish: "#806c8a",
+    },
+  },
+  // ── Warm Dusk ──────────────────────────────────────────────────────────────
+  {
     id: "emberforge",
     name: "Emberforge",
+    category: "Warm Dusk",
     colors: {
       void: "#0d0805", panel: "#170d08", surface: "#1f140c", surfaceHi: "#2c1d12", surfaceOff: "#150c06",
       text: "#f3e8dc", dim: "#b39a86", faint: "#6e5b4a",
-      cyan: "#ff8a3c", violet: "#6fd3ff", gold: "#d99a52", goldBright: "#f0c074",
+      cyan: "#ff8a3c", violet: "#6fd3ff", gold: "#d99a52", goldBright: "#f0c074", textAccent: "#efb15f",
       oxblood: "#7a2418", rose: "#ff5a4d", good: "#9bcf5f", ink: "#170a04", tarnish: "#8a5a30",
     },
   },
   {
-    id: "frostpunk",
-    name: "Frostpunk",
+    id: "copperline-dusk",
+    name: "Copperline Dusk",
+    category: "Warm Dusk",
     colors: {
-      void: "#080a0f", panel: "#10141c", surface: "#161c26", surfaceHi: "#222b38", surfaceOff: "#0d1119",
-      text: "#eaf1fb", dim: "#9aa8bd", faint: "#5a6678",
-      cyan: "#7dd3fc", violet: "#a5b4fc", gold: "#b9c4d4", goldBright: "#dde6f0",
-      oxblood: "#3a4a66", rose: "#f87171", good: "#6ee7b7", ink: "#07101a", tarnish: "#6a7686",
+      void: "#0b0809", panel: "#150f10", surface: "#1d1416", surfaceHi: "#2a1e20", surfaceOff: "#130c0e",
+      text: "#f2e8e6", dim: "#b59c98", faint: "#715c59",
+      cyan: "#ff9a5c", violet: "#a07ccf", gold: "#cd8a52", goldBright: "#ecb47a", textAccent: "#ecc090",
+      oxblood: "#6e2a2e", rose: "#ff6f5b", good: "#9bbf6f", ink: "#150a07", tarnish: "#8a6448",
+    },
+  },
+  {
+    id: "gilded-ash",
+    name: "Gilded Ash",
+    category: "Warm Dusk",
+    colors: {
+      void: "#0a0908", panel: "#141210", surface: "#1b1815", surfaceHi: "#27231e", surfaceOff: "#110f0c",
+      text: "#efebe3", dim: "#a9a194", faint: "#6b6358",
+      cyan: "#f0a85a", violet: "#a896a0", gold: "#b89a5e", goldBright: "#e0c486", textAccent: "#d8c290",
+      oxblood: "#6a2e26", rose: "#ef6f5b", good: "#9bbf6f", ink: "#140c07", tarnish: "#8a7850",
     },
   },
 ];

@@ -1329,6 +1329,18 @@ function batteryMeta(k: Kiosk): string {
   return parts.join(" · ");
 }
 
+/** Compare dotted numeric versions ("0.2.6" vs "0.2.4"): >0 if a>b, <0 if a<b,
+ * 0 if equal. Used so the hub only offers a *newer* cached APK, never a downgrade. */
+function cmpVersion(a: string, b: string): number {
+  const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = b.split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
 function KiosksSection({
   dialogs,
   latest,
@@ -1503,7 +1515,9 @@ function KiosksSection({
                 Forget
               </Button>
               {/* Update status: "Updating…" while a push is in flight, else compare
-                  the kiosk's version to the hub's cached APK — up-to-date or Update. */}
+                  the kiosk's version to the hub's cached APK. Only offer an update
+                  when the cache is *strictly newer* — never a downgrade (the kiosk
+                  can be ahead of a stale cache, e.g. after a local sideload). */}
               {updating[k.id] ? (
                 <span style={{ fontSize: "0.74rem", color: "var(--bf-accent, #38bdf8)", whiteSpace: "nowrap" }}>
                   <span className="bifrost-voice-pulse" style={{ display: "inline-block" }}>⟳</span> Updating → {updating[k.id]}…
@@ -1511,11 +1525,7 @@ function KiosksSection({
               ) : (
                 latest &&
                 k.app_version &&
-                (k.app_version === latest.version_name ? (
-                  <span style={{ fontSize: "0.74rem", color: "var(--bf-good)", whiteSpace: "nowrap" }}>
-                    ✓ up to date
-                  </span>
-                ) : (
+                (cmpVersion(latest.version_name, k.app_version) > 0 ? (
                   <Button
                     onClick={() => pushUpdate(k)}
                     disabled={!k.online || !k.authorized}
@@ -1524,6 +1534,10 @@ function KiosksSection({
                   >
                     Update → {latest.version_name}
                   </Button>
+                ) : (
+                  <span style={{ fontSize: "0.74rem", color: "var(--bf-good)", whiteSpace: "nowrap" }}>
+                    ✓ up to date
+                  </span>
                 ))
               )}
             </div>

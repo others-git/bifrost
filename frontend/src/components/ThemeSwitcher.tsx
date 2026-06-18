@@ -12,9 +12,10 @@ import {
   randomTheme,
   saveTheme,
   setActiveTheme,
+  THEME_CATEGORIES,
   type Theme,
 } from "../theme";
-import { color, font, radius } from "../theme";
+import { color, font, labelType, radius } from "../theme";
 import { Button } from "./controls";
 
 export function ThemeSwitcher() {
@@ -28,6 +29,16 @@ export function ThemeSwitcher() {
   // A freshly generated theme is "active" but not yet in the saved list.
   const unsaved = !!active.custom && !list.some((t) => t.id === active.id);
   const chips = unsaved ? [...list, active] : list;
+
+  // Group into the named sets (built-ins carry a category); anything without one
+  // — generated/saved customs — falls into a trailing "Custom" set.
+  const groups = [
+    ...THEME_CATEGORIES.map((label) => ({
+      label: label as string,
+      themes: chips.filter((t) => t.category === label),
+    })),
+    { label: "Custom", themes: chips.filter((t) => !t.category) },
+  ].filter((g) => g.themes.length > 0);
 
   function pick(t: Theme) {
     setActiveTheme(t);
@@ -55,21 +66,37 @@ export function ThemeSwitcher() {
 
   return (
     <div>
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(148px, 1fr))",
-          gap: "0.6rem",
-        }}
-      >
-        {chips.map((t) => (
-          <ThemeChip
-            key={t.id}
-            theme={t}
-            active={t.id === active.id}
-            onPick={() => pick(t)}
-            onDelete={t.custom ? () => remove(t) : undefined}
-          />
+      <div style={{ display: "flex", flexDirection: "column", gap: "1.2rem" }}>
+        {groups.map((g) => (
+          <div key={g.label}>
+            <div
+              style={{
+                ...labelType,
+                fontSize: "0.68rem",
+                color: color.dim,
+                marginBottom: "0.5rem",
+              }}
+            >
+              {g.label}
+            </div>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fill, minmax(148px, 1fr))",
+                gap: "0.6rem",
+              }}
+            >
+              {g.themes.map((t) => (
+                <ThemeChip
+                  key={t.id}
+                  theme={t}
+                  active={t.id === active.id}
+                  onPick={() => pick(t)}
+                  onDelete={t.custom ? () => remove(t) : undefined}
+                />
+              ))}
+            </div>
+          </div>
         ))}
       </div>
       <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.85rem", alignItems: "center" }}>
