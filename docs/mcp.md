@@ -12,10 +12,9 @@ the REST surface and reuse the real color math (`models::Color`).
 - **Transport:** **Streamable HTTP only** (stateless, JSON responses). There is
   no stdio server; stdio-only clients bridge to `/mcp` with the standard
   `mcp-remote` shim. See [MCP-Add rationale](#why-embedded) below.
-- **This file is the source of truth for what the server exposes** — kept here,
-  alongside the API it shares, so tool targets can't drift from the endpoints.
-  When you add or change a service function an assistant should reach, update the
-  mapping below.
+- **This page is the source of truth for what the server exposes** — kept
+  alongside the API it shares, so the tools listed here can't drift from the
+  endpoints behind them.
 
 Ultimate goal: AI-driven whole-home control. Target client: **Whisperr** (the
 voice/LLM pipeline). Tools are designed for natural-language ergonomics — resolve
@@ -73,19 +72,6 @@ All tools below are served natively from `src/api/mcp.rs`.
 | Tier-2 music search/play | a future music-service API | After PLAN.md Milestone 12.2 (Spotify OAuth + Connect) lands. |
 | Audio-in-scenes awareness | scene snapshot incl. audio source/volume | After PLAN.md Milestone 15. |
 
-## Maintenance checklist
-
-When the service layer (or `/api/v1`) changes:
-
-1. Add/adjust the tool in `src/api/mcp.rs` (tool fn + `schemars` param struct),
-   backed by the shared service fn — never a forked control path.
-2. Update the **mapping tables** above (shipped vs target).
-3. Cover it per CLAUDE.md: a tool-level test in `tests/api.rs` driving `/mcp`
-   (the service fns themselves are already covered), plus unit tests for any new
-   resolution/parsing helper.
-4. Cross-link from [the roadmap](https://github.com/others-git/bifrost/blob/main/PLAN.md) if it's part of a milestone, and note the
-   endpoint in [the API reference](api.md) if a new REST route backs it.
-
 ## Why embedded
 
 Bifrost's founding ethos is **one binary, one SQLite file, one Docker image**. An
@@ -111,10 +97,3 @@ JSON-response mode: every tool call is an independent request/response, so there
 is no `Mcp-Session-Id` bookkeeping. The endpoint is Bearer-gated (not protected
 by `rmcp`'s default localhost Host-allowlist, which is disabled since Bifrost is
 reached by LAN/Tailscale IP); the API key is the security boundary.
-
-### Fate of the old `bifrost-mcp` TS repo
-
-Superseded. The earlier plan was a separate TypeScript stdio server wrapping
-`/api/v1` over the network (re-implementing the color math in TS). That
-separate-repo framing of Milestone 11 is **retired** — MCP is now a first-class
-Bifrost surface, not a parallel client.
