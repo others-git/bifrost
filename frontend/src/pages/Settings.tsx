@@ -1313,6 +1313,22 @@ function ClientsTab({ dialogs }: { dialogs: Dialogs }) {
   );
 }
 
+/** One-line battery/power summary for a kiosk: level, charging draw (V×I), and
+ * temperature. Watts are computed from the reported voltage + current. */
+function batteryMeta(k: Kiosk): string {
+  if (k.battery_level == null) return "";
+  const parts: string[] = [`${k.battery_charging ? "⚡" : "🔋"} ${k.battery_level}%`];
+  if (k.battery_voltage_mv != null && k.battery_current_ua != null) {
+    // mV × µA → W (sign varies by vendor, so show magnitude while charging).
+    const watts = Math.abs((k.battery_voltage_mv / 1000) * (k.battery_current_ua / 1e6));
+    if (watts >= 0.05) parts.push(`${watts.toFixed(1)} W`);
+  }
+  if (k.battery_voltage_mv != null) parts.push(`${(k.battery_voltage_mv / 1000).toFixed(2)} V`);
+  if (k.battery_temp_dc != null) parts.push(`${(k.battery_temp_dc / 10).toFixed(1)}°C`);
+  if (k.power_source && k.power_source !== "none") parts.push(k.power_source.toUpperCase());
+  return parts.join(" · ");
+}
+
 function KiosksSection({
   dialogs,
   latest,
@@ -1437,6 +1453,11 @@ function KiosksSection({
                 {k.last_seen ? `seen ${k.last_seen}` : "never seen"}
                 {k.pending_command ? ` · queued: ${k.pending_command}` : ""}
               </div>
+              {k.battery_level != null && (
+                <div style={{ color: "var(--bf-faint)", fontSize: "0.74rem", marginTop: "0.1rem" }}>
+                  {batteryMeta(k)}
+                </div>
+              )}
             </div>
             <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap", alignItems: "center" }}>
               {/* Room = the kiosk's voice context (e.g. "turn on the lights" → its room). */}

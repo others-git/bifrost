@@ -81,6 +81,19 @@ struct CheckinRequest {
     app_version: Option<String>,
     #[serde(default)]
     screen_on: Option<bool>,
+    // Battery / power telemetry (M29+ apps; absent on older apps / desktop).
+    #[serde(default)]
+    battery_level: Option<i64>, // 0-100 (%)
+    #[serde(default)]
+    battery_charging: Option<bool>,
+    #[serde(default)]
+    battery_voltage_mv: Option<i64>,
+    #[serde(default)]
+    battery_current_ua: Option<i64>, // signed micro-amps (+ = into battery)
+    #[serde(default)]
+    battery_temp_dc: Option<i64>, // deci-celsius
+    #[serde(default)]
+    power_source: Option<String>, // ac | usb | wireless | none
 }
 
 #[derive(Serialize)]
@@ -122,13 +135,21 @@ async fn checkin(
         .unwrap_or_else(|| "Kiosk".to_string());
 
     let row = sqlx::query(
-        "INSERT INTO kiosks (id, api_key_id, name, app_version, screen_on, last_seen)
-         VALUES (?, ?, ?, ?, ?, datetime('now'))
+        "INSERT INTO kiosks (id, api_key_id, name, app_version, screen_on,
+                             battery_level, battery_charging, battery_voltage_mv,
+                             battery_current_ua, battery_temp_dc, power_source, last_seen)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
          ON CONFLICT(api_key_id) DO UPDATE SET
-             name        = excluded.name,
-             app_version = excluded.app_version,
-             screen_on   = excluded.screen_on,
-             last_seen   = datetime('now')
+             name               = excluded.name,
+             app_version        = excluded.app_version,
+             screen_on          = excluded.screen_on,
+             battery_level      = excluded.battery_level,
+             battery_charging   = excluded.battery_charging,
+             battery_voltage_mv = excluded.battery_voltage_mv,
+             battery_current_ua = excluded.battery_current_ua,
+             battery_temp_dc    = excluded.battery_temp_dc,
+             power_source       = excluded.power_source,
+             last_seen          = datetime('now')
          RETURNING id, pending_command",
     )
     .bind(Uuid::new_v4().to_string())
@@ -136,6 +157,12 @@ async fn checkin(
     .bind(&name)
     .bind(&req.app_version)
     .bind(req.screen_on.map(i64::from))
+    .bind(req.battery_level)
+    .bind(req.battery_charging.map(i64::from))
+    .bind(req.battery_voltage_mv)
+    .bind(req.battery_current_ua)
+    .bind(req.battery_temp_dc)
+    .bind(&req.power_source)
     .fetch_one(&state.db)
     .await;
 
@@ -185,6 +212,13 @@ struct KioskRow {
     authorized: bool,
     /// Assigned Room id (its voice context), or null. Set via `PUT …/room`.
     room_id: Option<String>,
+    // Battery / power telemetry from the latest check-in (null on older apps).
+    battery_level: Option<i64>,
+    battery_charging: Option<bool>,
+    battery_voltage_mv: Option<i64>,
+    battery_current_ua: Option<i64>,
+    battery_temp_dc: Option<i64>,
+    power_source: Option<String>,
 }
 
 /// `GET /api/kiosks` (session) — the clients view: every registered kiosk with
@@ -192,6 +226,8 @@ struct KioskRow {
 async fn list(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
     let rows = sqlx::query(&format!(
         "SELECT id, name, app_version, screen_on, last_seen, pending_command, room_id,
+                battery_level, battery_charging, battery_voltage_mv, battery_current_ua,
+                battery_temp_dc, power_source,
                 api_key_id IS NOT NULL AS authorized,
                 (last_seen > datetime('now', '-{ONLINE_WINDOW_SECS} seconds')) AS online
          FROM kiosks ORDER BY name"
@@ -212,6 +248,12 @@ async fn list(State(state): State<Arc<AppState>>, _: Session) -> impl IntoRespon
                     pending_command: r.get("pending_command"),
                     authorized: r.get::<i64, _>("authorized") != 0,
                     room_id: r.get("room_id"),
+                    battery_level: r.get("battery_level"),
+                    battery_charging: r.get::<Option<i64>, _>("battery_charging").map(|v| v != 0),
+                    battery_voltage_mv: r.get("battery_voltage_mv"),
+                    battery_current_ua: r.get("battery_current_ua"),
+                    battery_temp_dc: r.get("battery_temp_dc"),
+                    power_source: r.get("power_source"),
                 })
                 .collect::<Vec<_>>(),
         )

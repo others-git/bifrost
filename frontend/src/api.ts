@@ -1115,6 +1115,16 @@ export interface Kiosk {
   authorized: boolean;
   /** Assigned Room id (the kiosk's voice context / location), or null. */
   room_id: string | null;
+  /** Battery / power telemetry from the last check-in (null on older apps). */
+  battery_level: number | null;
+  battery_charging: boolean | null;
+  battery_voltage_mv: number | null;
+  /** Signed micro-amps (+ = charging into the battery). */
+  battery_current_ua: number | null;
+  /** Deci-celsius (245 = 24.5°C). */
+  battery_temp_dc: number | null;
+  /** ac | usb | wireless | none */
+  power_source: string | null;
 }
 
 export async function getKiosks(): Promise<Kiosk[]> {

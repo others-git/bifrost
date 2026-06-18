@@ -3328,6 +3328,43 @@ async fn kiosk_checkin_registers_and_command_is_delivered_once() {
 }
 
 #[tokio::test]
+async fn kiosk_checkin_stores_battery_telemetry() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "Hall tablet").await;
+
+    let r = app
+        .clone()
+        .oneshot(bearer_json(
+            "POST",
+            "/api/kiosks/checkin",
+            &key,
+            r#"{"app_version":"0.2","screen_on":false,"battery_level":42,
+                "battery_charging":true,"battery_voltage_mv":4001,
+                "battery_current_ua":850000,"battery_temp_dc":245,"power_source":"ac"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    let list = helpers::response_json(
+        app.oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let kiosk = &list.as_array().unwrap()[0];
+    assert_eq!(kiosk["battery_level"], 42);
+    assert_eq!(kiosk["battery_charging"], true);
+    assert_eq!(kiosk["battery_voltage_mv"], 4001);
+    assert_eq!(kiosk["battery_current_ua"], 850000);
+    assert_eq!(kiosk["battery_temp_dc"], 245);
+    assert_eq!(kiosk["power_source"], "ac");
+    // The telemetry is optional — a check-in without it (older app) still works.
+    assert_eq!(kiosk["screen_on"], false);
+}
+
+#[tokio::test]
 async fn kiosk_stream_requires_api_key() {
     let app = helpers::test_app_with_password().await;
     let resp = app
