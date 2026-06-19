@@ -11,6 +11,7 @@
 import { useRef, useState } from "react";
 import { color, alpha, glow } from "../theme";
 import { useViewport } from "../useViewport";
+import { speak } from "../tts";
 
 declare global {
   interface Window {
@@ -148,6 +149,10 @@ export function PushToTalk() {
         if (transcript) window.bifrostVoice?.partial(transcript);
         // The device action itself is the confirmation; clear the overlay.
         feedback("idle");
+        // Speak the reply back (single-turn talk-back). Best-effort and
+        // non-blocking — it never affects whether the command itself ran.
+        const said = (data?.said ?? "").trim();
+        if (said) void speak(said).catch(() => {});
       }
     } catch {
       feedback("error", "Couldn't reach the server");

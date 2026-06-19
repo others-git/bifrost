@@ -6321,6 +6321,139 @@ async fn voice_llm_fallback_resolves_an_unparsed_clause_and_drives_the_device() 
 }
 
 #[tokio::test]
+async fn voice_speak_without_auth_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/voice/speak")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"text":"hello"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn voice_speak_without_tts_endpoint_returns_503() {
+    // Talk-back degrades gracefully: with no `tts` role configured, /speak says so
+    // with a 503 rather than failing opaquely (text control is unaffected).
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "POST",
+            "/api/voice/speak",
+            &cookie,
+            r#"{"text":"hello"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn voice_speak_synthesizes_via_configured_tts() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Mock TTS endpoint returning audio bytes for the configured `tts` role.
+    let tts = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/audio/speech"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "audio/mpeg")
+                .set_body_bytes(b"ID3speech".to_vec()),
+        )
+        .mount(&tts)
+        .await;
+
+    let cfg = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/ai-endpoints/tts",
+            &cookie,
+            &format!(r#"{{"base_url":"{}","model":"tts-1"}}"#, tts.uri()),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        cfg.status().is_success(),
+        "configuring tts: {:?}",
+        cfg.status()
+    );
+
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "POST",
+            "/api/voice/speak",
+            &cookie,
+            r#"{"text":"hello there"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CONTENT_TYPE).unwrap(),
+        "audio/mpeg"
+    );
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&bytes[..], b"ID3speech");
+}
+
+#[tokio::test]
+async fn voice_speak_honors_disabled_tts_endpoint() {
+    // Disabling a role must actually take effect: a configured-but-disabled `tts`
+    // endpoint is treated as absent, so /speak degrades to 503 (the Settings
+    // Enabled switch flips this flag).
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Configure tts, then disable it.
+    for body in [
+        r#"{"base_url":"http://127.0.0.1:9/v1","model":"tts-1","enabled":true}"#,
+        r#"{"base_url":"http://127.0.0.1:9/v1","model":"tts-1","enabled":false}"#,
+    ] {
+        let cfg = app
+            .clone()
+            .oneshot(helpers::authed_json(
+                "PUT",
+                "/api/ai-endpoints/tts",
+                &cookie,
+                body,
+            ))
+            .await
+            .unwrap();
+        assert!(
+            cfg.status().is_success(),
+            "configuring tts: {:?}",
+            cfg.status()
+        );
+    }
+
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "POST",
+            "/api/voice/speak",
+            &cookie,
+            r#"{"text":"hello"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
 async fn voice_falls_back_to_ha_assist_for_unparsed_commands() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};

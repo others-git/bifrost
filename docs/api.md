@@ -447,6 +447,7 @@ cookie, so it sends a minted `bfr_` key like any other public-API client.
 |---|---|---|
 | `POST` | `/api/voice/command` | Run a **text** command (fallback chain below) |
 | `POST` | `/api/voice/listen` | Upload **audio**; server transcribes (configured STT) then runs it |
+| `POST` | `/api/voice/speak` | Synthesize **spoken audio** for `text` via the configured TTS model; returns the audio bytes |
 | `GET` | `/api/voice/vocabulary` | `{ words: [...] }` — the command-grammar keywords plus every enabled room/device/scene name (tokenized). A device with on-device STT (the wall tablet) biases its recognizer to this list so in-domain words aren't misheard. |
 
 A clause is resolved **native-first**: the deterministic grammar parses what it can;
@@ -480,6 +481,17 @@ control over `/command` never depends on STT being up):
 curl -X POST -H "Authorization: Bearer $KEY" \
   -F file=@utterance.wav -F room=office \
   http://bifrost.local:3000/api/voice/listen
+```
+
+`/api/voice/speak` — JSON in (`{ "text": "...", "voice": "alloy", "format": "mp3" }`;
+`voice`/`format` optional), audio bytes out (the `Content-Type` reflects the
+synthesized format). Spoken talk-back for a reply — pass it the `said` line from a
+command. Returns `503` when no TTS model is configured:
+
+```bash
+curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"text":"Turned off the office."}' \
+  http://bifrost.local:3000/api/voice/speak --output reply.mp3
 ```
 
 ## MCP endpoint (`/mcp`)

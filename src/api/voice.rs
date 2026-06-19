@@ -41,6 +41,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/command", post(command_handler))
         .route("/listen", post(listen_handler))
+        .route("/speak", post(speak_handler))
         .route("/vocabulary", get(vocabulary_handler))
 }
 
@@ -166,10 +167,16 @@ async fn listen_handler(
     let dump_dir = std::env::var("BIFROST_LISTEN_DUMP_DIR").ok();
     let dump_bytes = dump_dir.as_ref().map(|_| bytes.clone());
 
+    let audio_len = bytes.len();
+    tracing::debug!(target: "bifrost::voice", bytes = audio_len, stt_model = %ep.model, "audio received — offloading to STT endpoint");
     let text = match transcribe(&ep, filename, bytes).await {
         Ok(t) => t,
-        Err(e) => return (StatusCode::BAD_GATEWAY, e).into_response(),
+        Err(e) => {
+            tracing::debug!(target: "bifrost::voice", stt_model = %ep.model, error = %e, "STT transcription failed");
+            return (StatusCode::BAD_GATEWAY, e).into_response();
+        }
     };
+    tracing::debug!(target: "bifrost::voice", transcript = %text, bytes = audio_len, stt_model = %ep.model, "STT returned transcript");
 
     if let (Some(dir), Some(b)) = (dump_dir.as_deref(), dump_bytes)
         && let Some(p) = maybe_dump_clip(Some(dir), &b, &text)
@@ -379,6 +386,153 @@ async fn vocabulary_handler(
     .into_response()
 }
 
+#[derive(Deserialize)]
+struct SpeakRequest {
+    /// The text to speak. Typically a [`CommandResponse::said`] talk-back line.
+    text: String,
+    /// Engine voice. OpenAI requires one (default "alloy"); most OSS engines
+    /// accept or ignore it.
+    #[serde(default)]
+    voice: Option<String>,
+    /// Requested `response_format` (mp3 / wav / opus / aac / flac / pcm).
+    #[serde(default)]
+    format: Option<String>,
+}
+
+/// `POST /api/voice/speak { text, voice?, format? }` (M24) — synthesize spoken
+/// audio for `text` via the configured `tts` model role and return the audio
+/// bytes with their content-type. This is the talk-back seam: the text→action
+/// pipeline produces a `said` line, and this turns it into speech. Degrades with
+/// a clear 503 when no `tts` endpoint is configured (text control is unaffected).
+async fn speak_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<SpeakRequest>,
+) -> impl IntoResponse {
+    if !voice_authed(&state, &headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let text = req.text.trim();
+    if text.is_empty() {
+        return (StatusCode::BAD_REQUEST, "missing 'text' to speak").into_response();
+    }
+    let Some(ep) = crate::api::ai_endpoints::endpoint_for(&state, "tts").await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no text-to-speech model is configured (set one under AI endpoints)",
+        )
+            .into_response();
+    };
+    let voice = req
+        .voice
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("alloy");
+    let format = req
+        .format
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("mp3");
+    tracing::debug!(target: "bifrost::voice", text, voice, format, tts_model = %ep.model, "speak request");
+    match synthesize(&ep, text, voice, format).await {
+        Ok((content_type, bytes)) => {
+            tracing::debug!(target: "bifrost::voice", tts_model = %ep.model, bytes = bytes.len(), content_type = %content_type, "TTS synthesized");
+            ([(axum::http::header::CONTENT_TYPE, content_type)], bytes).into_response()
+        }
+        Err(e) => {
+            // A failed synth is a real operational problem (bad TTS config /
+            // unreachable model) — log at warn with the reason so it's visible
+            // without enabling debug, instead of an opaque tower_http 502.
+            tracing::warn!(target: "bifrost::voice", tts_model = %ep.model, base_url = %ep.base_url, error = %e, "TTS synthesis failed");
+            (StatusCode::BAD_GATEWAY, e).into_response()
+        }
+    }
+}
+
+/// Best-guess MIME for a requested speech `response_format`, used when the
+/// endpoint doesn't send its own `Content-Type`.
+fn content_type_for(format: &str) -> &'static str {
+    match format {
+        "wav" => "audio/wav",
+        "opus" => "audio/opus",
+        "aac" => "audio/aac",
+        "flac" => "audio/flac",
+        "pcm" => "audio/pcm",
+        _ => "audio/mpeg", // mp3
+    }
+}
+
+/// Synthesize `text` to speech via an OpenAI-compatible `POST /audio/speech`
+/// endpoint, returning the audio's `(content_type, bytes)`. The shared synthesis
+/// seam — the `/speak` route calls it for a whole reply, and the streaming
+/// talk-back pipe (M24) calls it per sentence. Generous timeout: CPU-only
+/// synthesis can take a few seconds.
+async fn synthesize(
+    ep: &AiEndpoint,
+    text: &str,
+    voice: &str,
+    format: &str,
+) -> Result<(String, Vec<u8>), String> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let body = serde_json::json!({
+        "model": ep.model,
+        "input": text,
+        "voice": voice,
+        "response_format": format,
+    });
+    let mut req = client
+        .post(format!("{}/audio/speech", ep.base_url))
+        .json(&body);
+    if let Some(k) = &ep.api_key {
+        req = req.bearer_auth(k);
+    }
+    let resp = req.send().await.map_err(|e| {
+        if e.is_connect() {
+            "couldn't reach the speech endpoint".to_string()
+        } else if e.is_timeout() {
+            "the speech endpoint timed out".to_string()
+        } else {
+            e.to_string()
+        }
+    })?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        // Surface the endpoint's own error body (e.g. an OpenAI-style
+        // `{"error":{"message":...}}`, or "model not found") — without it a
+        // misconfigured TTS endpoint is an opaque 502.
+        let detail = resp.text().await.unwrap_or_default();
+        let detail = detail.trim();
+        return Err(if detail.is_empty() {
+            format!("speech endpoint returned {status}")
+        } else {
+            format!(
+                "speech endpoint returned {status}: {}",
+                detail.chars().take(300).collect::<String>()
+            )
+        });
+    }
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .unwrap_or_else(|| content_type_for(format).to_string());
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|_| "the speech endpoint returned an unreadable body".to_string())?;
+    if bytes.is_empty() {
+        return Err("the speech endpoint returned no audio".to_string());
+    }
+    Ok((content_type, bytes.to_vec()))
+}
+
 /// POST audio to an OpenAI-compatible `/audio/transcriptions` endpoint and
 /// return the recognized text. The timeout is generous because CPU-only STT of a
 /// few seconds of speech can take a while.
@@ -453,8 +607,13 @@ fn maybe_dump_clip(
 /// Parse `text` into clauses and execute each. Shared seam: STT (P2) and any
 /// other ingress call this with the recognized text.
 async fn run_command(state: &AppState, text: &str, context_room: Option<&str>) -> CommandResponse {
+    // Every command the server sees, on one filterable target under the bifrost
+    // umbrella: `bifrost=debug` (the dev default) shows it; `bifrost::voice=debug`
+    // isolates just the voice firehose.
+    tracing::debug!(target: "bifrost::voice", text, room = ?context_room, "command in");
     let clauses = parse(text);
     if clauses.is_empty() {
+        tracing::debug!(target: "bifrost::voice", text, "unrecognized — no parseable clauses");
         return CommandResponse {
             ok: false,
             said: "Sorry, I didn't catch that.".into(),
@@ -463,32 +622,49 @@ async fn run_command(state: &AppState, text: &str, context_room: Option<&str>) -
     }
     let mut results = Vec::new();
     for clause in clauses {
-        results.push(match clause {
-            Clause::Cmd { heard, command } => dispatch(state, &heard, command, context_room).await,
-            Clause::Noop { heard } => ClauseResult {
-                heard,
-                ok: true,
-                said: "Okay.".into(),
-            },
+        // Log how each clause was understood and what it resolved to, so the
+        // whole path (grammar vs LLM vs HA, and the parsed Command) is visible.
+        let result = match clause {
+            Clause::Cmd { heard, command } => {
+                tracing::debug!(target: "bifrost::voice", path = "grammar", heard = %heard, command = ?command, "clause resolved by native grammar");
+                dispatch(state, &heard, command, context_room).await
+            }
+            Clause::Noop { heard } => {
+                tracing::debug!(target: "bifrost::voice", path = "noop", heard = %heard, "clause acknowledged (no-op)");
+                ClauseResult {
+                    heard,
+                    ok: true,
+                    said: "Okay.".into(),
+                }
+            }
             // Native grammar couldn't parse this clause. Fall back to the LLM
             // (the `chat` model, if configured) which maps it to a Command, then
             // to HA Assist (the long tail — e.g. "play <title> on the TV"); if
             // neither resolves it, report the original miss.
             Clause::Unparsed { heard } => {
+                tracing::debug!(target: "bifrost::voice", path = "unparsed", heard = %heard, "grammar miss — trying LLM then HA Assist");
                 if let Some(result) = llm_fallback(state, &heard, context_room).await {
                     result
                 } else {
                     match ha_assist_fallback(state, &heard).await {
-                        Some((said, ok)) => ClauseResult { heard, ok, said },
-                        None => ClauseResult {
-                            said: format!("I didn't understand \"{heard}\"."),
-                            heard,
-                            ok: false,
-                        },
+                        Some((said, ok)) => {
+                            tracing::debug!(target: "bifrost::voice", path = "ha_assist", heard = %heard, ok, "clause resolved by HA Assist");
+                            ClauseResult { heard, ok, said }
+                        }
+                        None => {
+                            tracing::debug!(target: "bifrost::voice", path = "unresolved", heard = %heard, "no resolver understood the clause");
+                            ClauseResult {
+                                said: format!("I didn't understand \"{heard}\"."),
+                                heard,
+                                ok: false,
+                            }
+                        }
                     }
                 }
             }
-        });
+        };
+        tracing::debug!(target: "bifrost::voice", heard = %result.heard, ok = result.ok, said = %result.said, "clause done");
+        results.push(result);
     }
     let ok = results.iter().all(|r| r.ok);
     let said = results
@@ -496,6 +672,7 @@ async fn run_command(state: &AppState, text: &str, context_room: Option<&str>) -
         .map(|r| r.said.as_str())
         .collect::<Vec<_>>()
         .join(" ");
+    tracing::debug!(target: "bifrost::voice", ok, said = %said, clauses = results.len(), "command done");
     CommandResponse {
         ok,
         said,
@@ -574,6 +751,7 @@ async fn llm_fallback(
     // Capture signal for the future self-improving vocabulary catalogue: the
     // transcript the grammar missed and what the LLM resolved it to.
     tracing::info!(target: "voice_learn", heard, ?command, "llm rescued grammar miss");
+    tracing::debug!(target: "bifrost::voice", path = "llm", heard, command = ?command, "clause resolved by LLM fallback");
     Some(dispatch(state, heard, command, context_room).await)
 }
 
@@ -2596,5 +2774,137 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn content_type_for_maps_known_formats_and_defaults_to_mpeg() {
+        assert_eq!(content_type_for("wav"), "audio/wav");
+        assert_eq!(content_type_for("opus"), "audio/opus");
+        assert_eq!(content_type_for("pcm"), "audio/pcm");
+        assert_eq!(content_type_for("mp3"), "audio/mpeg");
+        assert_eq!(content_type_for("anything-else"), "audio/mpeg");
+    }
+
+    #[tokio::test]
+    async fn synthesize_posts_speech_request_and_returns_audio() {
+        use wiremock::matchers::{body_partial_json, header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/audio/speech"))
+            .and(header("authorization", "Bearer k"))
+            .and(body_partial_json(serde_json::json!({
+                "model": "tts-1",
+                "input": "hello there",
+                "voice": "alloy",
+                "response_format": "mp3",
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "audio/mpeg")
+                    .set_body_bytes(b"ID3audio".to_vec()),
+            )
+            .mount(&server)
+            .await;
+
+        let ep = AiEndpoint {
+            base_url: server.uri(),
+            model: "tts-1".into(),
+            api_key: Some("k".into()),
+        };
+        let (ct, bytes) = synthesize(&ep, "hello there", "alloy", "mp3")
+            .await
+            .unwrap();
+        assert_eq!(ct, "audio/mpeg");
+        assert_eq!(bytes, b"ID3audio");
+    }
+
+    #[tokio::test]
+    async fn synthesize_falls_back_to_format_mime_when_header_absent() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Respond with audio bytes but no Content-Type header.
+        Mock::given(method("POST"))
+            .and(path("/audio/speech"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"RIFFwav".to_vec()))
+            .mount(&server)
+            .await;
+        let ep = AiEndpoint {
+            base_url: server.uri(),
+            model: "kokoro".into(),
+            api_key: None,
+        };
+        let (ct, _) = synthesize(&ep, "hi", "alloy", "wav").await.unwrap();
+        assert_eq!(ct, "audio/wav");
+    }
+
+    #[tokio::test]
+    async fn synthesize_errors_on_non_success() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/audio/speech"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let ep = AiEndpoint {
+            base_url: server.uri(),
+            model: "tts-1".into(),
+            api_key: None,
+        };
+        let err = synthesize(&ep, "hi", "alloy", "mp3").await.unwrap_err();
+        assert!(err.contains("500"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn synthesize_surfaces_upstream_error_body() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // A misconfigured endpoint's own explanation must reach the caller so the
+        // failure isn't an opaque 502.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/audio/speech"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "error": { "message": "model 'llama3.1' does not support speech" }
+            })))
+            .mount(&server)
+            .await;
+        let ep = AiEndpoint {
+            base_url: server.uri(),
+            model: "llama3.1".into(),
+            api_key: None,
+        };
+        let err = synthesize(&ep, "hi", "alloy", "mp3").await.unwrap_err();
+        assert!(err.contains("404"), "got: {err}");
+        assert!(
+            err.contains("does not support speech"),
+            "body not surfaced: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn synthesize_errors_on_empty_audio() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/audio/speech"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(Vec::<u8>::new()))
+            .mount(&server)
+            .await;
+        let ep = AiEndpoint {
+            base_url: server.uri(),
+            model: "tts-1".into(),
+            api_key: None,
+        };
+        assert!(synthesize(&ep, "hi", "alloy", "mp3").await.is_err());
     }
 }

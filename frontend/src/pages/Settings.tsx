@@ -57,7 +57,8 @@ import { ThemeSwitcher } from "../components/ThemeSwitcher";
 import { Select } from "../components/Select";
 import { useViewport } from "../useViewport";
 import { ACCENT, S } from "../styles";
-import { Button } from "../components/controls";
+import { Button, Switch } from "../components/controls";
+import { speak } from "../tts";
 
 interface Props {
   onNavigate: (page: "dashboard") => void;
@@ -1416,24 +1417,27 @@ const labelStyle: React.CSSProperties = {
 
 // ── AI model endpoints (Voice & AI tab) ──────────────────────────────────────
 
-const AI_ROLES: { role: AiRole; title: string; blurb: string; placeholder: string }[] = [
+const AI_ROLES: { role: AiRole; title: string; blurb: string; placeholder: string; modelHint: string }[] = [
   {
     role: "chat",
     title: "Chat (command LLM)",
     blurb: "Interprets voice commands the built-in grammar can't parse. OpenAI-compatible /chat/completions with tool-calling.",
     placeholder: "e.g. http://localhost:11434/v1",
+    modelHint: "model (e.g. qwen2.5:3b)",
   },
   {
     role: "transcription",
     title: "Transcription (speech-to-text)",
     blurb: "Server-side STT for clients that upload audio to /api/voice/listen. The wall-tablet kiosk transcribes on-device with Vosk and does NOT use this — leave it unset unless a client sends raw audio.",
     placeholder: "e.g. http://localhost:8080/v1",
+    modelHint: "model (e.g. whisper-1)",
   },
   {
     role: "tts",
     title: "Text-to-speech",
-    blurb: "Spoken replies (reserved for the conversation / talk modes).",
-    placeholder: "e.g. http://localhost:8080/v1",
+    blurb: "Spoken replies for voice talk-back. Needs an OpenAI-compatible speech server (Piper/Kokoro/openedai-speech, or vocals-mcp serve-openai) — NOT an LLM/Ollama endpoint.",
+    placeholder: "e.g. http://localhost:9123/v1",
+    modelHint: "voice / model (e.g. tts-1)",
   },
 ];
 
@@ -1473,7 +1477,7 @@ function AiEndpointCard({
   dialogs,
   onSaved,
 }: {
-  meta: { role: AiRole; title: string; blurb: string; placeholder: string };
+  meta: { role: AiRole; title: string; blurb: string; placeholder: string; modelHint: string };
   current?: AiEndpoint;
   dialogs: Dialogs;
   onSaved: () => void;
@@ -1519,11 +1523,48 @@ function AiEndpointCard({
     }
   }
 
+  // Enable/disable persists immediately for an already-configured role (it just
+  // flips the stored `enabled` flag, preserving the saved URL/model/key) so the
+  // switch reflects real server state — no Save needed. Optimistic with revert.
+  async function toggleEnabled(next: boolean) {
+    if (!current) return;
+    setEnabled(next);
+    setBusy(true);
+    try {
+      await putAiEndpoint(meta.role, {
+        base_url: current.base_url,
+        model: current.model,
+        enabled: next,
+      });
+      onSaved();
+    } catch (e) {
+      setEnabled(!next);
+      await dialogs.alert({ title: "Couldn't update", message: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function runTest() {
     setBusy(true);
     setTest(null);
     try {
       setTest(await testAiEndpoint(meta.role));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // TTS only: synthesize a short sample and play it in the browser — proves
+  // in-app playback end-to-end (vs `runTest`, which only pings /models).
+  async function playSample() {
+    setBusy(true);
+    setTest(null);
+    try {
+      await speak("Bifrost text to speech is online.", { force: true });
+      setTest({ ok: true, message: "playing sample…" });
+    } catch (e) {
+      setTest({ ok: false, message: e instanceof Error ? e.message : String(e) });
     } finally {
       setBusy(false);
     }
@@ -1556,7 +1597,7 @@ function AiEndpointCard({
       </div>
       <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder={meta.placeholder} style={{ ...S.input }} />
       <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-        <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="model (e.g. llama3.1)" style={{ ...S.input, flex: 1, minWidth: 130 }} />
+        <input value={model} onChange={(e) => setModel(e.target.value)} placeholder={meta.modelHint} style={{ ...S.input, flex: 1, minWidth: 130 }} />
         <input
           value={apiKey}
           onChange={(e) => setApiKey(e.target.value)}
@@ -1566,14 +1607,21 @@ function AiEndpointCard({
         />
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
-        <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.82rem", color: "var(--bf-dim)" }}>
-          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> Enabled
-        </label>
+        {configured && (
+          <label style={{ display: "flex", alignItems: "center", gap: "0.45rem", fontSize: "0.82rem", color: "var(--bf-dim)", cursor: busy ? "default" : "pointer" }}>
+            <Switch on={enabled} onChange={toggleEnabled} disabled={busy} /> Enabled
+          </label>
+        )}
         <div style={{ flex: 1 }} />
         {test && (
           <span style={{ fontSize: "0.78rem", color: test.ok ? "var(--bf-good)" : "var(--bf-rose, #e57)" }}>
-            {test.ok ? "✓ reachable" : `✗ ${test.message}`}
+            {test.ok ? `✓ ${test.message}` : `✗ ${test.message}`}
           </span>
+        )}
+        {configured && meta.role === "tts" && (
+          <Button variant="ghost" onClick={playSample} disabled={busy} style={{ padding: "0.3rem 0.7rem", fontSize: "0.78rem" }}>
+            Play
+          </Button>
         )}
         {configured && (
           <Button variant="ghost" onClick={runTest} disabled={busy} style={{ padding: "0.3rem 0.7rem", fontSize: "0.78rem" }}>
