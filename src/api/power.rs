@@ -227,6 +227,7 @@ pub(crate) async fn apply_power_state(state: &AppState, id: &str, on: bool) -> S
         }
     };
 
+    tracing::debug!(power = %id, device = %device_id, on, "set_power → provider");
     match provider.set_state(&device_id, on).await {
         Ok(()) => {
             // Reflect the commanded state in the cache; the device reports
@@ -240,6 +241,7 @@ pub(crate) async fn apply_power_state(state: &AppState, id: &str, on: bool) -> S
                 },
             )
             .await;
+            tracing::debug!(power = %id, on, "set_power ok");
             SetPowerOutcome::Ok
         }
         Err(e) => {

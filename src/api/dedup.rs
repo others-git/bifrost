@@ -82,7 +82,7 @@ async fn reconcile_table(state: &AppState, table: &str) -> sqlx::Result<()> {
             if *is_native {
                 continue;
             }
-            sqlx::query(&format!(
+            let res = sqlx::query(&format!(
                 "UPDATE {table} SET shadowed_by = ?, shadow_auto = 1
                  WHERE id = ? AND shadowed_by IS NULL"
             ))
@@ -90,6 +90,9 @@ async fn reconcile_table(state: &AppState, table: &str) -> sqlx::Result<()> {
             .bind(id)
             .execute(&state.db)
             .await?;
+            if res.rows_affected() > 0 {
+                tracing::debug!(table, device = %id, canonical = %canonical, "de-dup: shadowed integration copy under native");
+            }
         }
     }
     Ok(())

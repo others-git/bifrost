@@ -1324,9 +1324,11 @@ pub(crate) async fn apply_room_state(
         && new_state.color_temp_mirek.is_none()
         && new_state.effect.is_none();
     if !pure_power {
+        tracing::debug!(room = %room_id, on = new_state.on, applied, failed, fanned_out = false, "apply room state (lights only, no audio/power fan-out)");
         return (applied, failed);
     }
     let (a, f) = apply_room_power(state, room_id, new_state.on).await;
+    tracing::debug!(room = %room_id, on = new_state.on, applied = applied + a, failed = failed + f, fanned_out = true, "apply room state (power fanned out to audio + power members)");
     (applied + a, failed + f)
 }
 

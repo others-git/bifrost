@@ -240,16 +240,21 @@ pub(crate) async fn apply_light_state(
 ) -> SetLightOutcome {
     let (device_id, provider) = match controllable_provider(state, id).await {
         Ok(v) => v,
-        Err(outcome) => return outcome,
+        Err(outcome) => {
+            tracing::debug!(light = %id, "set_state: light not controllable");
+            return outcome;
+        }
     };
 
+    tracing::debug!(light = %id, device = %device_id, state = ?new_state, "set_state → provider");
     match provider.set_state(&device_id, new_state).await {
         Ok(()) => {
             persist_light_state(&state.db, id, new_state).await;
+            tracing::debug!(light = %id, "set_state ok");
             SetLightOutcome::Ok
         }
         Err(e) => {
-            tracing::error!("provider set_state error: {e:#}");
+            tracing::error!(light = %id, "provider set_state error: {e:#}");
             SetLightOutcome::ProviderError
         }
     }
@@ -265,13 +270,17 @@ pub(crate) async fn apply_light_segments(
 ) -> SetLightOutcome {
     let (device_id, provider) = match controllable_provider(state, id).await {
         Ok(v) => v,
-        Err(outcome) => return outcome,
+        Err(outcome) => {
+            tracing::debug!(light = %id, "set_segments: light not controllable");
+            return outcome;
+        }
     };
 
+    tracing::debug!(light = %id, device = %device_id, segments = segments.len(), "set_segments → provider");
     match provider.set_segments(&device_id, segments).await {
         Ok(()) => SetLightOutcome::Ok,
         Err(e) => {
-            tracing::error!("provider set_segments error: {e:#}");
+            tracing::error!(light = %id, "provider set_segments error: {e:#}");
             SetLightOutcome::ProviderError
         }
     }

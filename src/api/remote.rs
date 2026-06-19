@@ -347,6 +347,7 @@ pub(crate) async fn apply_remote_command(
             return RemoteOutcome::Db;
         }
     };
+    tracing::debug!(remote = %id, device = %device_id, command = ?cmd, "remote command → provider");
     let result = match cmd {
         RemoteCommand::Key { key, hold_secs } => {
             provider.send_key(&device_id, *key, *hold_secs).await
@@ -372,6 +373,7 @@ pub(crate) async fn apply_remote_command(
             if let RemoteCommand::LaunchApp { activity } = cmd {
                 record_app_seen(state, id, activity).await;
             }
+            tracing::debug!(remote = %id, "remote command ok");
             RemoteOutcome::Ok
         }
         Err(e) => {

@@ -227,6 +227,7 @@ pub(crate) async fn capture_scene(
         }
     }
 
+    tracing::debug!(scene = %scene_id, name, room = ?room_id, lights = captured, power = power_captured, "scene captured");
     Ok(SceneCapture {
         id: scene_id,
         lights: captured,
@@ -308,6 +309,7 @@ pub(crate) async fn apply_scene_entries(
     scene_id: &str,
     light_filter: Option<Vec<String>>,
 ) -> Option<(usize, usize)> {
+    tracing::debug!(scene = %scene_id, scoped = light_filter.is_some(), "apply scene");
     let light_rows = sqlx::query(
         "SELECT e.light_id, e.state, l.device_id, p.provider_type, p.credentials
          FROM scene_entries e
@@ -410,6 +412,7 @@ pub(crate) async fn apply_scene_entries(
         }
     }
 
+    tracing::debug!(scene = %scene_id, applied, failed, "scene applied");
     Some((applied, failed))
 }
 
