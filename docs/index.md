@@ -5,17 +5,17 @@
 <h1 align="center">Bifrost</h1>
 
 <p align="center">
-  A self-hosted smart-home hub — lights, audio, and power behind one fast UI, a clean API, and voice control. One binary, one SQLite file, one Docker image.
+  A self-hosted smart-home hub — control your lights, audio, power, and TVs from one web UI, a REST API, and voice.
 </p>
 
 ---
 
-Bifrost unifies your smart-home devices behind a single, fast, self-hosted control surface — a web dashboard, a REST API, an embedded assistant (MCP) server, and natural-language voice. It is built around **reliability**: every device connection is owned by a state machine with reconnection, backoff, and live push to the browser, and a read that can't reach a device falls back to cached state rather than failing.
+Bifrost is a self-hosted smart-home control hub. It brings your lights (Philips Hue, Govee, LIFX), audio (Sonos, Onkyo / Integra), power devices (switches, plugs, fans), and TVs/streamers under one web dashboard, a REST API, an embedded assistant (MCP) server, and natural-language voice — and it can also surface any Home Assistant integration as a Bifrost device. It aims to keep device connections live and show each device's real state: connections reconnect on their own with backoff, and a read that can't reach a device falls back to cached state rather than failing the request.
 
 ## What it does
 
 - **Rooms are the core abstraction.** A Room aggregates any mix of devices — lights, speakers/receivers, switches and plugs — and is the high-level control surface: power the whole room, set brightness across its lights, fan volume/mute out to its media members (each with a per-room loudness offset). Provider-native groupings (e.g. Hue rooms/zones) are mirrored and wrapped into Rooms with one **Sync** click. Each room can also be given **configurable quick-control buttons** — one-tap power/volume/brightness over a chosen set of its devices, or a scene — that sit next to its power button on the dashboard.
-- **Device domains, modelled honestly.** Lights (RGB + color-temperature + brightness + **dynamic effects**), audio (receivers, speakers, zones — power, volume, mute, source/streaming-service, transport, now-playing), power (strictly on/off switches, plugs, fans), and virtual **remotes** (D-pad keys + app launch for TVs and streamers). Each keeps its own state shape rather than being forced into a generic blob. A TV or streamer's volume can be **bound to an AV receiver** so it controls the right box.
+- **Four device domains, each with its own state shape.** Lights (RGB + color-temperature + brightness + **dynamic effects**), audio (receivers, speakers, zones — power, volume, mute, source/streaming-service, transport, now-playing), power (strictly on/off switches, plugs, fans), and virtual **remotes** (D-pad keys + app launch for TVs and streamers) — each modelled separately rather than squeezed into one generic shape. A TV or streamer's volume can be **bound to an AV receiver** so it controls the right box.
 - **Scenes.** Save full-state snapshots — each light's color/temperature/**effect** plus every switch's on/off — and restore them in one tap, scoped to the whole home or a single room.
 - **Floor planner.** Paint a rough 2D plan of your home (floor tiles + walls), drop devices roughly where they physically are, and bind painted regions to Rooms. The plan doubles as a live dashboard — devices glow with their real color/brightness and open the same controls used everywhere else.
 - **Voice control.** Speak commands in natural language; a deterministic grammar handles the common cases instantly, and anything it can't parse falls through to a local LLM that maps it to the same actions (see [Voice & assistants](#voice-assistants)).

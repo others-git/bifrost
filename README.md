@@ -5,7 +5,7 @@
 <h1 align="center">Bifrost</h1>
 
 <p align="center">
-  A self-hosted smart-home hub — lights, audio, and power behind one fast UI, a clean API, and voice control.
+  A self-hosted smart-home hub — control your lights, audio, power, and TVs from one web UI, a REST API, and voice.
 </p>
 
 <p align="center">
