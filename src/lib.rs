@@ -33,6 +33,9 @@ pub struct AppState {
     /// kiosk that's offline / mid-reconnect (delivered on its next check-in).
     pub kiosk_commands: tokio::sync::broadcast::Sender<api::kiosks::KioskCommand>,
     cipher: Aes256Gcm,
+    /// Non-reversible fingerprint of the derived credential key — for the startup
+    /// diagnostic that catches a silently-changed `BIFROST_SECRET`.
+    pub key_fp: String,
 }
 
 impl AppState {
@@ -40,6 +43,7 @@ impl AppState {
         Self {
             db,
             cipher: crypto::cipher_from_secret(secret),
+            key_fp: crypto::key_fingerprint(secret),
             registry,
             connections: Mutex::new(ConnectionRegistry::new()),
             started_at: std::time::Instant::now(),
@@ -53,7 +57,17 @@ impl AppState {
     }
 
     pub fn decrypt_credentials(&self, encoded: &str) -> anyhow::Result<String> {
-        crypto::decrypt(&self.cipher, encoded)
+        let result = crypto::decrypt(&self.cipher, encoded);
+        if result.is_err() {
+            // The usual cause is a changed effective key, not tampered data —
+            // surface the fingerprint so it can be compared to the startup log.
+            tracing::debug!(
+                target: "bifrost::crypto",
+                key_fp = %self.key_fp,
+                "credential decrypt failed — if this key_fp differs from a prior run, BIFROST_SECRET's bytes changed"
+            );
+        }
+        result
     }
 }
 
@@ -86,6 +100,46 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .layer(CorsLayer::permissive())
 }
 
+/// Result of comparing the running credential-key fingerprint to the DB's record.
+#[derive(Debug, PartialEq, Eq)]
+pub enum KeyCheck {
+    /// No prior record — recorded the current fingerprint (fresh DB / first run).
+    FirstRun,
+    /// The running key matches the stored fingerprint.
+    Match,
+    /// The key changed since last boot — stored credentials won't decrypt.
+    Changed { stored: String },
+}
+
+/// Compare `key_fp` (a one-way fingerprint of the derived credential key) against
+/// the value persisted in `credential_key_check`, recording it on first run.
+/// Catches a silently-changed `BIFROST_SECRET` at startup — the usual cause of
+/// "same secret, can't decrypt". Stores only the fingerprint, never the secret or
+/// key. **Insert-once:** a mismatch is reported but does NOT overwrite the stored
+/// value, so it keeps flagging on every boot until the correct secret is restored
+/// (the stored fingerprint stays authoritative for what the data needs).
+pub async fn verify_credential_key(db: &SqlitePool, key_fp: &str) -> KeyCheck {
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT key_fp FROM credential_key_check WHERE id = 1")
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
+    match stored {
+        Some(prev) if prev == key_fp => KeyCheck::Match,
+        Some(prev) => KeyCheck::Changed { stored: prev },
+        None => {
+            let _ = sqlx::query(
+                "INSERT OR IGNORE INTO credential_key_check (id, key_fp) VALUES (1, ?)",
+            )
+            .bind(key_fp)
+            .execute(db)
+            .await;
+            KeyCheck::FirstRun
+        }
+    }
+}
+
 /// Entry point called by `main`. Reads env vars, connects to DB, runs the server.
 pub async fn run() -> Result<()> {
     use tracing_subscriber::{EnvFilter, fmt};
@@ -96,6 +150,32 @@ pub async fn run() -> Result<()> {
     let db = db::connect(&cfg.database_url).await?;
     let registry = providers::default_registry();
     let state = Arc::new(AppState::new(db, &cfg.secret, registry));
+
+    // Credential-key diagnostic: this fingerprint is derived purely from
+    // BIFROST_SECRET and must be identical on every run, or stored credentials
+    // won't decrypt. If it changes while you believe the secret is unchanged, the
+    // secret's bytes differ at runtime (trailing whitespace, a stale exported env
+    // var shadowing .env, or a change only past the first 32 bytes).
+    tracing::info!(
+        target: "bifrost::crypto",
+        key_fp = %state.key_fp,
+        secret_len = cfg.secret.len(),
+        "credential key ready"
+    );
+    match verify_credential_key(&state.db, &state.key_fp).await {
+        KeyCheck::FirstRun => tracing::info!(
+            target: "bifrost::crypto", key_fp = %state.key_fp,
+            "recorded credential key fingerprint (first run / fresh database)"
+        ),
+        KeyCheck::Match => tracing::debug!(
+            target: "bifrost::crypto", key_fp = %state.key_fp,
+            "credential key matches the stored fingerprint — stored credentials will decrypt"
+        ),
+        KeyCheck::Changed { stored } => tracing::error!(
+            target: "bifrost::crypto", stored_fp = %stored, current_fp = %state.key_fp,
+            "BIFROST_SECRET CHANGED since the last boot — credentials encrypted under the previous secret will NOT decrypt. Restore the previous BIFROST_SECRET, or re-enter every provider credential."
+        ),
+    }
 
     start_managers(&state).await;
 
@@ -290,5 +370,50 @@ mod frontend_cache_tests {
         assert_eq!(cache_control_for("index.html"), "no-cache");
         assert_eq!(cache_control_for("favicon.svg"), "no-cache");
         assert_eq!(cache_control_for("manifest.webmanifest"), "no-cache");
+    }
+}
+
+#[cfg(test)]
+mod credential_key_tests {
+    use super::{KeyCheck, verify_credential_key};
+    use sqlx::SqlitePool;
+    use sqlx::sqlite::SqliteConnectOptions;
+    use std::str::FromStr;
+
+    async fn mem_db() -> SqlitePool {
+        let opts = SqliteConnectOptions::from_str(":memory:")
+            .unwrap()
+            .foreign_keys(true);
+        let db = SqlitePool::connect_with(opts).await.unwrap();
+        sqlx::migrate!("./migrations").run(&db).await.unwrap();
+        db
+    }
+
+    #[tokio::test]
+    async fn records_then_matches_then_flags_a_changed_secret() {
+        let db = mem_db().await;
+        // First boot records the fingerprint.
+        assert_eq!(
+            verify_credential_key(&db, "fp-aaaa").await,
+            KeyCheck::FirstRun
+        );
+        // Same secret → match.
+        assert_eq!(verify_credential_key(&db, "fp-aaaa").await, KeyCheck::Match);
+        // A different key is flagged, reporting the stored (authoritative) fp.
+        assert_eq!(
+            verify_credential_key(&db, "fp-bbbb").await,
+            KeyCheck::Changed {
+                stored: "fp-aaaa".into()
+            }
+        );
+        // A mismatch must NOT overwrite the stored fp — it keeps flagging.
+        assert_eq!(
+            verify_credential_key(&db, "fp-bbbb").await,
+            KeyCheck::Changed {
+                stored: "fp-aaaa".into()
+            }
+        );
+        // Restoring the original secret clears the alarm.
+        assert_eq!(verify_credential_key(&db, "fp-aaaa").await, KeyCheck::Match);
     }
 }

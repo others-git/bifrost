@@ -34,14 +34,37 @@ pub fn decrypt(key: &Aes256Gcm, encoded: &str) -> Result<String> {
     String::from_utf8(buf).context("decrypted bytes are not valid UTF-8")
 }
 
-/// Derive an `Aes256Gcm` cipher from a raw secret string.
-/// Secrets shorter than 32 bytes are zero-padded; longer ones are truncated.
-pub fn cipher_from_secret(secret: &str) -> Aes256Gcm {
+/// Derive the raw 32-byte AES key from a secret string.
+/// Secrets shorter than 32 bytes are zero-padded; longer ones are **truncated to
+/// the first 32 bytes** — so only the first 32 bytes of `BIFROST_SECRET` affect
+/// the key (a 64-char `openssl rand -hex 32` uses half its entropy, and two
+/// secrets sharing a 32-byte prefix collide). Deterministic: the same secret
+/// always yields the same key.
+fn derive_key_bytes(secret: &str) -> [u8; 32] {
     let mut key_bytes = [0u8; 32];
     let src = secret.as_bytes();
     let len = src.len().min(32);
     key_bytes[..len].copy_from_slice(&src[..len]);
-    Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes))
+    key_bytes
+}
+
+/// Derive an `Aes256Gcm` cipher from a raw secret string.
+pub fn cipher_from_secret(secret: &str) -> Aes256Gcm {
+    Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&derive_key_bytes(secret)))
+}
+
+/// A short, **non-reversible** fingerprint of the *derived key* (SHA-256 of the
+/// key bytes, first 8 hex chars). Logged at startup so an operator can confirm
+/// the effective key is stable across restarts: if this fingerprint changes
+/// while `BIFROST_SECRET` is believed unchanged, the secret's bytes actually
+/// differ at runtime — trailing whitespace/newline, a stale exported env var
+/// shadowing `.env` (dotenvy doesn't override an already-set var), or a change
+/// only beyond the first 32 bytes — which is the usual cause of "same secret,
+/// can't decrypt". Reveals nothing about the secret itself.
+pub fn key_fingerprint(secret: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(derive_key_bytes(secret));
+    hex::encode(&digest[..4])
 }
 
 #[cfg(test)]
@@ -108,5 +131,26 @@ mod tests {
         let cipher = cipher_from_secret("tiny");
         let encrypted = encrypt(&cipher, "data").unwrap();
         assert_eq!(decrypt(&cipher, &encrypted).unwrap(), "data");
+    }
+
+    #[test]
+    fn key_fingerprint_is_stable_and_distinguishes_secrets() {
+        // Same secret → same fingerprint (the property that makes it useful for
+        // confirming the key didn't change across restarts).
+        assert_eq!(key_fingerprint("my-secret"), key_fingerprint("my-secret"));
+        assert_ne!(key_fingerprint("key-a"), key_fingerprint("key-b"));
+        // 8 hex chars (4 bytes) and never the raw secret.
+        let fp = key_fingerprint("my-secret");
+        assert_eq!(fp.len(), 8);
+        assert!(!fp.contains("my-secret"));
+    }
+
+    #[test]
+    fn key_fingerprint_exposes_the_32_byte_truncation() {
+        // Two secrets identical in their first 32 bytes but differing afterwards
+        // derive the SAME key — the fingerprint makes that latent footgun visible.
+        let a = "0123456789abcdef0123456789abcdef".to_string() + "TAIL-A";
+        let b = "0123456789abcdef0123456789abcdef".to_string() + "TAIL-B";
+        assert_eq!(key_fingerprint(&a), key_fingerprint(&b));
     }
 }

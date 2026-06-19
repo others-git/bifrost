@@ -35,9 +35,14 @@ Upgrade with `docker compose pull && docker compose up -d`.
 
 !!! warning "Keep `BIFROST_SECRET` stable across upgrades"
     It encrypts your provider credentials at rest (AES-256-GCM). If it changes,
-    the app still starts but logs `failed to decrypt credentials` and providers
-    show disconnected — recovery is restoring the original secret or re-entering
-    every provider's credentials.
+    the app still starts but providers show disconnected — recovery is restoring
+    the original secret or re-entering every provider's credentials. On boot
+    Bifrost compares a one-way fingerprint of the key against the last-known one
+    (stored in the database — never the secret itself) and logs a loud
+    `BIFROST_SECRET CHANGED` error if they differ, so an accidental change is
+    caught immediately rather than surfacing as silent decryption failures. A
+    common cause: the value is set in the real environment *and* in `.env` with
+    different values — the environment wins (`.env` doesn't override it).
 
 ### Bare binary
 
@@ -54,7 +59,7 @@ Everything is configured via environment variables (a `.env` file works too):
 
 | Variable | Default | Notes |
 |---|---|---|
-| `BIFROST_SECRET` | — (**required**) | Encrypts provider credentials at rest with AES-256-GCM. Use 32+ random chars (`openssl rand -hex 32`). Changing it orphans stored credentials. |
+| `BIFROST_SECRET` | — (**required**) | Encrypts provider credentials at rest with AES-256-GCM. Use 32+ random chars (`openssl rand -hex 32`). Changing it orphans stored credentials. Surrounding whitespace is trimmed, so a stray trailing newline/space won't change the key. |
 | `DATABASE_URL` | `sqlite://bifrost.db` | SQLite only. In Docker, point at a volume, e.g. `sqlite:///data/bifrost.db`. |
 | `BIND_ADDR` | `0.0.0.0:3000` | Listen address. |
 | `RUST_LOG` | — | Log filter, e.g. `bifrost=info` or `bifrost=debug`. |
