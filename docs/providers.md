@@ -4,8 +4,10 @@ Devices are added through **providers** (Settings → Add Provider). Each provid
 discovers its devices automatically. IP-addressable providers offer a **Scan
 network** button that finds devices on the LAN and fills in the address; cloud
 providers take an account token instead. A single provider can serve more than
-one device domain — Home Assistant alone surfaces lights, audio, power, **and**
+one device domain — Home Assistant alone surfaces lights, media, power, **and**
 remotes.
+
+The table below is the **full set of supported devices** and how each connects.
 
 ## At a glance
 
@@ -14,9 +16,9 @@ remotes.
 | Philips Hue | Light | Lights | LAN (CLIP v2) | SSE push | Bridge IP + link-button app key |
 | Govee | Light | Lights | Cloud API + LAN (UDP) | Poll (≈2 min) | API key and/or LAN interface |
 | LIFX | Light | Lights | Cloud API + LAN (UDP) | Poll (≈2 min) | Account token and/or LAN interface |
-| Onkyo / Integra | Audio | Receivers + zones | LAN (eISCP) | Push | Receiver IP |
-| Sonos | Audio | Speakers | LAN (UPnP) | Push (events + poll) | Any player's IP |
-| Home Assistant | Integration | Lights · audio · power · remotes | REST + WebSocket | WebSocket push | Base URL + long-lived token |
+| Onkyo / Integra | Media | Receivers + zones | LAN (eISCP) | Push | Receiver IP |
+| Sonos | Media | Speakers | LAN (UPnP) | Push (events + poll) | Any player's IP |
+| Home Assistant | Integration | Lights · media · power · remotes | REST + WebSocket | WebSocket push | Base URL + long-lived token |
 
 ---
 

@@ -1,7 +1,7 @@
 site_name: Bifrost
 site_description: >-
-  A self-hosted smart-home hub — control your lights, audio, power, and TVs
-  from one web UI, a REST API, and voice.
+  A self-hosted smart-home hub — control your devices from one web UI,
+  a REST API, and voice.
 site_url: https://others-git.github.io/bifrost/
 repo_url: https://github.com/others-git/bifrost
 repo_name: others-git/bifrost

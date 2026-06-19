@@ -5,12 +5,12 @@
 <h1 align="center">Bifrost</h1>
 
 <p align="center">
-  A self-hosted smart-home hub — control your lights, audio, power, and TVs from one web UI, a REST API, and voice.
+  A self-hosted smart-home hub — control your devices from one web UI, a REST API, and voice.
 </p>
 
 ---
 
-Bifrost is a self-hosted smart-home control hub. It brings your lights (Philips Hue, Govee, LIFX), audio (Sonos, Onkyo / Integra), power devices (switches, plugs, fans), and TVs/streamers under one web dashboard, a REST API, an embedded assistant (MCP) server, and natural-language voice — and it can also surface any Home Assistant integration as a Bifrost device. It aims to keep device connections live and show each device's real state: connections reconnect on their own with backoff, and a read that can't reach a device falls back to cached state rather than failing the request.
+Bifrost is a self-hosted smart-home control hub. It brings your supported devices — direct integrations plus anything from Home Assistant — under one web dashboard, a REST API, an embedded assistant (MCP) server, and natural-language voice. It aims to keep device connections live and show each device's real state: connections reconnect on their own with backoff, and a read that can't reach a device falls back to cached state rather than failing the request. See **[Providers](providers.md)** for the full list of supported devices.
 
 ## What it does
 
