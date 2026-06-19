@@ -8,6 +8,15 @@
   A self-hosted smart-home hub — lights, audio, and power behind one fast UI, a clean API, and voice control. One binary, one SQLite file, one Docker image.
 </p>
 
+<p align="center">
+  <a href="https://github.com/others-git/bifrost/releases"><img src="https://img.shields.io/github/v/release/others-git/bifrost?sort=semver&color=6f42c1" alt="Latest release" /></a>
+  <a href="https://github.com/others-git/bifrost/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/others-git/bifrost/ci.yml?branch=main&label=CI" alt="CI" /></a>
+  <a href="https://github.com/others-git/bifrost/blob/main/LICENSE"><img src="https://img.shields.io/github/license/others-git/bifrost" alt="License" /></a>
+  <a href="https://others-git.github.io/bifrost/"><img src="https://img.shields.io/badge/docs-online-blue" alt="Docs" /></a>
+  <a href="https://github.com/others-git/bifrost/pkgs/container/bifrost"><img src="https://img.shields.io/badge/ghcr.io-bifrost-2496ed?logo=docker&logoColor=white" alt="Container image" /></a>
+  <a href="https://ca.unraid.net/apps/bifrost-0ehyi200nwfgp8"><img src="https://img.shields.io/badge/Unraid-Community%20Apps-e8512f" alt="Unraid Community Apps" /></a>
+</p>
+
 ---
 
 Bifrost unifies your smart-home devices behind a single, fast, self-hosted control
