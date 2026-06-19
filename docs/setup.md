@@ -110,32 +110,20 @@ binding, TV remotes, merging duplicates) — see **[Rooms & devices](rooms-and-d
 
 ## 5. Voice & assistants
 
-Bifrost can be driven by voice and by AI assistants, three ways:
+Bifrost is driven hands-free by **spoken voice** (a built-in pipeline:
+deterministic grammar → optional LLM fallback → optional Home Assistant Assist,
+with spoken talk-back) and by **AI assistants** (the embedded MCP server). All of
+it is optional and degrades gracefully — the grammar works with no models at all.
 
-- **Native voice pipeline** — a deterministic grammar parses spoken commands
-  (power, brightness, color, color-temperature, volume, mute, transport, scenes,
-  relative nudges) and resolves targets by room/device name. Fast and offline; it
-  needs no configuration.
-- **LLM fallback** — any phrasing the grammar can't parse is handed to a
-  configurable **chat model** (any OpenAI-compatible endpoint — e.g. a local model
-  via Ollama) that maps it to one action through the *same* dispatch path.
-  Configure it under Settings (`PUT /api/ai-endpoints/chat`). With none
-  configured, the native pipeline simply handles what it can; failing both, an
-  unparsed clause can fall through to **Home Assistant Assist** if HA is added.
-- **Embedded MCP server** — a first-class Model Context Protocol surface at `/mcp`
-  exposes the home as assistant tools (lights, audio, power, rooms, scenes,
-  remotes). Gated by the same API keys as the public API. See
-  **[MCP server](mcp.md)**.
+For setup, the only thing to configure is the optional model endpoints under
+**Settings → Voice & AI** — three OpenAI-compatible roles (`transcription` /
+`chat` / `tts`), each a base URL + model + optional key, pointing at whatever you
+run locally (Ollama, faster-whisper, Piper/Kokoro, …) or a hosted API; the
+**Test** button probes each. With nothing configured, text control still works
+over `POST /api/voice/command`.
 
-Configure the **chat** (NLU fallback) and **transcription** (speech-to-text)
-models — plus an optional **tts** voice — under **Settings → AI endpoints**. Each
-is one OpenAI-compatible server (base URL + model + optional key), so a local
-Ollama / faster-whisper or any hosted API works; the **Test** button probes the
-endpoint's `/models`. Everything degrades gracefully: with nothing configured the
-deterministic grammar still runs over `POST /api/voice/command` (text), and
-`POST /api/voice/listen` (audio) returns `503` only until a transcription model is
-set — so text control never depends on STT being up. All voice endpoints are gated
-by the same Bearer API keys as `/api/v1`.
+See **[Voice & assistants](voice.md)** for how the pipeline works end to end, and
+**[MCP server](mcp.md)** for the assistant tools.
 
 ## 6. Pair the wall tablet
 

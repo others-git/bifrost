@@ -35,11 +35,12 @@ adding providers, voice, the wall tablet, and API keys, end to end.
 
 ## Voice & assistants
 
-Bifrost is designed to be driven by voice and by AI assistants, three ways:
-
-- **Native voice pipeline.** A deterministic grammar parses spoken commands (power, brightness, color, color-temperature, volume, mute, transport, scenes, relative nudges) and resolves targets by room/device name. It's fast and offline.
-- **LLM fallback.** Any phrasing the grammar can't parse is handed to a configurable **chat model** (any OpenAI-compatible endpoint — e.g. a local model via Ollama) that maps it to exactly one action through the *same* dispatch path. Configure the `chat` endpoint in Settings; with none configured, the native pipeline simply handles what it can.
-- **Embedded MCP server.** A first-class Model Context Protocol surface at `/mcp` exposes the home as assistant tools, so an AI client can control lights, audio, power, rooms, and scenes in natural language. See **[MCP server](mcp.md)**.
+Bifrost is driven hands-free by **spoken voice** — a deterministic grammar
+(offline, no model) that falls back to an optional LLM and then to Home Assistant
+Assist, with spoken talk-back — and by **AI assistants** through the embedded
+**MCP server** at `/mcp`. Everything is optional and degrades gracefully; the
+models are pluggable and can run fully local. See **[Voice & assistants](voice.md)**
+for the whole picture and **[MCP server](mcp.md)** for the assistant tools.
 
 The **public API** (`/api/v1`, Bearer-key, mint keys in Settings → API keys) covers lights, rooms, scenes, audio, and power — documented in **[Public API](api.md)**. Devices can be paired to headless clients by scanning a QR code (no key typing).
 
