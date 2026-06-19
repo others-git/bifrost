@@ -813,17 +813,17 @@ function SegmentEditor({
   const numRows = Math.ceil(count / cols);
   const RIB = 20; // ribbon thickness (thin → rectangular segments)
   const SEGH = RIB - 6; // tinted-segment height (inset, so the ribbon frames it)
-  const PCT = 11; // brightness-% label height (sits below the ribbon)
-  const BELOW = 4 + PCT; // % band below the ribbon
-  const TOPPAD = 8; // room above the first row so a selection glow can breathe
-  const PITCH = RIB + BELOW + 14; // row-to-row spacing
+  const PCT = 11; // brightness-% label height (sits *above* the ribbon)
+  const ABOVE = 4 + PCT; // % band above each ribbon row
+  const BOTPAD = 8; // room below the last row so a selection glow can breathe
+  const PITCH = RIB + ABOVE + 14; // row-to-row spacing
   const TURN = PITCH / 2; // U-bend radius (chord = PITCH = diameter → semicircle)
   const VW = 300;
   const MX = TURN + RIB / 2 + 3;
   const innerW = VW - 2 * MX;
   const step = innerW / cols;
   const segW = step - 4; // a segment's tinted width
-  const rowY = (r: number) => TOPPAD + RIB / 2 + r * PITCH;
+  const rowY = (r: number) => 6 + ABOVE + RIB / 2 + r * PITCH;
   const colX = (k: number) => MX + (k + 0.5) * step;
   const ledX = (i: number) => {
     const r = Math.floor(i / cols);
@@ -831,7 +831,7 @@ function SegmentEditor({
     return colX(k);
   };
   const rowOf = (i: number) => Math.floor(i / cols);
-  const VH = rowY(numRows - 1) + RIB / 2 + BELOW + 6;
+  const VH = rowY(numRows - 1) + RIB / 2 + BOTPAD;
 
   // One continuous ribbon centreline. The last row stops just past its final
   // segment so a short row leaves no dangling tail.
@@ -942,12 +942,12 @@ function SegmentEditor({
             );
           })}
 
-          {/* Per segment: brightness % below, plus a full-column hit target. */}
+          {/* Per segment: brightness % above, plus a full-column hit target. */}
           {Array.from({ length: count }, (_, i) => {
             const x = ledX(i);
             const ry = rowY(rowOf(i));
             const on = selected.has(i);
-            const pctY = ry + RIB / 2 + 4 + PCT * 0.75;
+            const pctY = ry - RIB / 2 - 5; // baseline just above the ribbon
             return (
               <g key={`seg-ctl${i}`} onClick={() => toggle(i)} style={{ cursor: "pointer" }}>
                 <title>{`Segment ${i + 1} · ${brightness[i]}%`}</title>
@@ -966,9 +966,9 @@ function SegmentEditor({
                 </text>
                 <rect
                   x={x - step / 2}
-                  y={ry - RIB / 2 - 4}
+                  y={ry - RIB / 2 - ABOVE}
                   width={step}
-                  height={pctY - (ry - RIB / 2) + 4}
+                  height={ABOVE + RIB + 4}
                   fill="transparent"
                 />
               </g>

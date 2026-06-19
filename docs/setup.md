@@ -26,6 +26,13 @@ buttons won't find anything.
 
 Upgrade with `docker compose pull && docker compose up -d`.
 
+!!! tip "On Unraid?"
+    Bifrost is in **[Community Applications](https://ca.unraid.net/apps/bifrost-0ehyi200nwfgp8)** —
+    search **Bifrost** on the Apps tab and apply the template (set
+    `BIFROST_SECRET`, keep host networking). See
+    **[bifrost-unraid](https://github.com/others-git/bifrost-unraid)** for the
+    template and step-by-step install.
+
 !!! warning "Keep `BIFROST_SECRET` stable across upgrades"
     It encrypts your provider credentials at rest (AES-256-GCM). If it changes,
     the app still starts but logs `failed to decrypt credentials` and providers
@@ -92,6 +99,9 @@ reachable both natively and through Home Assistant is automatically
 **de-duplicated** — the native copy wins and the HA copy is hidden. See
 **[Providers](providers.md)** for transports, live-update modes, and per-provider
 capabilities.
+
+Next, organise everything into rooms and tidy the inventory (glyphs, receiver
+binding, TV remotes, merging duplicates) — see **[Rooms & devices](rooms-and-devices.md)**.
 
 ## 5. Voice & assistants
 
@@ -169,3 +179,5 @@ only with a browser session — a leaked key can't mint more keys. Full referenc
   Android wall-tablet app.
 - **[bifrost-skills](https://github.com/others-git/bifrost-skills)** — reusable
   hardware setup runbooks (starting with the tablet wall-kiosk).
+- **[bifrost-unraid](https://github.com/others-git/bifrost-unraid)** — the Unraid
+  Community Applications Docker template.

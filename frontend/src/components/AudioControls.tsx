@@ -242,14 +242,12 @@ export function TransportButton({
         background: big ? `${alpha(ACCENT, 0.13)}` : "rgba(255,255,255,0.04)",
         color: big ? "#fff" : T.dim,
         cursor: "pointer",
-        fontSize: big ? (compact ? "1rem" : "1.2rem") : compact ? "0.82rem" : "0.95rem",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
+        display: "grid",
+        placeItems: "center",
         flexShrink: 0,
       }}
     >
-      {glyph}
+      <Glyph name={glyph} size={big ? (compact ? 18 : 22) : compact ? 16 : 18} />
     </button>
   );
 }

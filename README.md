@@ -40,10 +40,14 @@ Then open `http://<host>:3000`. **Keep `BIFROST_SECRET` identical across upgrade
 it encrypts your provider credentials at rest. See the
 [install guide](docs/index.md#install) for bare-binary builds and configuration.
 
+On **Unraid**? Bifrost is in [Community Applications](https://ca.unraid.net/apps/bifrost-0ehyi200nwfgp8) —
+search **Bifrost** on the Apps tab and apply the template.
+
 ## Companion repos
 
 - **[bifrost-kiosk](https://github.com/others-git/bifrost-kiosk)** — a native Android app that turns a wall-mounted tablet into a hard-locked, always-on Bifrost fixture: a full-screen dashboard plus an offline wake-word voice satellite.
 - **[bifrost-skills](https://github.com/others-git/bifrost-skills)** — reusable hardware setup runbooks (starting with the tablet wall-kiosk).
+- **[bifrost-unraid](https://github.com/others-git/bifrost-unraid)** — the [Unraid Community Applications](https://ca.unraid.net/apps/bifrost-0ehyi200nwfgp8) Docker template.
 
 ## AI usage disclosure
 
