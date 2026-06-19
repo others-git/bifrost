@@ -188,7 +188,7 @@ provider-native synced playback group (see below).
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/v1/media/devices` | All audio devices (cached state) |
+| `GET` | `/api/v1/media/devices` | All media devices (cached state) |
 | `GET` | `/api/v1/media/devices/{id}` | One device — live read, refreshes the cache |
 | `PUT` | `/api/v1/media/devices/{id}/state` | Send a command (body below) |
 | `POST` | `/api/v1/media/devices/{id}/cast` | Cast media to a TV / media player (body below) |
@@ -253,7 +253,7 @@ receiver. Stored on the source.
 ```json
 // PUT …/{id}/receiver
 {
-  "receiver_id": "<audio device id>",  // null to unbind
+  "receiver_id": "<media device id>",  // null to unbind
   "receiver_source": "Game"             // optional: receiver input to select on power-on
 }
 ```
@@ -276,7 +276,7 @@ receiver binding from the companion.
 ```json
 // PUT …/{id}/companion
 {
-  "primary_id": "<audio device id>"   // null to unmerge
+  "primary_id": "<media device id>"   // null to unmerge
 }
 ```
 
@@ -315,7 +315,7 @@ grouping, **independent of Bifrost Rooms**. `POST …/{id}/group` joins the
 speaker `{id}` into the group coordinated by another speaker:
 
 ```json
-{ "coordinator_id": "<another audio device id>" }
+{ "coordinator_id": "<another media device id>" }
 ```
 
 `POST …/{id}/ungroup` removes the speaker from any group (returns it to
@@ -527,7 +527,7 @@ Accept: application/json, text/event-stream
 
 A missing or invalid key returns `401` before any MCP processing. The MCP tools
 call the same shared service layer as the routes above, so behaviour can't drift
-from the REST surface. Tools resolve lights, rooms, scenes, and audio devices by
+from the REST surface. Tools resolve lights, rooms, scenes, and media devices by
 **id or case-insensitive name/substring**. The tool catalogue and mapping live
 in [MCP server](mcp.md). stdio-only clients can bridge to this endpoint with the
 standard `mcp-remote` shim — there is no separate stdio server.

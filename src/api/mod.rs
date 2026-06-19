@@ -123,9 +123,6 @@ pub fn router() -> Router<Arc<AppState>> {
         .nest("/ai-endpoints", ai_endpoints::router())
         .nest("/api-keys", apikeys::router())
         .nest("/media", media::router())
-        // Deprecated alias: the media domain was renamed from "audio"; kept so
-        // existing clients on /api/audio/* keep working for a release.
-        .nest("/audio", media::router())
         .nest("/auth", auth::router())
         .nest("/dev", dev::router())
         .nest("/enrollment", enrollment::router())

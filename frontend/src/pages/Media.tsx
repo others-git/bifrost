@@ -114,7 +114,7 @@ export function MediaPage() {
   return (
     <div style={{ padding: isMobile ? "1rem 0.85rem" : "2rem", maxWidth: 1020, margin: "0 auto", color: T.text }}>
       <PageHeader
-        title="Audio"
+        title="Media"
         status={devices.length > 0 ? `${devices.length} device${devices.length !== 1 ? "s" : ""}` : undefined}
       />
 

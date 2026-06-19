@@ -39,8 +39,8 @@ directly-assigned ones, so you can start from a provider's layout and tweak.
 
 Speakers added to a room get a **per-room volume offset** — a trim (e.g. −10 / +5)
 so a quiet speaker and a loud one even out when you set one room volume. A room's
-volume/mute fans out to every audio member with its offset applied. Configure the
-audio members and their offsets on the Rooms page.
+volume/mute fans out to every media member with its offset applied. Configure the
+media members and their offsets on the Rooms page.
 
 ### Quick-control buttons
 

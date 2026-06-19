@@ -60,7 +60,7 @@ function Brand({ compact = false, fontSize }: { compact?: boolean; fontSize: str
 
 const NAV_ITEMS: { id: NavPage; glyph: string; label: string }[] = [
   { id: "dashboard", glyph: "◉", label: "Control" },
-  { id: "media", glyph: "♪", label: "Audio" },
+  { id: "media", glyph: "♪", label: "Media" },
   { id: "devices", glyph: "▤", label: "Devices" },
   { id: "scenes", glyph: "✦", label: "Scenes" },
   { id: "rooms", glyph: "⌂", label: "Rooms" },

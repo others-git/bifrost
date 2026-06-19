@@ -35,9 +35,6 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{id}/merge", post(merge_rooms))
         .route("/{id}/media", put(set_room_media_devices))
         .route("/{id}/media/state", put(set_room_media_state))
-        // Deprecated /audio aliases (domain renamed audio → media).
-        .route("/{id}/audio", put(set_room_media_devices))
-        .route("/{id}/audio/state", put(set_room_media_state))
         .route("/{id}/enabled", put(set_room_enabled))
         .route("/{id}/lights", put(set_direct_lights))
         .route("/{id}/power", put(set_room_power_devices))

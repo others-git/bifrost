@@ -1356,7 +1356,7 @@ async fn audio_placement_without_session_returns_401() {
         .oneshot(
             Request::builder()
                 .method("PUT")
-                .uri("/api/plans/some-id/audio")
+                .uri("/api/plans/some-id/media")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"placements":[]}"#))
                 .unwrap(),
@@ -1394,7 +1394,7 @@ async fn audio_placement_roundtrips_with_mount() {
         .clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/plans/{plan_id}/audio"),
+            &format!("/api/plans/{plan_id}/media"),
             &cookie,
             &body,
         ))
@@ -1437,7 +1437,7 @@ async fn audio_placement_rejects_unknown_device() {
     let resp = app
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/plans/{plan_id}/audio"),
+            &format!("/api/plans/{plan_id}/media"),
             &cookie,
             r#"{"placements":[{"media_device_id":"ghost","x":1,"y":1,"mount":"c"}]}"#,
         ))
@@ -4113,7 +4113,7 @@ async fn setup_onkyo(app: &Router, cookie: &str, port: u16) -> String {
 
     let resp = app
         .clone()
-        .oneshot(helpers::authed_get("/api/audio/devices", cookie))
+        .oneshot(helpers::authed_get("/api/media/devices", cookie))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -4127,29 +4127,29 @@ async fn audio_routes_require_session() {
     // Well-formed bodies so a route's auth check (not body validation) is what
     // rejects the request.
     for (method, uri, body) in [
-        ("GET", "/api/audio/devices", "{}"),
-        ("GET", "/api/audio/devices/some-id", "{}"),
-        ("PUT", "/api/audio/devices/some-id/state", "{}"),
-        ("GET", "/api/audio/devices/some-id/favorites", "{}"),
+        ("GET", "/api/media/devices", "{}"),
+        ("GET", "/api/media/devices/some-id", "{}"),
+        ("PUT", "/api/media/devices/some-id/state", "{}"),
+        ("GET", "/api/media/devices/some-id/favorites", "{}"),
         (
             "POST",
-            "/api/audio/devices/some-id/favorites/play",
+            "/api/media/devices/some-id/favorites/play",
             r#"{"favorite_id":"x"}"#,
         ),
         (
             "POST",
-            "/api/audio/devices/some-id/group",
+            "/api/media/devices/some-id/group",
             r#"{"coordinator_id":"x"}"#,
         ),
-        ("POST", "/api/audio/devices/some-id/ungroup", "{}"),
+        ("POST", "/api/media/devices/some-id/ungroup", "{}"),
         (
             "PUT",
-            "/api/audio/devices/some-id/receiver",
+            "/api/media/devices/some-id/receiver",
             r#"{"receiver_id":"x"}"#,
         ),
         (
             "PUT",
-            "/api/audio/devices/some-id/companion",
+            "/api/media/devices/some-id/companion",
             r#"{"primary_id":"x"}"#,
         ),
     ] {
@@ -4207,7 +4207,7 @@ async fn add_onkyo_device(
     assert_eq!(resp.status(), StatusCode::OK);
     let resp = app
         .clone()
-        .oneshot(helpers::authed_get("/api/audio/devices", cookie))
+        .oneshot(helpers::authed_get("/api/media/devices", cookie))
         .await
         .unwrap();
     let devices = helpers::response_json(resp).await;
@@ -4270,7 +4270,7 @@ async fn audio_receiver_binding_crud_and_validation() {
         .clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/audio/devices/{source}/receiver"),
+            &format!("/api/media/devices/{source}/receiver"),
             &cookie,
             &format!(r#"{{"receiver_id":"{source}"}}"#),
         ))
@@ -4283,7 +4283,7 @@ async fn audio_receiver_binding_crud_and_validation() {
         .clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/audio/devices/{source}/receiver"),
+            &format!("/api/media/devices/{source}/receiver"),
             &cookie,
             r#"{"receiver_id":"does-not-exist"}"#,
         ))
@@ -4296,7 +4296,7 @@ async fn audio_receiver_binding_crud_and_validation() {
         .clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/audio/devices/{source}/receiver"),
+            &format!("/api/media/devices/{source}/receiver"),
             &cookie,
             &format!(r#"{{"receiver_id":"{receiver}","receiver_source":"Game"}}"#),
         ))
@@ -4307,7 +4307,7 @@ async fn audio_receiver_binding_crud_and_validation() {
     let resp = app
         .clone()
         .oneshot(helpers::authed_get(
-            &format!("/api/audio/devices/{source}"),
+            &format!("/api/media/devices/{source}"),
             &cookie,
         ))
         .await
@@ -4321,7 +4321,7 @@ async fn audio_receiver_binding_crud_and_validation() {
         .clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/audio/devices/{receiver}/receiver"),
+            &format!("/api/media/devices/{receiver}/receiver"),
             &cookie,
             &format!(r#"{{"receiver_id":"{source}"}}"#),
         ))
@@ -4334,7 +4334,7 @@ async fn audio_receiver_binding_crud_and_validation() {
         .clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/audio/devices/{source}/receiver"),
+            &format!("/api/media/devices/{source}/receiver"),
             &cookie,
             r#"{"receiver_id":null}"#,
         ))
@@ -4344,7 +4344,7 @@ async fn audio_receiver_binding_crud_and_validation() {
 
     let resp = app
         .oneshot(helpers::authed_get(
-            &format!("/api/audio/devices/{source}"),
+            &format!("/api/media/devices/{source}"),
             &cookie,
         ))
         .await
@@ -4377,7 +4377,7 @@ async fn audio_companion_link_crud_and_validation() {
         .clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/audio/devices/{companion}/companion"),
+            &format!("/api/media/devices/{companion}/companion"),
             &cookie,
             &format!(r#"{{"primary_id":"{companion}"}}"#),
         ))
@@ -4390,7 +4390,7 @@ async fn audio_companion_link_crud_and_validation() {
         .clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/audio/devices/{companion}/companion"),
+            &format!("/api/media/devices/{companion}/companion"),
             &cookie,
             r#"{"primary_id":"does-not-exist"}"#,
         ))
@@ -4403,7 +4403,7 @@ async fn audio_companion_link_crud_and_validation() {
         .clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/audio/devices/{companion}/companion"),
+            &format!("/api/media/devices/{companion}/companion"),
             &cookie,
             &format!(r#"{{"primary_id":"{primary}"}}"#),
         ))
@@ -4414,7 +4414,7 @@ async fn audio_companion_link_crud_and_validation() {
     // The link is recorded on the companion.
     let resp = app
         .clone()
-        .oneshot(helpers::authed_get("/api/audio/devices", &cookie))
+        .oneshot(helpers::authed_get("/api/media/devices", &cookie))
         .await
         .unwrap();
     let list = helpers::response_json(resp).await;
@@ -4431,7 +4431,7 @@ async fn audio_companion_link_crud_and_validation() {
         .clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/audio/devices/{primary}/companion"),
+            &format!("/api/media/devices/{primary}/companion"),
             &cookie,
             &format!(r#"{{"primary_id":"{companion}"}}"#),
         ))
@@ -4443,7 +4443,7 @@ async fn audio_companion_link_crud_and_validation() {
     let resp = app
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/audio/devices/{companion}/companion"),
+            &format!("/api/media/devices/{companion}/companion"),
             &cookie,
             r#"{"primary_id":null}"#,
         ))
@@ -4473,7 +4473,7 @@ async fn audio_receiver_binding_routes_volume_to_receiver() {
         .clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/audio/devices/{source}/receiver"),
+            &format!("/api/media/devices/{source}/receiver"),
             &cookie,
             &format!(r#"{{"receiver_id":"{receiver}"}}"#),
         ))
@@ -4485,7 +4485,7 @@ async fn audio_receiver_binding_routes_volume_to_receiver() {
         .clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/audio/devices/{source}/state"),
+            &format!("/api/media/devices/{source}/state"),
             &cookie,
             r#"{"volume":33}"#,
         ))
@@ -4508,7 +4508,7 @@ async fn audio_receiver_binding_routes_volume_to_receiver() {
         .clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/audio/devices/{source}/receiver"),
+            &format!("/api/media/devices/{source}/receiver"),
             &cookie,
             r#"{"receiver_id":null}"#,
         ))
@@ -4519,7 +4519,7 @@ async fn audio_receiver_binding_routes_volume_to_receiver() {
     let resp = app
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/audio/devices/{source}/state"),
+            &format!("/api/media/devices/{source}/state"),
             &cookie,
             r#"{"volume":50}"#,
         ))
@@ -4561,7 +4561,7 @@ async fn list_overlays_bound_source_with_receiver_volume() {
     app.clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/audio/devices/{source}/receiver"),
+            &format!("/api/media/devices/{source}/receiver"),
             &cookie,
             &format!(r#"{{"receiver_id":"{receiver}"}}"#),
         ))
@@ -4569,7 +4569,7 @@ async fn list_overlays_bound_source_with_receiver_volume() {
         .unwrap();
 
     let list = helpers::response_json(
-        app.oneshot(helpers::authed_get("/api/audio/devices", &cookie))
+        app.oneshot(helpers::authed_get("/api/media/devices", &cookie))
             .await
             .unwrap(),
     )
@@ -4624,7 +4624,7 @@ async fn room_volume_skips_a_bound_receiver_member() {
     app.clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/rooms/{room_id}/audio"),
+            &format!("/api/rooms/{room_id}/media"),
             &cookie,
             &format!(
                 r#"{{"devices":[{{"media_device_id":"{source}"}},{{"media_device_id":"{receiver}"}}]}}"#
@@ -4636,7 +4636,7 @@ async fn room_volume_skips_a_bound_receiver_member() {
     app.clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/audio/devices/{source}/receiver"),
+            &format!("/api/media/devices/{source}/receiver"),
             &cookie,
             &format!(r#"{{"receiver_id":"{receiver}"}}"#),
         ))
@@ -4646,7 +4646,7 @@ async fn room_volume_skips_a_bound_receiver_member() {
     let resp = app
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/rooms/{room_id}/audio/state"),
+            &format!("/api/rooms/{room_id}/media/state"),
             &cookie,
             r#"{"volume":40}"#,
         ))
@@ -4793,7 +4793,7 @@ async fn setup_sonos(app: &Router, cookie: &str, base_uri: &str) -> String {
 
     let resp = app
         .clone()
-        .oneshot(helpers::authed_get("/api/audio/devices", cookie))
+        .oneshot(helpers::authed_get("/api/media/devices", cookie))
         .await
         .unwrap();
     let devices = helpers::response_json(resp).await;
@@ -4809,7 +4809,7 @@ async fn audio_favorites_lists_provider_favorites() {
 
     let resp = app
         .oneshot(helpers::authed_get(
-            &format!("/api/audio/devices/{device_id}/favorites"),
+            &format!("/api/media/devices/{device_id}/favorites"),
             &cookie,
         ))
         .await
@@ -4834,7 +4834,7 @@ async fn audio_play_favorite_starts_playback() {
         .clone()
         .oneshot(helpers::authed_json(
             "POST",
-            &format!("/api/audio/devices/{device_id}/favorites/play"),
+            &format!("/api/media/devices/{device_id}/favorites/play"),
             &cookie,
             r#"{"favorite_id":"FV:2/12"}"#,
         ))
@@ -4930,7 +4930,7 @@ async fn audio_play_favorite_unknown_id_returns_422() {
     let resp = app
         .oneshot(helpers::authed_json(
             "POST",
-            &format!("/api/audio/devices/{device_id}/favorites/play"),
+            &format!("/api/media/devices/{device_id}/favorites/play"),
             &cookie,
             r#"{"favorite_id":"FV:2/999"}"#,
         ))
@@ -4943,7 +4943,7 @@ async fn audio_play_favorite_unknown_id_returns_422() {
 async fn sonos_pair_ids(app: &Router, cookie: &str) -> (String, String) {
     let resp = app
         .clone()
-        .oneshot(helpers::authed_get("/api/audio/devices", cookie))
+        .oneshot(helpers::authed_get("/api/media/devices", cookie))
         .await
         .unwrap();
     let devices = helpers::response_json(resp).await;
@@ -4973,7 +4973,7 @@ async fn audio_group_joins_speaker_to_coordinator() {
         .clone()
         .oneshot(helpers::authed_json(
             "POST",
-            &format!("/api/audio/devices/{kitchen}/group"),
+            &format!("/api/media/devices/{kitchen}/group"),
             &cookie,
             &format!(r#"{{"coordinator_id":"{living}"}}"#),
         ))
@@ -5006,7 +5006,7 @@ async fn audio_ungroup_makes_speaker_standalone() {
         .clone()
         .oneshot(helpers::authed_json(
             "POST",
-            &format!("/api/audio/devices/{kitchen}/ungroup"),
+            &format!("/api/media/devices/{kitchen}/ungroup"),
             &cookie,
             "{}",
         ))
@@ -5035,7 +5035,7 @@ async fn audio_group_with_itself_returns_422() {
     let resp = app
         .oneshot(helpers::authed_json(
             "POST",
-            &format!("/api/audio/devices/{kitchen}/group"),
+            &format!("/api/media/devices/{kitchen}/group"),
             &cookie,
             &format!(r#"{{"coordinator_id":"{kitchen}"}}"#),
         ))
@@ -5055,7 +5055,7 @@ async fn audio_group_unknown_device_returns_404() {
     let resp = app
         .oneshot(helpers::authed_json(
             "POST",
-            "/api/audio/devices/nope/group",
+            "/api/media/devices/nope/group",
             &cookie,
             &format!(r#"{{"coordinator_id":"{living}"}}"#),
         ))
@@ -5078,7 +5078,7 @@ async fn audio_group_across_providers_returns_422() {
     let resp = app
         .oneshot(helpers::authed_json(
             "POST",
-            &format!("/api/audio/devices/{kitchen}/group"),
+            &format!("/api/media/devices/{kitchen}/group"),
             &cookie,
             &format!(r#"{{"coordinator_id":"{onkyo}"}}"#),
         ))
@@ -5123,7 +5123,7 @@ async fn onkyo_discover_lists_device_with_live_state() {
 
     let resp = app
         .oneshot(helpers::authed_get(
-            &format!("/api/audio/devices/{device_id}"),
+            &format!("/api/media/devices/{device_id}"),
             &cookie,
         ))
         .await
@@ -5147,7 +5147,7 @@ async fn audio_set_state_drives_receiver_and_validates() {
         .clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/audio/devices/{device_id}/state"),
+            &format!("/api/media/devices/{device_id}/state"),
             &cookie,
             r#"{"power":true,"volume":45,"source":"spotify"}"#,
         ))
@@ -5167,7 +5167,7 @@ async fn audio_set_state_drives_receiver_and_validates() {
         .clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/audio/devices/{device_id}/state"),
+            &format!("/api/media/devices/{device_id}/state"),
             &cookie,
             r#"{"source":"kazoo"}"#,
         ))
@@ -5179,7 +5179,7 @@ async fn audio_set_state_drives_receiver_and_validates() {
     let resp = app
         .oneshot(helpers::authed_json(
             "PUT",
-            "/api/audio/devices/nope/state",
+            "/api/media/devices/nope/state",
             &cookie,
             r#"{"volume":10}"#,
         ))
@@ -5202,7 +5202,7 @@ async fn v1_audio_requires_key_and_mirrors_session_routes() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/v1/audio/devices")
+                .uri("/api/v1/media/devices")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -5213,7 +5213,7 @@ async fn v1_audio_requires_key_and_mirrors_session_routes() {
     // List + live get with key.
     let resp = app
         .clone()
-        .oneshot(bearer_get("/api/v1/audio/devices", &key))
+        .oneshot(bearer_get("/api/v1/media/devices", &key))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -5223,7 +5223,7 @@ async fn v1_audio_requires_key_and_mirrors_session_routes() {
     let resp = app
         .clone()
         .oneshot(bearer_get(
-            &format!("/api/v1/audio/devices/{device_id}"),
+            &format!("/api/v1/media/devices/{device_id}"),
             &key,
         ))
         .await
@@ -5235,7 +5235,7 @@ async fn v1_audio_requires_key_and_mirrors_session_routes() {
     let resp = app
         .oneshot(bearer_json(
             "PUT",
-            &format!("/api/v1/audio/devices/{device_id}/state"),
+            &format!("/api/v1/media/devices/{device_id}/state"),
             &key,
             r#"{"transport":"pause"}"#,
         ))
@@ -5260,7 +5260,7 @@ async fn room_audio_link_requires_session() {
         .oneshot(
             Request::builder()
                 .method("PUT")
-                .uri("/api/rooms/some-id/audio")
+                .uri("/api/rooms/some-id/media")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"devices":[]}"#))
                 .unwrap(),
@@ -5296,7 +5296,7 @@ async fn room_audio_members_set_list_and_clear() {
         .clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/rooms/{room_id}/audio"),
+            &format!("/api/rooms/{room_id}/media"),
             &cookie,
             r#"{"devices":[{"media_device_id":"nope"}]}"#,
         ))
@@ -5307,7 +5307,7 @@ async fn room_audio_members_set_list_and_clear() {
         .clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            "/api/rooms/nope/audio",
+            "/api/rooms/nope/media",
             &cookie,
             &format!(r#"{{"devices":[{{"media_device_id":"{device_id}"}}]}}"#),
         ))
@@ -5320,7 +5320,7 @@ async fn room_audio_members_set_list_and_clear() {
         .clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/rooms/{room_id}/audio"),
+            &format!("/api/rooms/{room_id}/media"),
             &cookie,
             &format!(r#"{{"devices":[{{"media_device_id":"{device_id}","volume_offset":-6}}]}}"#),
         ))
@@ -5353,7 +5353,7 @@ async fn room_audio_members_set_list_and_clear() {
         .clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/rooms/{room_id}/audio"),
+            &format!("/api/rooms/{room_id}/media"),
             &cookie,
             r#"{"devices":[]}"#,
         ))
@@ -5515,7 +5515,7 @@ async fn room_audio_state_fans_out_with_offsets() {
     // Both devices share a name, so fetch the two ids directly.
     let resp = app
         .clone()
-        .oneshot(helpers::authed_get("/api/audio/devices", &cookie))
+        .oneshot(helpers::authed_get("/api/media/devices", &cookie))
         .await
         .unwrap();
     let devs = helpers::response_json(resp).await;
@@ -5543,7 +5543,7 @@ async fn room_audio_state_fans_out_with_offsets() {
         .clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/rooms/{room_id}/audio"),
+            &format!("/api/rooms/{room_id}/media"),
             &cookie,
             &body,
         ))
@@ -5554,7 +5554,7 @@ async fn room_audio_state_fans_out_with_offsets() {
     let resp = app
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/rooms/{room_id}/audio/state"),
+            &format!("/api/rooms/{room_id}/media/state"),
             &cookie,
             r#"{"volume":40}"#,
         ))
@@ -5593,7 +5593,7 @@ async fn room_audio_state_without_members_returns_404() {
     let resp = app
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/rooms/{room_id}/audio/state"),
+            &format!("/api/rooms/{room_id}/media/state"),
             &cookie,
             r#"{"volume":30}"#,
         ))
@@ -6602,7 +6602,7 @@ async fn voice_room_color_touches_lights_not_audio() {
     app.clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/audio/devices/{audio_id}/room"),
+            &format!("/api/media/devices/{audio_id}/room"),
             &cookie,
             &format!(r#"{{"room_id":"{room_id}"}}"#),
         ))
@@ -6664,7 +6664,7 @@ async fn room_effect_drives_lights_not_audio() {
     app.clone()
         .oneshot(helpers::authed_json(
             "PUT",
-            &format!("/api/audio/devices/{audio_id}/room"),
+            &format!("/api/media/devices/{audio_id}/room"),
             &cookie,
             &format!(r#"{{"room_id":"{room_id}"}}"#),
         ))
@@ -7392,7 +7392,7 @@ async fn discover_ha_surfaces_media_player_as_audio_device() {
 
     // The TV shows up on the audio device list.
     let resp = app
-        .oneshot(helpers::authed_get("/api/audio/devices", &cookie))
+        .oneshot(helpers::authed_get("/api/media/devices", &cookie))
         .await
         .unwrap();
     let devices = helpers::response_json(resp).await;
@@ -8278,7 +8278,7 @@ async fn discover_all_returns_a_json_array_when_authed() {
     assert!(body.is_array(), "expected an array, got {body}");
 }
 
-// ── Casting (/api/audio/devices/{id}/cast) ───────────────────────────────────
+// ── Casting (/api/media/devices/{id}/cast) ───────────────────────────────────
 
 #[tokio::test]
 async fn cast_requires_session() {
@@ -8287,7 +8287,7 @@ async fn cast_requires_session() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/audio/devices/some-id/cast")
+                .uri("/api/media/devices/some-id/cast")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"content_id":"x","content_type":"url"}"#))
                 .unwrap(),
@@ -8304,7 +8304,7 @@ async fn v1_cast_requires_key() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/v1/audio/devices/some-id/cast")
+                .uri("/api/v1/media/devices/some-id/cast")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"content_id":"x","content_type":"url"}"#))
                 .unwrap(),
@@ -8327,7 +8327,7 @@ async fn v1_cast_with_key_reaches_the_cast_service() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/v1/audio/devices/nonexistent/cast")
+                .uri("/api/v1/media/devices/nonexistent/cast")
                 .header(header::AUTHORIZATION, format!("Bearer {key}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"content_id":"x","content_type":"url"}"#))

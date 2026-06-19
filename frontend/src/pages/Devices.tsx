@@ -132,7 +132,7 @@ function mediaItem(a: MediaDevice): Item {
     name: a.name,
     deviceId: a.device_id,
     providerId: a.provider_id,
-    typeLabel: AUDIO_KIND_LABEL[a.kind] ?? "Audio",
+    typeLabel: AUDIO_KIND_LABEL[a.kind] ?? "Media",
     enabled: a.enabled !== false,
     glyph: a.glyph ?? null,
     defaultGlyph: mediaKindGlyph(a.kind),
@@ -966,7 +966,7 @@ function MergedCompanion({
 
 const SECTIONS: { domain: Domain; title: string }[] = [
   { domain: "light", title: "Lights" },
-  { domain: "media", title: "Audio" },
+  { domain: "media", title: "Media" },
   { domain: "power", title: "Power" },
 ];
 

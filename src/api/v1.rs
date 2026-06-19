@@ -66,21 +66,6 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/media/devices/{id}/ungroup", post(ungroup_media))
         .route("/media/devices/{id}/receiver", put(set_receiver_media))
         .route("/media/devices/{id}/companion", put(set_companion_media))
-        // Deprecated /audio/devices/* aliases (domain renamed audio → media);
-        // kept so existing public-API clients keep working for a release.
-        .route("/audio/devices", get(list_media))
-        .route("/audio/devices/{id}", get(get_media))
-        .route("/audio/devices/{id}/state", put(set_media))
-        .route("/audio/devices/{id}/cast", post(cast_media))
-        .route("/audio/devices/{id}/favorites", get(list_media_favorites))
-        .route(
-            "/audio/devices/{id}/favorites/play",
-            post(play_media_favorite),
-        )
-        .route("/audio/devices/{id}/group", post(group_media))
-        .route("/audio/devices/{id}/ungroup", post(ungroup_media))
-        .route("/audio/devices/{id}/receiver", put(set_receiver_media))
-        .route("/audio/devices/{id}/companion", put(set_companion_media))
         .route("/power/devices", get(list_power))
         .route("/power/devices/{id}", get(get_power))
         .route("/power/devices/{id}/state", put(set_power))

@@ -27,8 +27,6 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{id}/layout", put(set_layout))
         .route("/{id}/lights", put(set_lights))
         .route("/{id}/media", put(set_media_placements))
-        // Deprecated /audio alias (domain renamed audio → media).
-        .route("/{id}/audio", put(set_media_placements))
         .route("/{id}/rooms", put(set_rooms))
         .route("/{id}/size", put(set_size))
 }

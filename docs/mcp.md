@@ -44,7 +44,7 @@ All tools below are served natively from `src/api/mcp.rs`.
 
 | Tool | Shared service fn(s) | Notes |
 |---|---|---|
-| `get_home_state` | `list_public_rooms` + `list_all_lights` + `list_all_scenes` + `list_all_devices` + `list_all_power_devices` | One-call context snapshot (rooms with member ids, lights, scenes, audio devices, power devices) |
+| `get_home_state` | `list_public_rooms` + `list_all_lights` + `list_all_scenes` + `list_all_devices` + `list_all_power_devices` | One-call context snapshot (rooms with member ids, lights, scenes, media devices, power devices) |
 | `list_lights` | `list_all_lights` | each light carries `capabilities.effects` (the dynamic-effect names it supports) |
 | `set_light` | `apply_light_state` | light by id/name; hex → CIE xy via `Color::from_rgb`; optional `effect` (a name from `capabilities.effects`, e.g. "candle"/"breathe"/"Sunrise") supersedes color/temp |
 | `set_room` | `effective_members` + `apply_room_state` | room by id/name; fan-out to member lights |

@@ -1307,7 +1307,7 @@ function AddProviderForm({
               .map((t) => ({
                 value: t.provider_type,
                 label: t.display_name,
-                group: kind === "light" ? "Lights" : kind === "media" ? "Audio" : "Integrations",
+                group: kind === "light" ? "Lights" : kind === "media" ? "Media" : "Integrations",
               })),
           )}
         />
