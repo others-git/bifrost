@@ -1,24 +1,24 @@
-//! Audio device domain models: receivers, speakers, and the state/command
-//! vocabulary shared by every audio provider (Onkyo, Sonos, …).
+//! Media device domain models: receivers, speakers, and the state/command
+//! vocabulary shared by every media provider (Onkyo, Sonos, …).
 //!
 //! The shape deliberately mirrors the light models: a device carries a full
-//! `AudioState` snapshot, while writes are sparse `AudioCommand`s — only the
+//! `MediaState` snapshot, while writes are sparse `MediaCommand`s — only the
 //! fields present are sent to the device.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// An audio endpoint a provider can control. For a receiver each listening
+/// An media endpoint a provider can control. For a receiver each listening
 /// zone is its own device (`main`, `zone2`, …); for Sonos each player is one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AudioDevice {
+pub struct MediaDevice {
     pub id: Uuid,
     /// Stable provider-specific identifier (e.g. eISCP zone, Sonos player UUID).
     pub provider_id: String,
     pub name: String,
-    pub kind: AudioDeviceKind,
-    pub capabilities: AudioCapabilities,
-    pub state: AudioState,
+    pub kind: MediaDeviceKind,
+    pub capabilities: MediaCapabilities,
+    pub state: MediaState,
     /// Normalized hardware identity for cross-provider de-dup (see
     /// [`crate::providers::mac_hw_id`]); `None` when the provider can't supply one.
     #[serde(default)]
@@ -27,10 +27,10 @@ pub struct AudioDevice {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum AudioDeviceKind {
+pub enum MediaDeviceKind {
     Receiver,
     Speaker,
-    /// A television / display whose audio Bifrost controls (HA `media_player`
+    /// A television / display whose media Bifrost controls (HA `media_player`
     /// with `device_class: "tv"`). Kept distinct from a plain speaker/receiver
     /// so the UI can identify it as a TV.
     Tv,
@@ -38,7 +38,7 @@ pub enum AudioDeviceKind {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AudioCapabilities {
+pub struct MediaCapabilities {
     /// Device can switch between physical/virtual inputs (receivers).
     pub sources: bool,
     /// Device exposes play/pause/skip transport control.
@@ -62,7 +62,7 @@ pub struct AudioCapabilities {
 /// can start playing by reference — no search or accounts involved. `id` is
 /// provider-native and opaque; the client passes it back verbatim to play.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AudioFavorite {
+pub struct MediaFavorite {
     pub id: String,
     pub title: String,
     /// Optional secondary line (service name, description, …).
@@ -71,9 +71,9 @@ pub struct AudioFavorite {
 }
 
 /// Full state snapshot, as returned by `get_state` and stored in
-/// `audio_devices.last_state`.
+/// `media_devices.last_state`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AudioState {
+pub struct MediaState {
     pub power: bool,
     /// 0–100.
     pub volume: u8,
@@ -84,7 +84,7 @@ pub struct AudioState {
     pub source: Option<String>,
     /// Selectable sources/inputs the device exposes — receiver inputs, or the
     /// apps on a smart TV (HA `source_list`). Switch to one by sending its name
-    /// as `AudioCommand::source`. Empty when the device doesn't enumerate them.
+    /// as `MediaCommand::source`. Empty when the device doesn't enumerate them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_list: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -123,7 +123,7 @@ pub enum PlayState {
 /// A sparse write: only the fields present are applied, in a provider-defined
 /// order (power first, so "power on + volume 40" works from standby).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AudioCommand {
+pub struct MediaCommand {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub power: Option<bool>,
     /// 0–100; providers clamp to their native scale.
@@ -131,7 +131,7 @@ pub struct AudioCommand {
     pub volume: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mute: Option<bool>,
-    /// Source name as reported in `AudioState::source`, or a provider-native
+    /// Source name as reported in `MediaState::source`, or a provider-native
     /// raw code (e.g. Onkyo hex like "2B").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -139,7 +139,7 @@ pub struct AudioCommand {
     pub transport: Option<TransportCmd>,
 }
 
-impl AudioCommand {
+impl MediaCommand {
     pub fn is_empty(&self) -> bool {
         self.power.is_none()
             && self.volume.is_none()
@@ -159,15 +159,15 @@ impl AudioCommand {
     pub fn split_for_receiver(
         &self,
         receiver_source: Option<&str>,
-    ) -> (AudioCommand, AudioCommand) {
-        let source_cmd = AudioCommand {
+    ) -> (MediaCommand, MediaCommand) {
+        let source_cmd = MediaCommand {
             power: self.power,
             source: self.source.clone(),
             transport: self.transport,
             volume: None,
             mute: None,
         };
-        let mut receiver_cmd = AudioCommand {
+        let mut receiver_cmd = MediaCommand {
             volume: self.volume,
             mute: self.mute,
             ..Default::default()
@@ -180,14 +180,14 @@ impl AudioCommand {
     }
 }
 
-/// A full-state update pushed by an audio device (e.g. Onkyo's unsolicited
+/// A full-state update pushed by an media device (e.g. Onkyo's unsolicited
 /// eISCP echoes). Push sources accumulate state internally and always emit
 /// complete snapshots, so consumers replace rather than merge.
 #[derive(Debug, Clone, Serialize)]
-pub struct AudioEvent {
+pub struct MediaEvent {
     /// Provider-native device id (e.g. `main`).
     pub device_id: String,
-    pub state: AudioState,
+    pub state: MediaState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -207,9 +207,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn audio_command_is_empty_only_when_all_fields_absent() {
-        assert!(AudioCommand::default().is_empty());
-        let cmd = AudioCommand {
+    fn media_command_is_empty_only_when_all_fields_absent() {
+        assert!(MediaCommand::default().is_empty());
+        let cmd = MediaCommand {
             volume: Some(30),
             ..Default::default()
         };
@@ -217,8 +217,8 @@ mod tests {
     }
 
     #[test]
-    fn audio_state_serializes_without_optional_noise() {
-        let s = AudioState {
+    fn media_state_serializes_without_optional_noise() {
+        let s = MediaState {
             power: true,
             volume: 42,
             mute: false,
@@ -231,8 +231,8 @@ mod tests {
     }
 
     #[test]
-    fn audio_command_roundtrips_through_json() {
-        let cmd = AudioCommand {
+    fn media_command_roundtrips_through_json() {
+        let cmd = MediaCommand {
             power: Some(true),
             volume: Some(55),
             mute: Some(false),
@@ -240,7 +240,7 @@ mod tests {
             transport: Some(TransportCmd::Play),
         };
         let json = serde_json::to_string(&cmd).unwrap();
-        let back: AudioCommand = serde_json::from_str(&json).unwrap();
+        let back: MediaCommand = serde_json::from_str(&json).unwrap();
         assert_eq!(back.power, Some(true));
         assert_eq!(back.volume, Some(55));
         assert_eq!(back.source.as_deref(), Some("net"));
@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn split_for_receiver_routes_volume_and_mute_to_receiver() {
-        let cmd = AudioCommand {
+        let cmd = MediaCommand {
             volume: Some(40),
             mute: Some(true),
             transport: Some(TransportCmd::Play),
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn split_for_receiver_power_on_wakes_receiver_and_switches_input() {
-        let cmd = AudioCommand {
+        let cmd = MediaCommand {
             power: Some(true),
             ..Default::default()
         };
@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn split_for_receiver_power_off_is_not_propagated_to_receiver() {
         // Many sources may share one receiver, so one going dark mustn't silence it.
-        let cmd = AudioCommand {
+        let cmd = MediaCommand {
             power: Some(false),
             ..Default::default()
         };

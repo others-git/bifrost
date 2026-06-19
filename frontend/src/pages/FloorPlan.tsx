@@ -3,7 +3,7 @@ import {
   activateScene,
   createScene,
   createPlan,
-  getAudioDevices,
+  getMediaDevices,
   getScenes,
   getPlan,
   getPlans,
@@ -22,8 +22,8 @@ import {
   setLightState,
   setRoomState,
   xyToRgb,
-  type AudioDevice,
-  type AudioPlacement,
+  type MediaDevice,
+  type MediaPlacement,
   type Light,
   type LightState,
   type LightStatePatch,
@@ -35,8 +35,8 @@ import {
   type Scene,
 } from "../api";
 import { ColorWheel, hexToHs, hexToRgb, hsvToRgb, LightEditor, type LightControlChange } from "../components/LightEditor";
-import { AudioEditor } from "../components/AudioControls";
-import { RoomVolumeStrip } from "../components/RoomAudio";
+import { MediaEditor } from "../components/MediaControls";
+import { RoomVolumeStrip } from "../components/RoomMedia";
 import { SceneButton, SceneModal } from "../components/scenes";
 import { Modal, useDialogs } from "../components/dialogs";
 import { ACCENT, S } from "../styles";
@@ -68,7 +68,7 @@ const TOOL_GLYPH: Record<Tool, string> = {
 };
 
 /** Device category chosen under the Devices tool. */
-type PlaceCategory = "light" | "audio";
+type PlaceCategory = "light" | "media";
 
 const ROOM_COLORS = ["#8b5cf6", "#3b82f6", "#22d3ee", "#4ade80", "#facc15", "#fb923c", "#f43f5e"];
 
@@ -151,7 +151,7 @@ interface Popover {
 /** What the shared editor fly-out is currently pointed at. */
 type EditorTarget =
   | { kind: "light"; id: string; anchor: HTMLElement | { x: number; y: number } }
-  | { kind: "audio"; id: string; anchor: HTMLElement | { x: number; y: number } }
+  | { kind: "media"; id: string; anchor: HTMLElement | { x: number; y: number } }
   | { kind: "room"; roomId: string; anchor: HTMLElement };
 
 export function FloorPlanPage({ lights }: { lights: Light[] }) {
@@ -164,7 +164,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
   const [tiles, setTiles] = useState<Set<string>>(new Set());
   const [walls, setWalls] = useState<Set<string>>(new Set());
   const [placements, setPlacements] = useState<Placement[]>([]);
-  const [audioPlacements, setAudioPlacements] = useState<AudioPlacement[]>([]);
+  const [mediaPlacements, setMediaPlacements] = useState<MediaPlacement[]>([]);
   const [rooms, setRooms] = useState<EditRoom[]>([]);
   const [dirty, setDirty] = useState(false);
 
@@ -175,7 +175,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
   const [selectedRoom, setSelectedRoom] = useState<string>("");
   // Audio devices (for the Speakers palette + on-plan fly-out), keyed by id;
   // patched optimistically by the fly-out.
-  const [audioById, setAudioById] = useState<Map<string, AudioDevice>>(new Map());
+  const [mediaById, setMediaById] = useState<Map<string, MediaDevice>>(new Map());
   const [paintColor, setPaintColor] = useState("#ff9900");
   const [paintBrightness, setPaintBrightness] = useState(100);
   const [popover, setPopover] = useState<Popover | null>(null);
@@ -232,7 +232,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
     setTiles(new Set(p.tiles.map(([x, y]) => tileKey(x, y))));
     setWalls(new Set(p.walls.map((w) => wallKey(w.x, w.y, w.dir))));
     setPlacements(p.lights);
-    setAudioPlacements(p.audio);
+    setMediaPlacements(p.media);
     setRooms(
       p.rooms.map((r) => ({
         id: r.id,
@@ -245,13 +245,13 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
   }
 
   // Audio devices for the Speakers palette + on-plan fly-out.
-  async function loadAudioDevices() {
-    const list = await getAudioDevices();
-    setAudioById(new Map(list.map((d) => [d.id, d])));
+  async function loadMediaDevices() {
+    const list = await getMediaDevices();
+    setMediaById(new Map(list.map((d) => [d.id, d])));
   }
 
-  function patchAudio(id: string, patch: Partial<AudioDevice["state"]>) {
-    setAudioById((prev) => {
+  function patchAudio(id: string, patch: Partial<MediaDevice["state"]>) {
+    setMediaById((prev) => {
       const dev = prev.get(id);
       if (!dev) return prev;
       return new Map(prev).set(id, { ...dev, state: { ...dev.state, ...patch } });
@@ -266,7 +266,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
     getScenes().then(setScenes);
   }, []);
   useEffect(() => {
-    loadAudioDevices();
+    loadMediaDevices();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -315,7 +315,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
     try {
       await putPlanLayout(plan.id, tileArr, wallArr);
       await putPlanLights(plan.id, placements);
-      await putPlanAudio(plan.id, audioPlacements);
+      await putPlanAudio(plan.id, mediaPlacements);
       await putPlanRooms(plan.id, roomArr);
       // Reload to pick up server-assigned Room bindings and memberships.
       await loadPlan(plan.id);
@@ -501,7 +501,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
   }
 
   const placedIds = new Set(placements.map((p) => p.light_id));
-  const placedAudioIds = new Set(audioPlacements.map((p) => p.audio_device_id));
+  const placedMediaIds = new Set(mediaPlacements.map((p) => p.media_device_id));
 
   const toolButton = (id: Tool) => {
     const t = TOOLS.find((x) => x.id === id)!;
@@ -614,7 +614,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
             </span>
             {tool === "place" && (
               <div style={{ display: "inline-flex", borderRadius: radius.sm, border: `1px solid ${color.border}`, overflow: "hidden" }}>
-                {(["light", "audio"] as PlaceCategory[]).map((cat) => {
+                {(["light", "media"] as PlaceCategory[]).map((cat) => {
                   const on = placeCategory === cat;
                   return (
                     <button
@@ -672,8 +672,8 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
               tiles={tiles}
               walls={walls}
               placements={placements}
-              audioPlacements={audioPlacements}
-              audioById={audioById}
+              mediaPlacements={mediaPlacements}
+              mediaById={mediaById}
               rooms={rooms}
               selectedRoom={selectedRoom}
               statesById={statesById}
@@ -683,7 +683,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
               setTiles={setTiles}
               setWalls={setWalls}
               setPlacements={setPlacements}
-              setAudioPlacements={setAudioPlacements}
+              setMediaPlacements={setMediaPlacements}
               setRooms={setRooms}
               onLightClick={(pls, px, py) => {
                 if (pls.length === 1) {
@@ -692,8 +692,8 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
                   setPopover({ px, py, placements: pls });
                 }
               }}
-              onAudioClick={(deviceId, px, py) =>
-                setEditor({ kind: "audio", id: deviceId, anchor: { x: px, y: py } })
+              onMediaClick={(deviceId, px, py) =>
+                setEditor({ kind: "media", id: deviceId, anchor: { x: px, y: py } })
               }
               onResize={handleResize}
               onPaint={paintLight}
@@ -733,24 +733,24 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
               </InspectorPanel>
             )}
 
-            {tool === "place" && placeCategory === "audio" && (
+            {tool === "place" && placeCategory === "media" && (
               <InspectorPanel title="Speakers">
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem", maxHeight: "calc(100vh - 230px)", overflowY: "auto" }}>
-                  {[...audioById.values()].map((d) => {
-                    const sel = selected?.kind === "audio" && selected.id === d.id;
+                  {[...mediaById.values()].map((d) => {
+                    const sel = selected?.kind === "media" && selected.id === d.id;
                     return (
                       <Button variant="ghost"
                         key={d.id}
-                        onClick={() => setSelected(sel ? null : { kind: "audio", id: d.id })} style={{ textAlign: "left",
+                        onClick={() => setSelected(sel ? null : { kind: "media", id: d.id })} style={{ textAlign: "left",
                           fontSize: "0.8rem",
                           ...(sel ? { borderColor: ACCENT, color: ACCENT } : {}),
-                          ...(placedAudioIds.has(d.id) ? { opacity: 0.55 } : {}) }}
+                          ...(placedMediaIds.has(d.id) ? { opacity: 0.55 } : {}) }}
                       >
-                        {placedAudioIds.has(d.id) ? "✓ " : ""}{d.name}
+                        {placedMediaIds.has(d.id) ? "✓ " : ""}{d.name}
                       </Button>
                     );
                   })}
-                  {audioById.size === 0 && (
+                  {mediaById.size === 0 && (
                     <span style={{ color: "var(--bf-faint)", fontSize: "0.8rem" }}>No audio devices discovered yet.</span>
                   )}
                 </div>
@@ -912,17 +912,17 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
             />
           );
         }
-        if (editor.kind === "audio") {
-          const device = audioById.get(editor.id);
+        if (editor.kind === "media") {
+          const device = mediaById.get(editor.id);
           if (!device) return null;
           return (
-            <AudioEditor
+            <MediaEditor
               device={device}
               anchor={editor.anchor}
               onLocalPatch={patchAudio}
               onClose={() => setEditor(null)}
               receiverName={
-                device.receiver_id ? audioById.get(device.receiver_id)?.name : undefined
+                device.receiver_id ? mediaById.get(device.receiver_id)?.name : undefined
               }
             />
           );
@@ -1107,10 +1107,10 @@ function RoomController({
   onEditRoom: (room: Room, anchor: HTMLElement) => void;
 }) {
   const [busy, setBusy] = useState("");
-  const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
+  const [mediaDevices, setMediaDevices] = useState<MediaDevice[]>([]);
 
   useEffect(() => {
-    getAudioDevices().then(setAudioDevices);
+    getMediaDevices().then(setMediaDevices);
   }, []);
 
   // Plan regions bound to a Room, joined with the live Room data.
@@ -1189,9 +1189,9 @@ function RoomController({
               />
             </div>
 
-            {room.audio_devices.length > 0 && (
+            {room.media_devices.length > 0 && (
               <div style={{ borderTop: "1px solid #26241f", padding: "0.4rem 0.7rem 0.5rem" }}>
-                <RoomVolumeStrip room={room} devices={audioDevices} />
+                <RoomVolumeStrip room={room} devices={mediaDevices} />
               </div>
             )}
           </div>
@@ -1378,8 +1378,8 @@ function PlanCanvas({
   tiles,
   walls,
   placements,
-  audioPlacements,
-  audioById,
+  mediaPlacements,
+  mediaById,
   rooms,
   selectedRoom,
   statesById,
@@ -1389,10 +1389,10 @@ function PlanCanvas({
   setTiles,
   setWalls,
   setPlacements,
-  setAudioPlacements,
+  setMediaPlacements,
   setRooms,
   onLightClick,
-  onAudioClick,
+  onMediaClick,
   onResize,
   onPaint,
 }: {
@@ -1400,8 +1400,8 @@ function PlanCanvas({
   tiles: Set<string>;
   walls: Set<string>;
   placements: Placement[];
-  audioPlacements: AudioPlacement[];
-  audioById: Map<string, AudioDevice>;
+  mediaPlacements: MediaPlacement[];
+  mediaById: Map<string, MediaDevice>;
   rooms: EditRoom[];
   selectedRoom: string;
   statesById: Map<string, LightState>;
@@ -1411,10 +1411,10 @@ function PlanCanvas({
   setTiles: React.Dispatch<React.SetStateAction<Set<string>>>;
   setWalls: React.Dispatch<React.SetStateAction<Set<string>>>;
   setPlacements: React.Dispatch<React.SetStateAction<Placement[]>>;
-  setAudioPlacements: React.Dispatch<React.SetStateAction<AudioPlacement[]>>;
+  setMediaPlacements: React.Dispatch<React.SetStateAction<MediaPlacement[]>>;
   setRooms: React.Dispatch<React.SetStateAction<EditRoom[]>>;
   onLightClick: (placements: Placement[], px: number, py: number) => void;
-  onAudioClick: (deviceId: string, px: number, py: number) => void;
+  onMediaClick: (deviceId: string, px: number, py: number) => void;
   onResize: (width: number, height: number) => void;
   onPaint: (lightId: string) => void;
 }) {
@@ -1635,14 +1635,14 @@ function PlanCanvas({
     }
 
     // Audio devices — a speaker or receiver glyph, by the device's kind.
-    for (const p of audioPlacements) {
+    for (const p of mediaPlacements) {
       const [mx, my] = mountOffset(p.mount);
       const cx = ox + (p.x + mx) * cell;
       const cy = oy + (p.y + my) * cell;
       const sz = Math.max(11, cell * 0.5);
       ctx.lineJoin = "round";
       ctx.lineCap = "round";
-      if (audioById.get(p.audio_device_id)?.kind === "receiver") {
+      if (mediaById.get(p.media_device_id)?.kind === "receiver") {
         drawReceiverIcon(ctx, cx, cy, sz);
       } else {
         drawSpeakerIcon(ctx, cx, cy, sz);
@@ -1677,7 +1677,7 @@ function PlanCanvas({
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText("⤡", hx, hy + 0.5);
-  }, [view, plan, tiles, walls, placements, audioPlacements, audioById, rooms, selectedRoom, tool, statesById, pendingSize]);
+  }, [view, plan, tiles, walls, placements, mediaPlacements, mediaById, rooms, selectedRoom, tool, statesById, pendingSize]);
 
   useEffect(() => { draw(); }, [draw]);
   useEffect(() => {
@@ -1767,11 +1767,11 @@ function PlanCanvas({
         onMutate(() => setPlacements((prev) => prev.filter((p) => p.light_id !== hit.light_id)));
         return;
       }
-      const audioHit = hitAudio(gx, gy);
-      if (audioHit) {
+      const mediaHit = hitAudio(gx, gy);
+      if (mediaHit) {
         onMutate(() =>
-          setAudioPlacements((prev) =>
-            prev.filter((p) => p.audio_device_id !== audioHit.audio_device_id),
+          setMediaPlacements((prev) =>
+            prev.filter((p) => p.media_device_id !== mediaHit.media_device_id),
           ),
         );
         return;
@@ -1783,13 +1783,13 @@ function PlanCanvas({
       if (m < 0.28) {
         mount = fy === m ? "n" : 1 - fy === m ? "s" : fx === m ? "w" : "e";
       }
-      if (selected.kind === "audio") {
+      if (selected.kind === "media") {
         // Speakers are point placements — no strip drag.
         const deviceId = selected.id;
         onMutate(() =>
-          setAudioPlacements((prev) => [
-            ...prev.filter((p) => p.audio_device_id !== deviceId),
-            { audio_device_id: deviceId, x: tx, y: ty, mount },
+          setMediaPlacements((prev) => [
+            ...prev.filter((p) => p.media_device_id !== deviceId),
+            { media_device_id: deviceId, x: tx, y: ty, mount },
           ]),
         );
         return;
@@ -1833,8 +1833,8 @@ function PlanCanvas({
     return null;
   }
 
-  function hitAudio(gx: number, gy: number): AudioPlacement | null {
-    for (const p of audioPlacements) {
+  function hitAudio(gx: number, gy: number): MediaPlacement | null {
+    for (const p of mediaPlacements) {
       const [mx, my] = mountOffset(p.mount);
       if (Math.hypot(gx - (p.x + mx), gy - (p.y + my)) < 0.35) return p;
     }
@@ -1941,9 +1941,9 @@ function PlanCanvas({
         onLightClick(cluster, e.clientX, e.clientY);
         return;
       }
-      const audioHit = hitAudio(gx, gy);
-      if (audioHit) {
-        onAudioClick(audioHit.audio_device_id, e.clientX, e.clientY);
+      const mediaHit = hitAudio(gx, gy);
+      if (mediaHit) {
+        onMediaClick(mediaHit.media_device_id, e.clientX, e.clientY);
       }
     }
   }

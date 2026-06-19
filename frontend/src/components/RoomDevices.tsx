@@ -10,11 +10,11 @@
 
 import { useMemo, useState, type ReactNode } from "react";
 import {
-  setRoomAudioDevices,
+  setRoomMediaDevices,
   setRoomDirectLights,
   setRoomLinks,
   setRoomPowerDevices,
-  type AudioDevice,
+  type MediaDevice,
   type Light,
   type PowerDevice,
   type ProviderGroupInfo,
@@ -78,7 +78,7 @@ function Section({
 export function RoomDevicesPanel({
   room,
   lights,
-  audioDevices,
+  mediaDevices,
   powerDevices,
   providerGroups,
   onSaved,
@@ -86,7 +86,7 @@ export function RoomDevicesPanel({
 }: {
   room: Room;
   lights: Light[];
-  audioDevices: AudioDevice[];
+  mediaDevices: MediaDevice[];
   powerDevices: PowerDevice[];
   providerGroups: ProviderGroupInfo[];
   onSaved: () => void;
@@ -101,7 +101,7 @@ export function RoomDevicesPanel({
   const [power, setPower] = useState<Set<string>>(() => new Set(room.power_device_ids));
   // audio device id → per-room offset (members only).
   const [audio, setAudio] = useState<Map<string, number>>(
-    () => new Map(room.audio_devices.map((m) => [m.audio_device_id, m.volume_offset])),
+    () => new Map(room.media_devices.map((m) => [m.media_device_id, m.volume_offset])),
   );
   const [saving, setSaving] = useState(false);
 
@@ -120,9 +120,9 @@ export function RoomDevicesPanel({
       await setRoomLinks(room.id, [...links]);
       await setRoomDirectLights(room.id, [...directLights]);
       await setRoomPowerDevices(room.id, [...power]);
-      await setRoomAudioDevices(
+      await setRoomMediaDevices(
         room.id,
-        [...audio.entries()].map(([id, off]) => ({ audio_device_id: id, volume_offset: off })),
+        [...audio.entries()].map(([id, off]) => ({ media_device_id: id, volume_offset: off })),
       );
       onSaved();
     } finally {
@@ -133,7 +133,7 @@ export function RoomDevicesPanel({
   function groupSummary(pg: ProviderGroupInfo): string {
     const parts: string[] = [];
     if (pg.light_ids.length) parts.push(`${pg.light_ids.length} light${pg.light_ids.length !== 1 ? "s" : ""}`);
-    if (pg.audio_device_ids.length) parts.push(`${pg.audio_device_ids.length} speaker${pg.audio_device_ids.length !== 1 ? "s" : ""}`);
+    if (pg.media_device_ids.length) parts.push(`${pg.media_device_ids.length} speaker${pg.media_device_ids.length !== 1 ? "s" : ""}`);
     if (pg.power_device_ids.length) parts.push(`${pg.power_device_ids.length} power`);
     return parts.join(" · ") || "empty";
   }
@@ -154,12 +154,12 @@ export function RoomDevicesPanel({
           {providerGroups.map((pg) => (
             <SelectRow
               key={pg.id}
-              accent={pg.domain === "audio" ? AUDIO_ACCENT : undefined}
+              accent={pg.domain === "media" ? AUDIO_ACCENT : undefined}
               checked={links.has(pg.id)}
               onToggle={() => setLinks((s) => toggle(s, pg.id))}
             >
               <span style={{ display: "inline-grid", placeItems: "center", verticalAlign: "-2px" }}>
-                <Glyph name={pg.domain === "audio" ? "speaker" : "link"} size={14} />
+                <Glyph name={pg.domain === "media" ? "speaker" : "link"} size={14} />
               </span>{" "}
               {pg.name}
               <span style={{ color: "var(--bf-faint)", fontSize: "0.75rem" }}>{groupSummary(pg)}</span>
@@ -189,9 +189,9 @@ export function RoomDevicesPanel({
         title="Speakers"
         hint="(per-room volume offset)"
         empty="No audio devices discovered yet."
-        isEmpty={audioDevices.length === 0}
+        isEmpty={mediaDevices.length === 0}
       >
-        {audioDevices.map((d) => {
+        {mediaDevices.map((d) => {
           const off = audio.get(d.id);
           const isMember = off !== undefined;
           return (

@@ -18,12 +18,12 @@
 //! - `NTC` network transport (PLAY/PAUSE/STOP/TRUP/TRDN), `NSV` service select
 //! - `NTI`/`NAT`/`NAL` track metadata, `NST` play status (`prs` triplet)
 
-use crate::models::audio::{
-    AudioCapabilities, AudioCommand, AudioDevice, AudioDeviceKind, AudioState, NowPlaying,
+use crate::models::media::{
+    MediaCapabilities, MediaCommand, MediaDevice, MediaDeviceKind, MediaState, NowPlaying,
     PlayState, TransportCmd,
 };
 use crate::providers::discovery::{DeviceDiscovery, DiscoveredDevice, ScanOptions, udp_probe};
-use crate::providers::{AudioProvider, AudioProviderFactory, CredentialField, FieldKind};
+use crate::providers::{CredentialField, FieldKind, MediaProvider, MediaProviderFactory};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -158,7 +158,7 @@ fn source_commands(zone: &ZoneCodes, requested: &str) -> Result<Vec<String>> {
     if raw.len() == 2 && raw.chars().all(|c| c.is_ascii_hexdigit()) {
         return Ok(vec![format!("{sel}{raw}")]);
     }
-    Err(anyhow!("unknown audio source '{requested}'"))
+    Err(anyhow!("unknown media source '{requested}'"))
 }
 
 /// Per-zone eISCP command codes. Zone 2 mirrors the main zone with its own
@@ -247,7 +247,7 @@ fn meta(value: Option<&String>) -> Option<String> {
 
 /// Fold one eISCP message into an accumulated state. Returns true when the
 /// message changed something a consumer cares about (drives push events).
-fn apply_message(state: &mut AudioState, code: &str, data: &str) -> bool {
+fn apply_message(state: &mut MediaState, code: &str, data: &str) -> bool {
     let clean = |d: &str| {
         let t = d.trim();
         (!t.is_empty() && t != "N/A").then(|| t.to_string())
@@ -512,23 +512,23 @@ fn parse_nri_mac(xml: &str) -> Option<String> {
 }
 
 #[async_trait]
-impl AudioProvider for OnkyoProvider {
+impl MediaProvider for OnkyoProvider {
     fn name(&self) -> &str {
         "onkyo"
     }
 
-    async fn discover(&self) -> Result<Vec<AudioDevice>> {
+    async fn discover(&self) -> Result<Vec<MediaDevice>> {
         // Main-zone probe doubles as the reachability check.
         let main_state = self.get_state("main").await?;
         // The receiver's MAC identifies the physical unit for de-dup; the main
         // zone carries it (zone 2 is the same box, kept None to avoid a self-cluster).
         let hw_id = self.nri_hw_id().await;
-        let mut devices = vec![AudioDevice {
+        let mut devices = vec![MediaDevice {
             id: Uuid::new_v4(),
             provider_id: "main".to_string(),
             name: format!("Onkyo receiver ({})", self.host),
-            kind: AudioDeviceKind::Receiver,
-            capabilities: AudioCapabilities {
+            kind: MediaDeviceKind::Receiver,
+            capabilities: MediaCapabilities {
                 sources: true,
                 transport: true,
                 now_playing: true,
@@ -546,12 +546,12 @@ impl AudioProvider for OnkyoProvider {
         let probe = self.exchange(&["ZPWQSTN".into()], &["ZPW"]).await?;
         if probe.get("ZPW").map(|d| d == "00" || d == "01") == Some(true) {
             let state = self.get_state("zone2").await.unwrap_or_default();
-            devices.push(AudioDevice {
+            devices.push(MediaDevice {
                 id: Uuid::new_v4(),
                 provider_id: "zone2".to_string(),
                 name: format!("Onkyo zone 2 ({})", self.host),
-                kind: AudioDeviceKind::Zone,
-                capabilities: AudioCapabilities {
+                kind: MediaDeviceKind::Zone,
+                capabilities: MediaCapabilities {
                     sources: true,
                     transport: true,
                     now_playing: false,
@@ -565,7 +565,7 @@ impl AudioProvider for OnkyoProvider {
         Ok(devices)
     }
 
-    async fn get_state(&self, device_id: &str) -> Result<AudioState> {
+    async fn get_state(&self, device_id: &str) -> Result<MediaState> {
         let zone =
             zone_codes(device_id).ok_or_else(|| anyhow!("unknown Onkyo zone '{device_id}'"))?;
 
@@ -627,7 +627,7 @@ impl AudioProvider for OnkyoProvider {
             None
         };
 
-        Ok(AudioState {
+        Ok(MediaState {
             power,
             volume,
             mute,
@@ -639,7 +639,7 @@ impl AudioProvider for OnkyoProvider {
         })
     }
 
-    async fn set_state(&self, device_id: &str, cmd: &AudioCommand) -> Result<()> {
+    async fn set_state(&self, device_id: &str, cmd: &MediaCommand) -> Result<()> {
         let zone =
             zone_codes(device_id).ok_or_else(|| anyhow!("unknown Onkyo zone '{device_id}'"))?;
         if cmd.is_empty() {
@@ -677,8 +677,8 @@ impl AudioProvider for OnkyoProvider {
     /// having to reconnect (no more per-command push-channel bounce).
     async fn event_stream(
         &self,
-    ) -> Result<tokio::sync::mpsc::Receiver<crate::models::audio::AudioEvent>> {
-        use crate::models::audio::AudioEvent;
+    ) -> Result<tokio::sync::mpsc::Receiver<crate::models::media::MediaEvent>> {
+        use crate::models::media::MediaEvent;
 
         let link = link_for(&self.host, self.port);
         let mut rx = link.events.subscribe();
@@ -690,10 +690,10 @@ impl AudioProvider for OnkyoProvider {
         }
         let _ = link.writes.send(init);
 
-        let (tx, out_rx) = tokio::sync::mpsc::channel::<AudioEvent>(64);
+        let (tx, out_rx) = tokio::sync::mpsc::channel::<MediaEvent>(64);
         tokio::spawn(async move {
             // One accumulator per zone; zone codes fold via their canonical form.
-            let fresh = || AudioState {
+            let fresh = || MediaState {
                 reachable: Some(true),
                 ..Default::default()
             };
@@ -720,7 +720,7 @@ impl AudioProvider for OnkyoProvider {
                 };
                 if apply_message(state, canon, &data)
                     && tx
-                        .send(AudioEvent {
+                        .send(MediaEvent {
                             device_id: device_id.to_string(),
                             state: state.clone(),
                         })
@@ -797,7 +797,7 @@ impl DeviceDiscovery for OnkyoDiscovery {
 
 pub struct OnkyoProviderFactory;
 
-impl AudioProviderFactory for OnkyoProviderFactory {
+impl MediaProviderFactory for OnkyoProviderFactory {
     fn provider_type(&self) -> &'static str {
         "onkyo"
     }
@@ -806,7 +806,7 @@ impl AudioProviderFactory for OnkyoProviderFactory {
         "Onkyo / Integra"
     }
 
-    fn build(&self, credentials_json: &str) -> Result<Box<dyn AudioProvider>> {
+    fn build(&self, credentials_json: &str) -> Result<Box<dyn MediaProvider>> {
         Ok(Box::new(OnkyoProvider::from_credentials(credentials_json)?))
     }
 
@@ -831,9 +831,9 @@ impl AudioProviderFactory for OnkyoProviderFactory {
         ]
     }
 
-    fn connection_mode(&self) -> crate::providers::AudioConnectionMode {
+    fn connection_mode(&self) -> crate::providers::MediaConnectionMode {
         // The receiver echoes every state change unsolicited on the open socket.
-        crate::providers::AudioConnectionMode::Push
+        crate::providers::MediaConnectionMode::Push
     }
 
     fn discoverer(&self) -> Option<Box<dyn DeviceDiscovery>> {
@@ -973,7 +973,7 @@ mod tests {
 
     #[test]
     fn apply_message_folds_codes_into_state() {
-        let mut s = AudioState::default();
+        let mut s = MediaState::default();
         assert!(apply_message(&mut s, "PWR", "01"));
         assert!(apply_message(&mut s, "MVL", "28"));
         assert!(apply_message(&mut s, "AMT", "00"));
@@ -1135,7 +1135,7 @@ mod tests {
 
         p.set_state(
             "main",
-            &AudioCommand {
+            &MediaCommand {
                 power: Some(true),
                 volume: Some(40),
                 mute: Some(false),
@@ -1161,7 +1161,7 @@ mod tests {
 
         p.set_state(
             "main",
-            &AudioCommand {
+            &MediaCommand {
                 source: Some("spotify".into()),
                 transport: Some(TransportCmd::Play),
                 ..Default::default()
@@ -1185,7 +1185,7 @@ mod tests {
         let err = p
             .set_state(
                 "main",
-                &AudioCommand {
+                &MediaCommand {
                     source: Some("kazoo".into()),
                     ..Default::default()
                 },
@@ -1205,7 +1205,7 @@ mod tests {
         assert_eq!(devices.len(), 1);
         let d = &devices[0];
         assert_eq!(d.provider_id, "main");
-        assert_eq!(d.kind, AudioDeviceKind::Receiver);
+        assert_eq!(d.kind, MediaDeviceKind::Receiver);
         assert!(d.capabilities.sources && d.capabilities.transport);
         assert!(d.state.power);
         // No NRI scripted → the receiver reports no MAC, so no hw_id.
@@ -1243,7 +1243,7 @@ mod tests {
         assert_eq!(devices.len(), 2);
         let z2 = &devices[1];
         assert_eq!(z2.provider_id, "zone2");
-        assert_eq!(z2.kind, AudioDeviceKind::Zone);
+        assert_eq!(z2.kind, MediaDeviceKind::Zone);
         assert!(
             !z2.capabilities.now_playing,
             "NET metadata is main-zone only"
@@ -1261,7 +1261,7 @@ mod tests {
 
         p.set_state(
             "zone2",
-            &AudioCommand {
+            &MediaCommand {
                 power: Some(true),
                 volume: Some(25),
                 mute: Some(false),
@@ -1310,7 +1310,7 @@ mod tests {
         let p = OnkyoProvider::new_for_test("127.0.0.1", 1);
         assert!(p.get_state("zone9").await.is_err());
         assert!(
-            p.set_state("zone9", &AudioCommand::default())
+            p.set_state("zone9", &MediaCommand::default())
                 .await
                 .is_err()
         );
@@ -1338,7 +1338,7 @@ mod tests {
         assert_eq!(ev.state.source.as_deref(), Some("tv"));
 
         // The channel must stay open (idle ≠ closed); unsolicited-push
-        // forwarding is covered by the AudioPushManager scripted test.
+        // forwarding is covered by the MediaPushManager scripted test.
         assert!(
             tokio::time::timeout(Duration::from_millis(100), rx.recv())
                 .await
@@ -1470,16 +1470,16 @@ mod tests {
 
     #[test]
     fn factory_exposes_a_discoverer() {
-        use crate::providers::AudioProviderFactory as _;
+        use crate::providers::MediaProviderFactory as _;
         assert!(OnkyoProviderFactory.discoverer().is_some());
     }
 
     #[test]
     fn factory_advertises_push_mode() {
-        use crate::providers::{AudioConnectionMode, AudioProviderFactory as _};
+        use crate::providers::{MediaConnectionMode, MediaProviderFactory as _};
         assert_eq!(
             OnkyoProviderFactory.connection_mode(),
-            AudioConnectionMode::Push
+            MediaConnectionMode::Push
         );
     }
 

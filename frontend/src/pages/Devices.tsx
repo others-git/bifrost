@@ -8,34 +8,34 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getLights,
-  getAudioDevices,
+  getMediaDevices,
   getPowerDevices,
   getRooms,
   getProviders,
   setPowerEnabled,
   setLightEnabled,
-  setAudioEnabled,
+  setMediaEnabled,
   setPowerState,
   setLightGlyph,
-  setAudioGlyph,
+  setMediaGlyph,
   setPowerGlyph,
   setLightShadow,
-  setAudioShadow,
+  setMediaShadow,
   setPowerShadow,
   setLightRoom,
-  setAudioRoom,
+  setMediaRoom,
   setPowerRoom,
-  setAudioReceiver,
-  setAudioCompanion,
+  setMediaReceiver,
+  setMediaCompanion,
   setProviderOrder,
   type Light,
-  type AudioDevice,
+  type MediaDevice,
   type PowerDevice,
   type PowerKind,
   type Room,
   type Provider,
 } from "../api";
-import { Glyph, GLYPH_OPTIONS, powerKindGlyph, audioKindGlyph } from "../components/glyphs";
+import { Glyph, GLYPH_OPTIONS, powerKindGlyph, mediaKindGlyph } from "../components/glyphs";
 import { PageHeader, SectionLabel } from "../components/PageHeader";
 import { Switch } from "../components/controls";
 import { MenuItem } from "../components/Select";
@@ -43,7 +43,7 @@ import { AnchoredPanel } from "../components/AnchoredPanel";
 import { useViewport } from "../useViewport";
 import { T, ACCENT, alpha } from "../theme";
 
-type Domain = "light" | "audio" | "power";
+type Domain = "light" | "media" | "power";
 
 // One normalized row per device, so the inventory renders uniformly no matter
 // which domain a device came from. `glyph` is the override (null = none),
@@ -78,7 +78,7 @@ interface Item {
   inheritedRoomId: string | null;
   /** Audio only: the device kind, so a source (TV/speaker/zone) can be bound to
    * a receiver while receivers themselves aren't offered the control. */
-  audioKind?: AudioDevice["kind"];
+  mediaKind?: MediaDevice["kind"];
   /** Audio only (M22): the receiver this source's volume routes to; null = none. */
   receiverId?: string | null;
   /** Audio only (M22): the receiver input to select when this source plays. */
@@ -96,7 +96,7 @@ const POWER_KIND_LABEL: Record<PowerKind, string> = {
   generic: "Device",
 };
 
-const AUDIO_KIND_LABEL: Record<AudioDevice["kind"], string> = {
+const AUDIO_KIND_LABEL: Record<MediaDevice["kind"], string> = {
   receiver: "Receiver",
   speaker: "Speaker",
   tv: "TV",
@@ -125,9 +125,9 @@ function lightItem(l: Light): Item {
   };
 }
 
-function audioItem(a: AudioDevice): Item {
+function mediaItem(a: MediaDevice): Item {
   return {
-    domain: "audio",
+    domain: "media",
     id: a.id,
     name: a.name,
     deviceId: a.device_id,
@@ -135,7 +135,7 @@ function audioItem(a: AudioDevice): Item {
     typeLabel: AUDIO_KIND_LABEL[a.kind] ?? "Audio",
     enabled: a.enabled !== false,
     glyph: a.glyph ?? null,
-    defaultGlyph: audioKindGlyph(a.kind),
+    defaultGlyph: mediaKindGlyph(a.kind),
     on: a.state?.power === true,
     offline: a.state?.reachable === false,
     shadowedBy: a.shadowed_by ?? null,
@@ -143,7 +143,7 @@ function audioItem(a: AudioDevice): Item {
     companionOf: a.companion_of ?? null,
     roomId: a.room_id ?? null,
     inheritedRoomId: a.inherited_room_id ?? null,
-    audioKind: a.kind,
+    mediaKind: a.kind,
     receiverId: a.receiver_id ?? null,
     receiverSource: a.receiver_source ?? null,
   };
@@ -173,22 +173,22 @@ function powerItem(p: PowerDevice): Item {
 
 const SET_ENABLED: Record<Domain, (id: string, enabled: boolean) => Promise<void>> = {
   light: setLightEnabled,
-  audio: setAudioEnabled,
+  media: setMediaEnabled,
   power: setPowerEnabled,
 };
 const SET_GLYPH: Record<Domain, (id: string, glyph: string | null) => Promise<void>> = {
   light: setLightGlyph,
-  audio: setAudioGlyph,
+  media: setMediaGlyph,
   power: setPowerGlyph,
 };
 const SET_SHADOW: Record<Domain, (id: string, shadowedBy: string | null) => Promise<void>> = {
   light: setLightShadow,
-  audio: setAudioShadow,
+  media: setMediaShadow,
   power: setPowerShadow,
 };
 const SET_ROOM: Record<Domain, (id: string, roomId: string | null) => Promise<void>> = {
   light: setLightRoom,
-  audio: setAudioRoom,
+  media: setMediaRoom,
   power: setPowerRoom,
 };
 
@@ -335,7 +335,7 @@ function ReceiverPicker({
   anchor: HTMLElement | null;
   isCompact: boolean;
   sourceId: string;
-  devices: AudioDevice[];
+  devices: MediaDevice[];
   currentReceiver: string | null;
   currentSource: string | null;
   onPick: (receiverId: string | null, receiverSource: string | null) => void;
@@ -546,7 +546,7 @@ function DetailRow({ label, children }: { label: string; children: React.ReactNo
 function DeviceCard({
   item,
   rooms,
-  audioDevices,
+  mediaDevices,
   mergeCandidates,
   onToggle,
   onSetEnabled,
@@ -557,7 +557,7 @@ function DeviceCard({
 }: {
   item: Item;
   rooms: Room[];
-  audioDevices: AudioDevice[];
+  mediaDevices: MediaDevice[];
   /** M26: other visible same-domain devices this audio entity could merge into. */
   mergeCandidates: Item[];
   onToggle: (next: boolean) => void;
@@ -593,9 +593,9 @@ function DeviceCard({
     : null;
   // A source device (TV/streamer/console — any audio that isn't itself a
   // receiver) can route its volume to a receiver.
-  const isAudioSource = item.domain === "audio" && item.audioKind !== "receiver";
+  const isMediaSource = item.domain === "media" && item.mediaKind !== "receiver";
   const boundReceiver = item.receiverId
-    ? (audioDevices.find((a) => a.id === item.receiverId)?.name ?? null)
+    ? (mediaDevices.find((a) => a.id === item.receiverId)?.name ?? null)
     : null;
   const conn = connectionInfo(item.transport);
   // Distinct visual languages so the two muted states never read alike:
@@ -813,7 +813,7 @@ function DeviceCard({
               />
             )}
           </DetailRow>
-          {isAudioSource && (
+          {isMediaSource && (
             <DetailRow label="Receiver">
               <button ref={receiverBtnRef} onClick={() => setReceiverPicking((v) => !v)} style={detailBtnStyle}>
                 {boundReceiver ? `Volume → ${boundReceiver}` : "Bind receiver…"}
@@ -823,7 +823,7 @@ function DeviceCard({
                   anchor={receiverBtnRef.current}
                   isCompact={isCompact}
                   sourceId={item.id}
-                  devices={audioDevices}
+                  devices={mediaDevices}
                   currentReceiver={item.receiverId ?? null}
                   currentSource={item.receiverSource ?? null}
                   onPick={(rid, rsrc) => {
@@ -835,7 +835,7 @@ function DeviceCard({
               )}
             </DetailRow>
           )}
-          {item.domain === "audio" && mergeCandidates.length > 0 && (
+          {item.domain === "media" && mergeCandidates.length > 0 && (
             <DetailRow label="Merge">
               <button ref={mergeBtnRef} onClick={() => setMergePicking((v) => !v)} style={detailBtnStyle}>
                 Merge into…
@@ -966,7 +966,7 @@ function MergedCompanion({
 
 const SECTIONS: { domain: Domain; title: string }[] = [
   { domain: "light", title: "Lights" },
-  { domain: "audio", title: "Audio" },
+  { domain: "media", title: "Audio" },
   { domain: "power", title: "Power" },
 ];
 
@@ -976,7 +976,7 @@ export function DevicesPage() {
   const [providers, setProviders] = useState<Provider[]>([]);
   // Raw audio devices kept around so the receiver-binding picker has names +
   // each receiver's input list (the normalized Item drops device state).
-  const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
+  const [mediaDevices, setMediaDevices] = useState<MediaDevice[]>([]);
   const [loading, setLoading] = useState(true);
   // Live pointer-drag reordering of provider groups: `drag` drives the render
   // (the floating section's offset + where the others make room); `sectionRefs`
@@ -997,14 +997,14 @@ export function DevicesPage() {
   const refresh = useCallback(async () => {
     const [lights, audio, power, roomList, providerList] = await Promise.all([
       getLights(),
-      getAudioDevices(),
+      getMediaDevices(),
       getPowerDevices(),
       getRooms(),
       getProviders(),
     ]);
     const lightItems = lights === "unauthorized" ? [] : lights.map(lightItem);
-    setItems([...lightItems, ...audio.map(audioItem), ...power.map(powerItem)]);
-    setAudioDevices(audio);
+    setItems([...lightItems, ...audio.map(mediaItem), ...power.map(powerItem)]);
+    setMediaDevices(audio);
     setRooms(roomList);
     setProviders(providerList);
     setLoading(false);
@@ -1047,12 +1047,12 @@ export function DevicesPage() {
     setItems((prev) =>
       prev.map((d) => (d.id === item.id ? { ...d, receiverId, receiverSource } : d)),
     );
-    setAudioDevices((prev) =>
+    setMediaDevices((prev) =>
       prev.map((a) =>
         a.id === item.id ? { ...a, receiver_id: receiverId, receiver_source: receiverSource } : a,
       ),
     );
-    await setAudioReceiver(item.id, receiverId, receiverSource);
+    await setMediaReceiver(item.id, receiverId, receiverSource);
   }
 
   // Clear a manual duplicate link so the device shows up on its own again.
@@ -1067,11 +1067,11 @@ export function DevicesPage() {
   // controls route to the primary), or unmerge.
   async function setCompanion(item: Item, primaryId: string) {
     setItems((prev) => prev.map((d) => (d.id === item.id ? { ...d, companionOf: primaryId } : d)));
-    await setAudioCompanion(item.id, primaryId);
+    await setMediaCompanion(item.id, primaryId);
   }
   async function unmerge(item: Item) {
     setItems((prev) => prev.map((d) => (d.id === item.id ? { ...d, companionOf: null } : d)));
-    await setAudioCompanion(item.id, null);
+    await setMediaCompanion(item.id, null);
   }
 
   const byId = new Map(items.map((d) => [d.id, d] as const));
@@ -1080,7 +1080,7 @@ export function DevicesPage() {
   // may also serve — so candidates are all visible audio devices, not just the
   // current provider's (preserves behaviour from before the provider grouping).
   const visibleAudio = items.filter(
-    (d) => d.domain === "audio" && !d.shadowedBy && !d.companionOf,
+    (d) => d.domain === "media" && !d.shadowedBy && !d.companionOf,
   );
 
   // Top-level grouping is by provider, in the user-saved `display_order` (the
@@ -1236,7 +1236,7 @@ export function DevicesPage() {
               key={d.id}
               item={d}
               rooms={rooms}
-              audioDevices={audioDevices}
+              mediaDevices={mediaDevices}
               mergeCandidates={visibleAudio.filter((s) => s.id !== d.id)}
               onToggle={(next) => toggle(d, next)}
               onSetEnabled={(en) => setEnabled(d, en)}

@@ -3,7 +3,7 @@
 //! Some devices (an Android TV, a streaming box) aren't usefully modelled as a
 //! light, a speaker, or a plug — their control surface is a *remote*: a D-pad,
 //! navigation/media keys, and the ability to launch apps. That's its own domain
-//! so the model stays honest (it is neither audio state nor on/off).
+//! so the model stays honest (it is neither media state nor on/off).
 //!
 //! The model is deliberately provider-agnostic. The frontend `BifrostRemote`
 //! renders a fixed set of **canonical keys** ([`RemoteKey`]); each provider maps
@@ -11,7 +11,7 @@
 //! etc.). App launch takes a free-form `activity` (a Play Store package id *or* a
 //! deep-link URL), because that's the lowest common denominator across remotes.
 //!
-//! A remote is **paired** to the TV it controls (the `media_player`/audio device
+//! A remote is **paired** to the TV it controls (the `media_player`/media device
 //! that is the same physical box) by hardware id, so the UI can offer the remote
 //! from the TV's control fly-out. Pairing lives at the service/DB layer.
 

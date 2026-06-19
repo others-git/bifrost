@@ -132,7 +132,7 @@ provider group plus any directly assigned.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/v1/rooms` | All enabled rooms: `[{ id, name, light_ids, audio_device_ids, power_device_ids }]` — `audio_device_ids` / `power_device_ids` are the room's audio/power members; control each via the audio/power endpoints |
+| `GET` | `/api/v1/rooms` | All enabled rooms: `[{ id, name, light_ids, media_device_ids, power_device_ids }]` — `media_device_ids` / `power_device_ids` are the room's audio/power members; control each via the audio/power endpoints |
 | `PUT` | `/api/v1/rooms/{id}/state` | Apply a `LightState` to every member |
 
 Room writes respond `200` with `{ "applied": N, "failed": M }` — per-light
@@ -188,15 +188,16 @@ provider-native synced playback group (see below).
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/v1/audio/devices` | All audio devices (cached state) |
-| `GET` | `/api/v1/audio/devices/{id}` | One device — live read, refreshes the cache |
-| `PUT` | `/api/v1/audio/devices/{id}/state` | Send a command (body below) |
-| `GET` | `/api/v1/audio/devices/{id}/favorites` | List saved favorites (live read) |
-| `POST` | `/api/v1/audio/devices/{id}/favorites/play` | Start a favorite (body below) |
-| `POST` | `/api/v1/audio/devices/{id}/group` | Join this speaker into a group (body below) |
-| `POST` | `/api/v1/audio/devices/{id}/ungroup` | Remove this speaker from its group |
-| `PUT` | `/api/v1/audio/devices/{id}/receiver` | Bind this source to a receiver (body below) |
-| `PUT` | `/api/v1/audio/devices/{id}/companion` | Merge this entity into a primary as its companion (body below) |
+| `GET` | `/api/v1/media/devices` | All audio devices (cached state) |
+| `GET` | `/api/v1/media/devices/{id}` | One device — live read, refreshes the cache |
+| `PUT` | `/api/v1/media/devices/{id}/state` | Send a command (body below) |
+| `POST` | `/api/v1/media/devices/{id}/cast` | Cast media to a TV / media player (body below) |
+| `GET` | `/api/v1/media/devices/{id}/favorites` | List saved favorites (live read) |
+| `POST` | `/api/v1/media/devices/{id}/favorites/play` | Start a favorite (body below) |
+| `POST` | `/api/v1/media/devices/{id}/group` | Join this speaker into a group (body below) |
+| `POST` | `/api/v1/media/devices/{id}/ungroup` | Remove this speaker from its group |
+| `PUT` | `/api/v1/media/devices/{id}/receiver` | Bind this source to a receiver (body below) |
+| `PUT` | `/api/v1/media/devices/{id}/companion` | Merge this entity into a primary as its companion (body below) |
 
 `PUT …/state` takes a **sparse command** — only the fields present are applied:
 
@@ -222,6 +223,23 @@ unknown source — message in body), `502` device unreachable.
 
 A bound source's read (`GET …/{id}`) reports the **receiver's** volume/mute,
 and its `receiver_id` / `receiver_source` fields name the binding.
+
+#### Cast media
+
+Play media on a TV / media player. `content_id` + `content_type` are passed
+through to the device's provider (Home Assistant maps them to
+`media_player.play_media`; `content_type` is the provider-native kind — `url`,
+`music`, `app`, `channel`, `playlist`, …). To **launch an app**, use the
+remote's app-launch (`/remote/devices/{id}/command`); to **switch to a known
+input/app**, set `source` via `PUT …/state`.
+
+```json
+// POST …/{id}/cast
+{ "content_id": "https://example.com/stream.m3u8", "content_type": "url" }
+```
+
+Responses: `204` success, `404` unknown device, `422` the device doesn't support
+casting, `502` device unreachable.
 
 #### Bind a source to a receiver
 

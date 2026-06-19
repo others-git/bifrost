@@ -1,6 +1,6 @@
 // Control fly-out for a power device (switch / plug / fan / toggle): the device's
 // full name, its kind, and an on/off switch. Anchored next to its trigger on
-// desktop; a bottom sheet on phones — matching LightEditor / AudioEditor.
+// desktop; a bottom sheet on phones — matching LightEditor / MediaEditor.
 
 import type { PowerDevice } from "../api";
 import { Glyph, powerKindGlyph } from "./glyphs";

@@ -92,8 +92,8 @@ export async function setLightEnabled(id: string, enabled: boolean): Promise<voi
     body: JSON.stringify({ enabled }),
   });
 }
-export async function setAudioEnabled(id: string, enabled: boolean): Promise<void> {
-  await fetch(`/api/audio/devices/${id}/enabled`, {
+export async function setMediaEnabled(id: string, enabled: boolean): Promise<void> {
+  await fetch(`/api/media/devices/${id}/enabled`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ enabled }),
@@ -116,8 +116,8 @@ export async function setLightGlyph(id: string, glyph: string | null): Promise<v
     body: JSON.stringify({ glyph }),
   });
 }
-export async function setAudioGlyph(id: string, glyph: string | null): Promise<void> {
-  await fetch(`/api/audio/devices/${id}/glyph`, {
+export async function setMediaGlyph(id: string, glyph: string | null): Promise<void> {
+  await fetch(`/api/media/devices/${id}/glyph`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ glyph }),
@@ -141,8 +141,8 @@ export async function setLightShadow(id: string, shadowed_by: string | null): Pr
     body: JSON.stringify({ shadowed_by }),
   });
 }
-export async function setAudioShadow(id: string, shadowed_by: string | null): Promise<void> {
-  await fetch(`/api/audio/devices/${id}/shadow`, {
+export async function setMediaShadow(id: string, shadowed_by: string | null): Promise<void> {
+  await fetch(`/api/media/devices/${id}/shadow`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ shadowed_by }),
@@ -159,8 +159,8 @@ export async function setPowerShadow(id: string, shadowed_by: string | null): Pr
 /** M26 composite: merge an audio entity into `primary_id` (or `null` to unmerge).
  * Unlike shadowing, the companion's capabilities are routed/overlaid onto the
  * primary, not discarded. */
-export async function setAudioCompanion(id: string, primary_id: string | null): Promise<void> {
-  await fetch(`/api/audio/devices/${id}/companion`, {
+export async function setMediaCompanion(id: string, primary_id: string | null): Promise<void> {
+  await fetch(`/api/media/devices/${id}/companion`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ primary_id }),
@@ -177,8 +177,8 @@ export async function setLightRoom(id: string, room_id: string | null): Promise<
     body: JSON.stringify({ room_id }),
   });
 }
-export async function setAudioRoom(id: string, room_id: string | null): Promise<void> {
-  await fetch(`/api/audio/devices/${id}/room`, {
+export async function setMediaRoom(id: string, room_id: string | null): Promise<void> {
+  await fetch(`/api/media/devices/${id}/room`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ room_id }),
@@ -194,12 +194,12 @@ export async function setPowerRoom(id: string, room_id: string | null): Promise<
 /** M22: bind a source audio device to a receiver (volume/mute route to it), or
  * unbind with receiver_id = null. `receiver_source` is the receiver input to
  * select when the source becomes active. */
-export async function setAudioReceiver(
+export async function setMediaReceiver(
   id: string,
   receiver_id: string | null,
   receiver_source: string | null,
 ): Promise<void> {
-  await fetch(`/api/audio/devices/${id}/receiver`, {
+  await fetch(`/api/media/devices/${id}/receiver`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ receiver_id, receiver_source }),
@@ -212,7 +212,7 @@ export interface Provider {
   /** Human-facing type name, e.g. "Sonos". */
   type_name: string;
   /** UI category: a single device domain, or "integration" (e.g. Home Assistant). */
-  domain: "light" | "audio" | "integration";
+  domain: "light" | "media" | "integration";
   name: string;
   enabled: boolean;
   /** When set, discovering this provider removes devices it no longer reports. */
@@ -235,11 +235,11 @@ export interface ProviderType {
   /** Human-facing name, e.g. "Philips Hue". */
   display_name: string;
   /**
-   * UI grouping in the Add-provider menu. "light"/"audio" are single-domain
+   * UI grouping in the Add-provider menu. "light"/"media" are single-domain
    * device providers; "integration" is a higher-level platform adapter (e.g.
    * Home Assistant) that can surface many device kinds.
    */
-  kind: "light" | "audio" | "integration";
+  kind: "light" | "media" | "integration";
   /** Whether the UI should offer a "Scan network" button for this type. */
   supports_discovery: boolean;
   schema: CredentialField[];
@@ -428,7 +428,7 @@ export interface NowPlaying {
   play_state?: "playing" | "paused" | "stopped";
 }
 
-export interface AudioState {
+export interface MediaState {
   power: boolean;
   volume: number;
   mute: boolean;
@@ -444,7 +444,7 @@ export interface AudioState {
   group_coordinator?: string | null;
 }
 
-export interface AudioCapabilities {
+export interface MediaCapabilities {
   sources: boolean;
   transport: boolean;
   now_playing: boolean;
@@ -456,21 +456,21 @@ export interface AudioCapabilities {
 }
 
 /** A saved favorite/preset (e.g. a Sonos Favorite) playable by reference. */
-export interface AudioFavorite {
+export interface MediaFavorite {
   id: string;
   title: string;
   subtitle?: string;
 }
 
-export interface AudioDevice {
+export interface MediaDevice {
   id: string;
   provider_id: string;
   /** Provider-native id (e.g. "main") — matches audio_state push events. */
   device_id: string;
   name: string;
   kind: "receiver" | "speaker" | "tv" | "zone";
-  capabilities: AudioCapabilities;
-  state: AudioState;
+  capabilities: MediaCapabilities;
+  state: MediaState;
   last_seen?: string;
   enabled?: boolean;
   /** Optional glyph-name override; absent/null = use the type default. */
@@ -498,7 +498,7 @@ export interface AudioDevice {
 }
 
 /** Sparse command — only the fields present are applied. */
-export interface AudioCommand {
+export interface MediaCommand {
   power?: boolean;
   volume?: number;
   mute?: boolean;
@@ -506,21 +506,21 @@ export interface AudioCommand {
   transport?: "play" | "pause" | "stop" | "next" | "previous" | "toggle";
 }
 
-export async function getAudioDevices(): Promise<AudioDevice[]> {
-  const res = await fetch("/api/audio/devices");
+export async function getMediaDevices(): Promise<MediaDevice[]> {
+  const res = await fetch("/api/media/devices");
   if (!res.ok) return [];
   return res.json();
 }
 
 /** Live read — round-trips to the device and refreshes the cache. */
-export async function getAudioDevice(id: string): Promise<AudioDevice | null> {
-  const res = await fetch(`/api/audio/devices/${id}`);
+export async function getMediaDevice(id: string): Promise<MediaDevice | null> {
+  const res = await fetch(`/api/media/devices/${id}`);
   if (!res.ok) return null;
   return res.json();
 }
 
-export async function setAudioState(id: string, cmd: AudioCommand): Promise<string | null> {
-  const res = await fetch(`/api/audio/devices/${id}/state`, {
+export async function setMediaState(id: string, cmd: MediaCommand): Promise<string | null> {
+  const res = await fetch(`/api/media/devices/${id}/state`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(cmd),
@@ -530,18 +530,18 @@ export async function setAudioState(id: string, cmd: AudioCommand): Promise<stri
 }
 
 /** List a device's saved favorites (live read from the provider). */
-export async function getAudioFavorites(id: string): Promise<AudioFavorite[]> {
-  const res = await fetch(`/api/audio/devices/${id}/favorites`);
+export async function getMediaFavorites(id: string): Promise<MediaFavorite[]> {
+  const res = await fetch(`/api/media/devices/${id}/favorites`);
   if (!res.ok) return [];
   return res.json();
 }
 
 /** Start playing a favorite by its provider-native id. */
-export async function playAudioFavorite(
+export async function playMediaFavorite(
   id: string,
   favoriteId: string,
 ): Promise<string | null> {
-  const res = await fetch(`/api/audio/devices/${id}/favorites/play`, {
+  const res = await fetch(`/api/media/devices/${id}/favorites/play`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ favorite_id: favoriteId }),
@@ -552,11 +552,11 @@ export async function playAudioFavorite(
 
 /** Join `id` into the synced playback group coordinated by `coordinatorId`
  * (provider-native speaker grouping, e.g. Sonos). */
-export async function groupAudioDevice(
+export async function groupMediaDevice(
   id: string,
   coordinatorId: string,
 ): Promise<string | null> {
-  const res = await fetch(`/api/audio/devices/${id}/group`, {
+  const res = await fetch(`/api/media/devices/${id}/group`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ coordinator_id: coordinatorId }),
@@ -566,8 +566,8 @@ export async function groupAudioDevice(
 }
 
 /** Remove `id` from any playback group, returning it to standalone playback. */
-export async function ungroupAudioDevice(id: string): Promise<string | null> {
-  const res = await fetch(`/api/audio/devices/${id}/ungroup`, { method: "POST" });
+export async function ungroupMediaDevice(id: string): Promise<string | null> {
+  const res = await fetch(`/api/media/devices/${id}/ungroup`, { method: "POST" });
   if (res.ok) return null;
   return (await res.text()) || `HTTP ${res.status}`;
 }
@@ -592,7 +592,7 @@ export interface RemoteDevice {
   glyph: string | null;
   hw_id: string | null;
   /** The paired TV audio device id, if this remote controls a known TV. */
-  paired_audio_id: string | null;
+  paired_media_id: string | null;
 }
 
 /** The canonical keys a remote understands (snake_case, mirrors the backend). */
@@ -901,7 +901,7 @@ export interface RoomLink {
   name: string;
   provider_id: string;
   /** Which domain the linked provider room/zone belongs to. */
-  domain: "light" | "audio";
+  domain: "light" | "media";
 }
 
 export interface Room {
@@ -913,7 +913,7 @@ export interface Room {
   links: RoomLink[];
   /** Audio devices this room controls (volume/mute fans out to all), each with
    * its per-room volume offset. */
-  audio_devices: RoomAudioMember[];
+  media_devices: RoomMediaMember[];
   /** Power devices (switches/plugs/fans) the room contains. */
   power_device_ids: string[];
   /** User-configured quick-control buttons on the room's Control card. */
@@ -926,7 +926,7 @@ export type ControlKind = "power" | "volume" | "brightness" | "scene";
 
 /** One device a configured control acts on. */
 export interface ControlTarget {
-  domain: "light" | "audio" | "power";
+  domain: "light" | "media" | "power";
   id: string;
 }
 
@@ -953,18 +953,18 @@ export async function setRoomControls(roomId: string, controls: RoomControl[]): 
   if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
 }
 
-export interface RoomAudioMember {
-  audio_device_id: string;
+export interface RoomMediaMember {
+  media_device_id: string;
   /** Signed %, added to the room volume then clamped 0–100 for this device. */
   volume_offset: number;
 }
 
 /** Replace a room's explicit audio devices + per-device volume offsets. */
-export async function setRoomAudioDevices(
+export async function setRoomMediaDevices(
   roomId: string,
-  devices: RoomAudioMember[],
+  devices: RoomMediaMember[],
 ): Promise<void> {
-  await fetch(`/api/rooms/${roomId}/audio`, {
+  await fetch(`/api/rooms/${roomId}/media`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ devices }),
@@ -972,11 +972,11 @@ export async function setRoomAudioDevices(
 }
 
 /** Fan a volume/mute command out to every audio device in the room (offsets applied). */
-export async function setRoomAudioState(
+export async function setRoomMediaState(
   roomId: string,
   cmd: { volume?: number; mute?: boolean },
 ): Promise<void> {
-  await fetch(`/api/rooms/${roomId}/audio/state`, {
+  await fetch(`/api/rooms/${roomId}/media/state`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(cmd),
@@ -990,9 +990,9 @@ export interface ProviderGroupInfo {
   name: string;
   /** The group's primary domain label; an area can still mix domains (see the
    * `*_ids` lists). */
-  domain: "light" | "audio";
+  domain: "light" | "media";
   light_ids: string[];
-  audio_device_ids: string[];
+  media_device_ids: string[];
   /** Member power devices (switches/plugs/fans). */
   power_device_ids: string[];
 }
@@ -1311,8 +1311,8 @@ export interface Placement {
 }
 
 /** An audio device placed on the plan — point only (no LED-strip points). */
-export interface AudioPlacement {
-  audio_device_id: string;
+export interface MediaPlacement {
+  media_device_id: string;
   x: number;
   y: number;
   mount: Mount;
@@ -1343,7 +1343,7 @@ export interface PlanDetail {
   tiles: [number, number][];
   walls: Wall[];
   lights: Placement[];
-  audio: AudioPlacement[];
+  media: MediaPlacement[];
   rooms: PlanRoom[];
 }
 
@@ -1401,8 +1401,8 @@ export async function putPlanLights(id: string, placements: Placement[]): Promis
   if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
 }
 
-export async function putPlanAudio(id: string, placements: AudioPlacement[]): Promise<void> {
-  const res = await fetch(`/api/plans/${id}/audio`, {
+export async function putPlanAudio(id: string, placements: MediaPlacement[]): Promise<void> {
+  const res = await fetch(`/api/plans/${id}/media`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ placements }),

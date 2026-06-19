@@ -10,15 +10,15 @@
 
 use crate::AppState;
 use crate::api::apikeys::require_api_key;
-use crate::api::audio::{
-    GroupRequest, PlayFavoriteRequest, apply_audio_command, favorites_response, get_device_live,
-    group_devices, group_response, list_all_devices, list_device_favorites, play_device_favorite,
-    play_favorite_response, set_audio_companion, set_audio_receiver, set_audio_status,
-    set_companion_status, set_receiver_status, ungroup_device,
-};
 use crate::api::lights::{
     SegmentsRequest, apply_light_segments, apply_light_state, get_light_by_id, list_all_lights,
     set_light_status,
+};
+use crate::api::media::{
+    CastRequest, GroupRequest, PlayFavoriteRequest, apply_media_command, cast_to_device,
+    favorites_response, get_device_live, group_devices, group_response, list_all_devices,
+    list_device_favorites, play_device_favorite, play_favorite_response, set_companion_status,
+    set_media_companion, set_media_receiver, set_media_status, set_receiver_status, ungroup_device,
 };
 use crate::api::power::{
     PowerCommand, apply_power_state, get_power_device_live, list_all_power_devices,
@@ -53,18 +53,34 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/scenes", get(list_scenes).post(create_scene))
         .route("/scenes/{id}/activate", post(activate_scene))
         .route("/scenes/{id}", axum::routing::delete(remove_scene))
-        .route("/audio/devices", get(list_audio))
-        .route("/audio/devices/{id}", get(get_audio))
-        .route("/audio/devices/{id}/state", put(set_audio))
-        .route("/audio/devices/{id}/favorites", get(list_audio_favorites))
+        .route("/media/devices", get(list_media))
+        .route("/media/devices/{id}", get(get_media))
+        .route("/media/devices/{id}/state", put(set_media))
+        .route("/media/devices/{id}/cast", post(cast_media))
+        .route("/media/devices/{id}/favorites", get(list_media_favorites))
+        .route(
+            "/media/devices/{id}/favorites/play",
+            post(play_media_favorite),
+        )
+        .route("/media/devices/{id}/group", post(group_media))
+        .route("/media/devices/{id}/ungroup", post(ungroup_media))
+        .route("/media/devices/{id}/receiver", put(set_receiver_media))
+        .route("/media/devices/{id}/companion", put(set_companion_media))
+        // Deprecated /audio/devices/* aliases (domain renamed audio → media);
+        // kept so existing public-API clients keep working for a release.
+        .route("/audio/devices", get(list_media))
+        .route("/audio/devices/{id}", get(get_media))
+        .route("/audio/devices/{id}/state", put(set_media))
+        .route("/audio/devices/{id}/cast", post(cast_media))
+        .route("/audio/devices/{id}/favorites", get(list_media_favorites))
         .route(
             "/audio/devices/{id}/favorites/play",
-            post(play_audio_favorite),
+            post(play_media_favorite),
         )
-        .route("/audio/devices/{id}/group", post(group_audio))
-        .route("/audio/devices/{id}/ungroup", post(ungroup_audio))
-        .route("/audio/devices/{id}/receiver", put(set_receiver_audio))
-        .route("/audio/devices/{id}/companion", put(set_companion_audio))
+        .route("/audio/devices/{id}/group", post(group_media))
+        .route("/audio/devices/{id}/ungroup", post(ungroup_media))
+        .route("/audio/devices/{id}/receiver", put(set_receiver_media))
+        .route("/audio/devices/{id}/companion", put(set_companion_media))
         .route("/power/devices", get(list_power))
         .route("/power/devices/{id}", get(get_power))
         .route("/power/devices/{id}/state", put(set_power))
@@ -228,9 +244,9 @@ async fn activate_scene(
     }
 }
 
-// ── Audio devices ─────────────────────────────────────────────────────────────
+// ── Media devices ─────────────────────────────────────────────────────────────
 
-async fn list_audio(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+async fn list_media(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
     if let Err(s) = auth(&state, &headers).await {
         return s.into_response();
     }
@@ -240,7 +256,7 @@ async fn list_audio(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
     }
 }
 
-async fn get_audio(
+async fn get_media(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -255,19 +271,31 @@ async fn get_audio(
     }
 }
 
-async fn set_audio(
+async fn set_media(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
-    Json(cmd): Json<crate::models::audio::AudioCommand>,
+    Json(cmd): Json<crate::models::media::MediaCommand>,
 ) -> impl IntoResponse {
     if let Err(s) = auth(&state, &headers).await {
         return s.into_response();
     }
-    set_audio_status(apply_audio_command(&state, &id, &cmd).await)
+    set_media_status(apply_media_command(&state, &id, &cmd).await)
 }
 
-async fn list_audio_favorites(
+async fn cast_media(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<CastRequest>,
+) -> impl IntoResponse {
+    if let Err(s) = auth(&state, &headers).await {
+        return s.into_response();
+    }
+    set_media_status(cast_to_device(&state, &id, &req.content_id, &req.content_type).await)
+}
+
+async fn list_media_favorites(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -278,7 +306,7 @@ async fn list_audio_favorites(
     favorites_response(list_device_favorites(&state, &id).await)
 }
 
-async fn play_audio_favorite(
+async fn play_media_favorite(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -290,7 +318,7 @@ async fn play_audio_favorite(
     play_favorite_response(play_device_favorite(&state, &id, &req.favorite_id).await)
 }
 
-async fn group_audio(
+async fn group_media(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -302,7 +330,7 @@ async fn group_audio(
     group_response(group_devices(&state, &id, &req.coordinator_id).await)
 }
 
-async fn ungroup_audio(
+async fn ungroup_media(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -313,7 +341,7 @@ async fn ungroup_audio(
     group_response(ungroup_device(&state, &id).await)
 }
 
-async fn set_receiver_audio(
+async fn set_receiver_media(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -322,10 +350,10 @@ async fn set_receiver_audio(
     if let Err(s) = auth(&state, &headers).await {
         return s.into_response();
     }
-    set_receiver_status(set_audio_receiver(&state, &id, req.receiver_id, req.receiver_source).await)
+    set_receiver_status(set_media_receiver(&state, &id, req.receiver_id, req.receiver_source).await)
 }
 
-async fn set_companion_audio(
+async fn set_companion_media(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -334,7 +362,7 @@ async fn set_companion_audio(
     if let Err(s) = auth(&state, &headers).await {
         return s.into_response();
     }
-    set_companion_status(set_audio_companion(&state, &id, req.primary_id).await)
+    set_companion_status(set_media_companion(&state, &id, req.primary_id).await)
 }
 
 // ── Power devices ──────────────────────────────────────────────────────────────

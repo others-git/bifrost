@@ -1,7 +1,7 @@
 //! Power device API: list strictly-on/off devices (switches, plugs, fans,
 //! boolean helpers), read live state, and toggle them.
 //!
-//! Mirrors the lights and audio APIs: service functions own the behaviour and
+//! Mirrors the lights and media APIs: service functions own the behaviour and
 //! are shared by the session-authenticated routes here and the Bearer-key
 //! routes in `v1`. A power device's only state is `on`, so there is no command
 //! vocabulary — writes are a single bool. Reads hit the device live and refresh

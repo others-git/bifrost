@@ -1388,7 +1388,7 @@ async fn audio_placement_roundtrips_with_mount() {
         .to_string();
 
     let body = format!(
-        r#"{{"placements":[{{"audio_device_id":"{device_id}","x":2,"y":5,"mount":"e"}}]}}"#
+        r#"{{"placements":[{{"media_device_id":"{device_id}","x":2,"y":5,"mount":"e"}}]}}"#
     );
     let resp = app
         .clone()
@@ -1410,9 +1410,9 @@ async fn audio_placement_roundtrips_with_mount() {
         .await
         .unwrap();
     let plan = helpers::response_json(resp).await;
-    assert_eq!(plan["audio"][0]["audio_device_id"], device_id);
-    assert_eq!(plan["audio"][0]["x"], 2);
-    assert_eq!(plan["audio"][0]["mount"], "e");
+    assert_eq!(plan["media"][0]["media_device_id"], device_id);
+    assert_eq!(plan["media"][0]["x"], 2);
+    assert_eq!(plan["media"][0]["mount"], "e");
 }
 
 #[tokio::test]
@@ -1439,7 +1439,7 @@ async fn audio_placement_rejects_unknown_device() {
             "PUT",
             &format!("/api/plans/{plan_id}/audio"),
             &cookie,
-            r#"{"placements":[{"audio_device_id":"ghost","x":1,"y":1,"mount":"c"}]}"#,
+            r#"{"placements":[{"media_device_id":"ghost","x":1,"y":1,"mount":"c"}]}"#,
         ))
         .await
         .unwrap();
@@ -4627,7 +4627,7 @@ async fn room_volume_skips_a_bound_receiver_member() {
             &format!("/api/rooms/{room_id}/audio"),
             &cookie,
             &format!(
-                r#"{{"devices":[{{"audio_device_id":"{source}"}},{{"audio_device_id":"{receiver}"}}]}}"#
+                r#"{{"devices":[{{"media_device_id":"{source}"}},{{"media_device_id":"{receiver}"}}]}}"#
             ),
         ))
         .await
@@ -4903,8 +4903,8 @@ async fn sync_wraps_sonos_rooms_into_bifrost_rooms() {
         .unwrap();
     let mirrors = helpers::response_json(resp).await;
     assert_eq!(mirrors[0]["name"], "Living Room");
-    assert_eq!(mirrors[0]["domain"], "audio");
-    assert_eq!(mirrors[0]["audio_device_ids"][0], device_id);
+    assert_eq!(mirrors[0]["domain"], "media");
+    assert_eq!(mirrors[0]["media_device_ids"][0], device_id);
     assert_eq!(mirrors[0]["light_ids"].as_array().unwrap().len(), 0);
 
     // The room exists, links the audio mirror, and its audio device resolves
@@ -4915,9 +4915,9 @@ async fn sync_wraps_sonos_rooms_into_bifrost_rooms() {
         .unwrap();
     let rooms = helpers::response_json(resp).await;
     assert_eq!(rooms[0]["name"], "Living Room");
-    assert_eq!(rooms[0]["audio_devices"][0]["audio_device_id"], device_id);
+    assert_eq!(rooms[0]["media_devices"][0]["media_device_id"], device_id);
     assert_eq!(rooms[0]["links"][0]["name"], "Living Room");
-    assert_eq!(rooms[0]["links"][0]["domain"], "audio");
+    assert_eq!(rooms[0]["links"][0]["domain"], "media");
 }
 
 #[tokio::test]
@@ -5104,7 +5104,7 @@ async fn provider_types_include_audio_domain() {
         .iter()
         .find(|t| t["provider_type"] == "onkyo")
         .expect("onkyo registered");
-    assert_eq!(onkyo["kind"], "audio");
+    assert_eq!(onkyo["kind"], "media");
     let hue = types
         .as_array()
         .unwrap()
@@ -5298,7 +5298,7 @@ async fn room_audio_members_set_list_and_clear() {
             "PUT",
             &format!("/api/rooms/{room_id}/audio"),
             &cookie,
-            r#"{"devices":[{"audio_device_id":"nope"}]}"#,
+            r#"{"devices":[{"media_device_id":"nope"}]}"#,
         ))
         .await
         .unwrap();
@@ -5309,7 +5309,7 @@ async fn room_audio_members_set_list_and_clear() {
             "PUT",
             "/api/rooms/nope/audio",
             &cookie,
-            &format!(r#"{{"devices":[{{"audio_device_id":"{device_id}"}}]}}"#),
+            &format!(r#"{{"devices":[{{"media_device_id":"{device_id}"}}]}}"#),
         ))
         .await
         .unwrap();
@@ -5322,7 +5322,7 @@ async fn room_audio_members_set_list_and_clear() {
             "PUT",
             &format!("/api/rooms/{room_id}/audio"),
             &cookie,
-            &format!(r#"{{"devices":[{{"audio_device_id":"{device_id}","volume_offset":-6}}]}}"#),
+            &format!(r#"{{"devices":[{{"media_device_id":"{device_id}","volume_offset":-6}}]}}"#),
         ))
         .await
         .unwrap();
@@ -5334,8 +5334,8 @@ async fn room_audio_members_set_list_and_clear() {
         .await
         .unwrap();
     let rooms = helpers::response_json(resp).await;
-    assert_eq!(rooms[0]["audio_devices"][0]["audio_device_id"], device_id);
-    assert_eq!(rooms[0]["audio_devices"][0]["volume_offset"], -6);
+    assert_eq!(rooms[0]["media_devices"][0]["media_device_id"], device_id);
+    assert_eq!(rooms[0]["media_devices"][0]["volume_offset"], -6);
 
     let key = create_api_key(&app, &cookie, "mcp").await;
     let resp = app
@@ -5344,7 +5344,7 @@ async fn room_audio_members_set_list_and_clear() {
         .await
         .unwrap();
     assert_eq!(
-        helpers::response_json(resp).await[0]["audio_device_ids"][0],
+        helpers::response_json(resp).await[0]["media_device_ids"][0],
         device_id
     );
 
@@ -5366,7 +5366,7 @@ async fn room_audio_members_set_list_and_clear() {
         .await
         .unwrap();
     assert_eq!(
-        helpers::response_json(resp).await[0]["audio_devices"],
+        helpers::response_json(resp).await[0]["media_devices"],
         serde_json::json!([])
     );
 }
@@ -5537,7 +5537,7 @@ async fn room_audio_state_fans_out_with_offsets() {
         .to_string();
 
     let body = format!(
-        r#"{{"devices":[{{"audio_device_id":"{dev_a}","volume_offset":0}},{{"audio_device_id":"{dev_b}","volume_offset":-6}}]}}"#
+        r#"{{"devices":[{{"media_device_id":"{dev_a}","volume_offset":0}},{{"media_device_id":"{dev_b}","volume_offset":-6}}]}}"#
     );
     let resp = app
         .clone()
@@ -5815,7 +5815,7 @@ async fn audio_provider_lists_with_name_domain_and_ready_status() {
         .find(|p| p["provider_type"] == "onkyo")
         .expect("onkyo provider present");
     assert_eq!(onkyo["type_name"], "Onkyo / Integra");
-    assert_eq!(onkyo["domain"], "audio");
+    assert_eq!(onkyo["domain"], "media");
 }
 
 #[tokio::test]
@@ -5961,8 +5961,8 @@ async fn mcp_tools_list_exposes_the_tool_set() {
         "activate_scene",
         "save_room_scene",
         "save_home_scene",
-        "set_audio",
-        "play_audio_favorite",
+        "set_media",
+        "play_media_favorite",
         "group_speakers",
         "bind_receiver",
     ] {
@@ -6009,7 +6009,7 @@ async fn mcp_bind_receiver_binds_and_unbinds() {
         .clone()
         .oneshot(mcp_tool_call(
             &key,
-            "get_audio_state",
+            "get_media_state",
             serde_json::json!({"device": source}),
         ))
         .await
@@ -6035,7 +6035,7 @@ async fn mcp_bind_receiver_binds_and_unbinds() {
     let resp = app
         .oneshot(mcp_tool_call(
             &key,
-            "get_audio_state",
+            "get_media_state",
             serde_json::json!({"device": source}),
         ))
         .await
@@ -6070,7 +6070,7 @@ async fn mcp_get_home_state_returns_snapshot() {
     assert!(light_names.contains(&"Test Light"), "{light_names:?}");
     assert!(snapshot["rooms"].is_array());
     assert!(snapshot["scenes"].is_array());
-    assert!(snapshot["audio_devices"].is_array());
+    assert!(snapshot["media_devices"].is_array());
 }
 
 #[tokio::test]
@@ -8295,6 +8295,47 @@ async fn cast_requires_session() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn v1_cast_requires_key() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/audio/devices/some-id/cast")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"content_id":"x","content_type":"url"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn v1_cast_with_key_reaches_the_cast_service() {
+    // Bearer-authed cast for a nonexistent device → the shared cast_to_device
+    // returns NotFound → 404. Proves the v1 route is wired through auth to the
+    // same service the session route uses (the provider call itself is covered by
+    // the HA play_media wiremock test).
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "auto").await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/audio/devices/nonexistent/cast")
+                .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"content_id":"x","content_type":"url"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 // ── Light segments (per-segment colour control) ──────────────────────────────

@@ -51,13 +51,14 @@ All tools below are served natively from `src/api/mcp.rs`.
 | `activate_scene` | `apply_scene_entries` | scene by id/name; re-applies the captured full state (color/temp/effect + power). A Room Scene restores its room, a Home Scene the whole house |
 | `save_room_scene` | `capture_scene(room_id)` | snapshot a room's current full state (each light's color/temp/effect + power) as a new Room Scene |
 | `save_home_scene` | `capture_scene(None)` | snapshot the whole home's current state as a new Home Scene |
-| `set_audio` | `apply_audio_command` | device by id/name; power/volume/mute/source/transport |
-| `get_audio_state` | `get_device_live` | live read incl. now-playing |
-| `list_audio_favorites` | `list_device_favorites` | Sonos Favorites; empty for Onkyo |
-| `play_audio_favorite` | `list_device_favorites` + `play_device_favorite` | resolve `favorite` (id/title/substring) then play. *"play my jazz favorite in the office."* |
+| `set_media` | `apply_media_command` | device by id/name; power/volume/mute/source/transport |
+| `get_media_state` | `get_device_live` | live read incl. now-playing |
+| `list_media_favorites` | `list_device_favorites` | Sonos Favorites; empty for Onkyo |
+| `play_media_favorite` | `list_device_favorites` + `play_device_favorite` | resolve `favorite` (id/title/substring) then play. *"play my jazz favorite in the office."* |
+| `cast_media` | `cast_to_device` | cast media to a TV / media player by provider-native `content_id` + `content_type` (HA `media_player.play_media`). For launching a streaming app prefer the remote's `launch_app`; to switch input/app prefer `set_media`'s `source`. |
 | `group_speakers` | `group_devices` (per member) | join speakers under a coordinator. *"play the kitchen and living room together."* |
 | `ungroup_speaker` | `ungroup_device` | remove a speaker from its synced group |
-| `bind_receiver` | `set_audio_receiver` | bind a source (TV/streamer) to a receiver that owns its volume + the input to switch to on power-on; omit `receiver` to unbind. *"route the living room TV's sound through the AV receiver on the Game input."* |
+| `bind_receiver` | `set_media_receiver` | bind a source (TV/streamer) to a receiver that owns its volume + the input to switch to on power-on; omit `receiver` to unbind. *"route the living room TV's sound through the AV receiver on the Game input."* |
 | `list_power_devices` | `list_all_power_devices` | switches / plugs / fans / toggles with on/off state + kind |
 | `set_power` | `apply_power_state` | turn a power device on/off, by id or name. *"turn off the porch switch."* |
 | `list_remotes` | `list_remotes` | TVs / streamers with on state + current foreground app |
@@ -68,7 +69,7 @@ All tools below are served natively from `src/api/mcp.rs`.
 
 | Tool | Maps to | When |
 |---|---|---|
-| `list_audio_devices` | `list_all_devices` | If a standalone audio list is wanted beyond `get_home_state`. |
+| `list_media_devices` | `list_all_devices` | If a standalone audio list is wanted beyond `get_home_state`. |
 | Tier-2 music search/play | a future music-service API | After the Spotify OAuth + Connect music-service work lands. |
 | Audio-in-scenes awareness | scene snapshot incl. audio source/volume | After audio is captured in scenes. |
 

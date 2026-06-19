@@ -13,9 +13,9 @@
 //!   Rooms, exactly like Hue rooms/zones.
 //! - Registered as a **light-domain** factory in `default_registry()`.
 //!
-//! - **Audio (media_player):** `HaAudioFactory` (`media_player.*` →
-//!   `AudioDevice`: power/volume/mute/source/transport, grouping) is registered
-//!   too, so HA TVs and speakers surface on the Audio page and through the audio
+//! - **Media (media_player):** `HaMediaFactory` (`media_player.*` →
+//!   `MediaDevice`: power/volume/mute/source/transport, grouping) is registered
+//!   too, so HA TVs and speakers surface on the Media page and through the media
 //!   API/MCP. Reads on demand (no background manager). *Not yet:* launching
 //!   named content on a player (`media_player.play_media` / HA Assist) — that's
 //!   the next media increment.
@@ -33,7 +33,7 @@
 //! State is REST-polled (`GET /api/states`, services, `/api/template`) under the
 //! existing **poll** model. The next increment upgrades the WebSocket use from
 //! the one-shot registry fetch to a persistent `subscribe_events` push channel
-//! (mirroring Onkyo's `AudioConnectionMode::Push`) for instant state — see
+//! (mirroring Onkyo's `MediaConnectionMode::Push`) for instant state — see
 //! `references/ha_websocket_api.md`.
 //!
 //! ## Known limitations / next
@@ -42,15 +42,15 @@
 //! - **Device grouping:** the registry also gives each entity's `device_id` — the
 //!   basis for grouping a device's entities (the deferred device-registry import).
 
-use crate::models::audio::{
-    AudioCapabilities, AudioCommand, AudioDevice, AudioDeviceKind, AudioEvent, AudioState,
+use crate::models::media::{
+    MediaCapabilities, MediaCommand, MediaDevice, MediaDeviceKind, MediaEvent, MediaState,
     NowPlaying, PlayState, TransportCmd,
 };
 use crate::models::power::{PowerDevice, PowerKind, PowerState};
 use crate::models::remote::{RemoteDevice, RemoteKey, RemoteState};
 use crate::models::{Color, Light, LightCapabilities, LightState, Provider};
 use crate::providers::{
-    AudioProvider, AudioProviderFactory, CredentialField, FieldKind, LightProvider, PowerProvider,
+    CredentialField, FieldKind, LightProvider, MediaProvider, MediaProviderFactory, PowerProvider,
     PowerProviderFactory, ProviderFactory, ProviderGroup, RemoteProvider, RemoteProviderFactory,
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -463,7 +463,7 @@ impl HaProvider {
     }
 
     /// Areas containing entities whose id starts with any of `prefixes`, as
-    /// `ProviderGroup`s. Shared by the light, audio, and power `discover_groups`
+    /// `ProviderGroup`s. Shared by the light, media, and power `discover_groups`
     /// impls (each passes the entity domains it owns).
     async fn discover_groups_for(&self, prefixes: &[&str]) -> Result<Vec<ProviderGroup>> {
         // Render the area→entities map as JSON in one round-trip; `/api/states`
@@ -621,9 +621,9 @@ fn entity_to_light(e: HaEntity, hw_id: Option<String>) -> Light {
     }
 }
 
-// ── Audio mapping ─────────────────────────────────────────────────────────────
+// ── Media mapping ─────────────────────────────────────────────────────────────
 
-fn parse_audio_state(e: &HaEntity) -> AudioState {
+fn parse_media_state(e: &HaEntity) -> MediaState {
     let attrs = &e.attributes;
     let reachable = e.state != "unavailable";
     let power = !matches!(e.state.as_str(), "off" | "unavailable" | "standby");
@@ -653,7 +653,7 @@ fn parse_audio_state(e: &HaEntity) -> AudioState {
         None
     };
 
-    AudioState {
+    MediaState {
         power,
         volume,
         mute: attr_bool(attrs, "is_volume_muted").unwrap_or(false),
@@ -667,10 +667,10 @@ fn parse_audio_state(e: &HaEntity) -> AudioState {
     }
 }
 
-fn audio_capabilities(attrs: &Value) -> AudioCapabilities {
+fn media_capabilities(attrs: &Value) -> MediaCapabilities {
     let feat = attr_u64(attrs, "supported_features").unwrap_or(0);
     let has = |bit: u64| feat & bit != 0;
-    AudioCapabilities {
+    MediaCapabilities {
         sources: has(FEAT_SELECT_SOURCE),
         transport: has(FEAT_PLAY)
             || has(FEAT_PAUSE)
@@ -683,10 +683,10 @@ fn audio_capabilities(attrs: &Value) -> AudioCapabilities {
     }
 }
 
-fn audio_kind(attrs: &Value) -> AudioDeviceKind {
+fn media_kind(attrs: &Value) -> MediaDeviceKind {
     match attr_str(attrs, "device_class").as_deref() {
-        Some("tv") => return AudioDeviceKind::Tv,
-        Some("receiver") => return AudioDeviceKind::Receiver,
+        Some("tv") => return MediaDeviceKind::Tv,
+        Some("receiver") => return MediaDeviceKind::Receiver,
         _ => {}
     }
     // Many smart-TV integrations (e.g. Sony BRAVIA) don't set `device_class`, so
@@ -694,16 +694,16 @@ fn audio_kind(attrs: &Value) -> AudioDeviceKind {
     // running app (`app_id`/`app_name`) is a TV / streamer, not a speaker — a
     // speaker never runs named apps. Use that as the fallback TV signal.
     if attr_str(attrs, "app_id").is_some() || attr_str(attrs, "app_name").is_some() {
-        return AudioDeviceKind::Tv;
+        return MediaDeviceKind::Tv;
     }
-    AudioDeviceKind::Speaker
+    MediaDeviceKind::Speaker
 }
 
-fn entity_to_audio(e: HaEntity, hw_id: Option<String>) -> AudioDevice {
-    let state = parse_audio_state(&e);
-    let capabilities = audio_capabilities(&e.attributes);
-    let kind = audio_kind(&e.attributes);
-    AudioDevice {
+fn entity_to_media(e: HaEntity, hw_id: Option<String>) -> MediaDevice {
+    let state = parse_media_state(&e);
+    let capabilities = media_capabilities(&e.attributes);
+    let kind = media_kind(&e.attributes);
+    MediaDevice {
         id: Uuid::new_v4(),
         provider_id: e.entity_id.clone(),
         name: friendly_name(&e.entity_id, &e.attributes),
@@ -821,15 +821,15 @@ impl LightProvider for HaProvider {
     }
 }
 
-// ── AudioProvider impl ────────────────────────────────────────────────────────
+// ── MediaProvider impl ────────────────────────────────────────────────────────
 
 #[async_trait]
-impl AudioProvider for HaProvider {
+impl MediaProvider for HaProvider {
     fn name(&self) -> &str {
         "homeassistant"
     }
 
-    async fn discover(&self) -> Result<Vec<AudioDevice>> {
+    async fn discover(&self) -> Result<Vec<MediaDevice>> {
         let reg = self.entity_registry().await;
         let hw = self.entity_hw_ids().await;
         Ok(self
@@ -839,16 +839,16 @@ impl AudioProvider for HaProvider {
             .filter(|e| e.entity_id.starts_with(MEDIA_PREFIX) && keep_entity(&reg, &e.entity_id))
             .map(|e| {
                 let hw_id = hw.get(&e.entity_id).cloned();
-                entity_to_audio(e, hw_id)
+                entity_to_media(e, hw_id)
             })
             .collect())
     }
 
-    async fn get_state(&self, device_id: &str) -> Result<AudioState> {
-        Ok(parse_audio_state(&self.get_entity(device_id).await?))
+    async fn get_state(&self, device_id: &str) -> Result<MediaState> {
+        Ok(parse_media_state(&self.get_entity(device_id).await?))
     }
 
-    async fn set_state(&self, device_id: &str, cmd: &AudioCommand) -> Result<()> {
+    async fn set_state(&self, device_id: &str, cmd: &MediaCommand) -> Result<()> {
         // Power first, so "power on + volume" works from standby (matches Onkyo).
         if let Some(power) = cmd.power {
             let svc = if power { "turn_on" } else { "turn_off" };
@@ -978,7 +978,7 @@ impl PowerProvider for HaProvider {
 
 /// One pushed state change off the HA `state_changed` subscription, already
 /// classified into the Bifrost device domain it belongs to. The push manager
-/// fans these onto the per-domain event pipelines (light / audio / power), so a
+/// fans these onto the per-domain event pipelines (light / media / power), so a
 /// single HA WebSocket keeps **all three** domains live instead of 30 s polling.
 #[derive(Debug, Clone)]
 pub enum HaPushEvent {
@@ -986,7 +986,7 @@ pub enum HaPushEvent {
         device_id: String,
         state: LightState,
     },
-    Audio(AudioEvent),
+    Media(MediaEvent),
     Power {
         device_id: String,
         state: PowerState,
@@ -1003,9 +1003,9 @@ fn classify_push(e: HaEntity) -> Option<HaPushEvent> {
             state: parse_light_state(&e),
         })
     } else if id.starts_with(MEDIA_PREFIX) {
-        Some(HaPushEvent::Audio(AudioEvent {
+        Some(HaPushEvent::Media(MediaEvent {
             device_id: id,
-            state: parse_audio_state(&e),
+            state: parse_media_state(&e),
         }))
     } else if POWER_PREFIXES.iter().any(|p| id.starts_with(p)) {
         Some(HaPushEvent::Power {
@@ -1052,7 +1052,7 @@ impl HaProvider {
     /// Open a persistent WebSocket, authenticate, and `subscribe_events` to
     /// `state_changed`, returning a stream of classified per-domain push events.
     ///
-    /// Mirrors the audio push pattern (Onkyo's `event_stream`): the handshake
+    /// Mirrors the media push pattern (Onkyo's `event_stream`): the handshake
     /// runs synchronously so a connect/auth failure is surfaced as `Err` (the
     /// manager backs off), then a spawned task pumps frames until the socket
     /// drops — at which point the sender closes and the manager reconnects. This
@@ -1325,19 +1325,19 @@ impl ProviderFactory for HaLightFactory {
     }
 }
 
-/// Audio side of the same HA adapter. Registered with `register_audio(...)`.
+/// Media side of the same HA adapter. Registered with `register_media(...)`.
 /// NOTE: shares the `"ha"` type key with `HaLightFactory` — see the
 /// registry-exclusivity decision in the module docs.
-pub struct HaAudioFactory;
+pub struct HaMediaFactory;
 
-impl AudioProviderFactory for HaAudioFactory {
+impl MediaProviderFactory for HaMediaFactory {
     fn provider_type(&self) -> &'static str {
         "ha"
     }
     fn display_name(&self) -> &'static str {
         "Home Assistant"
     }
-    fn build(&self, credentials_json: &str) -> Result<Box<dyn AudioProvider>> {
+    fn build(&self, credentials_json: &str) -> Result<Box<dyn MediaProvider>> {
         Ok(Box::new(HaProvider::from_credentials(credentials_json)?))
     }
     fn credentials_schema(&self) -> &'static [CredentialField] {
@@ -1348,7 +1348,7 @@ impl AudioProviderFactory for HaAudioFactory {
 /// Power side of the HA adapter (`switch.*` / `fan.*` / `input_boolean.*`).
 /// Registered with `register_power(...)` **alongside** `HaLightFactory` — the
 /// same `"ha"` provider row serves both domains. This is wired in
-/// `default_registry()` (unlike `HaAudioFactory`, which stays on hold).
+/// `default_registry()` (unlike `HaMediaFactory`, which stays on hold).
 pub struct HaPowerFactory;
 
 impl PowerProviderFactory for HaPowerFactory {
@@ -1596,11 +1596,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discover_audio_maps_media_player_state() {
+    async fn discover_media_maps_media_player_state() {
         let server = MockServer::start().await;
         mount_states(&server, json!([media_entity()])).await;
 
-        let devices = AudioProvider::discover(&HaProvider::new_for_test(server.uri()).unwrap())
+        let devices = MediaProvider::discover(&HaProvider::new_for_test(server.uri()).unwrap())
             .await
             .unwrap();
 
@@ -1621,35 +1621,35 @@ mod tests {
     }
 
     #[test]
-    fn audio_kind_uses_app_signal_when_device_class_absent() {
+    fn media_kind_uses_app_signal_when_device_class_absent() {
         // `device_class` wins when present.
         assert_eq!(
-            audio_kind(&json!({ "device_class": "tv" })),
-            AudioDeviceKind::Tv
+            media_kind(&json!({ "device_class": "tv" })),
+            MediaDeviceKind::Tv
         );
         assert_eq!(
-            audio_kind(&json!({ "device_class": "receiver" })),
-            AudioDeviceKind::Receiver
+            media_kind(&json!({ "device_class": "receiver" })),
+            MediaDeviceKind::Receiver
         );
         // No `device_class`, but a running app → TV (e.g. Sony BRAVIA, which
         // doesn't set device_class but reports `app_name`/`app_id`).
         assert_eq!(
-            audio_kind(&json!({ "app_name": "YouTube" })),
-            AudioDeviceKind::Tv
+            media_kind(&json!({ "app_name": "YouTube" })),
+            MediaDeviceKind::Tv
         );
         assert_eq!(
-            audio_kind(&json!({ "app_id": "com.netflix.ninja" })),
-            AudioDeviceKind::Tv
+            media_kind(&json!({ "app_id": "com.netflix.ninja" })),
+            MediaDeviceKind::Tv
         );
         // Plain media, no app → a speaker.
         assert_eq!(
-            audio_kind(&json!({ "media_title": "Some Song" })),
-            AudioDeviceKind::Speaker
+            media_kind(&json!({ "media_title": "Some Song" })),
+            MediaDeviceKind::Speaker
         );
     }
 
     #[tokio::test]
-    async fn set_audio_volume_calls_volume_set_with_fraction() {
+    async fn set_media_volume_calls_volume_set_with_fraction() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/services/media_player/volume_set"))
@@ -1658,12 +1658,12 @@ mod tests {
             .mount(&server)
             .await;
 
-        let cmd = AudioCommand {
+        let cmd = MediaCommand {
             volume: Some(40),
             ..Default::default()
         };
         let p = HaProvider::new_for_test(server.uri()).unwrap();
-        AudioProvider::set_state(&p, "media_player.office", &cmd)
+        MediaProvider::set_state(&p, "media_player.office", &cmd)
             .await
             .unwrap();
 
@@ -1684,7 +1684,7 @@ mod tests {
             .await;
 
         let p = HaProvider::new_for_test(server.uri()).unwrap();
-        AudioProvider::play_media(&p, "media_player.tv", "https://example/stream.m3u8", "url")
+        MediaProvider::play_media(&p, "media_player.tv", "https://example/stream.m3u8", "url")
             .await
             .unwrap();
 
@@ -1920,9 +1920,9 @@ mod tests {
                 .build(r#"{"base_url":"http://ha.local:8123","token":"abc"}"#)
                 .is_ok()
         );
-        // `.err()` drops the Ok value (a `Box<dyn AudioProvider>`, which isn't
+        // `.err()` drops the Ok value (a `Box<dyn MediaProvider>`, which isn't
         // `Debug`) so the error can be unwrapped.
-        let err = HaAudioFactory
+        let err = HaMediaFactory
             .build(r#"{"base_url":"http://ha.local:8123"}"#)
             .err()
             .expect("missing token should fail to build");
@@ -2038,11 +2038,11 @@ mod tests {
             attributes: json!({ "volume_level": 0.5 }),
         };
         match classify_push(media) {
-            Some(HaPushEvent::Audio(ev)) => {
+            Some(HaPushEvent::Media(ev)) => {
                 assert_eq!(ev.device_id, "media_player.tv");
                 assert_eq!(ev.state.volume, 50);
             }
-            other => panic!("expected audio, got {other:?}"),
+            other => panic!("expected media, got {other:?}"),
         }
 
         let fan = HaEntity {

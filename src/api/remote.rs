@@ -8,7 +8,7 @@
 //! vocabulary. Reads hit the device live and refresh `last_state`, falling back
 //! to the cache (`reachable: false`) when unreachable.
 //!
-//! A remote is **paired** to its TV's audio device (`paired_audio_id`) when a
+//! A remote is **paired** to its TV's media device (`paired_media_id`) when a
 //! `media_player` shares its hardware id — set during discovery in
 //! [`crate::api::dedup`]-adjacent pairing ([`reconcile_remote_pairings`]).
 
@@ -50,8 +50,8 @@ pub(crate) struct RemoteDeviceRow {
     pub enabled: bool,
     pub glyph: Option<String>,
     pub hw_id: Option<String>,
-    /// The paired TV audio device id, if this remote controls a known TV.
-    pub paired_audio_id: Option<String>,
+    /// The paired TV media device id, if this remote controls a known TV.
+    pub paired_media_id: Option<String>,
 }
 
 fn row_to_remote(r: &sqlx::sqlite::SqliteRow) -> RemoteDeviceRow {
@@ -69,12 +69,12 @@ fn row_to_remote(r: &sqlx::sqlite::SqliteRow) -> RemoteDeviceRow {
         enabled: r.get::<i64, _>("enabled") != 0,
         glyph: r.get("glyph"),
         hw_id: r.get("hw_id"),
-        paired_audio_id: r.get("paired_audio_id"),
+        paired_media_id: r.get("paired_media_id"),
     }
 }
 
 const SELECT_REMOTE: &str = "SELECT id, provider_id, device_id, name, last_state, last_seen, \
-     enabled, glyph, hw_id, paired_audio_id FROM remote_devices";
+     enabled, glyph, hw_id, paired_media_id FROM remote_devices";
 
 // ── Provider build / discovery ───────────────────────────────────────────────
 
@@ -129,15 +129,15 @@ pub(crate) async fn discover_remote_devices(
     Ok(devices.len())
 }
 
-/// Pair each remote to a TV audio device that shares its `hw_id` (same physical
+/// Pair each remote to a TV media device that shares its `hw_id` (same physical
 /// box — an Android TV's `remote.*` and `media_player.*` share one HA device).
 /// Idempotent; run after discovery. A remote with no hw_id match is left
-/// unpaired. Prefers an audio device of TV kind when several share a hw_id.
+/// unpaired. Prefers an media device of TV kind when several share a hw_id.
 pub(crate) async fn reconcile_remote_pairings(state: &AppState) {
     let _ = sqlx::query(
         "UPDATE remote_devices
-            SET paired_audio_id = (
-                SELECT a.id FROM audio_devices a
+            SET paired_media_id = (
+                SELECT a.id FROM media_devices a
                  WHERE a.hw_id = remote_devices.hw_id
                    AND a.shadowed_by IS NULL
                  ORDER BY (a.kind = 'tv') DESC

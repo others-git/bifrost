@@ -6,13 +6,13 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
-  getAudioFavorites,
+  getMediaFavorites,
   getRemoteDevices,
-  playAudioFavorite,
-  setAudioState,
-  type AudioCommand,
-  type AudioDevice,
-  type AudioFavorite,
+  playMediaFavorite,
+  setMediaState,
+  type MediaCommand,
+  type MediaDevice,
+  type MediaFavorite,
   type RemoteDevice,
 } from "../api";
 import { DisableRow } from "./PowerFlyout";
@@ -23,7 +23,7 @@ import { Select } from "./Select";
 import { Glyph } from "./glyphs";
 import { T, domain, color, alpha, labelType } from "../theme";
 
-const ACCENT = domain.audio; // violet — audio's accent
+const ACCENT = domain.media; // violet — audio's accent
 
 export const KIND_LABEL: Record<string, string> = {
   receiver: "Receiver",
@@ -33,14 +33,14 @@ export const KIND_LABEL: Record<string, string> = {
 
 /** The control body for one audio device. State is owned by the parent (live
  * via SSE/poll) and updated optimistically through `onLocalPatch`. */
-export function AudioControls({
+export function MediaControls({
   device,
   onLocalPatch,
   compact = false,
   receiverName,
 }: {
-  device: AudioDevice;
-  onLocalPatch: (id: string, patch: Partial<AudioDevice["state"]>) => void;
+  device: MediaDevice;
+  onLocalPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
   /** Tighter spacing + smaller transport buttons, for cramped cards (phones). */
   compact?: boolean;
   /** When this source is bound to a receiver (M22), the receiver's name — shown
@@ -54,11 +54,11 @@ export function AudioControls({
   const cap = device.capabilities;
 
   const [favOpen, setFavOpen] = useState(false);
-  const [favs, setFavs] = useState<AudioFavorite[] | null>(null);
+  const [favs, setFavs] = useState<MediaFavorite[] | null>(null);
   const [favBusy, setFavBusy] = useState(false);
 
-  async function send(cmd: AudioCommand) {
-    const err = await setAudioState(device.id, cmd);
+  async function send(cmd: MediaCommand) {
+    const err = await setMediaState(device.id, cmd);
     if (err) console.warn("audio command failed:", err);
   }
   function setVolume(v: number) {
@@ -75,13 +75,13 @@ export function AudioControls({
     setFavOpen(next);
     if (next && favs === null) {
       setFavBusy(true);
-      setFavs(await getAudioFavorites(device.id));
+      setFavs(await getMediaFavorites(device.id));
       setFavBusy(false);
     }
   }
-  async function playFav(f: AudioFavorite) {
+  async function playFav(f: MediaFavorite) {
     onLocalPatch(device.id, { power: true });
-    const err = await playAudioFavorite(device.id, f.id);
+    const err = await playMediaFavorite(device.id, f.id);
     if (err) console.warn("play favorite failed:", err);
   }
 
@@ -255,15 +255,15 @@ export function TransportButton({
 /** Power for receivers/zones — the shared power button, lit violet (audio domain),
  * so every device type powers on/off identically. */
 export function PowerButton({ on, onToggle }: { on: boolean; onToggle: () => void }) {
-  return <PowerToggle on={on} accent={domain.audio} onToggle={onToggle} />;
+  return <PowerToggle on={on} accent={domain.media} onToggle={onToggle} />;
 }
 
 /**
- * Anchored fly-out wrapping AudioControls — the floor-plan counterpart to
+ * Anchored fly-out wrapping MediaControls — the floor-plan counterpart to
  * LightEditor. State is owned by the caller; `onLocalPatch` updates it
- * optimistically and `setAudioState` drives the device.
+ * optimistically and `setMediaState` drives the device.
  */
-export function AudioEditor({
+export function MediaEditor({
   device,
   anchor,
   onLocalPatch,
@@ -271,9 +271,9 @@ export function AudioEditor({
   onClose,
   receiverName,
 }: {
-  device: AudioDevice;
+  device: MediaDevice;
   anchor: HTMLElement | { x: number; y: number };
-  onLocalPatch: (id: string, patch: Partial<AudioDevice["state"]>) => void;
+  onLocalPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
   /** Enable/disable the device. Disabling drops it from room control. */
   onSetEnabled?: (enabled: boolean) => void;
   onClose: () => void;
@@ -293,7 +293,7 @@ export function AudioEditor({
     if (device.kind !== "tv") return;
     let alive = true;
     getRemoteDevices().then((rs) => {
-      if (alive) setPairedRemote(rs.find((r) => r.paired_audio_id === device.id && r.enabled) ?? null);
+      if (alive) setPairedRemote(rs.find((r) => r.paired_media_id === device.id && r.enabled) ?? null);
     });
     return () => {
       alive = false;
@@ -302,7 +302,7 @@ export function AudioEditor({
 
   function togglePower() {
     onLocalPatch(device.id, { power: !device.state.power });
-    setAudioState(device.id, { power: !device.state.power });
+    setMediaState(device.id, { power: !device.state.power });
   }
 
   return (
@@ -339,7 +339,7 @@ export function AudioEditor({
       {offline ? (
         <div style={{ fontSize: "0.8rem", color: "#c66" }}>Device offline.</div>
       ) : (
-        <AudioControls device={device} onLocalPatch={onLocalPatch} receiverName={receiverName} />
+        <MediaControls device={device} onLocalPatch={onLocalPatch} receiverName={receiverName} />
       )}
       {remoteOpen && pairedRemote && (
         <BifrostRemote
@@ -356,11 +356,11 @@ export function AudioEditor({
                   const st = device.state;
                   if (k === "mute") {
                     onLocalPatch(device.id, { mute: !st.mute });
-                    setAudioState(device.id, { mute: !st.mute });
+                    setMediaState(device.id, { mute: !st.mute });
                   } else {
                     const v = Math.max(0, Math.min(100, (st.volume ?? 0) + (k === "volume_up" ? 2 : -2)));
                     onLocalPatch(device.id, { volume: v });
-                    setAudioState(device.id, { volume: v });
+                    setMediaState(device.id, { volume: v });
                   }
                 }
               : undefined

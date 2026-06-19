@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   activateScene,
   createScene,
-  getAudioDevices,
+  getMediaDevices,
   getPowerDevices,
   getProviders,
   getRooms,
@@ -12,8 +12,8 @@ import {
   restoreDefaultHome,
   rgbToHex,
   rgbToXy,
-  setAudioEnabled,
-  setAudioState,
+  setMediaEnabled,
+  setMediaState,
   setLightEnabled,
   setLightSegments,
   setLightState,
@@ -21,8 +21,8 @@ import {
   setPowerState,
   setRoomState,
   xyToRgb,
-  type AudioCommand,
-  type AudioDevice,
+  type MediaCommand,
+  type MediaDevice,
   type ControlTarget,
   type Light,
   type LightState,
@@ -33,8 +33,8 @@ import {
   type RoomControl,
   type Scene,
 } from "../api";
-import { AudioEditor } from "../components/AudioControls";
-import { Glyph, powerKindGlyph, audioKindGlyph } from "../components/glyphs";
+import { MediaEditor } from "../components/MediaControls";
+import { Glyph, powerKindGlyph, mediaKindGlyph } from "../components/glyphs";
 import { hexToRgb, LightEditor, type LightControlChange } from "../components/LightEditor";
 import { T, font, glassCard, radius, color, glow, alpha } from "../theme";
 import { CornerFiligree } from "../components/ornament";
@@ -61,7 +61,7 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
   const { isMobile, isCompact } = useViewport();
   const [localLights, setLocalLights] = useState<Light[]>(lights);
   const [powerDevices, setPowerDevices] = useState<PowerDevice[]>([]);
-  const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
+  const [mediaDevices, setMediaDevices] = useState<MediaDevice[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
   // All scenes (home + room-scoped); per-room subsets are filtered downstream.
@@ -80,7 +80,7 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
   useEffect(() => {
     getRooms().then(setRooms);
     getPowerDevices().then(setPowerDevices);
-    getAudioDevices().then(setAudioDevices);
+    getMediaDevices().then(setMediaDevices);
   }, [lights]);
 
   // Real-time state: light_state (Hue SSE), audio_state (Onkyo push), and
@@ -98,13 +98,13 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
         ),
       );
     });
-    es.addEventListener("audio_state", (raw) => {
+    es.addEventListener("media_state", (raw) => {
       const ev = JSON.parse((raw as MessageEvent).data) as {
         provider_id: string;
         device_id: string;
-        state: AudioDevice["state"];
+        state: MediaDevice["state"];
       };
-      setAudioDevices((prev) =>
+      setMediaDevices((prev) =>
         prev.map((d) =>
           d.provider_id === ev.provider_id && d.device_id === ev.device_id
             ? { ...d, state: ev.state }
@@ -133,8 +133,8 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
   function onLightUpdate(id: string, state: LightState) {
     setLocalLights((prev) => prev.map((l) => (l.id === id ? { ...l, last_state: state } : l)));
   }
-  function onAudioPatch(id: string, patch: Partial<AudioDevice["state"]>) {
-    setAudioDevices((prev) =>
+  function onMediaPatch(id: string, patch: Partial<MediaDevice["state"]>) {
+    setMediaDevices((prev) =>
       prev.map((d) => (d.id === id ? { ...d, state: { ...d.state, ...patch } } : d)),
     );
   }
@@ -152,9 +152,9 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
     setLocalLights((prev) => prev.map((l) => (l.id === id ? { ...l, enabled } : l)));
     setLightEnabled(id, enabled);
   }
-  function onAudioSetEnabled(id: string, enabled: boolean) {
-    setAudioDevices((prev) => prev.map((d) => (d.id === id ? { ...d, enabled } : d)));
-    setAudioEnabled(id, enabled);
+  function onMediaSetEnabled(id: string, enabled: boolean) {
+    setMediaDevices((prev) => prev.map((d) => (d.id === id ? { ...d, enabled } : d)));
+    setMediaEnabled(id, enabled);
   }
   function onPowerSetEnabled(id: string, enabled: boolean) {
     setPowerDevices((prev) => prev.map((d) => (d.id === id ? { ...d, enabled } : d)));
@@ -162,7 +162,7 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
   }
 
   const onCount = localLights.filter((l) => l.last_state?.on).length;
-  const empty = localLights.length === 0 && powerDevices.length === 0 && audioDevices.length === 0;
+  const empty = localLights.length === 0 && powerDevices.length === 0 && mediaDevices.length === 0;
   const defaultHome = homeScenes.find((s) => s.is_default);
 
   // Confirmation is the seal's own two-tap arm/confirm gesture, so no modal here.
@@ -201,17 +201,17 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
         <RoomGrid
           lights={localLights}
           powerDevices={powerDevices}
-          audioDevices={audioDevices}
+          mediaDevices={mediaDevices}
           rooms={rooms}
           providers={providers}
           scenes={scenes}
           dialogs={dialogs}
           onScenesChanged={loadScenes}
           onLightUpdate={onLightUpdate}
-          onAudioPatch={onAudioPatch}
+          onMediaPatch={onMediaPatch}
           onPowerToggle={onPowerToggle}
           onLightSetEnabled={onLightSetEnabled}
-          onAudioSetEnabled={onAudioSetEnabled}
+          onMediaSetEnabled={onMediaSetEnabled}
           onPowerSetEnabled={onPowerSetEnabled}
           onChanged={onRefresh}
         />
@@ -232,40 +232,40 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
 function RoomGrid({
   lights,
   powerDevices,
-  audioDevices,
+  mediaDevices,
   rooms,
   providers,
   scenes,
   dialogs,
   onScenesChanged,
   onLightUpdate,
-  onAudioPatch,
+  onMediaPatch,
   onPowerToggle,
   onLightSetEnabled,
-  onAudioSetEnabled,
+  onMediaSetEnabled,
   onPowerSetEnabled,
   onChanged,
 }: {
   lights: Light[];
   powerDevices: PowerDevice[];
-  audioDevices: AudioDevice[];
+  mediaDevices: MediaDevice[];
   rooms: Room[];
   providers: Provider[];
   scenes: Scene[];
   dialogs: Dialogs;
   onScenesChanged: () => void;
   onLightUpdate: (id: string, state: LightState) => void;
-  onAudioPatch: (id: string, patch: Partial<AudioDevice["state"]>) => void;
+  onMediaPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
   onPowerToggle: (id: string, next: boolean) => void;
   onLightSetEnabled: (id: string, enabled: boolean) => void;
-  onAudioSetEnabled: (id: string, enabled: boolean) => void;
+  onMediaSetEnabled: (id: string, enabled: boolean) => void;
   onPowerSetEnabled: (id: string, enabled: boolean) => void;
   onChanged: () => void;
 }) {
   const { isMobile } = useViewport();
   const lightById = new Map(lights.map((l) => [l.id, l]));
   const powerById = new Map(powerDevices.map((d) => [d.id, d]));
-  const audioById = new Map(audioDevices.map((d) => [d.id, d]));
+  const mediaById = new Map(mediaDevices.map((d) => [d.id, d]));
   const assigned = new Set<string>();
 
   // Disabled devices keep their room membership but drop out of room control.
@@ -277,9 +277,9 @@ function RoomGrid({
       const power = room.power_device_ids
         .map((id) => powerById.get(id))
         .filter((d): d is PowerDevice => !!d && d.enabled !== false);
-      const members = room.audio_devices
-        .map((m) => audioById.get(m.audio_device_id))
-        .filter((d): d is AudioDevice => !!d && d.enabled !== false);
+      const members = room.media_devices
+        .map((m) => mediaById.get(m.media_device_id))
+        .filter((d): d is MediaDevice => !!d && d.enabled !== false);
       // M22 combined control: a receiver that is the volume-target of another
       // member in this room isn't shown on its own — the bound source's control
       // already drives it (volume routes there), so the pair reads as one device.
@@ -308,18 +308,18 @@ function RoomGrid({
 
   // Resolve a bound source's receiver name (the receiver may be collapsed out of
   // the room's member list, but still lives in the global device map).
-  const receiverNameFor = (d: AudioDevice) =>
-    d.receiver_id ? audioById.get(d.receiver_id)?.name : undefined;
+  const receiverNameFor = (d: MediaDevice) =>
+    d.receiver_id ? mediaById.get(d.receiver_id)?.name : undefined;
 
   const common = {
     scenes,
     dialogs,
     onScenesChanged,
     onLightUpdate,
-    onAudioPatch,
+    onMediaPatch,
     onPowerToggle,
     onLightSetEnabled,
-    onAudioSetEnabled,
+    onMediaSetEnabled,
     onPowerSetEnabled,
     onChanged,
     receiverNameFor,
@@ -363,10 +363,10 @@ function litHexes(lights: Light[]): string[] {
  * live sync group (sharing `group_coordinator`) become a single entry driven by
  * the coordinator; everything else is its own entry. A grouped coordinator whose
  * other members aren't in this room degrades to a solo entry. Derived from the
- * members — no group device is stored (see `models::audio::AudioState`). */
-function groupedAudio(audio: AudioDevice[]): { coordinator: AudioDevice; members: AudioDevice[] }[] {
-  const byCoordinator = new Map<string, AudioDevice[]>();
-  const solo: AudioDevice[] = [];
+ * members — no group device is stored (see `models::audio::MediaState`). */
+function groupedAudio(audio: MediaDevice[]): { coordinator: MediaDevice; members: MediaDevice[] }[] {
+  const byCoordinator = new Map<string, MediaDevice[]>();
+  const solo: MediaDevice[] = [];
   for (const d of audio) {
     const coord = d.state.group_coordinator;
     if (coord) {
@@ -377,7 +377,7 @@ function groupedAudio(audio: AudioDevice[]): { coordinator: AudioDevice; members
       solo.push(d);
     }
   }
-  const entries: { coordinator: AudioDevice; members: AudioDevice[] }[] = [];
+  const entries: { coordinator: MediaDevice; members: MediaDevice[] }[] = [];
   for (const [coord, members] of byCoordinator) {
     if (members.length >= 2) {
       const coordinator = members.find((m) => m.provider_id === coord) ?? members[0];
@@ -406,10 +406,10 @@ function RoomBox({
   dialogs,
   onScenesChanged,
   onLightUpdate,
-  onAudioPatch,
+  onMediaPatch,
   onPowerToggle,
   onLightSetEnabled,
-  onAudioSetEnabled,
+  onMediaSetEnabled,
   onPowerSetEnabled,
   onChanged,
   receiverNameFor,
@@ -419,19 +419,19 @@ function RoomBox({
   roomId?: string;
   lights: Light[];
   power: PowerDevice[];
-  audio: AudioDevice[];
+  audio: MediaDevice[];
   controls: RoomControl[];
   scenes: Scene[];
   dialogs: Dialogs;
   onScenesChanged: () => void;
   onLightUpdate: (id: string, state: LightState) => void;
-  onAudioPatch: (id: string, patch: Partial<AudioDevice["state"]>) => void;
+  onMediaPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
   onPowerToggle: (id: string, next: boolean) => void;
   onLightSetEnabled: (id: string, enabled: boolean) => void;
-  onAudioSetEnabled: (id: string, enabled: boolean) => void;
+  onMediaSetEnabled: (id: string, enabled: boolean) => void;
   onPowerSetEnabled: (id: string, enabled: boolean) => void;
   onChanged: () => void;
-  receiverNameFor?: (d: AudioDevice) => string | undefined;
+  receiverNameFor?: (d: MediaDevice) => string | undefined;
 }) {
   const { isCompact } = useViewport();
   const tuneRef = useRef<HTMLDivElement>(null);
@@ -656,7 +656,7 @@ function RoomBox({
                 audio={audio}
                 onLightUpdate={onLightUpdate}
                 onPowerToggle={onPowerToggle}
-                onAudioPatch={onAudioPatch}
+                onMediaPatch={onMediaPatch}
                 onChanged={onChanged}
                 size={isCompact ? 38 : 42}
               />
@@ -694,19 +694,19 @@ function RoomBox({
         ))}
         {groupedAudio(audio).map((entry) =>
           entry.members.length >= 2 ? (
-            <AudioButton
+            <MediaButton
               key={`grp-${entry.coordinator.id}`}
               device={entry.coordinator}
               groupMembers={entry.members}
-              onAudioPatch={onAudioPatch}
-              onSetEnabled={onAudioSetEnabled}
+              onMediaPatch={onMediaPatch}
+              onSetEnabled={onMediaSetEnabled}
             />
           ) : (
-            <AudioButton
+            <MediaButton
               key={entry.coordinator.id}
               device={entry.coordinator}
-              onAudioPatch={onAudioPatch}
-              onSetEnabled={onAudioSetEnabled}
+              onMediaPatch={onMediaPatch}
+              onSetEnabled={onMediaSetEnabled}
               receiverName={receiverNameFor?.(entry.coordinator)}
             />
           ),
@@ -751,7 +751,7 @@ function RoomBox({
 
 /** A user-configured quick-control button on a room's header (see migration
  * 0034 / RoomControlsPanel). `power` toggles its targets and `scene` applies a
- * scene directly; `brightness`/`volume` open the shared LightEditor/AudioEditor
+ * scene directly; `brightness`/`volume` open the shared LightEditor/MediaEditor
  * scoped to the targets (fanning to all of them). */
 function RoomControlButton({
   control,
@@ -760,17 +760,17 @@ function RoomControlButton({
   audio,
   onLightUpdate,
   onPowerToggle,
-  onAudioPatch,
+  onMediaPatch,
   onChanged,
   size,
 }: {
   control: RoomControl;
   lights: Light[];
   power: PowerDevice[];
-  audio: AudioDevice[];
+  audio: MediaDevice[];
   onLightUpdate: (id: string, state: LightState) => void;
   onPowerToggle: (id: string, next: boolean) => void;
-  onAudioPatch: (id: string, patch: Partial<AudioDevice["state"]>) => void;
+  onMediaPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
   onChanged: () => void;
   size: number;
 }) {
@@ -782,7 +782,7 @@ function RoomControlButton({
     control.targets.some((t) => t.domain === domain && t.id === id);
   const tLights = lights.filter((l) => has("light", l.id));
   const tPower = power.filter((d) => has("power", d.id));
-  const tAudio = audio.filter((d) => has("audio", d.id));
+  const tAudio = audio.filter((d) => has("media", d.id));
 
   // A non-scene control whose targets have all been removed/disabled has nothing
   // to act on — drop it rather than render a dead button.
@@ -798,7 +798,7 @@ function RoomControlButton({
         tAudio.some((d) => d.state.power);
 
   const accent =
-    control.kind === "volume" ? T.audio : control.kind === "brightness" ? "#ffb84d" : T.accent;
+    control.kind === "volume" ? T.media : control.kind === "brightness" ? "#ffb84d" : T.accent;
 
   function togglePower() {
     const next = !anyOn;
@@ -809,8 +809,8 @@ function RoomControlButton({
     }
     for (const d of tPower) onPowerToggle(d.id, next);
     for (const d of tAudio) {
-      onAudioPatch(d.id, { power: next });
-      setAudioState(d.id, { power: next });
+      onMediaPatch(d.id, { power: next });
+      setMediaState(d.id, { power: next });
     }
   }
 
@@ -847,16 +847,16 @@ function RoomControlButton({
     }, 200);
   }
 
-  // Volume control fans changes to every target audio device. The AudioEditor
+  // Volume control fans changes to every target audio device. The MediaEditor
   // commits its own `device`; this wrapper fans the same command to the rest.
-  function fanAudio(id: string, patch: Partial<AudioDevice["state"]>) {
-    const cmd: AudioCommand = {};
+  function fanAudio(id: string, patch: Partial<MediaDevice["state"]>) {
+    const cmd: MediaCommand = {};
     if (patch.volume !== undefined) cmd.volume = patch.volume;
     if (patch.mute !== undefined) cmd.mute = patch.mute;
     if (patch.power !== undefined) cmd.power = patch.power;
     for (const d of tAudio) {
-      onAudioPatch(d.id, patch);
-      if (d.id !== id && Object.keys(cmd).length > 0) setAudioState(d.id, cmd);
+      onMediaPatch(d.id, patch);
+      if (d.id !== id && Object.keys(cmd).length > 0) setMediaState(d.id, cmd);
     }
   }
 
@@ -908,7 +908,7 @@ function RoomControlButton({
         />
       )}
       {open && control.kind === "volume" && tAudio[0] && ref.current && (
-        <AudioEditor
+        <MediaEditor
           device={tAudio[0]}
           anchor={ref.current}
           onLocalPatch={fanAudio}
@@ -1264,18 +1264,18 @@ function PowerButton({
   );
 }
 
-function AudioButton({
+function MediaButton({
   device,
   groupMembers,
-  onAudioPatch,
+  onMediaPatch,
   onSetEnabled,
   receiverName,
 }: {
-  device: AudioDevice;
+  device: MediaDevice;
   /** When set (≥2), this button represents a live sync group coordinated by
    * `device`; it shows the group glyph and lists the members. */
-  groupMembers?: AudioDevice[];
-  onAudioPatch: (id: string, patch: Partial<AudioDevice["state"]>) => void;
+  groupMembers?: MediaDevice[];
+  onMediaPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
   onSetEnabled: (id: string, enabled: boolean) => void;
   /** M22: name of the receiver this source's volume routes to, if bound. */
   receiverName?: string;
@@ -1287,14 +1287,14 @@ function AudioButton({
   const title = grouped ? groupMembers!.map((m) => m.name).join(" + ") : device.name;
   function togglePower() {
     const next = !device.state.power;
-    onAudioPatch(device.id, { power: next });
-    setAudioState(device.id, { power: next });
+    onMediaPatch(device.id, { power: next });
+    setMediaState(device.id, { power: next });
   }
   return (
     <>
       <GlyphButton
         on={device.state.power}
-        accent={T.audio}
+        accent={T.media}
         offline={offline}
         title={title}
         active={open}
@@ -1302,13 +1302,13 @@ function AudioButton({
         onClick={() => setOpen((v) => !v)}
         onLongPress={togglePower}
       >
-        <Glyph name={grouped ? "speaker_group" : (device.glyph ?? audioKindGlyph(device.kind))} />
+        <Glyph name={grouped ? "speaker_group" : (device.glyph ?? mediaKindGlyph(device.kind))} />
       </GlyphButton>
       {open && ref.current && (
-        <AudioEditor
+        <MediaEditor
           device={device}
           anchor={ref.current}
-          onLocalPatch={onAudioPatch}
+          onLocalPatch={onMediaPatch}
           onSetEnabled={(en) => { onSetEnabled(device.id, en); if (!en) setOpen(false); }}
           onClose={() => setOpen(false)}
           receiverName={receiverName}

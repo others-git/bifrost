@@ -24,7 +24,7 @@ export function setTalkBackEnabled(on: boolean): void {
 }
 
 // The reply currently playing, so a new one can interrupt it instead of overlapping.
-let current: HTMLAudioElement | null = null;
+let current: HTMLMediaElement | null = null;
 
 /** Stop any reply that's currently playing. */
 export function stopSpeaking(): void {

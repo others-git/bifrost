@@ -4,7 +4,7 @@ import { Glyph } from "./components/glyphs";
 import { SetupPage } from "./pages/Setup";
 import { LoginPage } from "./pages/Login";
 import { DashboardPage } from "./pages/Dashboard";
-import { AudioPage } from "./pages/Audio";
+import { MediaPage } from "./pages/Media";
 import { DevicesPage } from "./pages/Devices";
 import { ScenesPage } from "./pages/Scenes";
 import { RoomsPage } from "./pages/Rooms";
@@ -18,7 +18,7 @@ import { VoiceFeedback } from "./components/VoiceFeedback";
 import { PushToTalk } from "./components/PushToTalk";
 
 /** Pages reachable from the nav tray. */
-type NavPage = "dashboard" | "audio" | "devices" | "scenes" | "rooms" | "plan" | "settings";
+type NavPage = "dashboard" | "media" | "devices" | "scenes" | "rooms" | "plan" | "settings";
 type Page = "loading" | "setup" | "login" | NavPage;
 
 /** True when served inside the Bifrost kiosk WebView (it appends
@@ -60,7 +60,7 @@ function Brand({ compact = false, fontSize }: { compact?: boolean; fontSize: str
 
 const NAV_ITEMS: { id: NavPage; glyph: string; label: string }[] = [
   { id: "dashboard", glyph: "◉", label: "Control" },
-  { id: "audio", glyph: "♪", label: "Audio" },
+  { id: "media", glyph: "♪", label: "Audio" },
   { id: "devices", glyph: "▤", label: "Devices" },
   { id: "scenes", glyph: "✦", label: "Scenes" },
   { id: "rooms", glyph: "⌂", label: "Rooms" },
@@ -159,7 +159,7 @@ export function App() {
         {page === "dashboard" && (
           <DashboardPage lights={lights} onRefresh={refreshLights} onNavigate={(p) => setPage(p)} />
         )}
-        {page === "audio" && <AudioPage />}
+        {page === "media" && <MediaPage />}
         {page === "devices" && <DevicesPage />}
         {page === "scenes" && <ScenesPage />}
         {page === "rooms" && <RoomsPage />}

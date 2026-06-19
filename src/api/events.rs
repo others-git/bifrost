@@ -25,11 +25,11 @@ async fn sse_events(
     _: Session,
 ) -> Result<Sse<impl stream::Stream<Item = Result<Event, Infallible>> + Send + 'static>, StatusCode>
 {
-    let (receivers, audio_receivers, power_receivers) = {
+    let (receivers, media_receivers, power_receivers) = {
         let connections = state.connections.lock().await;
         (
             connections.subscribe_all(),
-            connections.subscribe_all_audio(),
+            connections.subscribe_all_media(),
             connections.subscribe_all_power(),
         )
     };
@@ -51,9 +51,9 @@ async fn sse_events(
         })
         .collect();
 
-    // Audio push events: full-state snapshots tagged with the provider row id
-    // so the frontend can match its audio_devices rows.
-    for (provider_id, rx) in audio_receivers {
+    // Media push events: full-state snapshots tagged with the provider row id
+    // so the frontend can match its media_devices rows.
+    for (provider_id, rx) in media_receivers {
         streams.push(
             BroadcastStream::new(rx)
                 .filter_map(|r| std::future::ready(r.ok()))
@@ -64,7 +64,7 @@ async fn sse_events(
                         "state": event.state,
                     }))
                     .unwrap_or_default();
-                    Ok::<Event, Infallible>(Event::default().event("audio_state").data(data))
+                    Ok::<Event, Infallible>(Event::default().event("media_state").data(data))
                 })
                 .boxed(),
         );

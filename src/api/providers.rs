@@ -196,7 +196,7 @@ struct ProviderRow {
     provider_type: String,
     /// Human-facing type name (e.g. "Sonos"); falls back to the type key.
     type_name: String,
-    /// UI category: "light", "audio", or "integration" (matches the add menu).
+    /// UI category: "light", "media", or "integration" (matches the add menu).
     domain: String,
     name: String,
     enabled: bool,
@@ -225,7 +225,7 @@ async fn list_providers(State(state): State<Arc<AppState>>, _: Session) -> impl 
                         .unwrap_or(provider_type.as_str())
                         .to_string();
                     let domain = match state.registry.ui_domain(&provider_type) {
-                        Some(crate::providers::ProviderDomain::Audio) => "audio",
+                        Some(crate::providers::ProviderDomain::Media) => "media",
                         Some(crate::providers::ProviderDomain::Integration) => "integration",
                         _ => "light",
                     }
@@ -305,8 +305,8 @@ async fn add_provider(
     _: Session,
     Json(req): Json<AddProviderRequest>,
 ) -> impl IntoResponse {
-    let is_audio = state.registry.is_known_audio(&req.provider_type);
-    if !state.registry.is_known(&req.provider_type) && !is_audio {
+    let is_media = state.registry.is_known_media(&req.provider_type);
+    if !state.registry.is_known(&req.provider_type) && !is_media {
         return (
             StatusCode::BAD_REQUEST,
             format!(
@@ -320,10 +320,10 @@ async fn add_provider(
     let creds_json = req.credentials.to_string();
 
     // Smoke-test: try building the provider now so bad credentials fail fast.
-    let build_check = if is_audio {
+    let build_check = if is_media {
         state
             .registry
-            .build_audio(&req.provider_type, &creds_json)
+            .build_media(&req.provider_type, &creds_json)
             .map(|_| ())
     } else {
         state
@@ -504,10 +504,10 @@ async fn update_credentials(
     let creds_json = serde_json::Value::Object(merged).to_string();
 
     // Smoke-test before persisting, like add_provider does.
-    let build_check = if state.registry.is_known_audio(&provider_type) {
+    let build_check = if state.registry.is_known_media(&provider_type) {
         state
             .registry
-            .build_audio(&provider_type, &creds_json)
+            .build_media(&provider_type, &creds_json)
             .map(|_| ())
     } else {
         state
@@ -580,7 +580,7 @@ async fn provider_status(
         return Json(ConnectionStatus::from_state(&cs)).into_response();
     }
 
-    // No background manager. On-demand audio providers (e.g. Sonos) are read
+    // No background manager. On-demand media providers (e.g. Sonos) are read
     // live per request, so they're operational, not broken — report "ready".
     let provider_type: Option<String> =
         sqlx::query("SELECT provider_type FROM providers WHERE id = ?")
@@ -592,7 +592,7 @@ async fn provider_status(
             .map(|r| r.get("provider_type"));
 
     let label = match provider_type {
-        Some(t) if state.registry.is_known_audio(&t) => "ready",
+        Some(t) if state.registry.is_known_media(&t) => "ready",
         _ => "not_managed",
     };
     Json(serde_json::json!({ "state": label })).into_response()
@@ -605,7 +605,7 @@ async fn provider_status(
 #[derive(Clone, Copy)]
 enum SyncDomain {
     Light,
-    Audio,
+    Media,
     Power,
 }
 
@@ -630,10 +630,10 @@ async fn refresh_group_members(
 ) {
     let (device_table, member_table, member_col) = match domain {
         SyncDomain::Light => ("lights", "provider_group_lights", "light_id"),
-        SyncDomain::Audio => (
-            "audio_devices",
-            "provider_group_audio_devices",
-            "audio_device_id",
+        SyncDomain::Media => (
+            "media_devices",
+            "provider_group_media_devices",
+            "media_device_id",
         ),
         SyncDomain::Power => (
             "power_devices",
@@ -713,7 +713,7 @@ async fn sync_groups(
     // A provider can mirror its rooms/areas across several device domains (HA
     // surfaces lights + power; an Area with only switches still has to sync).
     // Gather each domain's groups, then merge by area id so one area → one
-    // mirror with members populated per domain. Hue (light) and Sonos (audio)
+    // mirror with members populated per domain. Hue (light) and Sonos (media)
     // serve a single domain, so this collapses to the old behaviour for them.
     let mut domain_groups: Vec<(SyncDomain, Vec<crate::providers::ProviderGroup>)> = Vec::new();
     if state.registry.is_known(&provider_type) {
@@ -746,17 +746,17 @@ async fn sync_groups(
             }
         }
     }
-    if state.registry.is_known_audio(&provider_type) {
-        match crate::api::audio::build_audio_provider(&state, &provider_type, &credentials_enc) {
+    if state.registry.is_known_media(&provider_type) {
+        match crate::api::media::build_media_provider(&state, &provider_type, &credentials_enc) {
             Ok(p) => match p.discover_groups().await {
-                Ok(g) => domain_groups.push((SyncDomain::Audio, g)),
+                Ok(g) => domain_groups.push((SyncDomain::Media, g)),
                 Err(e) => {
-                    tracing::error!("audio group discovery error: {e:#}");
+                    tracing::error!("media group discovery error: {e:#}");
                     return StatusCode::BAD_GATEWAY.into_response();
                 }
             },
             Err(e) => {
-                tracing::error!("failed to build audio provider: {e:#}");
+                tracing::error!("failed to build media provider: {e:#}");
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
         }
@@ -1138,9 +1138,9 @@ async fn discover(
         }
     }
 
-    // Audio domain.
-    if state.registry.is_known_audio(&provider_type) {
-        match crate::api::audio::discover_audio_devices(
+    // Media domain.
+    if state.registry.is_known_media(&provider_type) {
+        match crate::api::media::discover_media_devices(
             &state,
             &id,
             &provider_type,
@@ -1178,8 +1178,8 @@ async fn discover(
         if state.registry.is_known_power(&provider_type) {
             pruned += prune_stale(&state, &id, "power_devices", &prune_before).await;
         }
-        if state.registry.is_known_audio(&provider_type) {
-            pruned += prune_stale(&state, &id, "audio_devices", &prune_before).await;
+        if state.registry.is_known_media(&provider_type) {
+            pruned += prune_stale(&state, &id, "media_devices", &prune_before).await;
         }
         if state.registry.is_known_remote(&provider_type) {
             pruned += prune_stale(&state, &id, "remote_devices", &prune_before).await;
@@ -1188,7 +1188,7 @@ async fn discover(
 
     // Collapse any device now reachable both natively and via this integration.
     crate::api::dedup::reconcile_duplicates(&state).await;
-    // Pair each TV remote to the TV's audio device (shared hardware id).
+    // Pair each TV remote to the TV's media device (shared hardware id).
     crate::api::remote::reconcile_remote_pairings(&state).await;
 
     Json(DiscoverResponse { discovered, pruned }).into_response()

@@ -1,5 +1,5 @@
 // The shared fly-out shell — one anchored popover / bottom-sheet used by every
-// control fly-out (LightEditor, AudioEditor, PowerFlyout). It owns the parts
+// control fly-out (LightEditor, MediaEditor, PowerFlyout). It owns the parts
 // those three kept re-implementing: anchor positioning with viewport-flip,
 // the compact→bottom-sheet swap, outside-click + Escape close, and the portal to
 // <body> (so a dimmed/offline card can't make the fly-out translucent).

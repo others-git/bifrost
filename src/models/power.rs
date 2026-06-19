@@ -10,7 +10,7 @@
 //! their own domain instead of being crammed in here; this keeps each domain's
 //! state shape honest.
 //!
-//! The shape mirrors `AudioDevice`/`Light`: discovery returns full device
+//! The shape mirrors `MediaDevice`/`Light`: discovery returns full device
 //! snapshots and reads return full state, but a power "command" is just a bool.
 
 use serde::{Deserialize, Serialize};

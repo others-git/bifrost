@@ -5,11 +5,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
-  setRoomAudioDevices,
-  setRoomAudioState,
-  type AudioDevice,
+  setRoomMediaDevices,
+  setRoomMediaState,
+  type MediaDevice,
   type Room,
-  type RoomAudioMember,
+  type RoomMediaMember,
 } from "../api";
 import { Button } from "./controls";
 import { Glyph } from "./glyphs";
@@ -17,10 +17,10 @@ import { alpha } from "../theme";
 
 const ACCENT = "#a78bfa";
 
-function members(room: Room, devices: AudioDevice[]) {
-  const resolved = room.audio_devices
-    .map((m) => ({ m, dev: devices.find((d) => d.id === m.audio_device_id) }))
-    .filter((x): x is { m: RoomAudioMember; dev: AudioDevice } => !!x.dev);
+function members(room: Room, devices: MediaDevice[]) {
+  const resolved = room.media_devices
+    .map((m) => ({ m, dev: devices.find((d) => d.id === m.media_device_id) }))
+    .filter((x): x is { m: RoomMediaMember; dev: MediaDevice } => !!x.dev);
   // M22: a receiver that is another member's volume-target is driven through the
   // bound source, so don't count it as its own room volume target (avoids a
   // double-apply / inflated speaker count).
@@ -31,7 +31,7 @@ function members(room: Room, devices: AudioDevice[]) {
 }
 
 /** Live room volume + mute — fans out to all the room's audio members. */
-export function RoomVolumeStrip({ room, devices }: { room: Room; devices: AudioDevice[] }) {
+export function RoomVolumeStrip({ room, devices }: { room: Room; devices: MediaDevice[] }) {
   const mem = members(room, devices);
   // Room level seeds from the first member's level minus its offset (a "room
   // level" proxy, since room volume isn't persisted); muted if all are muted.
@@ -53,11 +53,11 @@ export function RoomVolumeStrip({ room, devices }: { room: Room; devices: AudioD
   function commitVolume(v: number) {
     setVolume(v);
     clearTimeout(volumeTimer.current);
-    volumeTimer.current = setTimeout(() => setRoomAudioState(room.id, { volume: v }), 250);
+    volumeTimer.current = setTimeout(() => setRoomMediaState(room.id, { volume: v }), 250);
   }
   function toggleMute() {
     setMute(!mute);
-    setRoomAudioState(room.id, { mute: !mute });
+    setRoomMediaState(room.id, { mute: !mute });
   }
 
   return (
@@ -88,13 +88,13 @@ export function RoomVolumeStrip({ room, devices }: { room: Room; devices: AudioD
 /** Choose which audio devices belong to the room and calibrate each one's
  * per-room volume offset. Saves the explicit membership; synced audio-group
  * links contribute on top. */
-export function RoomAudioEditor({
+export function RoomMediaEditor({
   room,
   devices,
   onChanged,
 }: {
   room: Room;
-  devices: AudioDevice[];
+  devices: MediaDevice[];
   onChanged: () => void;
 }) {
   // device id → offset (member) or undefined (not a member).
@@ -103,17 +103,17 @@ export function RoomAudioEditor({
 
   useEffect(() => {
     const d = new Map<string, number | undefined>();
-    for (const m of room.audio_devices) d.set(m.audio_device_id, m.volume_offset);
+    for (const m of room.media_devices) d.set(m.media_device_id, m.volume_offset);
     setDraft(d);
-  }, [room.id, room.audio_devices]);
+  }, [room.id, room.media_devices]);
 
   async function save() {
     setSaving(true);
     try {
       const list = [...draft.entries()]
         .filter(([, off]) => off !== undefined)
-        .map(([id, off]) => ({ audio_device_id: id, volume_offset: off as number }));
-      await setRoomAudioDevices(room.id, list);
+        .map(([id, off]) => ({ media_device_id: id, volume_offset: off as number }));
+      await setRoomMediaDevices(room.id, list);
       onChanged();
     } finally {
       setSaving(false);

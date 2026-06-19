@@ -14,14 +14,14 @@
 //! (`power: false` pauses, `power: true` plays) — the same convention voice
 //! assistants use.
 
-use crate::models::audio::AudioEvent;
-use crate::models::audio::{
-    AudioCapabilities, AudioCommand, AudioDevice, AudioDeviceKind, AudioFavorite, AudioState,
+use crate::models::media::MediaEvent;
+use crate::models::media::{
+    MediaCapabilities, MediaCommand, MediaDevice, MediaDeviceKind, MediaFavorite, MediaState,
     NowPlaying, PlayState, TransportCmd,
 };
 use crate::providers::discovery::{DeviceDiscovery, SsdpDiscovery};
 use crate::providers::{
-    AudioConnectionMode, AudioProvider, AudioProviderFactory, CredentialField, FieldKind,
+    CredentialField, FieldKind, MediaConnectionMode, MediaProvider, MediaProviderFactory,
 };
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -175,7 +175,7 @@ fn parse_topology(state_xml: &str) -> (Vec<Player>, Vec<Group>) {
 /// Parse the (unescaped) DIDL-Lite from a `Browse FV:2` Result into favorites.
 /// Each `<item>` carries an `id` attribute, a `<dc:title>`, and an optional
 /// `<r:description>` (the service/source label).
-fn parse_favorites(didl: &str) -> Vec<AudioFavorite> {
+fn parse_favorites(didl: &str) -> Vec<MediaFavorite> {
     let mut out = Vec::new();
     for chunk in didl.split("<item ").skip(1) {
         let open_el = chunk.split('>').next().unwrap_or("");
@@ -191,7 +191,7 @@ fn parse_favorites(didl: &str) -> Vec<AudioFavorite> {
         let subtitle = xml_tag(chunk, "r:description")
             .map(|d| xml_unescape(&d))
             .filter(|s| !s.is_empty());
-        out.push(AudioFavorite {
+        out.push(MediaFavorite {
             id,
             title,
             subtitle,
@@ -406,7 +406,7 @@ impl SonosProvider {
     /// `coordinator` — a grouped follower mirrors its coordinator, and its own
     /// `AVTransport` reports a slaved/stopped state with no track. `coordinator`
     /// is the player itself when it's standalone.
-    async fn read_state(&self, player: &Player, coordinator: &Player) -> Result<AudioState> {
+    async fn read_state(&self, player: &Player, coordinator: &Player) -> Result<MediaState> {
         let (volume, mute) = self.read_volume_mute(player, false).await?;
 
         let transport_body = self
@@ -451,7 +451,7 @@ impl SonosProvider {
             play_state,
         });
 
-        Ok(AudioState {
+        Ok(MediaState {
             power: play_state == Some(PlayState::Playing),
             volume: volume.min(100),
             mute,
@@ -511,7 +511,7 @@ impl SonosProvider {
     /// (`group_coordinator`). The reliable baseline behind the push channel and,
     /// because it touches each player, a liveness probe that keeps idle speakers
     /// from looking dead. Returns `(player uuid, state)` pairs.
-    async fn poll_states(&self) -> Result<Vec<(String, AudioState)>> {
+    async fn poll_states(&self) -> Result<Vec<(String, MediaState)>> {
         let (players, groups) = self.topology().await?;
         let by_uuid: HashMap<&str, &Player> =
             players.iter().map(|p| (p.uuid.as_str(), p)).collect();
@@ -529,7 +529,7 @@ impl SonosProvider {
                 .and_then(|c| by_uuid.get(*c))
                 .copied()
                 .unwrap_or(p);
-            let mut state = self.read_state(p, coordinator).await.unwrap_or(AudioState {
+            let mut state = self.read_state(p, coordinator).await.unwrap_or(MediaState {
                 reachable: Some(false),
                 ..Default::default()
             });
@@ -543,11 +543,11 @@ impl SonosProvider {
     /// for instant updates, with a heartbeat poll baseline so state stays honest
     /// even when no events flow (idle speakers, or a deployment where the GENA
     /// callback isn't LAN-reachable, e.g. Docker bridge). Runs until the channel
-    /// closes; the `AudioPushManager` owns reconnection.
+    /// closes; the `MediaPushManager` owns reconnection.
     async fn run_push(
         self,
-        tx: tokio::sync::mpsc::Sender<AudioEvent>,
-        initial: Vec<(String, AudioState)>,
+        tx: tokio::sync::mpsc::Sender<MediaEvent>,
+        initial: Vec<(String, MediaState)>,
     ) {
         // `cache` is the last-emitted state per player; both the poll loop and
         // the GENA callbacks merge into it and emit only real changes.
@@ -587,12 +587,12 @@ impl SonosProvider {
 }
 
 #[async_trait]
-impl AudioProvider for SonosProvider {
+impl MediaProvider for SonosProvider {
     fn name(&self) -> &str {
         "sonos"
     }
 
-    async fn discover(&self) -> Result<Vec<AudioDevice>> {
+    async fn discover(&self) -> Result<Vec<MediaDevice>> {
         // Individual players are the only stored devices. A Sonos *group* is a
         // transient, provider-native grouping — not a thing we persist. Per
         // "derive from members", grouped playback is surfaced from the member
@@ -621,17 +621,17 @@ impl AudioProvider for SonosProvider {
                 .and_then(|c| by_uuid.get(*c))
                 .copied()
                 .unwrap_or(p);
-            let mut state = self.read_state(p, coordinator).await.unwrap_or(AudioState {
+            let mut state = self.read_state(p, coordinator).await.unwrap_or(MediaState {
                 reachable: Some(false),
                 ..Default::default()
             });
             state.group_coordinator = coordinator_of.get(p.uuid.as_str()).map(|c| c.to_string());
-            devices.push(AudioDevice {
+            devices.push(MediaDevice {
                 id: Uuid::new_v4(),
                 provider_id: p.uuid.clone(),
                 name: p.name.clone(),
-                kind: AudioDeviceKind::Speaker,
-                capabilities: AudioCapabilities {
+                kind: MediaDeviceKind::Speaker,
+                capabilities: MediaCapabilities {
                     sources: false,
                     transport: true,
                     now_playing: true,
@@ -647,12 +647,12 @@ impl AudioProvider for SonosProvider {
         Ok(devices)
     }
 
-    async fn get_state(&self, device_id: &str) -> Result<AudioState> {
+    async fn get_state(&self, device_id: &str) -> Result<MediaState> {
         let (player, coordinator) = self.resolve(device_id).await?;
         self.read_state(&player, &coordinator).await
     }
 
-    async fn set_state(&self, device_id: &str, cmd: &AudioCommand) -> Result<()> {
+    async fn set_state(&self, device_id: &str, cmd: &MediaCommand) -> Result<()> {
         if cmd.source.is_some() {
             return Err(anyhow!(
                 "Sonos source selection is not supported; control playback from a Sonos app, then use transport commands"
@@ -758,7 +758,7 @@ impl AudioProvider for SonosProvider {
         Ok(())
     }
 
-    async fn list_favorites(&self, _device_id: &str) -> Result<Vec<AudioFavorite>> {
+    async fn list_favorites(&self, _device_id: &str) -> Result<Vec<MediaFavorite>> {
         Ok(parse_favorites(&self.browse_favorites().await?))
     }
 
@@ -885,11 +885,11 @@ impl AudioProvider for SonosProvider {
             .collect())
     }
 
-    async fn event_stream(&self) -> Result<tokio::sync::mpsc::Receiver<AudioEvent>> {
+    async fn event_stream(&self) -> Result<tokio::sync::mpsc::Receiver<MediaEvent>> {
         // Up-front reachability check so the manager treats an unreachable Sonos
         // as a connect failure (→ backoff) rather than a silently-dead channel.
         let initial = self.poll_states().await?;
-        let (tx, rx) = tokio::sync::mpsc::channel::<AudioEvent>(64);
+        let (tx, rx) = tokio::sync::mpsc::channel::<MediaEvent>(64);
         let provider = self.clone();
         tokio::spawn(async move { provider.run_push(tx, initial).await });
         Ok(rx)
@@ -906,7 +906,7 @@ impl AudioProvider for SonosProvider {
 
 /// Last-emitted state per player uuid, shared by the poll loop and the GENA
 /// callback handlers (which merge partial events into it).
-type SharedCache = Arc<tokio::sync::Mutex<HashMap<String, AudioState>>>;
+type SharedCache = Arc<tokio::sync::Mutex<HashMap<String, MediaState>>>;
 
 /// Renew subscriptions well before their (1800s) timeout.
 const RENEW_EVERY: Duration = Duration::from_secs(900);
@@ -914,10 +914,10 @@ const RENEW_EVERY: Duration = Duration::from_secs(900);
 /// Emit a device's full state iff it changed since the last emit (the writer and
 /// broadcast treat events as full snapshots). `Err` = channel closed.
 async fn emit(
-    tx: &tokio::sync::mpsc::Sender<AudioEvent>,
+    tx: &tokio::sync::mpsc::Sender<MediaEvent>,
     cache: &SharedCache,
     uuid: &str,
-    state: AudioState,
+    state: MediaState,
 ) -> Result<(), ()> {
     {
         let mut c = cache.lock().await;
@@ -929,7 +929,7 @@ async fn emit(
         }
         c.insert(uuid.to_string(), state.clone());
     }
-    tx.send(AudioEvent {
+    tx.send(MediaEvent {
         device_id: uuid.to_string(),
         state,
     })
@@ -940,7 +940,7 @@ async fn emit(
 /// Shared state for the callback HTTP server.
 #[derive(Clone)]
 struct PushCtx {
-    tx: tokio::sync::mpsc::Sender<AudioEvent>,
+    tx: tokio::sync::mpsc::Sender<MediaEvent>,
     cache: SharedCache,
 }
 
@@ -999,7 +999,7 @@ impl PushCtx {
                     }
                 }
                 // Recompute each known player's coordinator; emit the changed ones.
-                let updates: Vec<(String, AudioState)> = {
+                let updates: Vec<(String, MediaState)> = {
                     let mut c = self.cache.lock().await;
                     let mut out = Vec::new();
                     for (u, st) in c.iter_mut() {
@@ -1116,7 +1116,7 @@ impl SonosProvider {
     /// caller then runs poll-only).
     async fn start_gena(
         &self,
-        tx: &tokio::sync::mpsc::Sender<AudioEvent>,
+        tx: &tokio::sync::mpsc::Sender<MediaEvent>,
         cache: &SharedCache,
     ) -> Option<Gena> {
         let host = self
@@ -1239,7 +1239,7 @@ fn parse_avtransport_lastchange(event: &str) -> (Option<PlayState>, Option<NowPl
 
 pub struct SonosProviderFactory;
 
-impl AudioProviderFactory for SonosProviderFactory {
+impl MediaProviderFactory for SonosProviderFactory {
     fn provider_type(&self) -> &'static str {
         "sonos"
     }
@@ -1248,7 +1248,7 @@ impl AudioProviderFactory for SonosProviderFactory {
         "Sonos"
     }
 
-    fn build(&self, credentials_json: &str) -> Result<Box<dyn AudioProvider>> {
+    fn build(&self, credentials_json: &str) -> Result<Box<dyn MediaProvider>> {
         Ok(Box::new(SonosProvider::from_credentials(credentials_json)?))
     }
 
@@ -1273,10 +1273,10 @@ impl AudioProviderFactory for SonosProviderFactory {
         )))
     }
 
-    fn connection_mode(&self) -> AudioConnectionMode {
+    fn connection_mode(&self) -> MediaConnectionMode {
         // Push: GENA event subscriptions for instant updates, with a heartbeat
         // poll baseline (see `event_stream`).
-        AudioConnectionMode::Push
+        MediaConnectionMode::Push
     }
 }
 
@@ -1511,7 +1511,7 @@ mod tests {
         assert_eq!(names, vec!["Living Room", "Kitchen", "Den"]);
         assert_eq!(devices[0].provider_id, "RINCON_LIVING");
         assert!(
-            devices.iter().all(|d| d.kind == AudioDeviceKind::Speaker),
+            devices.iter().all(|d| d.kind == MediaDeviceKind::Speaker),
             "players are speakers"
         );
         assert!(
@@ -1539,7 +1539,7 @@ mod tests {
         let devices = p.discover().await.unwrap();
 
         assert!(
-            devices.iter().all(|d| d.kind == AudioDeviceKind::Speaker),
+            devices.iter().all(|d| d.kind == MediaDeviceKind::Speaker),
             "only individual speakers are surfaced, never a group device"
         );
         assert!(
@@ -1629,7 +1629,7 @@ mod tests {
         let p = SonosProvider::new_for_test(server.uri()).unwrap();
         p.set_state(
             "group:RINCON_LIVING",
-            &AudioCommand {
+            &MediaCommand {
                 volume: Some(40),
                 ..Default::default()
             },
@@ -1704,7 +1704,7 @@ mod tests {
         let p = SonosProvider::new_for_test(server.uri()).unwrap();
         p.set_state(
             "RINCON_LIVING",
-            &AudioCommand {
+            &MediaCommand {
                 volume: Some(20),
                 mute: Some(true),
                 ..Default::default()
@@ -1738,7 +1738,7 @@ mod tests {
         let p = SonosProvider::new_for_test(server.uri()).unwrap();
         p.set_state(
             "RINCON_LIVING",
-            &AudioCommand {
+            &MediaCommand {
                 power: Some(false),
                 ..Default::default()
             },
@@ -1770,7 +1770,7 @@ mod tests {
         let p = SonosProvider::new_for_test(server.uri()).unwrap();
         p.set_state(
             "RINCON_KITCHEN",
-            &AudioCommand {
+            &MediaCommand {
                 transport: Some(TransportCmd::Next),
                 ..Default::default()
             },
@@ -1786,7 +1786,7 @@ mod tests {
         let err = p
             .set_state(
                 "RINCON_LIVING",
-                &AudioCommand {
+                &MediaCommand {
                     source: Some("spotify".into()),
                     ..Default::default()
                 },
@@ -1979,7 +1979,7 @@ mod tests {
     // factory wires a discoverer for Sonos.
     #[test]
     fn factory_exposes_a_discoverer() {
-        use crate::providers::AudioProviderFactory as _;
+        use crate::providers::MediaProviderFactory as _;
         assert!(SonosProviderFactory.discoverer().is_some());
     }
 

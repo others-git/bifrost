@@ -1,6 +1,5 @@
 pub mod ai_endpoints;
 pub mod apikeys;
-pub mod audio;
 pub mod auth;
 pub mod dedup;
 pub mod dev;
@@ -10,6 +9,7 @@ pub mod kiosk_update;
 pub mod kiosks;
 pub mod lights;
 pub mod mcp;
+pub mod media;
 pub mod plans;
 pub mod power;
 pub mod providers;
@@ -53,7 +53,7 @@ pub(crate) struct SetRoomRequest {
     pub room_id: Option<String>,
 }
 
-/// Body for binding a source audio device to a receiver (M22). `receiver_id`
+/// Body for binding a source media device to a receiver (M22). `receiver_id`
 /// `null` clears the binding; `receiver_source` is the receiver input to select
 /// when the source becomes active (`null` = leave the input alone).
 #[derive(Deserialize)]
@@ -63,7 +63,7 @@ pub(crate) struct SetReceiverRequest {
     pub receiver_source: Option<String>,
 }
 
-/// M26 composite: merge this audio entity into `primary_id` as its companion, or
+/// M26 composite: merge this media entity into `primary_id` as its companion, or
 /// unmerge with `null`.
 #[derive(Deserialize)]
 pub(crate) struct SetCompanionRequest {
@@ -95,7 +95,7 @@ pub(crate) async fn set_device_glyph(
 
 /// Flip a device row's `enabled` flag. A disabled device is still tracked and
 /// keeps its room membership, but the control/membership queries skip it.
-/// `table` is a fixed identifier per domain (`lights` / `audio_devices` /
+/// `table` is a fixed identifier per domain (`lights` / `media_devices` /
 /// `power_devices`), so the formatted SQL is injection-free.
 pub(crate) async fn set_device_enabled(
     state: &AppState,
@@ -122,7 +122,10 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .nest("/ai-endpoints", ai_endpoints::router())
         .nest("/api-keys", apikeys::router())
-        .nest("/audio", audio::router())
+        .nest("/media", media::router())
+        // Deprecated alias: the media domain was renamed from "audio"; kept so
+        // existing clients on /api/audio/* keep working for a release.
+        .nest("/audio", media::router())
         .nest("/auth", auth::router())
         .nest("/dev", dev::router())
         .nest("/enrollment", enrollment::router())
@@ -192,11 +195,11 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         let name: String = row.get("name");
         let provider_type: String = row.get("provider_type");
 
-        // Light providers run an SSE/polling manager. On-demand audio providers
+        // Light providers run an SSE/polling manager. On-demand media providers
         // (Sonos) have none — they're read live per request, so report "ready".
         let conn_state = if let Some(lock) = connections.get_state_lock(&id) {
             lock.read().await.label().to_string()
-        } else if state.registry.is_known_audio(&provider_type) {
+        } else if state.registry.is_known_media(&provider_type) {
             "ready".to_string()
         } else {
             "not_started".to_string()

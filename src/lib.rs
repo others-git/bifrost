@@ -254,7 +254,7 @@ pub fn start_manager_for(
         Some(ConnectionMode::HaPush) => {
             // HA pushes every device domain over one WebSocket; build the concrete
             // provider directly (like the Sse arm builds HueProvider) so the push
-            // manager can fan state_changed onto the light/audio/power pipelines.
+            // manager can fan state_changed onto the light/media/power pipelines.
             match providers::ha::HaProvider::from_credentials(creds_json) {
                 Ok(provider) => {
                     tracing::info!("starting HA push manager for provider {provider_id}");
@@ -279,25 +279,25 @@ pub fn start_manager_for(
                 Err(e) => tracing::error!("failed to build provider {provider_id}: {e:#}"),
             }
         }
-        None => match state.registry.audio_connection_mode(provider_type) {
-            Some(providers::AudioConnectionMode::Push) => {
-                match state.registry.build_audio(provider_type, creds_json) {
+        None => match state.registry.media_connection_mode(provider_type) {
+            Some(providers::MediaConnectionMode::Push) => {
+                match state.registry.build_media(provider_type, creds_json) {
                     Ok(provider) => {
-                        tracing::info!("starting audio push manager for provider {provider_id}");
-                        connections.start_audio_push(
+                        tracing::info!("starting media push manager for provider {provider_id}");
+                        connections.start_media_push(
                             provider_id.to_string(),
                             provider,
                             state.db.clone(),
                         );
                     }
                     Err(e) => {
-                        tracing::error!("failed to build audio provider {provider_id}: {e:#}")
+                        tracing::error!("failed to build media provider {provider_id}: {e:#}")
                     }
                 }
             }
-            Some(providers::AudioConnectionMode::OnDemand) => {
+            Some(providers::MediaConnectionMode::OnDemand) => {
                 // State is read live per request; nothing to keep alive.
-                tracing::info!("audio provider {provider_id} ({provider_type}) reads on demand");
+                tracing::info!("media provider {provider_id} ({provider_type}) reads on demand");
             }
             None => tracing::warn!("provider {provider_id} has unknown type '{provider_type}'"),
         },

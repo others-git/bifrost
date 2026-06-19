@@ -2,29 +2,29 @@
 //!
 //! Served at `/mcp` as a Streamable HTTP endpoint (stateless, JSON responses),
 //! gated by the same Bearer API keys as `/api/v1`. Tools call the shared
-//! service functions (`api::lights` / `api::audio` / `api::rooms` /
+//! service functions (`api::lights` / `api::media` / `api::rooms` /
 //! `api::scenes`) directly — no HTTP hop — so the MCP surface can't
 //! drift from the session and public APIs. There is no stdio transport;
 //! stdio-only clients can bridge with the standard `mcp-remote` shim.
 //!
-//! LLM ergonomics: every tool that targets a light, room, scene, or audio
+//! LLM ergonomics: every tool that targets a light, room, scene, or media
 //! device accepts an id **or** a case-insensitive name/substring; on no (or
 //! ambiguous) match the error lists the valid options so the assistant can
 //! self-correct.
 
 use crate::AppState;
 use crate::api::apikeys::require_api_key;
-use crate::api::audio::{
-    FavoritesOutcome, GroupOutcome, PlayFavoriteOutcome, SetAudioOutcome, SetReceiverOutcome,
-    apply_audio_command, get_device_live, group_devices, list_all_devices, list_device_favorites,
-    play_device_favorite, set_audio_receiver, ungroup_device,
-};
 use crate::api::lights::{SetLightOutcome, apply_light_state, list_all_lights};
+use crate::api::media::{
+    FavoritesOutcome, GroupOutcome, PlayFavoriteOutcome, SetMediaOutcome, SetReceiverOutcome,
+    apply_media_command, cast_to_device, get_device_live, group_devices, list_all_devices,
+    list_device_favorites, play_device_favorite, set_media_receiver, ungroup_device,
+};
 use crate::api::power::{SetPowerOutcome, apply_power_state, list_all_power_devices};
 use crate::api::remote::{RemoteOutcome, apply_remote_command, list_remotes};
 use crate::api::rooms::{apply_room_state, effective_members, list_public_rooms};
 use crate::api::scenes::{SceneCaptureError, apply_scene_entries, capture_scene, list_all_scenes};
-use crate::models::audio::{AudioCommand, AudioFavorite, TransportCmd};
+use crate::models::media::{MediaCommand, MediaFavorite, TransportCmd};
 use crate::models::remote::{RemoteCommand, RemoteKey};
 use crate::models::{Color, LightState};
 use axum::{
@@ -102,11 +102,11 @@ impl ServerHandler for BifrostMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("bifrost", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Bifrost smart-home control. Rooms aggregate lights and audio devices; \
+                "Bifrost smart-home control. Rooms aggregate lights and media devices; \
                  scenes are saved full-state snapshots (room-scoped or whole-home) that \
                  restore each light's color/temperature/effect + power on/off. Tools accept \
                  an id or a case-insensitive name/substring for lights, rooms, scenes and \
-                 audio devices. Start with get_home_state for a full snapshot.",
+                 media devices. Start with get_home_state for a full snapshot.",
             )
     }
 }
@@ -167,8 +167,8 @@ pub struct SaveHomeSceneRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct SetAudioRequest {
-    /// Audio device id, or a case-insensitive name/substring.
+pub struct SetMediaRequest {
+    /// Media device id, or a case-insensitive name/substring.
     pub device: String,
     /// Power on/off.
     pub power: Option<bool>,
@@ -177,7 +177,7 @@ pub struct SetAudioRequest {
     /// Mute on/off.
     pub mute: Option<bool>,
     /// Switch input / app: a source name from the device's `source_list` (a
-    /// smart TV's apps like "Hulu", or a receiver's inputs). Call get_audio_state
+    /// smart TV's apps like "Hulu", or a receiver's inputs). Call get_media_state
     /// first to see the exact available names.
     pub source: Option<String>,
     /// Transport command: play, pause, stop, next, previous, or toggle.
@@ -185,17 +185,28 @@ pub struct SetAudioRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct AudioDeviceRequest {
-    /// Audio device id, or a case-insensitive name/substring.
+pub struct MediaDeviceRequest {
+    /// Media device id, or a case-insensitive name/substring.
     pub device: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct PlayFavoriteRequest {
-    /// Audio device id, or a case-insensitive name/substring.
+    /// Media device id, or a case-insensitive name/substring.
     pub device: String,
     /// Favorite id, exact title, or title substring (case-insensitive).
     pub favorite: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CastMediaRequest {
+    /// Target TV / media player id, or a case-insensitive name/substring.
+    pub device: String,
+    /// Provider-native content id — e.g. a media URL, an app id, or a channel number.
+    pub content_id: String,
+    /// Provider-native content type (HA `media_content_type`): music, url, app,
+    /// channel, playlist, … Call get_media_state first to see what the device supports.
+    pub content_type: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -208,7 +219,7 @@ pub struct GroupSpeakersRequest {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct BindReceiverRequest {
-    /// The source audio device (TV / streamer / console) to bind, id or name.
+    /// The source media device (TV / streamer / console) to bind, id or name.
     pub device: String,
     /// The receiver that owns volume for this source, id or name. Omit (null)
     /// to *unbind* the device so it controls its own volume again.
@@ -249,12 +260,12 @@ pub struct LaunchAppRequest {
 #[tool_router]
 impl BifrostMcp {
     #[tool(
-        description = "One-call snapshot of the whole home: rooms (with member light/audio ids), lights, scenes, audio devices, and power devices (switches/plugs/fans)."
+        description = "One-call snapshot of the whole home: rooms (with member light/media ids), lights, scenes, media devices, and power devices (switches/plugs/fans)."
     )]
     async fn get_home_state(&self) -> Result<CallToolResult, ErrorData> {
         // The reads are independent — run them concurrently rather than serially
         // awaiting each.
-        let (rooms, lights, scenes, audio_devices, power_devices) = tokio::join!(
+        let (rooms, lights, scenes, media_devices, power_devices) = tokio::join!(
             list_public_rooms(&self.state),
             list_all_lights(&self.state),
             list_all_scenes(&self.state),
@@ -263,13 +274,13 @@ impl BifrostMcp {
         );
         let lights = lights.map_err(|()| internal("listing lights"))?;
         let scenes = scenes.map_err(|()| internal("listing scenes"))?;
-        let audio_devices = audio_devices.map_err(|()| internal("listing audio devices"))?;
+        let media_devices = media_devices.map_err(|()| internal("listing media devices"))?;
         let power_devices = power_devices.map_err(|()| internal("listing power devices"))?;
         Ok(ok_json(serde_json::json!({
             "rooms": rooms,
             "lights": lights,
             "scenes": scenes,
-            "audio_devices": audio_devices,
+            "media_devices": media_devices,
             "power_devices": power_devices,
         })))
     }
@@ -390,14 +401,14 @@ impl BifrostMcp {
     }
 
     #[tool(
-        description = "Control an audio device: power, volume (0–100), mute, input source, and/or transport (play/pause/stop/next/previous/toggle). Only the given fields are sent."
+        description = "Control an media device: power, volume (0–100), mute, input source, and/or transport (play/pause/stop/next/previous/toggle). Only the given fields are sent."
     )]
-    async fn set_audio(
+    async fn set_media(
         &self,
-        Parameters(req): Parameters<SetAudioRequest>,
+        Parameters(req): Parameters<SetMediaRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        let devices = named_audio(&self.state).await?;
-        let id = match resolve("audio device", &req.device, &devices) {
+        let devices = named_media(&self.state).await?;
+        let id = match resolve("media device", &req.device, &devices) {
             Ok(id) => id,
             Err(e) => return Ok(e),
         };
@@ -412,58 +423,58 @@ impl BifrostMcp {
                 }
             },
         };
-        let cmd = AudioCommand {
+        let cmd = MediaCommand {
             power: req.power,
             volume: req.volume,
             mute: req.mute,
             source: req.source,
             transport,
         };
-        match apply_audio_command(&self.state, &id, &cmd).await {
-            SetAudioOutcome::Ok => Ok(ok_text("ok")),
-            SetAudioOutcome::NotFound => {
-                Ok(fail("audio device not found or its provider is disabled"))
+        match apply_media_command(&self.state, &id, &cmd).await {
+            SetMediaOutcome::Ok => Ok(ok_text("ok")),
+            SetMediaOutcome::NotFound => {
+                Ok(fail("media device not found or its provider is disabled"))
             }
-            SetAudioOutcome::BadCommand(m) => Ok(fail(m)),
-            SetAudioOutcome::ProviderError => Ok(fail("the device could not be reached")),
-            SetAudioOutcome::Db => Err(internal("sending audio command")),
+            SetMediaOutcome::BadCommand(m) => Ok(fail(m)),
+            SetMediaOutcome::ProviderError => Ok(fail("the device could not be reached")),
+            SetMediaOutcome::Db => Err(internal("sending media command")),
         }
     }
 
     #[tool(
-        description = "Live state of one audio device: power/volume/mute/source, now-playing metadata, and `source_list` (selectable inputs / a smart TV's apps) where available."
+        description = "Live state of one media device: power/volume/mute/source, now-playing metadata, and `source_list` (selectable inputs / a smart TV's apps) where available."
     )]
-    async fn get_audio_state(
+    async fn get_media_state(
         &self,
-        Parameters(req): Parameters<AudioDeviceRequest>,
+        Parameters(req): Parameters<MediaDeviceRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        let devices = named_audio(&self.state).await?;
-        let id = match resolve("audio device", &req.device, &devices) {
+        let devices = named_media(&self.state).await?;
+        let id = match resolve("media device", &req.device, &devices) {
             Ok(id) => id,
             Err(e) => return Ok(e),
         };
         match get_device_live(&self.state, &id).await {
             Ok(Some(device)) => Ok(ok_json(serde_json::json!(device))),
-            Ok(None) => Ok(fail("audio device not found")),
-            Err(()) => Err(internal("reading audio device")),
+            Ok(None) => Ok(fail("media device not found")),
+            Err(()) => Err(internal("reading media device")),
         }
     }
 
     #[tool(
-        description = "List an audio device's saved favorites (e.g. Sonos Favorites: stations, playlists)."
+        description = "List an media device's saved favorites (e.g. Sonos Favorites: stations, playlists)."
     )]
-    async fn list_audio_favorites(
+    async fn list_media_favorites(
         &self,
-        Parameters(req): Parameters<AudioDeviceRequest>,
+        Parameters(req): Parameters<MediaDeviceRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        let devices = named_audio(&self.state).await?;
-        let id = match resolve("audio device", &req.device, &devices) {
+        let devices = named_media(&self.state).await?;
+        let id = match resolve("media device", &req.device, &devices) {
             Ok(id) => id,
             Err(e) => return Ok(e),
         };
         match list_device_favorites(&self.state, &id).await {
             FavoritesOutcome::Ok(favs) => Ok(ok_json(serde_json::json!(favs))),
-            FavoritesOutcome::NotFound => Ok(fail("audio device not found")),
+            FavoritesOutcome::NotFound => Ok(fail("media device not found")),
             FavoritesOutcome::Unreachable => {
                 Ok(fail("the device could not be reached or has no favorites"))
             }
@@ -472,20 +483,20 @@ impl BifrostMcp {
     }
 
     #[tool(
-        description = "Play one of an audio device's saved favorites, matched by id, exact title, or title substring. E.g. play the 'jazz' favorite in the office."
+        description = "Play one of an media device's saved favorites, matched by id, exact title, or title substring. E.g. play the 'jazz' favorite in the office."
     )]
-    async fn play_audio_favorite(
+    async fn play_media_favorite(
         &self,
         Parameters(req): Parameters<PlayFavoriteRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        let devices = named_audio(&self.state).await?;
-        let id = match resolve("audio device", &req.device, &devices) {
+        let devices = named_media(&self.state).await?;
+        let id = match resolve("media device", &req.device, &devices) {
             Ok(id) => id,
             Err(e) => return Ok(e),
         };
         let favs = match list_device_favorites(&self.state, &id).await {
             FavoritesOutcome::Ok(favs) => favs,
-            FavoritesOutcome::NotFound => return Ok(fail("audio device not found")),
+            FavoritesOutcome::NotFound => return Ok(fail("media device not found")),
             FavoritesOutcome::Unreachable => {
                 return Ok(fail("the device could not be reached or has no favorites"));
             }
@@ -497,10 +508,33 @@ impl BifrostMcp {
         };
         match play_device_favorite(&self.state, &id, &favorite).await {
             PlayFavoriteOutcome::Ok => Ok(ok_text("ok")),
-            PlayFavoriteOutcome::NotFound => Ok(fail("audio device not found")),
+            PlayFavoriteOutcome::NotFound => Ok(fail("media device not found")),
             PlayFavoriteOutcome::BadFavorite(m) => Ok(fail(m)),
             PlayFavoriteOutcome::Unreachable => Ok(fail("the device could not be reached")),
             PlayFavoriteOutcome::Db => Err(internal("playing favorite")),
+        }
+    }
+
+    #[tool(
+        description = "Cast media to a TV / media player by provider-native content id + type (HA media_player.play_media). For launching a streaming app prefer the remote's launch_app; for switching to a known input/app prefer set_media's `source`."
+    )]
+    async fn cast_media(
+        &self,
+        Parameters(req): Parameters<CastMediaRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let devices = named_media(&self.state).await?;
+        let id = match resolve("media device", &req.device, &devices) {
+            Ok(id) => id,
+            Err(e) => return Ok(e),
+        };
+        match cast_to_device(&self.state, &id, &req.content_id, &req.content_type).await {
+            SetMediaOutcome::Ok => Ok(ok_text("ok")),
+            SetMediaOutcome::NotFound => {
+                Ok(fail("media device not found or its provider is disabled"))
+            }
+            SetMediaOutcome::BadCommand(m) => Ok(fail(m)),
+            SetMediaOutcome::ProviderError => Ok(fail("the device could not be reached")),
+            SetMediaOutcome::Db => Err(internal("casting media")),
         }
     }
 
@@ -511,8 +545,8 @@ impl BifrostMcp {
         &self,
         Parameters(req): Parameters<GroupSpeakersRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        let devices = named_audio(&self.state).await?;
-        let coordinator_id = match resolve("audio device", &req.coordinator, &devices) {
+        let devices = named_media(&self.state).await?;
+        let coordinator_id = match resolve("media device", &req.coordinator, &devices) {
             Ok(id) => id,
             Err(e) => return Ok(e),
         };
@@ -521,7 +555,7 @@ impl BifrostMcp {
         }
         let mut results = Vec::new();
         for speaker in &req.speakers {
-            let member_id = match resolve("audio device", speaker, &devices) {
+            let member_id = match resolve("media device", speaker, &devices) {
                 Ok(id) => id,
                 Err(e) => return Ok(e),
             };
@@ -543,16 +577,16 @@ impl BifrostMcp {
     #[tool(description = "Remove a speaker from its synced playback group.")]
     async fn ungroup_speaker(
         &self,
-        Parameters(req): Parameters<AudioDeviceRequest>,
+        Parameters(req): Parameters<MediaDeviceRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        let devices = named_audio(&self.state).await?;
-        let id = match resolve("audio device", &req.device, &devices) {
+        let devices = named_media(&self.state).await?;
+        let id = match resolve("media device", &req.device, &devices) {
             Ok(id) => id,
             Err(e) => return Ok(e),
         };
         match ungroup_device(&self.state, &id).await {
             GroupOutcome::Ok => Ok(ok_text("ok")),
-            GroupOutcome::NotFound => Ok(fail("audio device not found")),
+            GroupOutcome::NotFound => Ok(fail("media device not found")),
             GroupOutcome::BadRequest(m) => Ok(fail(m)),
             GroupOutcome::Unreachable => Ok(fail("the device could not be reached")),
             GroupOutcome::Db => Err(internal("ungrouping speaker")),
@@ -644,14 +678,14 @@ impl BifrostMcp {
     }
 
     #[tool(
-        description = "Bind a source audio device (a TV / streamer / console) to an AV receiver that owns its volume: afterwards volume/mute for the source route to the receiver, and powering the source on switches the receiver to the given input. Omit `receiver` to unbind. E.g. 'route the living room TV's sound through the AV receiver on the Game input.'"
+        description = "Bind a source media device (a TV / streamer / console) to an AV receiver that owns its volume: afterwards volume/mute for the source route to the receiver, and powering the source on switches the receiver to the given input. Omit `receiver` to unbind. E.g. 'route the living room TV's sound through the AV receiver on the Game input.'"
     )]
     async fn bind_receiver(
         &self,
         Parameters(req): Parameters<BindReceiverRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        let devices = named_audio(&self.state).await?;
-        let id = match resolve("audio device", &req.device, &devices) {
+        let devices = named_media(&self.state).await?;
+        let id = match resolve("media device", &req.device, &devices) {
             Ok(id) => id,
             Err(e) => return Ok(e),
         };
@@ -662,9 +696,9 @@ impl BifrostMcp {
                 Err(e) => return Ok(e),
             },
         };
-        match set_audio_receiver(&self.state, &id, receiver_id, req.receiver_source).await {
+        match set_media_receiver(&self.state, &id, receiver_id, req.receiver_source).await {
             SetReceiverOutcome::Ok => Ok(ok_text("ok")),
-            SetReceiverOutcome::NotFound => Ok(fail("audio device not found")),
+            SetReceiverOutcome::NotFound => Ok(fail("media device not found")),
             SetReceiverOutcome::BadRequest(m) => Ok(fail(m)),
             SetReceiverOutcome::Db => Err(internal("binding receiver")),
         }
@@ -747,7 +781,7 @@ fn join_names(items: &[Named]) -> String {
 }
 
 /// Favorite resolution mirrors `resolve`: id, exact title, then substring.
-fn resolve_favorite(query: &str, favs: &[AudioFavorite]) -> Result<String, CallToolResult> {
+fn resolve_favorite(query: &str, favs: &[MediaFavorite]) -> Result<String, CallToolResult> {
     let items: Vec<Named> = favs
         .iter()
         .map(|f| Named {
@@ -771,11 +805,11 @@ async fn named_rooms(state: &AppState) -> Result<Vec<Named>, ErrorData> {
     .await
 }
 
-async fn named_audio(state: &AppState) -> Result<Vec<Named>, ErrorData> {
+async fn named_media(state: &AppState) -> Result<Vec<Named>, ErrorData> {
     named_query(
         state,
-        "SELECT id, name FROM audio_devices ORDER BY name",
-        "audio devices",
+        "SELECT id, name FROM media_devices ORDER BY name",
+        "media devices",
     )
     .await
 }
@@ -972,12 +1006,12 @@ mod tests {
     #[test]
     fn resolve_favorite_by_title_substring() {
         let favs = vec![
-            AudioFavorite {
+            MediaFavorite {
                 id: "FV:2/1".into(),
                 title: "Smooth Jazz Radio".into(),
                 subtitle: None,
             },
-            AudioFavorite {
+            MediaFavorite {
                 id: "FV:2/2".into(),
                 title: "Morning News".into(),
                 subtitle: None,

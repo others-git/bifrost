@@ -19,7 +19,7 @@ use sqlx::Row;
 use std::collections::HashMap;
 
 /// The three device-domain tables that carry `hw_id` / `shadowed_by`.
-const TABLES: [&str; 3] = ["lights", "audio_devices", "power_devices"];
+const TABLES: [&str; 3] = ["lights", "media_devices", "power_devices"];
 
 /// Recompute automatic shadows across every device domain. Cheap and
 /// idempotent — run it after any discovery or provider change.

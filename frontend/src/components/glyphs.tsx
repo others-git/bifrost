@@ -5,7 +5,7 @@
 // device may also pin an override glyph by name (e.g. a switch that drives an
 // LED strip can show the led_strip glyph); see `Glyph` and `GLYPH_OPTIONS`.
 
-import type { AudioDevice, PowerKind } from "../api";
+import type { MediaDevice, PowerKind } from "../api";
 
 const base = {
   fill: "none",
@@ -356,7 +356,7 @@ export function powerKindGlyph(kind: PowerKind): string {
 /// TV glyph, a receiver the amp glyph, everything else a speaker. Driven by the
 /// device's `kind` (HA's `device_class`, Onkyo/Sonos topology), no per-device
 /// special-casing.
-export function audioKindGlyph(kind: AudioDevice["kind"]): string {
+export function mediaKindGlyph(kind: MediaDevice["kind"]): string {
   switch (kind) {
     case "tv":
       return "tv";
@@ -371,7 +371,7 @@ export function LightGlyph({ size = 22 }: { size?: number }) {
   return <Glyph name="bulb" size={size} />;
 }
 
-export function AudioGlyph({ size = 22 }: { size?: number }) {
+export function MediaGlyph({ size = 22 }: { size?: number }) {
   return <Glyph name="speaker" size={size} />;
 }
 

@@ -47,7 +47,7 @@ export const color = {
 /** Per-domain accent — keeps lights/audio/power visually distinct (tight core). */
 export const domain = {
   light: color.cyan,
-  audio: color.violet,
+  media: color.violet,
   power: color.gold,
 } as const;
 
@@ -131,7 +131,7 @@ export const T = {
   dim: color.dim,
   faint: color.faint,
   accent: color.cyan,
-  audio: color.violet,
+  media: color.violet,
   power: color.gold,
   panel: panelGradient,
   panelBorder: color.hairline,

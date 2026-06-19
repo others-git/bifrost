@@ -987,7 +987,7 @@ function ProviderCard({
           <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.25rem" }}>
             <span style={{ color: "var(--bf-dim)", fontSize: "0.8rem" }}>
               {provider.type_name}
-              {provider.domain === "audio" ? " · Audio" : ""}
+              {provider.domain === "media" ? " · Audio" : ""}
               {provider.domain === "integration" ? " · Integration" : ""}
             </span>
             {status && <StatusBadge state={status.state} />}
@@ -1301,13 +1301,13 @@ function AddProviderForm({
           value={selectedType}
           onChange={setSelectedType}
           style={{ width: "100%" }}
-          options={(["light", "audio", "integration"] as const).flatMap((kind) =>
+          options={(["light", "media", "integration"] as const).flatMap((kind) =>
             types
               .filter((t) => t.kind === kind)
               .map((t) => ({
                 value: t.provider_type,
                 label: t.display_name,
-                group: kind === "light" ? "Lights" : kind === "audio" ? "Audio" : "Integrations",
+                group: kind === "light" ? "Lights" : kind === "media" ? "Audio" : "Integrations",
               })),
           )}
         />

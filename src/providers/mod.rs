@@ -12,7 +12,7 @@ pub mod wled;
 
 use discovery::DeviceDiscovery;
 
-use crate::models::audio::{AudioCommand, AudioDevice, AudioEvent, AudioFavorite, AudioState};
+use crate::models::media::{MediaCommand, MediaDevice, MediaEvent, MediaFavorite, MediaState};
 use crate::models::power::{PowerDevice, PowerState};
 use crate::models::remote::{RemoteDevice, RemoteKey, RemoteState};
 use crate::models::{Light, LightState};
@@ -40,7 +40,7 @@ pub fn mac_hw_id(raw: &str) -> Option<String> {
 
 /// A process-wide cache of `reqwest::Client`s keyed by an opaque config signature.
 ///
-/// HTTP providers are **rebuilt per request** (`build_provider`/`build_audio_provider`
+/// HTTP providers are **rebuilt per request** (`build_provider`/`build_media_provider`
 /// decrypt creds and construct a fresh provider on every control). A new `Client`
 /// each time opens a new TCP+TLS connection per command — no keep-alive, so every
 /// control pays a handshake. A `Client` owns its connection pool and is cheap to
@@ -130,24 +130,24 @@ pub trait LightProvider: Send + Sync {
     }
 }
 
-// ── Audio provider trait ────────────────────────────────────────────────────
+// ── Media provider trait ────────────────────────────────────────────────────
 
-/// Runtime interface for audio integrations (receivers, networked speakers).
+/// Runtime interface for media integrations (receivers, networked speakers).
 /// The shape mirrors `LightProvider`: discovery returns full device snapshots,
 /// reads return full state, writes are sparse commands.
 #[async_trait]
-pub trait AudioProvider: Send + Sync {
+pub trait MediaProvider: Send + Sync {
     fn name(&self) -> &str;
-    async fn discover(&self) -> Result<Vec<AudioDevice>>;
-    async fn get_state(&self, device_id: &str) -> Result<AudioState>;
-    async fn set_state(&self, device_id: &str, cmd: &AudioCommand) -> Result<()>;
+    async fn discover(&self) -> Result<Vec<MediaDevice>>;
+    async fn get_state(&self, device_id: &str) -> Result<MediaState>;
+    async fn set_state(&self, device_id: &str, cmd: &MediaCommand) -> Result<()>;
 
     /// Open a persistent push channel: the device reports state changes as
     /// they happen (volume knob, track changes, …). The returned receiver
-    /// closing means the connection dropped — the `AudioPushManager` owns
+    /// closing means the connection dropped — the `MediaPushManager` owns
     /// reconnection, never the provider. Only implemented by providers whose
-    /// factory advertises `AudioConnectionMode::Push`.
-    async fn event_stream(&self) -> Result<tokio::sync::mpsc::Receiver<AudioEvent>> {
+    /// factory advertises `MediaConnectionMode::Push`.
+    async fn event_stream(&self) -> Result<tokio::sync::mpsc::Receiver<MediaEvent>> {
         Err(anyhow!("{} does not support push events", self.name()))
     }
 
@@ -155,7 +155,7 @@ pub trait AudioProvider: Send + Sync {
     /// device (e.g. Sonos Favorites). Default: none — providers without a
     /// favorites concept (or where the protocol can't enumerate them, like
     /// Onkyo eISCP) simply report an empty list.
-    async fn list_favorites(&self, _device_id: &str) -> Result<Vec<AudioFavorite>> {
+    async fn list_favorites(&self, _device_id: &str) -> Result<Vec<MediaFavorite>> {
         Ok(Vec::new())
     }
 
@@ -194,9 +194,9 @@ pub trait AudioProvider: Send + Sync {
     }
 
     /// The provider's own rooms/zones (e.g. each Sonos player's room), mirrored
-    /// locally and wrapped by Bifrost Rooms — the audio analog of
+    /// locally and wrapped by Bifrost Rooms — the media analog of
     /// `LightProvider::discover_groups`. `ProviderGroup::member_device_ids` hold
-    /// audio device ids (matching `AudioDevice::provider_id`). Default: none.
+    /// media device ids (matching `MediaDevice::provider_id`). Default: none.
     async fn discover_groups(&self) -> Result<Vec<ProviderGroup>> {
         Ok(vec![])
     }
@@ -204,7 +204,7 @@ pub trait AudioProvider: Send + Sync {
 
 /// Runtime interface for **power devices** — strictly on/off endpoints
 /// (switches, plugs, fans, boolean helpers). The shape mirrors `LightProvider`
-/// and `AudioProvider`, but the write is just a bool: this domain exists
+/// and `MediaProvider`, but the write is just a bool: this domain exists
 /// precisely so simple toggles don't carry a light's or a receiver's unused
 /// state. Implemented today by the Home Assistant adapter, which surfaces HA's
 /// `switch.*` / `fan.*` / `input_boolean.*` entities through it.
@@ -224,19 +224,19 @@ pub trait PowerProvider: Send + Sync {
     }
 }
 
-/// How the runtime keeps an audio provider's state fresh.
+/// How the runtime keeps an media provider's state fresh.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum AudioConnectionMode {
+pub enum MediaConnectionMode {
     /// Persistent connection with device-initiated updates (Onkyo eISCP).
     Push,
     /// No background channel; state is read on demand.
     OnDemand,
 }
 
-/// Factory for one audio provider type. Registered in the same
+/// Factory for one media provider type. Registered in the same
 /// `ProviderRegistry` as light factories — the registry stays the single
-/// place provider types live; light and audio just occupy separate maps.
-pub trait AudioProviderFactory: Send + Sync {
+/// place provider types live; light and media just occupy separate maps.
+pub trait MediaProviderFactory: Send + Sync {
     /// The stable string key stored in `providers.provider_type` (e.g. `"onkyo"`).
     fn provider_type(&self) -> &'static str;
 
@@ -245,13 +245,13 @@ pub trait AudioProviderFactory: Send + Sync {
         self.provider_type()
     }
 
-    fn build(&self, credentials_json: &str) -> Result<Box<dyn AudioProvider>>;
+    fn build(&self, credentials_json: &str) -> Result<Box<dyn MediaProvider>>;
 
     fn credentials_schema(&self) -> &'static [CredentialField];
 
     /// Defaults to on-demand reads; push providers override.
-    fn connection_mode(&self) -> AudioConnectionMode {
-        AudioConnectionMode::OnDemand
+    fn connection_mode(&self) -> MediaConnectionMode {
+        MediaConnectionMode::OnDemand
     }
 
     /// Network auto-detect for this provider type. Default: none — providers
@@ -262,7 +262,7 @@ pub trait AudioProviderFactory: Send + Sync {
 }
 
 /// Factory for one power provider type. A `provider_type` may register a power
-/// factory **in addition to** a light/audio one — that's how a single
+/// factory **in addition to** a light/media one — that's how a single
 /// integration (Home Assistant) serves several device domains from one provider
 /// row. Power devices are polled like light pollers; there is no push variant
 /// yet, so there is no separate connection-mode enum.
@@ -282,7 +282,7 @@ pub trait PowerProviderFactory: Send + Sync {
 
 /// A virtual remote control for a TV / streamer. Like `PowerProvider`, a
 /// `provider_type` may register this **in addition to** its other domains (HA
-/// serves lights + power + audio + remote from one row). Providers map Bifrost's
+/// serves lights + power + media + remote from one row). Providers map Bifrost's
 /// canonical [`RemoteKey`] to their native command vocabulary.
 #[async_trait]
 pub trait RemoteProvider: Send + Sync {
@@ -343,7 +343,7 @@ pub enum ConnectionMode {
     /// Periodic state polling via `PollingManager`.
     Poll { interval_secs: u64 },
     /// Multi-domain push via Home Assistant's `subscribe_events` WebSocket,
-    /// managed by `HaPushManager` — keeps lights, audio, and power live from one
+    /// managed by `HaPushManager` — keeps lights, media, and power live from one
     /// connection (replacing the per-domain poll). Built directly from the
     /// concrete `HaProvider` (like `Sse` is from `HueProvider`).
     HaPush,
@@ -397,11 +397,11 @@ pub trait ProviderFactory: Send + Sync {
 // ── Registry ────────────────────────────────────────────────────────────────
 
 /// Central registry. Add new providers once here; the rest of the app needs no changes.
-/// Light and audio factories live in separate maps under the same roof — a
+/// Light and media factories live in separate maps under the same roof — a
 /// provider type string belongs to exactly one of the two domains.
 pub struct ProviderRegistry {
     factories: HashMap<&'static str, Box<dyn ProviderFactory>>,
-    audio_factories: HashMap<&'static str, Box<dyn AudioProviderFactory>>,
+    media_factories: HashMap<&'static str, Box<dyn MediaProviderFactory>>,
     power_factories: HashMap<&'static str, Box<dyn PowerProviderFactory>>,
     remote_factories: HashMap<&'static str, Box<dyn RemoteProviderFactory>>,
 }
@@ -410,7 +410,7 @@ impl ProviderRegistry {
     pub fn new() -> Self {
         Self {
             factories: HashMap::new(),
-            audio_factories: HashMap::new(),
+            media_factories: HashMap::new(),
             power_factories: HashMap::new(),
             remote_factories: HashMap::new(),
         }
@@ -421,8 +421,8 @@ impl ProviderRegistry {
             .insert(factory.provider_type(), Box::new(factory));
     }
 
-    pub fn register_audio<F: AudioProviderFactory + 'static>(&mut self, factory: F) {
-        self.audio_factories
+    pub fn register_media<F: MediaProviderFactory + 'static>(&mut self, factory: F) {
+        self.media_factories
             .insert(factory.provider_type(), Box::new(factory));
     }
 
@@ -475,30 +475,30 @@ impl ProviderRegistry {
         self.remote_factories.contains_key(provider_type)
     }
 
-    /// Build a live audio provider from a type string + decrypted credentials JSON.
-    pub fn build_audio(
+    /// Build a live media provider from a type string + decrypted credentials JSON.
+    pub fn build_media(
         &self,
         provider_type: &str,
         credentials_json: &str,
-    ) -> Result<Box<dyn AudioProvider>> {
-        self.audio_factories
+    ) -> Result<Box<dyn MediaProvider>> {
+        self.media_factories
             .get(provider_type)
-            .ok_or_else(|| anyhow!("unknown audio provider type: {provider_type}"))?
+            .ok_or_else(|| anyhow!("unknown media provider type: {provider_type}"))?
             .build(credentials_json)
     }
 
-    /// Returns true if `provider_type` is a registered audio provider.
-    pub fn is_known_audio(&self, provider_type: &str) -> bool {
-        self.audio_factories.contains_key(provider_type)
+    /// Returns true if `provider_type` is a registered media provider.
+    pub fn is_known_media(&self, provider_type: &str) -> bool {
+        self.media_factories.contains_key(provider_type)
     }
 
-    /// Human-facing name for a provider type (light, audio, or power), if
+    /// Human-facing name for a provider type (light, media, or power), if
     /// registered. A multi-domain type (HA) resolves via its light factory.
     pub fn display_name(&self, provider_type: &str) -> Option<&'static str> {
         if let Some(f) = self.factories.get(provider_type) {
             return Some(f.display_name());
         }
-        if let Some(f) = self.audio_factories.get(provider_type) {
+        if let Some(f) = self.media_factories.get(provider_type) {
             return Some(f.display_name());
         }
         self.power_factories
@@ -507,19 +507,19 @@ impl ProviderRegistry {
     }
 
     /// The network auto-detect object for a provider type, if it has one.
-    /// Looks in both the light and audio factory maps.
+    /// Looks in both the light and media factory maps.
     pub fn discoverer(&self, provider_type: &str) -> Option<Box<dyn DeviceDiscovery>> {
         if let Some(f) = self.factories.get(provider_type) {
             return f.discoverer();
         }
-        self.audio_factories
+        self.media_factories
             .get(provider_type)
             .and_then(|f| f.discoverer())
     }
 
-    /// How the runtime should keep this audio provider type's state fresh.
-    pub fn audio_connection_mode(&self, provider_type: &str) -> Option<AudioConnectionMode> {
-        self.audio_factories
+    /// How the runtime should keep this media provider type's state fresh.
+    pub fn media_connection_mode(&self, provider_type: &str) -> Option<MediaConnectionMode> {
+        self.media_factories
             .get(provider_type)
             .map(|f| f.connection_mode())
     }
@@ -541,14 +541,14 @@ impl ProviderRegistry {
         self.factories.contains_key(provider_type)
     }
 
-    /// The credential schema for a single provider type (light or audio), if
+    /// The credential schema for a single provider type (light or media), if
     /// registered. Lets the API tell which fields are secret when prefilling
     /// the edit form.
     pub fn schema(&self, provider_type: &str) -> Option<&'static [CredentialField]> {
         if let Some(f) = self.factories.get(provider_type) {
             return Some(f.credentials_schema());
         }
-        if let Some(f) = self.audio_factories.get(provider_type) {
+        if let Some(f) = self.media_factories.get(provider_type) {
             return Some(f.credentials_schema());
         }
         self.power_factories
@@ -565,14 +565,14 @@ impl ProviderRegistry {
 
     /// The UI category for a configured provider type — the same grouping shown
     /// in the add-provider menu. A light/integration factory's `domain()` wins
-    /// (so a multi-domain type like HA reads as `Integration`, not `Audio`);
-    /// otherwise an audio-only type is `Audio`.
+    /// (so a multi-domain type like HA reads as `Integration`, not `Media`);
+    /// otherwise an media-only type is `Media`.
     pub fn ui_domain(&self, provider_type: &str) -> Option<ProviderDomain> {
         if let Some(f) = self.factories.get(provider_type) {
             return Some(f.domain());
         }
-        if self.audio_factories.contains_key(provider_type) {
-            return Some(ProviderDomain::Audio);
+        if self.media_factories.contains_key(provider_type) {
+            return Some(ProviderDomain::Media);
         }
         self.power_factories
             .get(provider_type)
@@ -582,7 +582,7 @@ impl ProviderRegistry {
     /// All registered provider types for the "Add provider" UI, **one entry per
     /// type**, sorted by type name. A multi-domain integration (HA) registers in
     /// several maps but must appear once — its light/integration factory is
-    /// authoritative for the menu, so an audio factory sharing that type key is
+    /// authoritative for the menu, so an media factory sharing that type key is
     /// skipped here (it still serves discovery/control behind the scenes).
     pub fn all_types(&self) -> Vec<ProviderTypeInfo> {
         let mut types: Vec<_> = self
@@ -596,13 +596,13 @@ impl ProviderRegistry {
                 schema: f.credentials_schema().to_vec(),
             })
             .chain(
-                self.audio_factories
+                self.media_factories
                     .values()
                     .filter(|f| !self.factories.contains_key(f.provider_type()))
                     .map(|f| ProviderTypeInfo {
                         provider_type: f.provider_type(),
                         display_name: f.display_name(),
-                        kind: ProviderDomain::Audio,
+                        kind: ProviderDomain::Media,
                         supports_discovery: f.discoverer().is_some(),
                         schema: f.credentials_schema().to_vec(),
                     }),
@@ -614,7 +614,7 @@ impl ProviderRegistry {
 }
 
 /// How a provider type is grouped in the "Add provider" UI. Most providers map
-/// to a single device domain (`Light`/`Audio`); an `Integration` is a
+/// to a single device domain (`Light`/`Media`); an `Integration` is a
 /// higher-level platform adapter (e.g. Home Assistant) that can surface many
 /// device kinds at once, so it gets its own category rather than being filed
 /// under one domain.
@@ -622,7 +622,7 @@ impl ProviderRegistry {
 #[serde(rename_all = "lowercase")]
 pub enum ProviderDomain {
     Light,
-    Audio,
+    Media,
     Integration,
 }
 
@@ -657,15 +657,15 @@ pub fn default_registry() -> ProviderRegistry {
     r.register(govee::GoveeProviderFactory);
     r.register(lifx::LifxProviderFactory);
     // Home Assistant serves multiple device domains from one provider row:
-    // lights, power (switch/fan/plug), and audio (media_player — TVs, speakers).
+    // lights, power (switch/fan/plug), and media (media_player — TVs, speakers).
     // It appears once in the add-provider menu as an "Integration" (its light
-    // factory's domain); the power/audio factories serve discovery + control.
+    // factory's domain); the power/media factories serve discovery + control.
     r.register(ha::HaLightFactory);
     r.register_power(ha::HaPowerFactory);
-    r.register_audio(ha::HaAudioFactory);
+    r.register_media(ha::HaMediaFactory);
     r.register_remote(ha::HaRemoteFactory);
-    r.register_audio(onkyo::OnkyoProviderFactory);
-    r.register_audio(sonos::SonosProviderFactory);
+    r.register_media(onkyo::OnkyoProviderFactory);
+    r.register_media(sonos::SonosProviderFactory);
     r
 }
 
@@ -802,13 +802,13 @@ pub(crate) mod tests {
     fn default_registry_serves_ha_across_all_device_domains() {
         let reg = default_registry();
         let creds = r#"{"base_url":"http://ha.local:8123","token":"t"}"#;
-        // One "ha" provider row serves lights, power, and audio (media_player).
+        // One "ha" provider row serves lights, power, and media (media_player).
         assert!(reg.is_known("ha"), "light domain");
         assert!(reg.is_known_power("ha"), "power domain");
-        assert!(reg.is_known_audio("ha"), "audio (media_player) domain");
+        assert!(reg.is_known_media("ha"), "media (media_player) domain");
         assert!(reg.build("ha", creds).is_ok());
         assert!(reg.build_power("ha", creds).is_ok());
-        assert!(reg.build_audio("ha", creds).is_ok());
+        assert!(reg.build_media("ha", creds).is_ok());
     }
 
     #[test]
@@ -820,7 +820,7 @@ pub(crate) mod tests {
             .filter(|t| t.provider_type == "ha")
             .collect();
         assert_eq!(ha.len(), 1, "HA must not be listed once per domain");
-        // …and it's categorised as an Integration, not Audio.
+        // …and it's categorised as an Integration, not Media.
         assert_eq!(ha[0].kind, ProviderDomain::Integration);
     }
 
@@ -855,30 +855,30 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn default_registry_contains_onkyo_and_sonos_as_audio() {
+    fn default_registry_contains_onkyo_and_sonos_as_media() {
         let reg = default_registry();
-        assert!(reg.is_known_audio("onkyo"));
-        assert!(reg.is_known_audio("sonos"));
-        // Audio types are not light types and vice versa.
+        assert!(reg.is_known_media("onkyo"));
+        assert!(reg.is_known_media("sonos"));
+        // Media types are not light types and vice versa.
         assert!(!reg.is_known("onkyo"));
-        assert!(!reg.is_known_audio("hue"));
+        assert!(!reg.is_known_media("hue"));
         // Builds without touching the network.
-        assert!(reg.build_audio("onkyo", r#"{"host":"10.0.0.9"}"#).is_ok());
-        assert!(reg.build_audio("sonos", r#"{"host":"10.0.0.9"}"#).is_ok());
+        assert!(reg.build_media("onkyo", r#"{"host":"10.0.0.9"}"#).is_ok());
+        assert!(reg.build_media("sonos", r#"{"host":"10.0.0.9"}"#).is_ok());
     }
 
     #[test]
-    fn build_audio_unknown_type_returns_error() {
+    fn build_media_unknown_type_returns_error() {
         let reg = ProviderRegistry::new();
         let err = reg
-            .build_audio("nonexistent", "{}")
+            .build_media("nonexistent", "{}")
             .err()
             .expect("expected an error");
         assert!(err.to_string().contains("nonexistent"));
     }
 
     #[test]
-    fn all_types_tags_light_and_audio_domains() {
+    fn all_types_tags_light_and_media_domains() {
         let reg = default_registry();
         let types = reg.all_types();
         let kind_of = |t: &str| {
@@ -889,8 +889,8 @@ pub(crate) mod tests {
                 .unwrap()
         };
         assert_eq!(kind_of("hue"), ProviderDomain::Light);
-        assert_eq!(kind_of("onkyo"), ProviderDomain::Audio);
-        assert_eq!(kind_of("sonos"), ProviderDomain::Audio);
+        assert_eq!(kind_of("onkyo"), ProviderDomain::Media);
+        assert_eq!(kind_of("sonos"), ProviderDomain::Media);
         // HA is a platform adapter, surfaced under its own "Integration" group
         // rather than filed under Lights despite being a light-domain provider.
         assert_eq!(kind_of("ha"), ProviderDomain::Integration);

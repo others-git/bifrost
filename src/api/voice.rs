@@ -4,7 +4,7 @@
 //! into device actions, deterministically, **with no model**: a built-in grammar
 //! parses the text into [`Command`]s, resolves entities by name (rooms first,
 //! then devices), and dispatches through the **same service fns** the session
-//! API and MCP use — never a forked control path. Audio (STT) and an LLM
+//! API and MCP use — never a forked control path. Media (STT) and an LLM
 //! fallback for the long tail are later phases (P2/P3); this layer is pure
 //! text→action so it's fully unit-testable without either.
 //!
@@ -17,13 +17,13 @@
 use crate::AppState;
 use crate::api::ai_endpoints::AiEndpoint;
 use crate::api::apikeys::require_api_key;
-use crate::api::audio::{SetAudioOutcome, apply_audio_command};
 use crate::api::auth::require_session;
 use crate::api::lights::{SetLightOutcome, apply_light_state};
+use crate::api::media::{SetMediaOutcome, apply_media_command};
 use crate::api::power::{SetPowerOutcome, apply_power_state};
 use crate::api::rooms::{apply_room_state, effective_members};
 use crate::api::scenes::apply_scene_entries;
-use crate::models::audio::{AudioCommand, AudioState, TransportCmd};
+use crate::models::media::{MediaCommand, MediaState, TransportCmd};
 use crate::models::{Color, LightState};
 use axum::{
     Json, Router,
@@ -1058,8 +1058,8 @@ async fn dispatch(
     }
 }
 
-fn audio_set(f: impl FnOnce(&mut AudioCommand)) -> AudioCommand {
-    let mut c = AudioCommand::default();
+fn audio_set(f: impl FnOnce(&mut MediaCommand)) -> MediaCommand {
+    let mut c = MediaCommand::default();
     f(&mut c);
     c
 }
@@ -1114,10 +1114,10 @@ async fn power_cmd(
             SetPowerOutcome::ProviderError => Err(format!("Couldn't reach {name}.")),
             SetPowerOutcome::Db => Err("Something went wrong.".into()),
         },
-        Resolved::Audio { id, name } => {
+        Resolved::Media { id, name } => {
             let cmd = audio_set(move |c| c.power = Some(on));
             map_audio(
-                apply_audio_command(state, &id, &cmd).await,
+                apply_media_command(state, &id, &cmd).await,
                 format!("{verb} {name}."),
             )
         }
@@ -1170,7 +1170,7 @@ async fn apply_light_target(
             }
             Ok(format!("Set everything to {describe}."))
         }
-        Resolved::Power { name, .. } | Resolved::Audio { name, .. } => {
+        Resolved::Power { name, .. } | Resolved::Media { name, .. } => {
             Err(format!("{name} can't do that."))
         }
     }
@@ -1240,14 +1240,14 @@ async fn cached_light_state(state: &AppState, id: &str) -> Option<LightState> {
 
 /// An audio device's last-known volume (cached), defaulting to 0.
 async fn cached_volume(state: &AppState, id: &str) -> u8 {
-    sqlx::query("SELECT last_state FROM audio_devices WHERE id = ?")
+    sqlx::query("SELECT last_state FROM media_devices WHERE id = ?")
         .bind(id)
         .fetch_optional(&state.db)
         .await
         .ok()
         .flatten()
         .and_then(|r| r.get::<Option<String>, _>("last_state"))
-        .and_then(|s| serde_json::from_str::<AudioState>(&s).ok())
+        .and_then(|s| serde_json::from_str::<MediaState>(&s).ok())
         .map(|s| s.volume)
         .unwrap_or(0)
 }
@@ -1265,12 +1265,12 @@ async fn relative_cmd(
     let volume = match domain {
         RelDomain::Volume => true,
         RelDomain::Brightness => false,
-        RelDomain::Auto => matches!(resolved, Resolved::Audio { .. }),
+        RelDomain::Auto => matches!(resolved, Resolved::Media { .. }),
     };
     if volume {
         // Volume: an audio device, or a room with a single audio member.
         let (id, name) = match &resolved {
-            Resolved::Audio { id, name } => (id.clone(), name.clone()),
+            Resolved::Media { id, name } => (id.clone(), name.clone()),
             Resolved::Room { id, name } => lone_room_audio(state, id)
                 .await
                 .ok_or_else(|| format!("Which speaker in {name}?"))?,
@@ -1280,7 +1280,7 @@ async fn relative_cmd(
         let cmd = audio_set(move |c| c.volume = Some(v));
         let dir = if up { "up" } else { "down" };
         return map_audio(
-            apply_audio_command(state, &id, &cmd).await,
+            apply_media_command(state, &id, &cmd).await,
             format!("Turned {name} {dir}."),
         );
     }
@@ -1309,7 +1309,7 @@ async fn relative_cmd(
             }
             Ok(format!("{verb} everything."))
         }
-        Resolved::Power { name, .. } | Resolved::Audio { name, .. } => {
+        Resolved::Power { name, .. } | Resolved::Media { name, .. } => {
             Err(format!("{name} can't be dimmed."))
         }
     }
@@ -1361,7 +1361,7 @@ async fn apply_scene(
 async fn audio_cmd(
     state: &AppState,
     target: Target,
-    cmd: AudioCommand,
+    cmd: MediaCommand,
     verb: &str,
     noun: &str,
 ) -> Result<String, String> {
@@ -1377,7 +1377,7 @@ async fn audio_cmd(
         format!("{name} {noun}.")
     };
     map_audio(
-        apply_audio_command(state, &id, &cmd).await,
+        apply_media_command(state, &id, &cmd).await,
         format!("{verb} {tail}"),
     )
 }
@@ -1391,13 +1391,13 @@ fn map_light(outcome: SetLightOutcome, ok_msg: String) -> Result<String, String>
     }
 }
 
-fn map_audio(outcome: SetAudioOutcome, ok_msg: String) -> Result<String, String> {
+fn map_audio(outcome: SetMediaOutcome, ok_msg: String) -> Result<String, String> {
     match outcome {
-        SetAudioOutcome::Ok => Ok(ok_msg),
-        SetAudioOutcome::NotFound => Err("That speaker isn't available.".into()),
-        SetAudioOutcome::BadCommand(m) => Err(m),
-        SetAudioOutcome::ProviderError => Err("Couldn't reach that speaker.".into()),
-        SetAudioOutcome::Db => Err("Something went wrong.".into()),
+        SetMediaOutcome::Ok => Ok(ok_msg),
+        SetMediaOutcome::NotFound => Err("That speaker isn't available.".into()),
+        SetMediaOutcome::BadCommand(m) => Err(m),
+        SetMediaOutcome::ProviderError => Err("Couldn't reach that speaker.".into()),
+        SetMediaOutcome::Db => Err("Something went wrong.".into()),
     }
 }
 
@@ -1412,7 +1412,7 @@ enum Resolved {
     Room { id: String, name: String },
     Light { id: String, name: String },
     Power { id: String, name: String },
-    Audio { id: String, name: String },
+    Media { id: String, name: String },
     Everywhere,
 }
 
@@ -1441,7 +1441,7 @@ async fn resolve_target(
         return Ok(Resolved::Power { id, name });
     }
     if let Resolved2::One(id, name) = resolve_ent(&name, &audio(state).await) {
-        return Ok(Resolved::Audio { id, name });
+        return Ok(Resolved::Media { id, name });
     }
     Err(format!("I couldn't find \"{name}\"."))
 }
@@ -1470,9 +1470,9 @@ async fn resolve_audio_target(
 /// The single audio device in a room, if it has exactly one (id, name).
 async fn lone_room_audio(state: &AppState, room_id: &str) -> Option<(String, String)> {
     let rows = sqlx::query(
-        "SELECT a.id, a.name FROM audio_devices a
+        "SELECT a.id, a.name FROM media_devices a
          WHERE a.shadowed_by IS NULL AND a.companion_of IS NULL AND a.enabled = 1 AND a.id IN (
-             SELECT audio_device_id FROM room_audio_devices WHERE room_id = ?1
+             SELECT media_device_id FROM room_media_devices WHERE room_id = ?1
          )",
     )
     .bind(room_id)
@@ -1553,7 +1553,7 @@ async fn power(state: &AppState) -> Vec<Ent> {
 async fn audio(state: &AppState) -> Vec<Ent> {
     ents(
         state,
-        "SELECT id, name FROM audio_devices WHERE enabled = 1 AND shadowed_by IS NULL AND companion_of IS NULL ORDER BY name",
+        "SELECT id, name FROM media_devices WHERE enabled = 1 AND shadowed_by IS NULL AND companion_of IS NULL ORDER BY name",
     )
     .await
 }

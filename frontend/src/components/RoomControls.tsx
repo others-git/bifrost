@@ -7,7 +7,7 @@
 import { useState } from "react";
 import {
   setRoomControls,
-  type AudioDevice,
+  type MediaDevice,
   type ControlKind,
   type ControlTarget,
   type Light,
@@ -43,20 +43,20 @@ function targetsForKind(
   kind: ControlKind,
   room: Room,
   lights: Light[],
-  audioDevices: AudioDevice[],
+  mediaDevices: MediaDevice[],
   powerDevices: PowerDevice[],
 ): { domain: ControlTarget["domain"]; id: string; name: string }[] {
   const out: { domain: ControlTarget["domain"]; id: string; name: string }[] = [];
   const memberLights = lights.filter((l) => room.light_ids.includes(l.id));
-  const memberAudio = audioDevices.filter((d) =>
-    room.audio_devices.some((m) => m.audio_device_id === d.id),
+  const memberAudio = mediaDevices.filter((d) =>
+    room.media_devices.some((m) => m.media_device_id === d.id),
   );
   const memberPower = powerDevices.filter((d) => room.power_device_ids.includes(d.id));
   if (kind === "power" || kind === "brightness") {
     for (const l of memberLights) out.push({ domain: "light", id: l.id, name: l.name });
   }
   if (kind === "power" || kind === "volume") {
-    for (const d of memberAudio) out.push({ domain: "audio", id: d.id, name: d.name });
+    for (const d of memberAudio) out.push({ domain: "media", id: d.id, name: d.name });
   }
   if (kind === "power") {
     for (const d of memberPower) out.push({ domain: "power", id: d.id, name: d.name });
@@ -76,7 +76,7 @@ function summary(c: RoomControl, scenes: Scene[]): string {
 export function RoomControlsPanel({
   room,
   lights,
-  audioDevices,
+  mediaDevices,
   powerDevices,
   scenes,
   onSaved,
@@ -84,7 +84,7 @@ export function RoomControlsPanel({
 }: {
   room: Room;
   lights: Light[];
-  audioDevices: AudioDevice[];
+  mediaDevices: MediaDevice[];
   powerDevices: PowerDevice[];
   scenes: Scene[];
   onSaved: () => void;
@@ -141,7 +141,7 @@ export function RoomControlsPanel({
             key={i}
             room={room}
             lights={lights}
-            audioDevices={audioDevices}
+            mediaDevices={mediaDevices}
             powerDevices={powerDevices}
             scenes={scenes}
             initial={c}
@@ -182,7 +182,7 @@ export function RoomControlsPanel({
         <ControlEditor
           room={room}
           lights={lights}
-          audioDevices={audioDevices}
+          mediaDevices={mediaDevices}
           powerDevices={powerDevices}
           scenes={scenes}
           onDone={(ctrl) => commit(ctrl, -1)}
@@ -211,7 +211,7 @@ export function RoomControlsPanel({
 function ControlEditor({
   room,
   lights,
-  audioDevices,
+  mediaDevices,
   powerDevices,
   scenes,
   initial,
@@ -220,7 +220,7 @@ function ControlEditor({
 }: {
   room: Room;
   lights: Light[];
-  audioDevices: AudioDevice[];
+  mediaDevices: MediaDevice[];
   powerDevices: PowerDevice[];
   scenes: Scene[];
   initial?: RoomControl;
@@ -243,7 +243,7 @@ function ControlEditor({
     setTargets(new Set()); // available targets change with kind
   }
 
-  const available = targetsForKind(kind, room, lights, audioDevices, powerDevices);
+  const available = targetsForKind(kind, room, lights, mediaDevices, powerDevices);
   // A scene quick-control applies one of this room's saved Room Scenes.
   const roomScenes = scenes.filter((s) => s.room_id === room.id);
 

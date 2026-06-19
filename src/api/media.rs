@@ -1,4 +1,4 @@
-//! Audio device API: list devices, read live state, send commands.
+//! Media device API: list devices, read live state, send commands.
 //!
 //! Mirrors the lights API split: service functions own the behaviour and are
 //! shared by the session-authenticated routes here and the Bearer-key routes
@@ -8,7 +8,7 @@
 
 use crate::AppState;
 use crate::api::auth::Session;
-use crate::models::audio::{AudioCapabilities, AudioCommand, AudioFavorite, AudioState};
+use crate::models::media::{MediaCapabilities, MediaCommand, MediaFavorite, MediaState};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -44,7 +44,7 @@ async fn set_receiver_handler(
     Path(id): Path<String>,
     Json(req): Json<crate::api::SetReceiverRequest>,
 ) -> impl IntoResponse {
-    set_receiver_status(set_audio_receiver(&state, &id, req.receiver_id, req.receiver_source).await)
+    set_receiver_status(set_media_receiver(&state, &id, req.receiver_id, req.receiver_source).await)
 }
 
 async fn set_companion_handler(
@@ -53,7 +53,7 @@ async fn set_companion_handler(
     Path(id): Path<String>,
     Json(req): Json<crate::api::SetCompanionRequest>,
 ) -> impl IntoResponse {
-    set_companion_status(set_audio_companion(&state, &id, req.primary_id).await)
+    set_companion_status(set_media_companion(&state, &id, req.primary_id).await)
 }
 
 async fn set_enabled_handler(
@@ -62,7 +62,7 @@ async fn set_enabled_handler(
     Path(id): Path<String>,
     Json(req): Json<crate::api::SetEnabledRequest>,
 ) -> impl IntoResponse {
-    crate::api::set_device_enabled(&state, "audio_devices", &id, req.enabled)
+    crate::api::set_device_enabled(&state, "media_devices", &id, req.enabled)
         .await
         .into_response()
 }
@@ -73,7 +73,7 @@ async fn set_glyph_handler(
     Path(id): Path<String>,
     Json(req): Json<crate::api::SetGlyphRequest>,
 ) -> impl IntoResponse {
-    crate::api::set_device_glyph(&state, "audio_devices", &id, req.glyph)
+    crate::api::set_device_glyph(&state, "media_devices", &id, req.glyph)
         .await
         .into_response()
 }
@@ -84,7 +84,7 @@ async fn set_shadow_handler(
     Path(id): Path<String>,
     Json(req): Json<crate::api::SetShadowRequest>,
 ) -> impl IntoResponse {
-    crate::api::dedup::set_device_shadow(&state, "audio_devices", &id, req.shadowed_by)
+    crate::api::dedup::set_device_shadow(&state, "media_devices", &id, req.shadowed_by)
         .await
         .into_response()
 }
@@ -97,9 +97,9 @@ async fn set_room_handler(
 ) -> impl IntoResponse {
     crate::api::rooms::set_device_room(
         &state,
-        "audio_devices",
-        "room_audio_devices",
-        "audio_device_id",
+        "media_devices",
+        "room_media_devices",
+        "media_device_id",
         &id,
         req.room_id,
     )
@@ -124,15 +124,15 @@ pub(crate) struct PlayFavoriteRequest {
 // ── Wire shape ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct AudioDeviceRow {
+pub(crate) struct MediaDeviceRow {
     pub id: String,
     pub provider_id: String,
-    /// Provider-native id (e.g. `main`) — matches `audio_state` push events.
+    /// Provider-native id (e.g. `main`) — matches `media_state` push events.
     pub device_id: String,
     pub name: String,
     pub kind: String,
-    pub capabilities: AudioCapabilities,
-    pub state: AudioState,
+    pub capabilities: MediaCapabilities,
+    pub state: MediaState,
     pub last_seen: Option<String>,
     /// Disabled devices keep their room membership but receive no commands and
     /// are hidden from room control.
@@ -153,21 +153,21 @@ pub(crate) struct AudioDeviceRow {
     /// it has no direct assignment — so the Devices page shows the effective room
     /// rather than "No room".
     pub inherited_room_id: Option<String>,
-    /// M22 receiver binding: the audio device id whose volume/mute this source
+    /// M22 receiver binding: the media device id whose volume/mute this source
     /// routes to (the receiver is the volume authority). `None` = unbound.
     pub receiver_id: Option<String>,
     /// The receiver input to select when this source becomes active; `None` =
     /// leave the receiver's input alone.
     pub receiver_source: Option<String>,
-    /// M26 composite: the PRIMARY audio device id this entity merges into, if it
+    /// M26 composite: the PRIMARY media device id this entity merges into, if it
     /// is a companion (a complementary view of the same physical device). `None`
     /// = standalone. A companion is hidden from control; its state/controls merge
     /// into the primary (unlike `shadowed_by`, which discards them).
     pub companion_of: Option<String>,
 }
 
-fn row_to_device(r: sqlx::sqlite::SqliteRow) -> AudioDeviceRow {
-    AudioDeviceRow {
+fn row_to_device(r: sqlx::sqlite::SqliteRow) -> MediaDeviceRow {
+    MediaDeviceRow {
         id: r.get("id"),
         provider_id: r.get("provider_id"),
         device_id: r.get("device_id"),
@@ -197,7 +197,7 @@ fn row_to_device(r: sqlx::sqlite::SqliteRow) -> AudioDeviceRow {
 /// binding** where the primary lacks them, and union the offered capabilities.
 /// The receiver volume overlay (run afterwards) then shows the receiver's volume
 /// on the merged binding. Nothing is hidden — the union lives on the primary.
-fn merge_companion_into(primary: &mut AudioDeviceRow, companion: &AudioDeviceRow) {
+fn merge_companion_into(primary: &mut MediaDeviceRow, companion: &MediaDeviceRow) {
     if primary.state.now_playing.is_none() {
         primary
             .state
@@ -226,11 +226,11 @@ fn merge_companion_into(primary: &mut AudioDeviceRow, companion: &AudioDeviceRow
 }
 
 /// The companion rows (M26) merged into `primary_id`, if any.
-async fn load_companions(state: &AppState, primary_id: &str) -> Vec<AudioDeviceRow> {
+async fn load_companions(state: &AppState, primary_id: &str) -> Vec<MediaDeviceRow> {
     sqlx::query(
         "SELECT id, provider_id, device_id, name, kind, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto, receiver_id, receiver_source, companion_of,
-                (SELECT room_id FROM room_audio_devices WHERE audio_device_id = audio_devices.id LIMIT 1) AS room_id
-         FROM audio_devices WHERE companion_of = ?",
+                (SELECT room_id FROM room_media_devices WHERE media_device_id = media_devices.id LIMIT 1) AS room_id
+         FROM media_devices WHERE companion_of = ?",
     )
     .bind(primary_id)
     .fetch_all(&state.db)
@@ -244,27 +244,27 @@ async fn load_companions(state: &AppState, primary_id: &str) -> Vec<AudioDeviceR
 
 // ── Services (shared with /api/v1) ───────────────────────────────────────────
 
-pub(crate) fn build_audio_provider(
+pub(crate) fn build_media_provider(
     state: &AppState,
     provider_type: &str,
     credentials_enc: &str,
-) -> anyhow::Result<Box<dyn crate::providers::AudioProvider>> {
+) -> anyhow::Result<Box<dyn crate::providers::MediaProvider>> {
     let creds_json = state.decrypt_credentials(credentials_enc)?;
-    state.registry.build_audio(provider_type, &creds_json)
+    state.registry.build_media(provider_type, &creds_json)
 }
 
-pub(crate) async fn list_all_devices(state: &AppState) -> Result<Vec<AudioDeviceRow>, ()> {
-    let mut devices: Vec<AudioDeviceRow> = sqlx::query(
+pub(crate) async fn list_all_devices(state: &AppState) -> Result<Vec<MediaDeviceRow>, ()> {
+    let mut devices: Vec<MediaDeviceRow> = sqlx::query(
         "SELECT id, provider_id, device_id, name, kind, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto, receiver_id, receiver_source, companion_of,
-                (SELECT room_id FROM room_audio_devices WHERE audio_device_id = audio_devices.id LIMIT 1) AS room_id,
+                (SELECT room_id FROM room_media_devices WHERE media_device_id = media_devices.id LIMIT 1) AS room_id,
                 (SELECT rl.room_id FROM room_links rl
-                   JOIN provider_group_audio_devices pga ON pga.provider_group_id = rl.provider_group_id
-                   WHERE pga.audio_device_id = audio_devices.id LIMIT 1) AS inherited_room_id
-         FROM audio_devices ORDER BY name",
+                   JOIN provider_group_media_devices pga ON pga.provider_group_id = rl.provider_group_id
+                   WHERE pga.media_device_id = media_devices.id LIMIT 1) AS inherited_room_id
+         FROM media_devices ORDER BY name",
     )
     .fetch_all(&state.db)
     .await
-    .map_err(|e| tracing::error!("db error listing audio devices: {e}"))?
+    .map_err(|e| tracing::error!("db error listing media devices: {e}"))?
     .into_iter()
     .map(row_to_device)
     .collect();
@@ -273,7 +273,7 @@ pub(crate) async fn list_all_devices(state: &AppState) -> Result<Vec<AudioDevice
     // the receiver overlay (so a companion's receiver binding shows the receiver's
     // volume on the merged card). Companions stay in the list (marked
     // `companion_of`); control surfaces hide them, the inventory collapses them.
-    let companions: Vec<AudioDeviceRow> = devices
+    let companions: Vec<MediaDeviceRow> = devices
         .iter()
         .filter(|d| d.companion_of.is_some())
         .cloned()
@@ -310,23 +310,23 @@ pub(crate) async fn list_all_devices(state: &AppState) -> Result<Vec<AudioDevice
 pub(crate) async fn get_device_live(
     state: &AppState,
     id: &str,
-) -> Result<Option<AudioDeviceRow>, ()> {
+) -> Result<Option<MediaDeviceRow>, ()> {
     let row = sqlx::query(
         "SELECT a.id, a.provider_id, a.device_id, a.name, a.kind, a.capabilities,
                 a.last_state, a.last_seen, a.enabled, a.glyph, a.hw_id, a.shadowed_by, a.shadow_auto,
                 a.receiver_id, a.receiver_source, a.companion_of,
-                (SELECT room_id FROM room_audio_devices WHERE audio_device_id = a.id LIMIT 1) AS room_id,
+                (SELECT room_id FROM room_media_devices WHERE media_device_id = a.id LIMIT 1) AS room_id,
                 (SELECT rl.room_id FROM room_links rl
-                   JOIN provider_group_audio_devices pga ON pga.provider_group_id = rl.provider_group_id
-                   WHERE pga.audio_device_id = a.id LIMIT 1) AS inherited_room_id,
+                   JOIN provider_group_media_devices pga ON pga.provider_group_id = rl.provider_group_id
+                   WHERE pga.media_device_id = a.id LIMIT 1) AS inherited_room_id,
                 p.provider_type, p.credentials
-         FROM audio_devices a JOIN providers p ON a.provider_id = p.id
+         FROM media_devices a JOIN providers p ON a.provider_id = p.id
          WHERE a.id = ? AND p.enabled = 1",
     )
     .bind(id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| tracing::error!("db error fetching audio device: {e}"))?;
+    .map_err(|e| tracing::error!("db error fetching media device: {e}"))?;
 
     let Some(row) = row else { return Ok(None) };
     let device_id: String = row.get("device_id");
@@ -334,12 +334,12 @@ pub(crate) async fn get_device_live(
     let credentials: String = row.get("credentials");
     let mut device = row_to_device(row);
 
-    match build_audio_provider(state, &provider_type, &credentials) {
+    match build_media_provider(state, &provider_type, &credentials) {
         Ok(provider) => match provider.get_state(&device_id).await {
             Ok(fresh) => {
                 let state_json = serde_json::to_string(&fresh).unwrap_or_default();
                 let _ = sqlx::query(
-                    "UPDATE audio_devices SET last_state = ?, last_seen = datetime('now') WHERE id = ?",
+                    "UPDATE media_devices SET last_state = ?, last_seen = datetime('now') WHERE id = ?",
                 )
                 .bind(&state_json)
                 .bind(&device.id)
@@ -348,12 +348,12 @@ pub(crate) async fn get_device_live(
                 device.state = fresh;
             }
             Err(e) => {
-                tracing::debug!("audio device {id} unreachable: {e:#}");
+                tracing::debug!("media device {id} unreachable: {e:#}");
                 device.state.reachable = Some(false);
             }
         },
         Err(e) => {
-            tracing::error!("failed to build audio provider: {e:#}");
+            tracing::error!("failed to build media provider: {e:#}");
             device.state.reachable = Some(false);
         }
     }
@@ -373,14 +373,14 @@ pub(crate) async fn get_device_live(
     // good cached volume with 0. The push manager keeps last_state current.
     if let Some(rid) = &device.receiver_id
         && let Ok(Some(r)) = sqlx::query(
-            "SELECT last_state FROM audio_devices WHERE id = ? AND enabled = 1 AND shadowed_by IS NULL",
+            "SELECT last_state FROM media_devices WHERE id = ? AND enabled = 1 AND shadowed_by IS NULL",
         )
         .bind(rid)
         .fetch_optional(&state.db)
         .await
         && let Some(rstate) = r
             .get::<Option<String>, _>("last_state")
-            .and_then(|s| serde_json::from_str::<AudioState>(&s).ok())
+            .and_then(|s| serde_json::from_str::<MediaState>(&s).ok())
     {
         device.state.volume = rstate.volume;
         device.state.mute = rstate.mute;
@@ -388,7 +388,7 @@ pub(crate) async fn get_device_live(
     Ok(Some(device))
 }
 
-pub(crate) enum SetAudioOutcome {
+pub(crate) enum SetMediaOutcome {
     Ok,
     NotFound,
     BadCommand(String),
@@ -403,11 +403,11 @@ pub(crate) enum SetReceiverOutcome {
     Db,
 }
 
-/// Bind (or, with `receiver_id = None`, unbind) a source audio device to a
+/// Bind (or, with `receiver_id = None`, unbind) a source media device to a
 /// receiver. Stored on the source — many sources may share one receiver. Rejects
 /// a missing source/receiver and self-binding; chaining (binding to a device
 /// that is itself bound) is rejected so volume can't route in a loop.
-pub(crate) async fn set_audio_receiver(
+pub(crate) async fn set_media_receiver(
     state: &AppState,
     id: &str,
     receiver_id: Option<String>,
@@ -417,7 +417,7 @@ pub(crate) async fn set_audio_receiver(
         if rid == id {
             return SetReceiverOutcome::BadRequest("a device cannot be its own receiver".into());
         }
-        let receiver = sqlx::query("SELECT receiver_id FROM audio_devices WHERE id = ?")
+        let receiver = sqlx::query("SELECT receiver_id FROM media_devices WHERE id = ?")
             .bind(rid)
             .fetch_optional(&state.db)
             .await;
@@ -439,7 +439,7 @@ pub(crate) async fn set_audio_receiver(
     }
     // Clearing the binding clears the input too; setting it stores both.
     let stored_source = receiver_id.as_ref().and(receiver_source);
-    match sqlx::query("UPDATE audio_devices SET receiver_id = ?, receiver_source = ? WHERE id = ?")
+    match sqlx::query("UPDATE media_devices SET receiver_id = ?, receiver_source = ? WHERE id = ?")
         .bind(&receiver_id)
         .bind(&stored_source)
         .bind(id)
@@ -471,12 +471,12 @@ pub(crate) enum SetCompanionOutcome {
     Db,
 }
 
-/// M26: merge an audio entity into a **primary** as its companion (the link is
+/// M26: merge an media entity into a **primary** as its companion (the link is
 /// stored on the companion as `companion_of`), or unmerge with `primary_id =
 /// None`. Unlike a shadow, the companion's capabilities are routed/overlaid onto
 /// the primary, not discarded. Rejects self-merge, an unknown/companion/shadowed
 /// primary, and merging a device that is itself a primary (no chains).
-pub(crate) async fn set_audio_companion(
+pub(crate) async fn set_media_companion(
     state: &AppState,
     id: &str,
     primary_id: Option<String>,
@@ -485,7 +485,7 @@ pub(crate) async fn set_audio_companion(
         if pid == id {
             return SetCompanionOutcome::BadRequest("a device cannot be its own companion".into());
         }
-        match sqlx::query("SELECT companion_of, shadowed_by FROM audio_devices WHERE id = ?")
+        match sqlx::query("SELECT companion_of, shadowed_by FROM media_devices WHERE id = ?")
             .bind(pid)
             .fetch_optional(&state.db)
             .await
@@ -511,7 +511,7 @@ pub(crate) async fn set_audio_companion(
         }
         // The companion must not itself be a primary of other devices (no chains).
         match sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM audio_devices WHERE companion_of = ?",
+            "SELECT COUNT(*) FROM media_devices WHERE companion_of = ?",
         )
         .bind(id)
         .fetch_one(&state.db)
@@ -529,7 +529,7 @@ pub(crate) async fn set_audio_companion(
             }
         }
     }
-    match sqlx::query("UPDATE audio_devices SET companion_of = ? WHERE id = ?")
+    match sqlx::query("UPDATE media_devices SET companion_of = ? WHERE id = ?")
         .bind(&primary_id)
         .bind(id)
         .execute(&state.db)
@@ -553,7 +553,7 @@ pub(crate) fn set_companion_status(outcome: SetCompanionOutcome) -> axum::respon
     }
 }
 
-/// Route a command for an audio device, honouring an M22 receiver binding: a
+/// Route a command for an media device, honouring an M22 receiver binding: a
 /// bound source sends `volume`/`mute` to its receiver (and switches the receiver
 /// input on power-on) while keeping `power`/`source`/`transport` on itself.
 /// Unbound devices apply the command directly. Shared by session, `/v1`, and MCP
@@ -561,14 +561,14 @@ pub(crate) fn set_companion_status(outcome: SetCompanionOutcome) -> axum::respon
 /// One backing entity of a composite device (M26), for command routing.
 struct Backing {
     id: String,
-    capabilities: AudioCapabilities,
+    capabilities: MediaCapabilities,
     /// This backing routes its volume/mute to a receiver (M22 binding).
     receiver_bound: bool,
     /// This backing is the one actively reporting playback.
     has_now_playing: bool,
 }
 
-/// Route an `AudioCommand` across a composite's backings (`backings[0]` is the
+/// Route an `MediaCommand` across a composite's backings (`backings[0]` is the
 /// primary), per the M26 rules:
 /// - **volume / mute → a receiver-bound backing** (so it reaches the receiver),
 ///   else the primary;
@@ -580,7 +580,7 @@ struct Backing {
 /// Returns `(backing_id, sub-command)` for each non-empty target. Each part is
 /// then applied via [`apply_with_receiver`], which does that backing's own
 /// receiver split — so a receiver-bound backing's volume reaches its receiver.
-fn route_across_backings(cmd: &AudioCommand, backings: &[Backing]) -> Vec<(String, AudioCommand)> {
+fn route_across_backings(cmd: &MediaCommand, backings: &[Backing]) -> Vec<(String, MediaCommand)> {
     let primary_id = backings[0].id.clone();
     let pick = |pred: fn(&Backing) -> bool| -> String {
         backings
@@ -588,7 +588,7 @@ fn route_across_backings(cmd: &AudioCommand, backings: &[Backing]) -> Vec<(Strin
             .find(|b| pred(b))
             .map_or_else(|| primary_id.clone(), |b| b.id.clone())
     };
-    let mut parts: std::collections::BTreeMap<String, AudioCommand> =
+    let mut parts: std::collections::BTreeMap<String, MediaCommand> =
         std::collections::BTreeMap::new();
     if cmd.volume.is_some() || cmd.mute.is_some() {
         let e = parts.entry(pick(|b| b.receiver_bound)).or_default();
@@ -621,7 +621,7 @@ fn route_across_backings(cmd: &AudioCommand, backings: &[Backing]) -> Vec<(Strin
 async fn load_composite_backings(state: &AppState, id: &str) -> Vec<Backing> {
     let rows = sqlx::query(
         "SELECT id, capabilities, receiver_id, last_state, (id = ?) AS is_primary
-         FROM audio_devices
+         FROM media_devices
          WHERE id = ? OR companion_of = ?
          ORDER BY is_primary DESC, name",
     )
@@ -634,7 +634,7 @@ async fn load_composite_backings(state: &AppState, id: &str) -> Vec<Backing> {
     .unwrap_or_default();
     rows.into_iter()
         .map(|r| {
-            let state: Option<AudioState> = r
+            let state: Option<MediaState> = r
                 .get::<Option<String>, _>("last_state")
                 .and_then(|s| serde_json::from_str(&s).ok());
             Backing {
@@ -651,42 +651,42 @@ async fn load_composite_backings(state: &AppState, id: &str) -> Vec<Backing> {
 /// Apply a command to a device. If `id` is a composite **primary** (has
 /// companions merged in), route each field to the backing that owns it (M26);
 /// otherwise drive the single device directly (with its own receiver split).
-pub(crate) async fn apply_audio_command(
+pub(crate) async fn apply_media_command(
     state: &AppState,
     id: &str,
-    cmd: &AudioCommand,
-) -> SetAudioOutcome {
+    cmd: &MediaCommand,
+) -> SetMediaOutcome {
     let backings = load_composite_backings(state, id).await;
     if backings.len() <= 1 {
         return apply_with_receiver(state, id, cmd).await;
     }
     for (backing_id, sub) in route_across_backings(cmd, &backings) {
         match apply_with_receiver(state, &backing_id, &sub).await {
-            SetAudioOutcome::Ok => {}
+            SetMediaOutcome::Ok => {}
             other => return other,
         }
     }
-    SetAudioOutcome::Ok
+    SetMediaOutcome::Ok
 }
 
 /// Drive one device, routing its volume/mute to a bound receiver (M22) if any.
-async fn apply_with_receiver(state: &AppState, id: &str, cmd: &AudioCommand) -> SetAudioOutcome {
+async fn apply_with_receiver(state: &AppState, id: &str, cmd: &MediaCommand) -> SetMediaOutcome {
     match load_receiver_binding(state, id).await {
-        Err(()) => SetAudioOutcome::Db,
+        Err(()) => SetMediaOutcome::Db,
         Ok(None) => apply_to_device(state, id, cmd).await,
         Ok(Some((receiver_id, receiver_source))) => {
             let (source_cmd, receiver_cmd) = cmd.split_for_receiver(receiver_source.as_deref());
             // Source first (power/input), so the receiver wakes to an active source.
             if !source_cmd.is_empty() {
                 match apply_to_device(state, id, &source_cmd).await {
-                    SetAudioOutcome::Ok => {}
+                    SetMediaOutcome::Ok => {}
                     other => return other,
                 }
             }
             if !receiver_cmd.is_empty() {
                 return apply_to_device(state, &receiver_id, &receiver_cmd).await;
             }
-            SetAudioOutcome::Ok
+            SetMediaOutcome::Ok
         }
     }
 }
@@ -700,11 +700,11 @@ async fn load_receiver_binding(
 ) -> Result<Option<(String, Option<String>)>, ()> {
     let row = sqlx::query(
         "SELECT a.receiver_id, a.receiver_source
-         FROM audio_devices a JOIN providers p ON a.provider_id = p.id
+         FROM media_devices a JOIN providers p ON a.provider_id = p.id
          WHERE a.id = ? AND p.enabled = 1 AND a.enabled = 1 AND a.shadowed_by IS NULL
            AND a.receiver_id IS NOT NULL
            AND EXISTS (
-               SELECT 1 FROM audio_devices r JOIN providers rp ON r.provider_id = rp.id
+               SELECT 1 FROM media_devices r JOIN providers rp ON r.provider_id = rp.id
                WHERE r.id = a.receiver_id AND r.enabled = 1 AND r.shadowed_by IS NULL AND rp.enabled = 1
            )",
     )
@@ -715,11 +715,11 @@ async fn load_receiver_binding(
     Ok(row.map(|r| (r.get("receiver_id"), r.get("receiver_source"))))
 }
 
-async fn apply_to_device(state: &AppState, id: &str, cmd: &AudioCommand) -> SetAudioOutcome {
+async fn apply_to_device(state: &AppState, id: &str, cmd: &MediaCommand) -> SetMediaOutcome {
     // A disabled device receives no commands (control lookups skip it).
     let row = sqlx::query(
         "SELECT a.device_id, p.provider_type, p.credentials
-         FROM audio_devices a JOIN providers p ON a.provider_id = p.id
+         FROM media_devices a JOIN providers p ON a.provider_id = p.id
          WHERE a.id = ? AND p.enabled = 1 AND a.enabled = 1 AND a.shadowed_by IS NULL",
     )
     .bind(id)
@@ -728,10 +728,10 @@ async fn apply_to_device(state: &AppState, id: &str, cmd: &AudioCommand) -> SetA
 
     let row = match row {
         Ok(Some(r)) => r,
-        Ok(None) => return SetAudioOutcome::NotFound,
+        Ok(None) => return SetMediaOutcome::NotFound,
         Err(e) => {
             tracing::error!("db error: {e}");
-            return SetAudioOutcome::Db;
+            return SetMediaOutcome::Db;
         }
     };
 
@@ -739,41 +739,41 @@ async fn apply_to_device(state: &AppState, id: &str, cmd: &AudioCommand) -> SetA
     let provider_type: String = row.get("provider_type");
     let credentials: String = row.get("credentials");
 
-    let provider = match build_audio_provider(state, &provider_type, &credentials) {
+    let provider = match build_media_provider(state, &provider_type, &credentials) {
         Ok(p) => p,
         Err(e) => {
-            tracing::error!("failed to build audio provider: {e:#}");
-            return SetAudioOutcome::Db;
+            tracing::error!("failed to build media provider: {e:#}");
+            return SetMediaOutcome::Db;
         }
     };
 
     match provider.set_state(&device_id, cmd).await {
-        Ok(()) => SetAudioOutcome::Ok,
+        Ok(()) => SetMediaOutcome::Ok,
         // Validation failures (unknown source/zone) are the caller's mistake,
         // not a gateway fault; connection problems stay 502s.
         Err(e) if e.to_string().contains("unknown") || e.to_string().contains("not supported") => {
-            SetAudioOutcome::BadCommand(e.to_string())
+            SetMediaOutcome::BadCommand(e.to_string())
         }
         Err(e) => {
-            tracing::error!("audio set_state error: {e:#}");
-            SetAudioOutcome::ProviderError
+            tracing::error!("media set_state error: {e:#}");
+            SetMediaOutcome::ProviderError
         }
     }
 }
 
-/// Look up an audio device's provider-native id and a live provider built from
+/// Look up an media device's provider-native id and a live provider built from
 /// its (decrypted) credentials. Shared by the favorites services.
 enum ProviderLookup {
-    Found(String, Box<dyn crate::providers::AudioProvider>),
+    Found(String, Box<dyn crate::providers::MediaProvider>),
     NotFound,
     Db,
 }
 
-async fn lookup_audio_provider(state: &AppState, id: &str) -> ProviderLookup {
+async fn lookup_media_provider(state: &AppState, id: &str) -> ProviderLookup {
     // A disabled device receives no commands (control lookups skip it).
     let row = sqlx::query(
         "SELECT a.device_id, p.provider_type, p.credentials
-         FROM audio_devices a JOIN providers p ON a.provider_id = p.id
+         FROM media_devices a JOIN providers p ON a.provider_id = p.id
          WHERE a.id = ? AND p.enabled = 1 AND a.enabled = 1 AND a.shadowed_by IS NULL",
     )
     .bind(id)
@@ -790,10 +790,10 @@ async fn lookup_audio_provider(state: &AppState, id: &str) -> ProviderLookup {
     let device_id: String = row.get("device_id");
     let provider_type: String = row.get("provider_type");
     let credentials: String = row.get("credentials");
-    match build_audio_provider(state, &provider_type, &credentials) {
+    match build_media_provider(state, &provider_type, &credentials) {
         Ok(p) => ProviderLookup::Found(device_id, p),
         Err(e) => {
-            tracing::error!("failed to build audio provider: {e:#}");
+            tracing::error!("failed to build media provider: {e:#}");
             ProviderLookup::Db
         }
     }
@@ -802,14 +802,14 @@ async fn lookup_audio_provider(state: &AppState, id: &str) -> ProviderLookup {
 // ── Favorites (list + play) ──────────────────────────────────────────────────
 
 pub(crate) enum FavoritesOutcome {
-    Ok(Vec<AudioFavorite>),
+    Ok(Vec<MediaFavorite>),
     NotFound,
     Unreachable,
     Db,
 }
 
 pub(crate) async fn list_device_favorites(state: &AppState, id: &str) -> FavoritesOutcome {
-    let (device_id, provider) = match lookup_audio_provider(state, id).await {
+    let (device_id, provider) = match lookup_media_provider(state, id).await {
         ProviderLookup::Found(d, p) => (d, p),
         ProviderLookup::NotFound => return FavoritesOutcome::NotFound,
         ProviderLookup::Db => return FavoritesOutcome::Db,
@@ -817,7 +817,7 @@ pub(crate) async fn list_device_favorites(state: &AppState, id: &str) -> Favorit
     match provider.list_favorites(&device_id).await {
         Ok(favs) => FavoritesOutcome::Ok(favs),
         Err(e) => {
-            tracing::debug!("audio favorites unavailable for {id}: {e:#}");
+            tracing::debug!("media favorites unavailable for {id}: {e:#}");
             FavoritesOutcome::Unreachable
         }
     }
@@ -845,7 +845,7 @@ pub(crate) async fn play_device_favorite(
     id: &str,
     favorite_id: &str,
 ) -> PlayFavoriteOutcome {
-    let (device_id, provider) = match lookup_audio_provider(state, id).await {
+    let (device_id, provider) = match lookup_media_provider(state, id).await {
         ProviderLookup::Found(d, p) => (d, p),
         ProviderLookup::NotFound => return PlayFavoriteOutcome::NotFound,
         ProviderLookup::Db => return PlayFavoriteOutcome::Db,
@@ -858,7 +858,7 @@ pub(crate) async fn play_device_favorite(
             PlayFavoriteOutcome::BadFavorite(e.to_string())
         }
         Err(e) => {
-            tracing::error!("audio play_favorite error: {e:#}");
+            tracing::error!("media play_favorite error: {e:#}");
             PlayFavoriteOutcome::Unreachable
         }
     }
@@ -879,26 +879,26 @@ pub(crate) fn play_favorite_response(outcome: PlayFavoriteOutcome) -> axum::resp
 // ── Speaker grouping (provider-native, e.g. Sonos) ───────────────────────────
 
 /// The bits needed to build a provider and address a device within it.
-struct AudioRow {
+struct MediaRow {
     device_id: String,
-    /// `audio_devices.provider_id` — the providers-table row id (which provider
+    /// `media_devices.provider_id` — the providers-table row id (which provider
     /// instance owns the device), not the provider-native id.
     provider_row_id: String,
     provider_type: String,
     credentials: String,
 }
 
-async fn load_audio_row(state: &AppState, id: &str) -> Result<Option<AudioRow>, ()> {
+async fn load_media_row(state: &AppState, id: &str) -> Result<Option<MediaRow>, ()> {
     let row = sqlx::query(
         "SELECT a.device_id, a.provider_id AS provider_row_id, p.provider_type, p.credentials
-         FROM audio_devices a JOIN providers p ON a.provider_id = p.id
+         FROM media_devices a JOIN providers p ON a.provider_id = p.id
          WHERE a.id = ? AND p.enabled = 1",
     )
     .bind(id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| tracing::error!("db error loading audio device: {e}"))?;
-    Ok(row.map(|r| AudioRow {
+    .map_err(|e| tracing::error!("db error loading media device: {e}"))?;
+    Ok(row.map(|r| MediaRow {
         device_id: r.get("device_id"),
         provider_row_id: r.get("provider_row_id"),
         provider_type: r.get("provider_type"),
@@ -924,7 +924,7 @@ fn map_group_result(res: anyhow::Result<()>) -> GroupOutcome {
             GroupOutcome::BadRequest(e.to_string())
         }
         Err(e) => {
-            tracing::error!("audio grouping error: {e:#}");
+            tracing::error!("media grouping error: {e:#}");
             GroupOutcome::Unreachable
         }
     }
@@ -937,12 +937,12 @@ pub(crate) async fn group_devices(
     id: &str,
     coordinator_id: &str,
 ) -> GroupOutcome {
-    let member = match load_audio_row(state, id).await {
+    let member = match load_media_row(state, id).await {
         Ok(Some(r)) => r,
         Ok(None) => return GroupOutcome::NotFound,
         Err(()) => return GroupOutcome::Db,
     };
-    let coordinator = match load_audio_row(state, coordinator_id).await {
+    let coordinator = match load_media_row(state, coordinator_id).await {
         Ok(Some(r)) => r,
         Ok(None) => return GroupOutcome::NotFound,
         Err(()) => return GroupOutcome::Db,
@@ -952,10 +952,10 @@ pub(crate) async fn group_devices(
             "speakers must belong to the same provider to be grouped".into(),
         );
     }
-    let provider = match build_audio_provider(state, &member.provider_type, &member.credentials) {
+    let provider = match build_media_provider(state, &member.provider_type, &member.credentials) {
         Ok(p) => p,
         Err(e) => {
-            tracing::error!("failed to build audio provider: {e:#}");
+            tracing::error!("failed to build media provider: {e:#}");
             return GroupOutcome::Db;
         }
     };
@@ -968,15 +968,15 @@ pub(crate) async fn group_devices(
 
 /// Remove the speaker `id` from any playback group it's in.
 pub(crate) async fn ungroup_device(state: &AppState, id: &str) -> GroupOutcome {
-    let row = match load_audio_row(state, id).await {
+    let row = match load_media_row(state, id).await {
         Ok(Some(r)) => r,
         Ok(None) => return GroupOutcome::NotFound,
         Err(()) => return GroupOutcome::Db,
     };
-    let provider = match build_audio_provider(state, &row.provider_type, &row.credentials) {
+    let provider = match build_media_provider(state, &row.provider_type, &row.credentials) {
         Ok(p) => p,
         Err(e) => {
-            tracing::error!("failed to build audio provider: {e:#}");
+            tracing::error!("failed to build media provider: {e:#}");
             return GroupOutcome::Db;
         }
     };
@@ -993,7 +993,7 @@ pub(crate) fn group_response(outcome: GroupOutcome) -> axum::response::Response 
     }
 }
 
-/// Cast content to an audio device (the casting seam — a TV/media_player).
+/// Cast content to an media device (the casting seam — a TV/media_player).
 /// Resolves the device's provider and calls `play_media` (raw `content_id` +
 /// `content_type` passthrough). Skeleton: HA implements it via
 /// `media_player.play_media`; richer resolution (app deep-links, title search,
@@ -1003,10 +1003,10 @@ pub(crate) async fn cast_to_device(
     id: &str,
     content_id: &str,
     content_type: &str,
-) -> SetAudioOutcome {
+) -> SetMediaOutcome {
     let row = sqlx::query(
         "SELECT a.device_id, p.provider_type, p.credentials
-         FROM audio_devices a JOIN providers p ON a.provider_id = p.id
+         FROM media_devices a JOIN providers p ON a.provider_id = p.id
          WHERE a.id = ? AND p.enabled = 1 AND a.enabled = 1 AND a.shadowed_by IS NULL",
     )
     .bind(id)
@@ -1014,80 +1014,84 @@ pub(crate) async fn cast_to_device(
     .await;
     let row = match row {
         Ok(Some(r)) => r,
-        Ok(None) => return SetAudioOutcome::NotFound,
+        Ok(None) => return SetMediaOutcome::NotFound,
         Err(e) => {
             tracing::error!("db error: {e}");
-            return SetAudioOutcome::Db;
+            return SetMediaOutcome::Db;
         }
     };
     let device_id: String = row.get("device_id");
     let provider_type: String = row.get("provider_type");
     let credentials: String = row.get("credentials");
-    let provider = match build_audio_provider(state, &provider_type, &credentials) {
+    let provider = match build_media_provider(state, &provider_type, &credentials) {
         Ok(p) => p,
         Err(e) => {
-            tracing::error!("failed to build audio provider: {e:#}");
-            return SetAudioOutcome::Db;
+            tracing::error!("failed to build media provider: {e:#}");
+            return SetMediaOutcome::Db;
         }
     };
+    tracing::debug!(media = %id, device = %device_id, content_type, content_id, "cast → provider");
     match provider
         .play_media(&device_id, content_id, content_type)
         .await
     {
-        Ok(()) => SetAudioOutcome::Ok,
+        Ok(()) => {
+            tracing::debug!(media = %id, "cast ok");
+            SetMediaOutcome::Ok
+        }
         // "does not support casting" is the caller's mistake (wrong device), 422.
-        Err(e) if e.to_string().contains("support") => SetAudioOutcome::BadCommand(e.to_string()),
+        Err(e) if e.to_string().contains("support") => SetMediaOutcome::BadCommand(e.to_string()),
         Err(e) => {
-            tracing::error!("cast error: {e:#}");
-            SetAudioOutcome::ProviderError
+            tracing::error!(media = %id, "cast error: {e:#}");
+            SetMediaOutcome::ProviderError
         }
     }
 }
 
-pub(crate) fn set_audio_status(outcome: SetAudioOutcome) -> axum::response::Response {
+pub(crate) fn set_media_status(outcome: SetMediaOutcome) -> axum::response::Response {
     match outcome {
-        SetAudioOutcome::Ok => StatusCode::NO_CONTENT.into_response(),
-        SetAudioOutcome::NotFound => StatusCode::NOT_FOUND.into_response(),
-        SetAudioOutcome::BadCommand(m) => (StatusCode::UNPROCESSABLE_ENTITY, m).into_response(),
-        SetAudioOutcome::ProviderError => StatusCode::BAD_GATEWAY.into_response(),
-        SetAudioOutcome::Db => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        SetMediaOutcome::Ok => StatusCode::NO_CONTENT.into_response(),
+        SetMediaOutcome::NotFound => StatusCode::NOT_FOUND.into_response(),
+        SetMediaOutcome::BadCommand(m) => (StatusCode::UNPROCESSABLE_ENTITY, m).into_response(),
+        SetMediaOutcome::ProviderError => StatusCode::BAD_GATEWAY.into_response(),
+        SetMediaOutcome::Db => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
-/// Discover an audio provider's devices and upsert them. Returns the count.
+/// Discover an media provider's devices and upsert them. Returns the count.
 /// Called from the shared `/api/providers/{id}/discover` handler.
-pub(crate) async fn discover_audio_devices(
+pub(crate) async fn discover_media_devices(
     state: &AppState,
     provider_row_id: &str,
     provider_type: &str,
     credentials_enc: &str,
 ) -> Result<usize, StatusCode> {
-    let provider = build_audio_provider(state, provider_type, credentials_enc).map_err(|e| {
-        tracing::error!("failed to build audio provider: {e:#}");
+    let provider = build_media_provider(state, provider_type, credentials_enc).map_err(|e| {
+        tracing::error!("failed to build media provider: {e:#}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
     let devices = provider.discover().await.map_err(|e| {
-        tracing::error!("audio discovery error: {e:#}");
+        tracing::error!("media discovery error: {e:#}");
         StatusCode::BAD_GATEWAY
     })?;
 
     // Batch the upserts in one transaction (one WAL commit, not one per device).
     let mut tx = state.db.begin().await.map_err(|e| {
-        tracing::error!("discover_audio_devices: begin failed: {e}");
+        tracing::error!("discover_media_devices: begin failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     for device in &devices {
         let caps = serde_json::to_string(&device.capabilities).unwrap_or_default();
         let state_json = serde_json::to_string(&device.state).unwrap_or_default();
         let kind = match device.kind {
-            crate::models::audio::AudioDeviceKind::Receiver => "receiver",
-            crate::models::audio::AudioDeviceKind::Speaker => "speaker",
-            crate::models::audio::AudioDeviceKind::Tv => "tv",
-            crate::models::audio::AudioDeviceKind::Zone => "zone",
+            crate::models::media::MediaDeviceKind::Receiver => "receiver",
+            crate::models::media::MediaDeviceKind::Speaker => "speaker",
+            crate::models::media::MediaDeviceKind::Tv => "tv",
+            crate::models::media::MediaDeviceKind::Zone => "zone",
         };
         let _ = sqlx::query(
-            "INSERT INTO audio_devices (id, provider_id, device_id, name, kind, capabilities, last_state, last_seen, hw_id)
+            "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, last_seen, hw_id)
              VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
              ON CONFLICT (provider_id, device_id)
              DO UPDATE SET name         = excluded.name,
@@ -1109,7 +1113,7 @@ pub(crate) async fn discover_audio_devices(
         .await;
     }
     tx.commit().await.map_err(|e| {
-        tracing::error!("discover_audio_devices: commit failed: {e}");
+        tracing::error!("discover_media_devices: commit failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     Ok(devices.len())
@@ -1140,17 +1144,18 @@ async fn set_device_handler(
     State(state): State<Arc<AppState>>,
     _: Session,
     Path(id): Path<String>,
-    Json(cmd): Json<AudioCommand>,
+    Json(cmd): Json<MediaCommand>,
 ) -> impl IntoResponse {
-    set_audio_status(apply_audio_command(&state, &id, &cmd).await)
+    set_media_status(apply_media_command(&state, &id, &cmd).await)
 }
 
 /// Body for casting content to a device (the casting seam). `content_type` is the
-/// provider-native kind (HA: `music`/`url`/`app`/`channel`/…).
+/// provider-native kind (HA: `music`/`url`/`app`/`channel`/…). Shared by the
+/// session route and `/api/v1`.
 #[derive(serde::Deserialize)]
-struct CastRequest {
-    content_id: String,
-    content_type: String,
+pub(crate) struct CastRequest {
+    pub(crate) content_id: String,
+    pub(crate) content_type: String,
 }
 
 async fn cast_handler(
@@ -1159,7 +1164,7 @@ async fn cast_handler(
     Path(id): Path<String>,
     Json(req): Json<CastRequest>,
 ) -> impl IntoResponse {
-    set_audio_status(cast_to_device(&state, &id, &req.content_id, &req.content_type).await)
+    set_media_status(cast_to_device(&state, &id, &req.content_id, &req.content_type).await)
 }
 
 async fn list_favorites_handler(
@@ -1199,7 +1204,7 @@ async fn ungroup_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::audio::TransportCmd;
+    use crate::models::media::TransportCmd;
 
     fn backing(
         id: &str,
@@ -1210,7 +1215,7 @@ mod tests {
     ) -> Backing {
         Backing {
             id: id.into(),
-            capabilities: AudioCapabilities {
+            capabilities: MediaCapabilities {
                 transport,
                 sources,
                 ..Default::default()
@@ -1230,14 +1235,14 @@ mod tests {
             backing("tv", false, false, false, false),
             backing("speaker", true, false, true, true),
         ];
-        let cmd = AudioCommand {
+        let cmd = MediaCommand {
             power: Some(true),
             volume: Some(30),
             mute: Some(true),
             source: None,
             transport: Some(TransportCmd::Toggle),
         };
-        let routed: std::collections::HashMap<String, AudioCommand> =
+        let routed: std::collections::HashMap<String, MediaCommand> =
             route_across_backings(&cmd, &backings).into_iter().collect();
 
         assert_eq!(routed["speaker"].volume, Some(30));
@@ -1255,12 +1260,12 @@ mod tests {
             backing("primary", false, true, false, false),
             backing("comp", false, false, false, false),
         ];
-        let cmd = AudioCommand {
+        let cmd = MediaCommand {
             volume: Some(50),
             source: Some("hdmi1".into()),
             ..Default::default()
         };
-        let routed: std::collections::HashMap<String, AudioCommand> =
+        let routed: std::collections::HashMap<String, MediaCommand> =
             route_across_backings(&cmd, &backings).into_iter().collect();
 
         assert_eq!(routed["primary"].volume, Some(50));

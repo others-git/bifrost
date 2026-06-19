@@ -9,12 +9,12 @@
 //! single linked group; otherwise it fans out per light in parallel.
 
 use crate::AppState;
-use crate::api::audio::{SetAudioOutcome, apply_audio_command};
 use crate::api::auth::Session;
 use crate::api::lights::build_provider;
+use crate::api::media::{SetMediaOutcome, apply_media_command};
 use crate::api::power::{SetPowerOutcome, apply_power_state};
 use crate::models::LightState;
-use crate::models::audio::AudioCommand;
+use crate::models::media::MediaCommand;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -33,8 +33,11 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/", get(list_rooms).post(create_room))
         .route("/{id}", delete(remove_room))
         .route("/{id}/merge", post(merge_rooms))
-        .route("/{id}/audio", put(set_room_audio_devices))
-        .route("/{id}/audio/state", put(set_room_audio_state))
+        .route("/{id}/media", put(set_room_media_devices))
+        .route("/{id}/media/state", put(set_room_media_state))
+        // Deprecated /audio aliases (domain renamed audio → media).
+        .route("/{id}/audio", put(set_room_media_devices))
+        .route("/{id}/audio/state", put(set_room_media_state))
         .route("/{id}/enabled", put(set_room_enabled))
         .route("/{id}/lights", put(set_direct_lights))
         .route("/{id}/power", put(set_room_power_devices))
@@ -56,7 +59,7 @@ struct LinkInfo {
     provider_group_id: String,
     name: String,
     provider_id: String,
-    /// "light" or "audio" — which domain this linked provider room/zone is.
+    /// "light" or "media" — which domain this linked provider room/zone is.
     domain: String,
 }
 
@@ -68,9 +71,9 @@ struct RoomInfo {
     light_ids: Vec<String>,
     direct_light_ids: Vec<String>,
     links: Vec<LinkInfo>,
-    /// Audio devices this room controls (volume/mute fans out to all), each
+    /// Media devices this room controls (volume/mute fans out to all), each
     /// with its per-room volume offset.
-    audio_devices: Vec<RoomAudioMember>,
+    media_devices: Vec<RoomMediaMember>,
     /// Power devices (switches/plugs/fans) the room contains.
     power_device_ids: Vec<String>,
     /// User-configured quick-control buttons rendered on the room's Control card.
@@ -99,7 +102,7 @@ pub(crate) struct RoomControl {
     scene_id: Option<String>,
 }
 
-/// One device a control acts on. `domain` ∈ light | audio | power.
+/// One device a control acts on. `domain` ∈ light | media | power.
 #[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct ControlTarget {
     domain: String,
@@ -117,16 +120,16 @@ struct ProviderGroupInfo {
     domain: String,
     /// Member lights.
     light_ids: Vec<String>,
-    /// Member audio devices.
-    audio_device_ids: Vec<String>,
+    /// Member media devices.
+    media_device_ids: Vec<String>,
     /// Member power devices (switches/plugs/fans).
     power_device_ids: Vec<String>,
 }
 
-/// "audio" if the provider type is a registered audio provider, else "light".
+/// "media" if the provider type is a registered media provider, else "light".
 fn domain_label(state: &AppState, provider_type: &str) -> &'static str {
-    if state.registry.is_known_audio(provider_type) {
-        "audio"
+    if state.registry.is_known_media(provider_type) {
+        "media"
     } else {
         "light"
     }
@@ -310,34 +313,34 @@ pub(crate) async fn set_device_room(
     }
 }
 
-/// One audio device's membership in a room, with its per-room volume offset.
+/// One media device's membership in a room, with its per-room volume offset.
 #[derive(Serialize)]
-pub(crate) struct RoomAudioMember {
-    pub(crate) audio_device_id: String,
+pub(crate) struct RoomMediaMember {
+    pub(crate) media_device_id: String,
     /// Signed %, added to the room volume then clamped 0–100 per device.
     pub(crate) volume_offset: i64,
 }
 
-/// A room's effective audio devices — the audio analog of `effective_members`
-/// (lights): explicit membership (`room_audio_devices`) ∪ devices from linked
-/// audio provider-groups (`room_links` → `provider_group_audio_devices`), with
+/// A room's effective media devices — the media analog of `effective_members`
+/// (lights): explicit membership (`room_media_devices`) ∪ devices from linked
+/// media provider-groups (`room_links` → `provider_group_media_devices`), with
 /// the per-room `volume_offset` (0 when there's no explicit row). Shared by the
 /// session and v1 room listings so they can't drift.
-pub(crate) async fn effective_audio_members(
+pub(crate) async fn effective_media_members(
     state: &AppState,
     room_id: &str,
-) -> Vec<RoomAudioMember> {
+) -> Vec<RoomMediaMember> {
     sqlx::query(
-        "SELECT d.id AS audio_device_id, COALESCE(rad.volume_offset, 0) AS volume_offset
-         FROM audio_devices d
-         LEFT JOIN room_audio_devices rad
-           ON rad.room_id = ?1 AND rad.audio_device_id = d.id
+        "SELECT d.id AS media_device_id, COALESCE(rad.volume_offset, 0) AS volume_offset
+         FROM media_devices d
+         LEFT JOIN room_media_devices rad
+           ON rad.room_id = ?1 AND rad.media_device_id = d.id
          WHERE d.shadowed_by IS NULL AND d.companion_of IS NULL AND d.id IN (
-             SELECT audio_device_id FROM room_audio_devices WHERE room_id = ?1
+             SELECT media_device_id FROM room_media_devices WHERE room_id = ?1
              UNION
-             SELECT pga.audio_device_id
+             SELECT pga.media_device_id
              FROM room_links rl
-             JOIN provider_group_audio_devices pga ON pga.provider_group_id = rl.provider_group_id
+             JOIN provider_group_media_devices pga ON pga.provider_group_id = rl.provider_group_id
              WHERE rl.room_id = ?1
          )
          ORDER BY d.name",
@@ -347,14 +350,14 @@ pub(crate) async fn effective_audio_members(
     .await
     .unwrap_or_default()
     .into_iter()
-    .map(|r| RoomAudioMember {
-        audio_device_id: r.get("audio_device_id"),
+    .map(|r| RoomMediaMember {
+        media_device_id: r.get("media_device_id"),
         volume_offset: r.get("volume_offset"),
     })
     .collect()
 }
 
-/// Of the given audio device ids, the subset that is some *other* id's receiver
+/// Of the given media device ids, the subset that is some *other* id's receiver
 /// (M22) — i.e. a receiver whose volume is driven through a bound source also in
 /// the set. Used to collapse a bound pair to a single volume target.
 async fn receiver_targets_within(
@@ -368,7 +371,7 @@ async fn receiver_targets_within(
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
-        "SELECT DISTINCT receiver_id FROM audio_devices
+        "SELECT DISTINCT receiver_id FROM media_devices
          WHERE receiver_id IS NOT NULL AND id IN ({placeholders}) AND receiver_id IN ({placeholders})"
     );
     let mut q = sqlx::query(&sql);
@@ -387,7 +390,7 @@ async fn receiver_targets_within(
 }
 
 /// A room as exposed to third parties (the public `/api/v1` API and the MCP
-/// surface): enabled rooms only, with effective light and audio membership.
+/// surface): enabled rooms only, with effective light and media membership.
 /// Shared so the two surfaces can't drift.
 #[derive(Serialize)]
 pub(crate) struct PublicRoom {
@@ -395,8 +398,8 @@ pub(crate) struct PublicRoom {
     pub name: String,
     /// Effective members (linked provider-group lights ∪ direct lights).
     pub light_ids: Vec<String>,
-    /// Audio devices the room controls — drive each via /audio/devices/{id}/state.
-    pub audio_device_ids: Vec<String>,
+    /// Media devices the room controls — drive each via /media/devices/{id}/state.
+    pub media_device_ids: Vec<String>,
     /// Power devices the room contains — drive each via /power/devices/{id}/state.
     pub power_device_ids: Vec<String>,
 }
@@ -412,16 +415,16 @@ pub(crate) async fn list_public_rooms(state: &AppState) -> Vec<PublicRoom> {
     for row in rows {
         let id: String = row.get("id");
         let light_ids = effective_member_ids(state, &id).await;
-        let audio_device_ids = effective_audio_members(state, &id)
+        let media_device_ids = effective_media_members(state, &id)
             .await
             .into_iter()
-            .map(|m| m.audio_device_id)
+            .map(|m| m.media_device_id)
             .collect();
         let power_device_ids = effective_power_member_ids(state, &id).await;
         out.push(PublicRoom {
             name: row.get("name"),
             light_ids,
-            audio_device_ids,
+            media_device_ids,
             power_device_ids,
             id,
         });
@@ -479,7 +482,7 @@ async fn list_rooms(State(state): State<Arc<AppState>>, _: Session) -> impl Into
         })
         .collect();
 
-        let audio_devices = effective_audio_members(&state, &id).await;
+        let media_devices = effective_media_members(&state, &id).await;
         let power_device_ids = effective_power_member_ids(&state, &id).await;
         let controls = list_room_controls(&state, &id).await;
 
@@ -487,7 +490,7 @@ async fn list_rooms(State(state): State<Arc<AppState>>, _: Session) -> impl Into
             light_ids: effective_member_ids(&state, &id).await,
             direct_light_ids: direct,
             links,
-            audio_devices,
+            media_devices,
             power_device_ids,
             controls,
             enabled: room.get::<i64, _>("enabled") != 0,
@@ -524,37 +527,37 @@ async fn set_room_enabled(
 }
 
 #[derive(Deserialize)]
-struct SetRoomAudioRequest {
-    /// Replaces the room's explicit audio membership. Synced audio-group
+struct SetRoomMediaRequest {
+    /// Replaces the room's explicit media membership. Synced media-group
     /// members stay live via room_links; include a device here to set its
     /// offset (or to add it manually).
     #[serde(default)]
-    devices: Vec<RoomAudioInput>,
+    devices: Vec<RoomMediaInput>,
 }
 
 #[derive(Deserialize)]
-struct RoomAudioInput {
-    audio_device_id: String,
+struct RoomMediaInput {
+    media_device_id: String,
     #[serde(default)]
     volume_offset: i64,
 }
 
-/// Set the room's explicit audio devices + per-device volume offsets (replace-
-/// all, like `set_links`). Effective membership also includes synced audio-
+/// Set the room's explicit media devices + per-device volume offsets (replace-
+/// all, like `set_links`). Effective membership also includes synced media-
 /// group devices via room_links.
-async fn set_room_audio_devices(
+async fn set_room_media_devices(
     State(state): State<Arc<AppState>>,
     _: Session,
     Path(id): Path<String>,
-    Json(req): Json<SetRoomAudioRequest>,
+    Json(req): Json<SetRoomMediaRequest>,
 ) -> impl IntoResponse {
     if !room_exists(&state, &id).await {
         return StatusCode::NOT_FOUND.into_response();
     }
 
     for d in &req.devices {
-        let known = sqlx::query("SELECT 1 FROM audio_devices WHERE id = ?")
-            .bind(&d.audio_device_id)
+        let known = sqlx::query("SELECT 1 FROM media_devices WHERE id = ?")
+            .bind(&d.media_device_id)
             .fetch_optional(&state.db)
             .await
             .ok()
@@ -563,23 +566,23 @@ async fn set_room_audio_devices(
         if !known {
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
-                format!("unknown audio device '{}'", d.audio_device_id),
+                format!("unknown media device '{}'", d.media_device_id),
             )
                 .into_response();
         }
     }
 
-    let _ = sqlx::query("DELETE FROM room_audio_devices WHERE room_id = ?")
+    let _ = sqlx::query("DELETE FROM room_media_devices WHERE room_id = ?")
         .bind(&id)
         .execute(&state.db)
         .await;
     for d in &req.devices {
         let _ = sqlx::query(
-            "INSERT OR REPLACE INTO room_audio_devices (room_id, audio_device_id, volume_offset)
+            "INSERT OR REPLACE INTO room_media_devices (room_id, media_device_id, volume_offset)
              VALUES (?, ?, ?)",
         )
         .bind(&id)
-        .bind(&d.audio_device_id)
+        .bind(&d.media_device_id)
         .bind(d.volume_offset)
         .execute(&state.db)
         .await;
@@ -631,7 +634,7 @@ fn valid_control_kind(kind: &str) -> bool {
 async fn target_exists(state: &AppState, t: &ControlTarget) -> bool {
     let table = match t.domain.as_str() {
         "light" => "lights",
-        "audio" => "audio_devices",
+        "media" => "media_devices",
         "power" => "power_devices",
         _ => return false,
     };
@@ -735,22 +738,22 @@ async fn set_room_controls(
 }
 
 #[derive(Deserialize)]
-struct RoomAudioStateRequest {
+struct RoomMediaStateRequest {
     #[serde(default)]
     volume: Option<u8>,
     #[serde(default)]
     mute: Option<bool>,
 }
 
-/// Fan a volume/mute command out to every audio device in the room, applying
+/// Fan a volume/mute command out to every media device in the room, applying
 /// each device's per-room offset to the volume (clamped 0–100).
-async fn set_room_audio_state(
+async fn set_room_media_state(
     State(state): State<Arc<AppState>>,
     _: Session,
     Path(id): Path<String>,
-    Json(req): Json<RoomAudioStateRequest>,
+    Json(req): Json<RoomMediaStateRequest>,
 ) -> impl IntoResponse {
-    let members = effective_audio_members(&state, &id).await;
+    let members = effective_media_members(&state, &id).await;
     if members.is_empty() {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -759,20 +762,20 @@ async fn set_room_audio_state(
     // driven *through* that bound source (M22 routing), so skip it here — else
     // the room volume would hit the receiver twice (once direct, once routed),
     // a last-write-wins race when their offsets differ.
-    let member_ids: Vec<String> = members.iter().map(|m| m.audio_device_id.clone()).collect();
+    let member_ids: Vec<String> = members.iter().map(|m| m.media_device_id.clone()).collect();
     let bound_targets = receiver_targets_within(&state, &member_ids).await;
 
-    // Fan out to every audio member concurrently — a room's speakers are
+    // Fan out to every media member concurrently — a room's speakers are
     // distinct devices (Sonos units on their own IPs), so a room volume change
     // should hit them in parallel rather than serially round-tripping each.
     let jobs = members
         .iter()
-        .filter(|m| !bound_targets.contains(&m.audio_device_id))
+        .filter(|m| !bound_targets.contains(&m.media_device_id))
         .filter_map(|m| {
             let volume = req
                 .volume
                 .map(|v| (v as i64 + m.volume_offset).clamp(0, 100) as u8);
-            let cmd = AudioCommand {
+            let cmd = MediaCommand {
                 volume,
                 mute: req.mute,
                 ..Default::default()
@@ -783,8 +786,8 @@ async fn set_room_audio_state(
             let state = &state;
             Some(async move {
                 matches!(
-                    apply_audio_command(state, &m.audio_device_id, &cmd).await,
-                    crate::api::audio::SetAudioOutcome::Ok
+                    apply_media_command(state, &m.media_device_id, &cmd).await,
+                    crate::api::media::SetMediaOutcome::Ok
                 )
             })
         });
@@ -827,11 +830,11 @@ async fn list_provider_groups(State(state): State<Arc<AppState>>, _: Session) ->
         // Query every member table — an area (HA) can mix domains, so the label
         // alone can't tell us which members it has.
         let light_ids = group_member_ids(&state, &id, "provider_group_lights", "light_id").await;
-        let audio_device_ids = group_member_ids(
+        let media_device_ids = group_member_ids(
             &state,
             &id,
-            "provider_group_audio_devices",
-            "audio_device_id",
+            "provider_group_media_devices",
+            "media_device_id",
         )
         .await;
         let power_device_ids = group_member_ids(
@@ -847,7 +850,7 @@ async fn list_provider_groups(State(state): State<Arc<AppState>>, _: Session) ->
             name: r.get("name"),
             domain: domain.to_string(),
             light_ids,
-            audio_device_ids,
+            media_device_ids,
             power_device_ids,
             id,
         });
@@ -965,11 +968,11 @@ async fn merge_rooms(
     .bind(&req.source_room_id)
     .execute(&state.db)
     .await;
-    // Audio + power membership move the same way (keep the target's offset for
-    // any audio device already shared, via OR IGNORE on the PK).
+    // Media + power membership move the same way (keep the target's offset for
+    // any media device already shared, via OR IGNORE on the PK).
     let _ = sqlx::query(
-        "INSERT OR IGNORE INTO room_audio_devices (room_id, audio_device_id, volume_offset)
-         SELECT ?, audio_device_id, volume_offset FROM room_audio_devices WHERE room_id = ?",
+        "INSERT OR IGNORE INTO room_media_devices (room_id, media_device_id, volume_offset)
+         SELECT ?, media_device_id, volume_offset FROM room_media_devices WHERE room_id = ?",
     )
     .bind(&id)
     .bind(&req.source_room_id)
@@ -1302,7 +1305,7 @@ pub(crate) async fn apply_uniform_state(
 
 /// Apply a room on/off (+ color/brightness for lights) to **all** member
 /// domains: lights via [`apply_uniform_state`], then the room's `on` state
-/// fanned out to audio members (power only) and power-device members. This is
+/// fanned out to media members (power only) and power-device members. This is
 /// the shared room-control path for the session, `/v1`, and MCP `set_room`, so
 /// "turn the room on/off" means the whole room (CLAUDE.md's room model), not
 /// just its lights. (Palette-scene apply stays lights-only and keeps calling
@@ -1315,7 +1318,7 @@ pub(crate) async fn apply_room_state(
 ) -> (usize, usize) {
     let (applied, failed) = apply_uniform_state(state, room_id, new_state, members).await;
     // Only a *pure* power change (on/off with no light attributes) fans out to
-    // the room's audio + power members. A brightness/color/temp/effect change is a
+    // the room's media + power members. A brightness/color/temp/effect change is a
     // lighting-attribute command — its implicit `on: true` must NOT power on the
     // room's speakers/switches (e.g. "make the room blue" shouldn't start Sonos,
     // and a room-wide effect pick shouldn't either).
@@ -1324,30 +1327,30 @@ pub(crate) async fn apply_room_state(
         && new_state.color_temp_mirek.is_none()
         && new_state.effect.is_none();
     if !pure_power {
-        tracing::debug!(room = %room_id, on = new_state.on, applied, failed, fanned_out = false, "apply room state (lights only, no audio/power fan-out)");
+        tracing::debug!(room = %room_id, on = new_state.on, applied, failed, fanned_out = false, "apply room state (lights only, no media/power fan-out)");
         return (applied, failed);
     }
     let (a, f) = apply_room_power(state, room_id, new_state.on).await;
-    tracing::debug!(room = %room_id, on = new_state.on, applied = applied + a, failed = failed + f, fanned_out = true, "apply room state (power fanned out to audio + power members)");
+    tracing::debug!(room = %room_id, on = new_state.on, applied = applied + a, failed = failed + f, fanned_out = true, "apply room state (power fanned out to media + power members)");
     (applied + a, failed + f)
 }
 
-/// Drive every audio + power member of a room to `on`. Audio members get a
+/// Drive every media + power member of a room to `on`. Media members get a
 /// power-only command (so a bound source still wakes its receiver, routing
-/// through `apply_audio_command`); power members go through `apply_power_state`.
+/// through `apply_media_command`); power members go through `apply_power_state`.
 /// A disabled/absent member (`NotFound`) is skipped silently — it's not a
 /// failure, just out of scope; only real provider/DB errors count as failed.
 async fn apply_room_power(state: &AppState, room_id: &str, on: bool) -> (usize, usize) {
     let mut applied = 0usize;
     let mut failed = 0usize;
-    let cmd = AudioCommand {
+    let cmd = MediaCommand {
         power: Some(on),
         ..Default::default()
     };
-    for member in effective_audio_members(state, room_id).await {
-        match apply_audio_command(state, &member.audio_device_id, &cmd).await {
-            SetAudioOutcome::Ok => applied += 1,
-            SetAudioOutcome::NotFound => {}
+    for member in effective_media_members(state, room_id).await {
+        match apply_media_command(state, &member.media_device_id, &cmd).await {
+            SetMediaOutcome::Ok => applied += 1,
+            SetMediaOutcome::NotFound => {}
             _ => failed += 1,
         }
     }

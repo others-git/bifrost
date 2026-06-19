@@ -4,31 +4,31 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
-  getAudioDevices,
-  getAudioDevice,
-  setAudioState,
-  groupAudioDevice,
-  ungroupAudioDevice,
+  getMediaDevices,
+  getMediaDevice,
+  setMediaState,
+  groupMediaDevice,
+  ungroupMediaDevice,
   discoverProvider,
-  type AudioDevice,
+  type MediaDevice,
 } from "../api";
-import { AudioControls, KIND_LABEL, PowerButton } from "../components/AudioControls";
+import { MediaControls, KIND_LABEL, PowerButton } from "../components/MediaControls";
 import { SelectRow } from "../components/SelectRow";
 import { PageHeader } from "../components/PageHeader";
 import { Glyph } from "../components/glyphs";
 import { useViewport } from "../useViewport";
 import { T, domain, alpha } from "../theme";
 
-const ACCENT = domain.audio; // violet — audio's counterpart to the lamps' glow
+const ACCENT = domain.media; // violet — audio's counterpart to the lamps' glow
 
 /** Devices to show on the Audio control surface: drop de-dup **shadows** (a
  * duplicate of a native device — e.g. a Sonos also imported via HA) and disabled
  * devices. Both are managed on the Devices page, not controlled here. */
-const controllable = (list: AudioDevice[]) =>
+const controllable = (list: MediaDevice[]) =>
   list.filter((d) => !d.shadowed_by && !d.companion_of && d.enabled !== false);
 
-export function AudioPage() {
-  const [devices, setDevices] = useState<AudioDevice[]>([]);
+export function MediaPage() {
+  const [devices, setDevices] = useState<MediaDevice[]>([]);
   const [loading, setLoading] = useState(true);
   const { isMobile, isCompact } = useViewport();
 
@@ -37,10 +37,10 @@ export function AudioPage() {
     let timer: ReturnType<typeof setTimeout>;
 
     async function refresh(live: boolean) {
-      const list = controllable(await getAudioDevices());
+      const list = controllable(await getMediaDevices());
       if (cancelled) return;
       if (live && list.length > 0) {
-        const fresh = await Promise.all(list.map((d) => getAudioDevice(d.id)));
+        const fresh = await Promise.all(list.map((d) => getMediaDevice(d.id)));
         if (cancelled) return;
         setDevices(fresh.flatMap((d, i) => (d ? [d] : [list[i]])));
       } else {
@@ -61,11 +61,11 @@ export function AudioPage() {
   // snapshots — replace, don't merge.
   useEffect(() => {
     const es = new EventSource("/api/events");
-    es.addEventListener("audio_state", (raw) => {
+    es.addEventListener("media_state", (raw) => {
       const ev = JSON.parse((raw as MessageEvent).data) as {
         provider_id: string;
         device_id: string;
-        state: AudioDevice["state"];
+        state: MediaDevice["state"];
       };
       setDevices((prev) =>
         prev.map((d) =>
@@ -79,7 +79,7 @@ export function AudioPage() {
     return () => es.close();
   }, []);
 
-  function patchLocal(id: string, patch: Partial<AudioDevice["state"]>) {
+  function patchLocal(id: string, patch: Partial<MediaDevice["state"]>) {
     setDevices((prev) =>
       prev.map((d) => (d.id === id ? { ...d, state: { ...d.state, ...patch } } : d)),
     );
@@ -88,12 +88,12 @@ export function AudioPage() {
   // Re-fetch the device list with live state — used after a grouping change,
   // which alters the household topology (a synced-group zone appears/vanishes).
   const reloadDevices = useCallback(async () => {
-    const list = controllable(await getAudioDevices());
+    const list = controllable(await getMediaDevices());
     if (list.length === 0) {
       setDevices([]);
       return;
     }
-    const fresh = await Promise.all(list.map((d) => getAudioDevice(d.id)));
+    const fresh = await Promise.all(list.map((d) => getMediaDevice(d.id)));
     setDevices(fresh.flatMap((d, i) => (d ? [d] : [list[i]])));
   }, []);
 
@@ -141,7 +141,7 @@ export function AudioPage() {
           }}
         >
           {devices.map((d) => (
-            <AudioDeviceCard
+            <MediaDeviceCard
               key={d.id}
               device={d}
               peers={devices.filter(
@@ -162,16 +162,16 @@ export function AudioPage() {
   );
 }
 
-function AudioDeviceCard({
+function MediaDeviceCard({
   device,
   peers,
   onLocalPatch,
   onGroupingChanged,
   compact = false,
 }: {
-  device: AudioDevice;
-  peers: AudioDevice[];
-  onLocalPatch: (id: string, patch: Partial<AudioDevice["state"]>) => void;
+  device: MediaDevice;
+  peers: MediaDevice[];
+  onLocalPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
   onGroupingChanged: (providerId: string) => Promise<void>;
   compact?: boolean;
 }) {
@@ -185,14 +185,14 @@ function AudioDeviceCard({
 
   function togglePower() {
     onLocalPatch(device.id, { power: !s.power });
-    setAudioState(device.id, { power: !s.power });
+    setMediaState(device.id, { power: !s.power });
   }
 
   // This card's speaker coordinates the group; each selected peer joins it.
   async function group(memberIds: string[]) {
     setGroupBusy(true);
     try {
-      for (const m of memberIds) await groupAudioDevice(m, device.id);
+      for (const m of memberIds) await groupMediaDevice(m, device.id);
       setGroupOpen(false);
       await onGroupingChanged(device.provider_id);
     } finally {
@@ -203,7 +203,7 @@ function AudioDeviceCard({
   async function ungroup() {
     setGroupBusy(true);
     try {
-      await ungroupAudioDevice(device.id);
+      await ungroupMediaDevice(device.id);
       setGroupOpen(false);
       await onGroupingChanged(device.provider_id);
     } finally {
@@ -292,7 +292,7 @@ function AudioDeviceCard({
         {groupOpen && canGroup && (
           <GroupPanel peers={peers} busy={groupBusy} onGroup={group} onUngroup={ungroup} />
         )}
-        <AudioControls device={device} onLocalPatch={onLocalPatch} compact={compact} />
+        <MediaControls device={device} onLocalPatch={onLocalPatch} compact={compact} />
       </div>
     </section>
   );
@@ -306,7 +306,7 @@ function GroupPanel({
   onGroup,
   onUngroup,
 }: {
-  peers: AudioDevice[];
+  peers: MediaDevice[];
   busy: boolean;
   onGroup: (memberIds: string[]) => void;
   onUngroup: () => void;

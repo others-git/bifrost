@@ -6,7 +6,7 @@
 import { useEffect, useState } from "react";
 import {
   createRoom,
-  getAudioDevices,
+  getMediaDevices,
   getLights,
   getScenes,
   getPowerDevices,
@@ -15,14 +15,14 @@ import {
   mergeRooms,
   removeRoom,
   setRoomEnabled,
-  type AudioDevice,
+  type MediaDevice,
   type Light,
   type Scene,
   type PowerDevice,
   type ProviderGroupInfo,
   type Room,
 } from "../api";
-import { RoomVolumeStrip } from "../components/RoomAudio";
+import { RoomVolumeStrip } from "../components/RoomMedia";
 import { RoomDevicesPanel } from "../components/RoomDevices";
 import { RoomControlsPanel } from "../components/RoomControls";
 import { Glyph } from "../components/glyphs";
@@ -40,7 +40,7 @@ export function RoomsPage() {
   const [rooms, setRooms] = useState<Room[]>([]);
   const [providerGroups, setProviderGroups] = useState<ProviderGroupInfo[]>([]);
   const [lights, setLights] = useState<Light[]>([]);
-  const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
+  const [mediaDevices, setMediaDevices] = useState<MediaDevice[]>([]);
   const [powerDevices, setPowerDevices] = useState<PowerDevice[]>([]);
   const [scenes, setScenes] = useState<Scene[]>([]);
   const [showAdd, setShowAdd] = useState(false);
@@ -48,7 +48,7 @@ export function RoomsPage() {
   async function load() {
     setRooms(await getRooms());
     setProviderGroups(await getProviderGroups());
-    setAudioDevices(await getAudioDevices());
+    setMediaDevices(await getMediaDevices());
     setPowerDevices(await getPowerDevices());
     setScenes(await getScenes());
     const l = await getLights();
@@ -97,7 +97,7 @@ export function RoomsPage() {
             allRooms={rooms}
             lights={lights}
             providerGroups={providerGroups}
-            audioDevices={audioDevices}
+            mediaDevices={mediaDevices}
             powerDevices={powerDevices}
             scenes={scenes}
             dialogs={dialogs}
@@ -148,7 +148,7 @@ function RoomCard({
   allRooms,
   lights,
   providerGroups,
-  audioDevices,
+  mediaDevices,
   powerDevices,
   scenes,
   dialogs,
@@ -159,7 +159,7 @@ function RoomCard({
   allRooms: Room[];
   lights: Light[];
   providerGroups: ProviderGroupInfo[];
-  audioDevices: AudioDevice[];
+  mediaDevices: MediaDevice[];
   powerDevices: PowerDevice[];
   scenes: Scene[];
   // Owned by RoomsPage (which renders `dialogs.element`). A RoomCard must NOT
@@ -175,7 +175,7 @@ function RoomCard({
   const [editingControls, setEditingControls] = useState(false);
   const [merging, setMerging] = useState(false);
   const mergeCandidates = allRooms.filter((r) => r.id !== room.id);
-  const speakers = room.audio_devices.length;
+  const speakers = room.media_devices.length;
   const powerCount = room.power_device_ids.length;
 
   async function handleMerge(targetId: string) {
@@ -227,11 +227,11 @@ function RoomCard({
         {room.links.map((l) => (
           <span
             key={l.provider_group_id}
-            title={l.domain === "audio" ? "Synced audio room/zone" : "Synced provider room/zone"}
+            title={l.domain === "media" ? "Synced audio room/zone" : "Synced provider room/zone"}
             style={{ border: "1px solid var(--bf-border)", borderRadius: 4, padding: "0 0.35rem", color: "#9a9", fontSize: "0.72rem" }}
           >
             <span style={{ display: "inline-grid", placeItems: "center", verticalAlign: "-2px" }}>
-              <Glyph name={l.domain === "audio" ? "speaker" : "link"} size={13} />
+              <Glyph name={l.domain === "media" ? "speaker" : "link"} size={13} />
             </span>{" "}
             {l.name}
           </span>
@@ -284,13 +284,13 @@ function RoomCard({
       </div>
 
       {/* Live room volume (fans out to all members). */}
-      <RoomVolumeStrip room={room} devices={audioDevices} />
+      <RoomVolumeStrip room={room} devices={mediaDevices} />
 
       {editingDevices && (
         <RoomDevicesPanel
           room={room}
           lights={lights}
-          audioDevices={audioDevices}
+          mediaDevices={mediaDevices}
           powerDevices={powerDevices}
           providerGroups={providerGroups}
           onSaved={() => { setEditingDevices(false); onChanged(); }}
@@ -302,7 +302,7 @@ function RoomCard({
         <RoomControlsPanel
           room={room}
           lights={lights}
-          audioDevices={audioDevices}
+          mediaDevices={mediaDevices}
           powerDevices={powerDevices}
           scenes={scenes}
           onSaved={() => { setEditingControls(false); onChanged(); }}
@@ -391,19 +391,19 @@ function RoomEditForm({
         </div>
       )}
 
-      {providerGroups.some((pg) => pg.domain === "audio") && (
+      {providerGroups.some((pg) => pg.domain === "media") && (
         <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
           <span style={{ fontSize: "0.875rem", color: "var(--bf-dim)" }}>
             Linked audio rooms/zones <span style={{ color: "var(--bf-faint)" }}>(adds the room's speakers)</span>
           </span>
           {providerGroups
-            .filter((pg) => pg.domain === "audio")
+            .filter((pg) => pg.domain === "media")
             .map((pg) => (
               <SelectRow key={pg.id} checked={links.has(pg.id)} onToggle={() => toggleSet(setLinks, pg.id)}>
                 <span style={{ display: "inline-grid", placeItems: "center", verticalAlign: "-2px" }}><Glyph name="speaker" size={13} /></span>{" "}
                 {pg.name}
                 <span style={{ color: "var(--bf-faint)", fontSize: "0.75rem" }}>
-                  {pg.audio_device_ids.length} device{pg.audio_device_ids.length !== 1 ? "s" : ""}
+                  {pg.media_device_ids.length} device{pg.media_device_ids.length !== 1 ? "s" : ""}
                 </span>
               </SelectRow>
             ))}
