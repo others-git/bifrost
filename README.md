@@ -5,7 +5,7 @@
 <h1 align="center">Bifrost</h1>
 
 <p align="center">
-  A self-hosted smart-home hub — lights, audio, and power behind one fast UI, a clean API, and voice control. One binary, one SQLite file, one Docker image.
+  A self-hosted smart-home hub — lights, audio, and power behind one fast UI, a clean API, and voice control.
 </p>
 
 <p align="center">
