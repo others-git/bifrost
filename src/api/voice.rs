@@ -637,13 +637,14 @@ async fn run_command(state: &AppState, text: &str, context_room: Option<&str>) -
                     said: "Okay.".into(),
                 }
             }
-            // Native grammar couldn't parse this clause. Fall back to the LLM
-            // (the `chat` model, if configured) which maps it to a Command, then
-            // to HA Assist (the long tail — e.g. "play <title> on the TV"); if
-            // neither resolves it, report the original miss.
+            // Native grammar couldn't parse this clause. Try the TV content
+            // resolver ("open/play X on the TV"), then the LLM (the `chat` model),
+            // then HA Assist (the long tail); if none resolve it, report the miss.
             Clause::Unparsed { heard } => {
-                tracing::debug!(target: "bifrost::voice", path = "unparsed", heard = %heard, "grammar miss — trying LLM then HA Assist");
-                if let Some(result) = llm_fallback(state, &heard, context_room).await {
+                tracing::debug!(target: "bifrost::voice", path = "unparsed", heard = %heard, "grammar miss — trying TV resolver, LLM, then HA Assist");
+                if let Some(result) = tv_play_fallback(state, &heard).await {
+                    result
+                } else if let Some(result) = llm_fallback(state, &heard, context_room).await {
                     result
                 } else {
                     match ha_assist_fallback(state, &heard).await {
@@ -678,6 +679,39 @@ async fn run_command(state: &AppState, text: &str, context_room: Option<&str>) -
         said,
         clauses: results,
     }
+}
+
+/// Try to handle "open/play/watch \<X\> on/in \<device\>" natively via the TV
+/// content resolver, **before** the LLM/HA fallbacks. Returns `None` when the
+/// clause isn't a play-on-a-TV shape or no TV/remote resolves — so the LLM and
+/// HA Assist still get their turn (native-first, not native-only).
+async fn tv_play_fallback(state: &AppState, heard: &str) -> Option<ClauseResult> {
+    let c = heard.trim();
+    let lower = c.to_ascii_lowercase();
+    if !["play ", "open ", "launch ", "watch ", "put on "]
+        .iter()
+        .any(|v| lower.starts_with(v))
+    {
+        return None;
+    }
+    // "<query> on/in <device>" — split on the LAST " on "/" in ".
+    let (query, device) = c.rsplit_once(" on ").or_else(|| c.rsplit_once(" in "))?;
+    use crate::api::remote::ResolveOutcome;
+    let (said, ok) =
+        match crate::api::remote::resolve_and_play(state, device.trim(), query.trim()).await {
+            ResolveOutcome::Launched(name) | ResolveOutcome::OpenedPreferred(name) => {
+                (format!("Opened {name}."), true)
+            }
+            ResolveOutcome::Failed => ("I couldn't reach that TV.".to_string(), false),
+            // Not a TV we know, or nothing matched → let the LLM / HA Assist try.
+            ResolveOutcome::NoRemote | ResolveOutcome::NoMatch => return None,
+        };
+    tracing::debug!(target: "bifrost::voice", path = "tv_resolver", heard = %c, ok, "clause resolved by TV content resolver");
+    Some(ClauseResult {
+        heard: c.to_string(),
+        ok,
+        said,
+    })
 }
 
 /// Delegate an utterance the native grammar couldn't parse to HA Assist. Returns

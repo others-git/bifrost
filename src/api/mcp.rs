@@ -21,7 +21,9 @@ use crate::api::media::{
     list_device_favorites, play_device_favorite, set_media_receiver, ungroup_device,
 };
 use crate::api::power::{SetPowerOutcome, apply_power_state, list_all_power_devices};
-use crate::api::remote::{RemoteOutcome, apply_remote_command, list_remotes};
+use crate::api::remote::{
+    RemoteOutcome, ResolveOutcome, apply_remote_command, list_remotes, resolve_and_play,
+};
 use crate::api::rooms::{apply_room_state, effective_members, list_public_rooms};
 use crate::api::scenes::{SceneCaptureError, apply_scene_entries, capture_scene, list_all_scenes};
 use crate::models::media::{MediaCommand, MediaFavorite, TransportCmd};
@@ -253,6 +255,17 @@ pub struct LaunchAppRequest {
     /// App to launch: a Play Store package id (`com.netflix.ninja`) or a
     /// deep-link URL (`https://www.youtube.com/watch?v=…`).
     pub app: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct PlayOnRequest {
+    /// The TV/streamer (or its remote), by id or case-insensitive name (e.g.
+    /// "Bedroom TV"). A TV is accepted directly; its paired remote is used.
+    pub device: String,
+    /// What to do, in natural language: an app to open ("open Netflix" or just
+    /// "Netflix") or something to play ("play Bob's Burgers"). A title that
+    /// doesn't name a known app opens the TV's last-used app as the best guess.
+    pub query: String,
 }
 
 // ── Tools ────────────────────────────────────────────────────────────────────
@@ -675,6 +688,24 @@ impl BifrostMcp {
         Ok(remote_outcome(
             apply_remote_command(&self.state, &id, &cmd).await,
         ))
+    }
+
+    #[tool(
+        description = "Open an app or start something on a TV by name. \"open Netflix on the bedroom TV\" launches the app; \"play Bob's Burgers on the bedroom TV\" opens the TV's last-used app as the best guess for where it lives (in-app title search is limited today). Prefer this over launch_app for natural requests — it resolves app names and falls back to the last-used app."
+    )]
+    async fn play_on(
+        &self,
+        Parameters(req): Parameters<PlayOnRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match resolve_and_play(&self.state, &req.device, &req.query).await {
+            ResolveOutcome::Launched(name) => Ok(ok_text(format!("Opened {name}."))),
+            ResolveOutcome::OpenedPreferred(name) => Ok(ok_text(format!(
+                "Opened {name} (the last app used) — look there for what you asked for."
+            ))),
+            ResolveOutcome::NoMatch => Ok(fail("couldn't find a matching app on that device")),
+            ResolveOutcome::NoRemote => Ok(fail("no TV or remote found by that name")),
+            ResolveOutcome::Failed => Ok(fail("the device could not be reached")),
+        }
     }
 
     #[tool(

@@ -18,8 +18,11 @@ they can run entirely on your own hardware, or not at all.
      color, color-temperature, volume, mute, transport, scenes, and relative
      nudges, resolves targets by room/device name, and handles compound commands
      ("dim the office and pause the kitchen"). Fast and offline.
-   - **LLM fallback** — anything the grammar can't parse is handed to the *chat*
-     model (OpenAI-compatible tool-calling), which maps it to the **same** internal
+   - **TV content** — "open Netflix on the bedroom TV" / "play Bob's Burgers on the
+     living room TV" resolves to an app launch on that TV (matched by name; a title
+     with no matching app opens the TV's last-used app as the best guess).
+   - **LLM fallback** — anything still unparsed is handed to the *chat* model
+     (OpenAI-compatible tool-calling), which maps it to the **same** internal
      command and dispatches it the same way.
    - **Home Assistant Assist** — if HA is connected and the LLM didn't resolve it,
      the clause is delegated to HA Assist (the long tail, e.g. "play *Bob's

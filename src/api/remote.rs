@@ -526,9 +526,230 @@ async fn set_glyph_handler(
         .into_response()
 }
 
+// ── Content resolver (TV backlog #1) — matching core ─────────────────────────
+//
+// Pure logic for turning a spoken app/title query into a launchable app on a
+// remote's TV. The service layer feeds these the device's app catalog
+// (`list_remote_apps`) and acts on the result; kept pure so the matching rules
+// are unit-tested without a device or DB.
+
+/// `false` for surfaces that aren't a user app to launch or to treat as the
+/// "last-used" app — the screensaver, the launcher, and system UIs.
+fn is_launchable_app(app: &RemoteApp) -> bool {
+    if app.name == "Screensaver" {
+        return false;
+    }
+    let p = app.package.to_ascii_lowercase();
+    const SYSTEM: &[&str] = &[
+        "dream",
+        "screensaver",
+        "backdrop",
+        "launcher",
+        "systemui",
+        "settings",
+        "inputmethod",
+        "packageinstaller",
+        "tvrecommendations",
+        "frameworkpackagestubs",
+    ];
+    !SYSTEM.iter().any(|kw| p.contains(kw))
+}
+
+/// Best app match for `query` among the catalog, ignoring system surfaces. Tries,
+/// in order: exact (case-insensitive) friendly name, name prefix, name substring,
+/// then package substring.
+fn match_app<'a>(query: &str, apps: &'a [RemoteApp]) -> Option<&'a RemoteApp> {
+    let q = query.trim().to_ascii_lowercase();
+    if q.is_empty() {
+        return None;
+    }
+    let nm = |a: &RemoteApp| a.name.to_ascii_lowercase();
+    let find = |pred: &dyn Fn(&RemoteApp) -> bool| -> Option<&'a RemoteApp> {
+        apps.iter()
+            .filter(|a| is_launchable_app(a))
+            .find(|a| pred(a))
+    };
+    find(&|a| nm(a) == q)
+        .or_else(|| find(&|a| nm(a).starts_with(&q)))
+        .or_else(|| find(&|a| nm(a).contains(&q)))
+        .or_else(|| find(&|a| a.package.to_ascii_lowercase().contains(&q)))
+}
+
+/// The device's most-recently-used launchable app — the "preferred app" fast path
+/// for a title query (e.g. someone who only ever uses Hulu). The app with the
+/// latest `last_seen`; `None` if nothing usable has been seen.
+fn preferred_app(apps: &[RemoteApp]) -> Option<&RemoteApp> {
+    apps.iter()
+        .filter(|a| is_launchable_app(a) && a.last_seen.is_some())
+        .max_by(|a, b| a.last_seen.cmp(&b.last_seen))
+}
+
+/// What [`resolve_and_play`] did, for the caller to phrase a reply.
+pub(crate) enum ResolveOutcome {
+    /// Launched the app the query named (its friendly name).
+    Launched(String),
+    /// Title intent we couldn't map to an app — opened the TV's last-used app as
+    /// the best guess for where the title lives (its friendly name). True in-app
+    /// title search is a follow-up; callers may add an HA-Assist fallback.
+    OpenedPreferred(String),
+    /// No app matched the query.
+    NoMatch,
+    /// No remote/TV resolved from the device name.
+    NoRemote,
+    /// Reaching the device failed.
+    Failed,
+}
+
+/// Resolve a "device" name/id to the remote that drives its TV — a remote
+/// directly, or a media device (TV) whose paired remote we use.
+async fn resolve_remote(state: &AppState, query: &str) -> Option<String> {
+    let q = query.trim();
+    if q.is_empty() {
+        return None;
+    }
+    // 1) a remote by id or exact (case-insensitive) name
+    if let Ok(Some(id)) = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM remote_devices WHERE enabled = 1 AND (id = ?1 OR lower(name) = lower(?1)) LIMIT 1",
+    )
+    .bind(q)
+    .fetch_optional(&state.db)
+    .await
+    {
+        return Some(id);
+    }
+    // 2) a media device (TV) by id/name → its paired remote; else a substring
+    //    match on either the remote's or the TV's name.
+    sqlx::query_scalar::<_, String>(
+        "SELECT r.id FROM remote_devices r LEFT JOIN media_devices m ON r.paired_media_id = m.id
+         WHERE r.enabled = 1 AND (m.id = ?1 OR lower(m.name) = lower(?1)
+              OR lower(r.name) LIKE '%' || lower(?1) || '%'
+              OR lower(m.name) LIKE '%' || lower(?1) || '%') LIMIT 1",
+    )
+    .bind(q)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn launch(state: &AppState, remote_id: &str, app: &RemoteApp) -> ResolveOutcome {
+    let cmd = RemoteCommand::LaunchApp {
+        activity: app.package.clone(),
+    };
+    match apply_remote_command(state, remote_id, &cmd).await {
+        RemoteOutcome::Ok => ResolveOutcome::Launched(app.name.clone()),
+        _ => ResolveOutcome::Failed,
+    }
+}
+
+/// Resolve a natural phrase to a TV action. `device` is the TV/remote name/id;
+/// `query` is "open \<app\>" or "play/watch \<title\>" (or bare). An app intent
+/// (or a bare/“play” phrase that names a known app) launches that app; a title
+/// we can't map to an app opens the device's **last-used app** as the best guess
+/// for where it lives — the preferred-app fast path. (True in-app/title search is
+/// the next step; for now the caller can fall back to HA Assist for the title.)
+pub(crate) async fn resolve_and_play(
+    state: &AppState,
+    device: &str,
+    query: &str,
+) -> ResolveOutcome {
+    let Some(remote_id) = resolve_remote(state, device).await else {
+        return ResolveOutcome::NoRemote;
+    };
+    let q = query.trim();
+    let lower = q.to_ascii_lowercase();
+    let apps = list_remote_apps(state, &remote_id).await;
+
+    // Explicit app intent: "open/launch/start <app>".
+    if let Some(name) = ["open ", "launch ", "start "]
+        .iter()
+        .find_map(|v| lower.strip_prefix(v).map(|_| q[v.len()..].trim()))
+    {
+        return match match_app(name, &apps) {
+            Some(app) => launch(state, &remote_id, app).await,
+            None => ResolveOutcome::NoMatch,
+        };
+    }
+
+    // Title/bare intent: strip a leading play-verb. If the remainder names a
+    // known app, open it ("play netflix"); otherwise open the last-used app.
+    let title = ["play ", "watch ", "put on "]
+        .iter()
+        .find_map(|v| lower.strip_prefix(v).map(|_| q[v.len()..].trim()))
+        .unwrap_or(q);
+    if let Some(app) = match_app(title, &apps) {
+        return launch(state, &remote_id, app).await;
+    }
+    match preferred_app(&apps) {
+        Some(app) => match launch(state, &remote_id, app).await {
+            ResolveOutcome::Launched(n) => ResolveOutcome::OpenedPreferred(n),
+            other => other,
+        },
+        None => ResolveOutcome::NoMatch,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{app_display_name, prettify_package};
+    use super::{
+        RemoteApp, app_display_name, is_launchable_app, match_app, preferred_app, prettify_package,
+    };
+
+    fn app(package: &str, last_seen: Option<&str>) -> RemoteApp {
+        RemoteApp {
+            name: app_display_name(package),
+            package: package.to_string(),
+            pinned: false,
+            last_seen: last_seen.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn match_app_resolves_by_friendly_name_and_skips_screensaver() {
+        let apps = vec![
+            app("com.hulu.plus", Some("2026-06-19 10:00:00")),
+            app(
+                "com.google.android.apps.tv.dreamx",
+                Some("2026-06-19 11:00:00"),
+            ),
+            app("com.netflix.ninja", None),
+        ];
+        assert_eq!(match_app("hulu", &apps).unwrap().package, "com.hulu.plus");
+        assert_eq!(
+            match_app("netflix", &apps).unwrap().package,
+            "com.netflix.ninja"
+        );
+        // The screensaver is never a launch target, even by name.
+        assert!(match_app("screensaver", &apps).is_none());
+        assert!(match_app("nope", &apps).is_none());
+        assert!(match_app("", &apps).is_none());
+    }
+
+    #[test]
+    fn preferred_app_is_the_most_recently_used_non_system_app() {
+        let apps = vec![
+            app("com.hulu.plus", Some("2026-06-19 10:00:00")),
+            // Newer, but it's the screensaver — must be excluded.
+            app(
+                "com.google.android.apps.tv.dreamx",
+                Some("2026-06-19 23:59:00"),
+            ),
+            app("com.netflix.ninja", Some("2026-06-18 09:00:00")),
+        ];
+        assert_eq!(preferred_app(&apps).unwrap().package, "com.hulu.plus");
+        // Nothing seen → no preference.
+        assert!(preferred_app(&[app("com.hulu.plus", None)]).is_none());
+    }
+
+    #[test]
+    fn is_launchable_app_excludes_launcher_and_settings() {
+        assert!(!is_launchable_app(&app(
+            "com.google.android.tvlauncher",
+            None
+        )));
+        assert!(!is_launchable_app(&app("com.android.tv.settings", None)));
+        assert!(is_launchable_app(&app("com.hulu.plus", None)));
+    }
 
     #[test]
     fn app_display_name_matches_brand_across_package_variants() {
