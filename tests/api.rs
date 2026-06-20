@@ -7003,6 +7003,55 @@ async fn standby_tv_reads_on_and_reachable_via_paired_remote() {
 }
 
 #[tokio::test]
+async fn remote_surfaces_on_the_primary_when_paired_to_a_companion() {
+    let ha = ha_remote_mock().await;
+    let (app, prov_id, db) = helpers::test_app_with_ha_db(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Two rows for one physical TV: a surface (primary) the user merged the other
+    // into, and the merged-in companion the remote is hw-paired to. The remote
+    // belongs to the composite, so it must surface on the primary regardless of
+    // which row it's literally paired to.
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state)
+         VALUES ('tvP', ?, 'media_player.tv', 'BRAVIA', 'tv', '{}', '{\"power\":true,\"volume\":0,\"mute\":false}')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, companion_of)
+         VALUES ('tvC', ?, 'bravia.tv', 'BRAVIA', 'tv', '{}', '{\"power\":true,\"volume\":0,\"mute\":false}', 'tvP')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO remote_devices (id, provider_id, device_id, name, enabled, paired_media_id)
+         VALUES ('rem', ?, 'remote.tv', 'BRAVIA', 1, 'tvC')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/media/devices", &cookie))
+        .await
+        .unwrap();
+    let devices = helpers::response_json(resp).await;
+    let primary = devices
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == "tvP")
+        .expect("primary in list");
+    assert_eq!(primary["remote_id"], "rem");
+}
+
+#[tokio::test]
 async fn smarttv_pair_without_session_returns_401() {
     let app = helpers::test_app_with_password().await;
     let resp = app

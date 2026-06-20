@@ -231,6 +231,7 @@ fn merge_companion_into(primary: &mut MediaDeviceRow, companion: &MediaDeviceRow
     primary.capabilities.sources |= companion.capabilities.sources;
     primary.capabilities.favorites |= companion.capabilities.favorites;
     primary.capabilities.now_playing |= companion.capabilities.now_playing;
+    primary.capabilities.grouping |= companion.capabilities.grouping;
 }
 
 /// The companion rows (M26) merged into `primary_id`, if any.
@@ -325,15 +326,17 @@ fn apply_composite_power(device: &mut MediaDeviceRow, members: &[PowerSignal]) {
     }
 }
 
-/// Stored state of every enabled remote paired to a media device, keyed by that
-/// media device id — the remote's contribution to its TV's composite power /
-/// reachability (cheap; no live round trip).
+/// Stored state of every enabled remote paired to a media device, keyed by the
+/// **surface** (control) device id — the primary if the paired device is itself a
+/// companion, so a remote paired to any composite member contributes to the
+/// primary's power / reachability (cheap; no live round trip).
 async fn load_paired_remote_states(
     state: &AppState,
 ) -> std::collections::HashMap<String, RemoteState> {
     sqlx::query(
-        "SELECT paired_media_id, last_state FROM remote_devices
-         WHERE enabled = 1 AND paired_media_id IS NOT NULL",
+        "SELECT COALESCE(m.companion_of, m.id) AS surface_id, r.last_state
+         FROM remote_devices r JOIN media_devices m ON r.paired_media_id = m.id
+         WHERE r.enabled = 1",
     )
     .fetch_all(&state.db)
     .await
@@ -341,20 +344,24 @@ async fn load_paired_remote_states(
     .unwrap_or_default()
     .into_iter()
     .filter_map(|r| {
-        let media_id: String = r.get("paired_media_id");
+        let surface_id: String = r.get("surface_id");
         let st: RemoteState = r
             .get::<Option<String>, _>("last_state")
             .and_then(|s| serde_json::from_str(&s).ok())?;
-        Some((media_id, st))
+        Some((surface_id, st))
     })
     .collect()
 }
 
-/// Stored state of the single remote paired to `media_id`, if any.
+/// Stored state of the single remote paired to `media_id`'s composite (the device
+/// or any of its companions), if any.
 async fn load_one_paired_remote_state(state: &AppState, media_id: &str) -> Option<RemoteState> {
     let row = sqlx::query(
-        "SELECT last_state FROM remote_devices WHERE paired_media_id = ? AND enabled = 1 LIMIT 1",
+        "SELECT r.last_state FROM remote_devices r
+           JOIN media_devices cm ON r.paired_media_id = cm.id
+          WHERE r.enabled = 1 AND (cm.id = ? OR cm.companion_of = ?) LIMIT 1",
     )
+    .bind(media_id)
     .bind(media_id)
     .fetch_optional(&state.db)
     .await
@@ -382,7 +389,11 @@ pub(crate) async fn list_all_devices(state: &AppState) -> Result<Vec<MediaDevice
                 (SELECT rl.room_id FROM room_links rl
                    JOIN provider_group_media_devices pga ON pga.provider_group_id = rl.provider_group_id
                    WHERE pga.media_device_id = media_devices.id LIMIT 1) AS inherited_room_id,
-                (SELECT id FROM remote_devices WHERE paired_media_id = media_devices.id AND enabled = 1 LIMIT 1) AS remote_id
+                (SELECT r.id FROM remote_devices r
+                   JOIN media_devices cm ON r.paired_media_id = cm.id
+                  WHERE r.enabled = 1
+                    AND (cm.id = media_devices.id OR cm.companion_of = media_devices.id)
+                  LIMIT 1) AS remote_id
          FROM media_devices ORDER BY name",
     )
     .fetch_all(&state.db)
@@ -462,7 +473,10 @@ pub(crate) async fn get_device_live(
                 (SELECT rl.room_id FROM room_links rl
                    JOIN provider_group_media_devices pga ON pga.provider_group_id = rl.provider_group_id
                    WHERE pga.media_device_id = a.id LIMIT 1) AS inherited_room_id,
-                (SELECT id FROM remote_devices WHERE paired_media_id = a.id AND enabled = 1 LIMIT 1) AS remote_id,
+                (SELECT r.id FROM remote_devices r
+                   JOIN media_devices cm ON r.paired_media_id = cm.id
+                  WHERE r.enabled = 1 AND (cm.id = a.id OR cm.companion_of = a.id)
+                  LIMIT 1) AS remote_id,
                 p.provider_type, p.credentials
          FROM media_devices a JOIN providers p ON a.provider_id = p.id
          WHERE a.id = ? AND p.enabled = 1",
@@ -837,6 +851,25 @@ async fn load_composite_backings(state: &AppState, id: &str) -> Vec<Backing> {
         .collect()
 }
 
+/// The composite member (highest-priority) whose capability `pred` is true — so an
+/// operation routes to whichever row can actually do it, regardless of which is the
+/// primary. Falls back to `id` itself when nothing matches.
+async fn capable_backing(
+    state: &AppState,
+    id: &str,
+    pred: fn(&MediaCapabilities) -> bool,
+) -> String {
+    load_composite_backings(state, id)
+        .await
+        .iter()
+        .filter(|b| pred(&b.capabilities))
+        .fold(None::<&Backing>, |acc, b| match acc {
+            Some(a) if a.priority >= b.priority => Some(a),
+            _ => Some(b),
+        })
+        .map_or_else(|| id.to_string(), |b| b.id.clone())
+}
+
 /// Apply a command to a device. If `id` is a composite **primary** (has
 /// companions merged in), route each field to the backing that owns it (M26);
 /// otherwise drive the single device directly (with its own receiver split).
@@ -893,8 +926,11 @@ async fn apply_routed(
 /// provider `turn_on` (see [`crate::api::remote::apply_remote_command`]).
 async fn wake_paired_remote(state: &AppState, media_id: &str) -> bool {
     let remote_id: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM remote_devices WHERE paired_media_id = ? AND enabled = 1 LIMIT 1",
+        "SELECT r.id FROM remote_devices r
+           JOIN media_devices cm ON r.paired_media_id = cm.id
+          WHERE r.enabled = 1 AND (cm.id = ? OR cm.companion_of = ?) LIMIT 1",
     )
+    .bind(media_id)
     .bind(media_id)
     .fetch_optional(&state.db)
     .await
@@ -1057,6 +1093,9 @@ pub(crate) enum FavoritesOutcome {
 }
 
 pub(crate) async fn list_device_favorites(state: &AppState, id: &str) -> FavoritesOutcome {
+    // Favorites live on whichever composite member advertises them (e.g. a Sonos
+    // companion merged into a TV), not necessarily the primary surface.
+    let id = &capable_backing(state, id, |c| c.favorites).await;
     let (device_id, provider) = match lookup_media_provider(state, id).await {
         ProviderLookup::Found(d, p) => (d, p),
         ProviderLookup::NotFound => return FavoritesOutcome::NotFound,
@@ -1093,6 +1132,7 @@ pub(crate) async fn play_device_favorite(
     id: &str,
     favorite_id: &str,
 ) -> PlayFavoriteOutcome {
+    let id = &capable_backing(state, id, |c| c.favorites).await;
     let (device_id, provider) = match lookup_media_provider(state, id).await {
         ProviderLookup::Found(d, p) => (d, p),
         ProviderLookup::NotFound => return PlayFavoriteOutcome::NotFound,
@@ -1247,6 +1287,33 @@ pub(crate) fn group_response(outcome: GroupOutcome) -> axum::response::Response 
 /// `media_player.play_media`; richer resolution (app deep-links, title search,
 /// the "play X on the bedroom TV" voice path) is future work.
 pub(crate) async fn cast_to_device(
+    state: &AppState,
+    id: &str,
+    content_id: &str,
+    content_type: &str,
+) -> SetMediaOutcome {
+    // `play_media` has no capability flag, so cast is tried across the composite's
+    // members (primary first): a TV's native row may not cast while its HA
+    // companion does — and which is the primary must not matter.
+    let backings = load_composite_backings(state, id).await;
+    let ids: Vec<String> = if backings.len() <= 1 {
+        vec![id.to_string()]
+    } else {
+        backings.iter().map(|b| b.id.clone()).collect()
+    };
+    let mut last = SetMediaOutcome::NotFound;
+    for bid in &ids {
+        match cast_one(state, bid, content_id, content_type).await {
+            SetMediaOutcome::Ok => return SetMediaOutcome::Ok,
+            // This member can't cast (or failed) — try the next composite member.
+            other => last = other,
+        }
+    }
+    last
+}
+
+/// Cast to one concrete device (no composite resolution).
+async fn cast_one(
     state: &AppState,
     id: &str,
     content_id: &str,
