@@ -63,22 +63,19 @@ export function LightFlyout({
   }
 
   function onChange(change: LightControlChange) {
-    const next: LightState = { ...(st ?? {}), on: true, effect: undefined };
+    // Send only the dimension that changed. Brightness and on/off are independent
+    // of the colour/temp/effect mode, so a brightness change carries no mode and
+    // the server preserves (and re-asserts) any running effect instead of dropping
+    // it. The three modes are mutually exclusive — the server clears the other two
+    // when one is set — so we never need to send them together.
+    const next: LightState = { on: true };
     if (change.field === "brightness") {
       if (light.capabilities.dimmable) next.brightness = change.brightness;
     } else if (change.field === "color") {
-      if (light.capabilities.color_rgb) {
-        next.color = rgbToXy(...hexToRgb(change.hex));
-        next.color_temp_mirek = undefined;
-      }
+      if (light.capabilities.color_rgb) next.color = rgbToXy(...hexToRgb(change.hex));
     } else if (change.field === "temp") {
-      if (light.capabilities.color_temperature) {
-        next.color_temp_mirek = change.mirek;
-        next.color = undefined;
-      }
+      if (light.capabilities.color_temperature) next.color_temp_mirek = change.mirek;
     } else if (change.field === "effect") {
-      // The third exclusive mode keeps the current colour so the provider renders
-      // the effect in it (e.g. a LIFX pulse pulses the colour, not white).
       next.effect = change.effect;
     }
     commit(next);

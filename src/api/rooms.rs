@@ -1281,9 +1281,16 @@ pub(crate) async fn apply_uniform_state(
         let db = state.db.clone();
         let target = new_state.clone();
         jobs.push(async move {
-            match provider.set_state(&m.device_id, &target).await {
+            // Merge onto this member's own current state so a room brightness-/on-
+            // only cascade doesn't cancel a member's running effect (and each
+            // member keeps its own colour/mode).
+            let merged = crate::api::lights::merge_light_state(
+                crate::api::lights::current_light_state(&db, &m.light_id).await,
+                &target,
+            );
+            match provider.set_state(&m.device_id, &merged).await {
                 Ok(()) => {
-                    crate::api::lights::persist_light_state(&db, &m.light_id, &target).await;
+                    crate::api::lights::write_light_state(&db, &m.light_id, &merged).await;
                     true
                 }
                 Err(e) => {

@@ -143,19 +143,34 @@ pub(crate) enum SetLightOutcome {
 /// exactly one mode — so setting `color` clears any cached `color_temp_mirek`
 /// and vice-versa, letting the UI tell which mode the light is in from
 /// `last_state` alone.
-pub(crate) async fn persist_light_state(db: &sqlx::SqlitePool, light_id: &str, new: &LightState) {
-    let current =
-        sqlx::query_scalar::<_, Option<String>>("SELECT last_state FROM lights WHERE id = ?")
-            .bind(light_id)
-            .fetch_optional(db)
-            .await
-            .ok()
-            .flatten()
-            .flatten();
-    let mut merged: LightState = current
+/// A light's cached `last_state` (default if it has none yet).
+pub(crate) async fn current_light_state(db: &sqlx::SqlitePool, light_id: &str) -> LightState {
+    sqlx::query_scalar::<_, Option<String>>("SELECT last_state FROM lights WHERE id = ?")
+        .bind(light_id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .flatten()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
 
+/// Merge an incoming write onto the light's current state. `on` / `brightness` /
+/// `reachable` are **independent** dimensions; colour, colour-temperature, and a
+/// dynamic effect are **mutually exclusive** modes — setting any one clears the
+/// other two, so the result always names one honest mode (this is what lets a
+/// scene snapshot capture/reapply an effect without a stale effect leaking onto a
+/// now-plain-colour light).
+///
+/// Crucially, a write that touches **none** of the three mode fields (e.g. a
+/// brightness-only or on/off change) **preserves the running mode**. Sending this
+/// merged state to the provider — rather than the bare incoming patch — is what
+/// keeps adjusting brightness from cancelling a running effect: a provider like HA
+/// turns the effect off on a `light.turn_on` that omits `effect`, so we re-assert
+/// it. Generic across every provider and surface (session / v1 / MCP / voice /
+/// room cascade).
+pub(crate) fn merge_light_state(mut merged: LightState, new: &LightState) -> LightState {
     merged.on = new.on;
     if new.brightness.is_some() {
         merged.brightness = new.brightness;
@@ -163,11 +178,6 @@ pub(crate) async fn persist_light_state(db: &sqlx::SqlitePool, light_id: &str, n
     if new.reachable.is_some() {
         merged.reachable = new.reachable;
     }
-    // Colour, colour-temperature, and a dynamic effect are mutually exclusive
-    // modes — a light is in exactly one. Setting any one clears the other two so
-    // `last_state` always names a single honest mode; this is what lets a Home
-    // Scene snapshot capture and reapply an effect without a stale effect leaking
-    // onto a light that has since gone back to a plain colour.
     if new.color.is_some() {
         merged.color = new.color.clone();
         merged.color_temp_mirek = None;
@@ -185,8 +195,12 @@ pub(crate) async fn persist_light_state(db: &sqlx::SqlitePool, light_id: &str, n
             merged.color_temp_mirek = None;
         }
     }
+    merged
+}
 
-    let Ok(json) = serde_json::to_string(&merged) else {
+/// Write a light's full resolved state to the cache.
+pub(crate) async fn write_light_state(db: &sqlx::SqlitePool, light_id: &str, state: &LightState) {
+    let Ok(json) = serde_json::to_string(state) else {
         return;
     };
     let _ =
@@ -195,6 +209,11 @@ pub(crate) async fn persist_light_state(db: &sqlx::SqlitePool, light_id: &str, n
             .bind(light_id)
             .execute(db)
             .await;
+}
+
+pub(crate) async fn persist_light_state(db: &sqlx::SqlitePool, light_id: &str, new: &LightState) {
+    let merged = merge_light_state(current_light_state(db, light_id).await, new);
+    write_light_state(db, light_id, &merged).await;
 }
 
 /// Resolve a controllable light to its provider device id + a freshly built
@@ -247,10 +266,14 @@ pub(crate) async fn apply_light_state(
         }
     };
 
-    tracing::debug!(light = %id, device = %device_id, state = ?new_state, "set_state → provider");
-    match provider.set_state(&device_id, new_state).await {
+    // Merge onto the current state before driving the provider, so it receives the
+    // full honest mode — in particular a brightness-/on-only change re-asserts a
+    // running effect instead of dropping it (see `merge_light_state`).
+    let merged = merge_light_state(current_light_state(&state.db, id).await, new_state);
+    tracing::debug!(light = %id, device = %device_id, state = ?merged, "set_state → provider");
+    match provider.set_state(&device_id, &merged).await {
         Ok(()) => {
-            persist_light_state(&state.db, id, new_state).await;
+            write_light_state(&state.db, id, &merged).await;
             tracing::debug!(light = %id, "set_state ok");
             SetLightOutcome::Ok
         }
@@ -406,4 +429,89 @@ pub(crate) fn build_provider(
 ) -> anyhow::Result<Box<dyn crate::providers::LightProvider>> {
     let creds_json = state.decrypt_credentials(credentials_enc)?;
     state.registry.build(provider_type, &creds_json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_light_state;
+    use crate::models::{Color, LightState};
+
+    fn effecting() -> LightState {
+        LightState {
+            on: true,
+            brightness: Some(80.0),
+            effect: Some("Flames".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn brightness_only_write_preserves_the_running_effect() {
+        // The Nanoleaf/HA bug: adjusting brightness must not cancel a running
+        // effect. A write that names no mode keeps the current one.
+        let new = LightState {
+            on: true,
+            brightness: Some(20.0),
+            ..Default::default()
+        };
+        let merged = merge_light_state(effecting(), &new);
+        assert_eq!(merged.brightness, Some(20.0));
+        assert_eq!(merged.effect.as_deref(), Some("Flames"));
+        assert!(merged.color.is_none());
+    }
+
+    #[test]
+    fn on_off_write_preserves_the_running_effect() {
+        let new = LightState {
+            on: false,
+            ..Default::default()
+        };
+        let merged = merge_light_state(effecting(), &new);
+        assert!(!merged.on);
+        assert_eq!(merged.effect.as_deref(), Some("Flames"));
+    }
+
+    #[test]
+    fn setting_a_colour_clears_the_effect_and_temp() {
+        let mut base = effecting();
+        base.color_temp_mirek = None;
+        let new = LightState {
+            on: true,
+            color: Some(Color::from_rgb(255, 0, 0)),
+            ..Default::default()
+        };
+        let merged = merge_light_state(base, &new);
+        assert!(merged.color.is_some());
+        assert!(merged.effect.is_none());
+        assert!(merged.color_temp_mirek.is_none());
+    }
+
+    #[test]
+    fn setting_temp_clears_colour_and_effect() {
+        let base = LightState {
+            on: true,
+            color: Some(Color::from_rgb(0, 255, 0)),
+            ..Default::default()
+        };
+        let new = LightState {
+            on: true,
+            color_temp_mirek: Some(250),
+            ..Default::default()
+        };
+        let merged = merge_light_state(base, &new);
+        assert_eq!(merged.color_temp_mirek, Some(250));
+        assert!(merged.color.is_none());
+        assert!(merged.effect.is_none());
+    }
+
+    #[test]
+    fn a_clear_effect_token_clears_the_effect() {
+        let new = LightState {
+            on: true,
+            effect: Some("no_effect".into()),
+            ..Default::default()
+        };
+        let merged = merge_light_state(effecting(), &new);
+        assert!(merged.effect.is_none());
+    }
 }
