@@ -111,6 +111,7 @@ fn parse_wled_state(s: &WledState) -> LightState {
         reachable: None,
         effect: None,
         transport: None,
+        ip: None,
     }
 }
 
@@ -394,6 +395,7 @@ mod tests {
             reachable: None,
             effect: None,
             transport: None,
+            ip: None,
         };
         WledProvider::new_for_test(server.uri())
             .unwrap()

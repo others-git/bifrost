@@ -353,44 +353,28 @@ function TvAio({
   receiverName?: string;
 }) {
   const remote = useRemote(remoteId);
-  const cap = device.capabilities;
-  const hasWatch = cap.now_playing || cap.transport || cap.sources || cap.favorites;
-
-  type TvTab = "remote" | "watch" | "apps";
-  const tabs: { value: TvTab; label: string }[] = [{ value: "remote", label: "Remote" }];
-  if (hasWatch) tabs.push({ value: "watch", label: "Watch" });
-  tabs.push({ value: "apps", label: "Apps" });
-
-  const [tab, setTab] = useState<TvTab>("remote");
-  // Guard against a stale selection if the available surfaces change.
-  const active = tabs.some((t) => t.value === tab) ? tab : tabs[0].value;
-
-  // Bound to a receiver (M22): the remote's volume/mute drive the device, which
-  // the backend routes to the receiver — not the TV's own volume keys.
-  const onVolume = device.receiver_id
-    ? (k: "volume_up" | "volume_down" | "mute") => {
-        const st = device.state;
-        if (k === "mute") {
-          onLocalPatch(device.id, { mute: !st.mute });
-          setMediaState(device.id, { mute: !st.mute });
-        } else {
-          const v = Math.max(0, Math.min(100, (st.volume ?? 0) + (k === "volume_up" ? 2 : -2)));
-          onLocalPatch(device.id, { volume: v });
-          setMediaState(device.id, { volume: v });
-        }
-      }
-    : undefined;
+  const [tab, setTab] = useState<"remote" | "apps">("remote");
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "0.9rem" }}>
-      {tabs.length > 1 && (
-        <Segmented value={active} onChange={setTab} accent={color.violet} options={tabs} />
-      )}
-      {active === "remote" && <RemotePad press={remote.press} onVolume={onVolume} />}
-      {active === "watch" && (
-        <MediaControls device={device} onLocalPatch={onLocalPatch} receiverName={receiverName} hideTransport />
-      )}
-      {active === "apps" && (
+      <Segmented
+        value={tab}
+        onChange={setTab}
+        variant="outline"
+        accent={color.violet}
+        options={[
+          { value: "remote", label: "Remote" },
+          { value: "apps", label: "Apps" },
+        ]}
+      />
+      {tab === "remote" ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.9rem" }}>
+          {/* What's on + volume sit above the keypad — the old "Watch" tab, folded in. */}
+          <TvNowPlaying device={device} />
+          <FancyVolume device={device} onLocalPatch={onLocalPatch} receiverName={receiverName} />
+          <RemotePad press={remote.press} />
+        </div>
+      ) : (
         <RemoteApps
           apps={remote.apps}
           currentApp={remote.currentApp}
@@ -398,6 +382,136 @@ function TvAio({
           onPin={remote.togglePin}
         />
       )}
+    </div>
+  );
+}
+
+/** A compact "what's on the TV" line — the now-playing title (with a secondary
+ * line) or the current source / home screen. Sits at the top of the Remote tab. */
+function TvNowPlaying({ device }: { device: MediaDevice }) {
+  const np = device.state.now_playing;
+  const title = np?.title?.trim();
+  const sub = np?.artist ?? np?.album;
+  const source = device.state.source;
+  const primary = title || (source ? `Source · ${source}` : "Home screen");
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", minWidth: 0, padding: "0.1rem" }}>
+      <span style={{ display: "grid", placeItems: "center", color: color.violet, flexShrink: 0 }}>
+        <Glyph name="tv" size={16} />
+      </span>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: "0.9rem", color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {primary}
+        </div>
+        {title && sub && (
+          <div style={{ fontSize: "0.74rem", color: T.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {sub}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** A glassy custom volume slider — a translucent track with a glowing violet fill
+ * and a haloed thumb, click/drag to set. Replaces the native range input.
+ * Volume/mute route to a bound receiver server-side, so this drives them directly. */
+function FancyVolume({
+  device,
+  onLocalPatch,
+  receiverName,
+}: {
+  device: MediaDevice;
+  onLocalPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
+  receiverName?: string;
+}) {
+  const st = device.state;
+  const volume = st.volume ?? 0;
+  const muted = st.mute ?? false;
+  const trackRef = useRef<HTMLDivElement>(null);
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  function commit(v: number) {
+    const clamped = Math.max(0, Math.min(100, Math.round(v)));
+    onLocalPatch(device.id, { volume: clamped });
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setMediaState(device.id, { volume: clamped }), 200);
+  }
+  function fromPointer(clientX: number) {
+    const el = trackRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    commit(((clientX - r.left) / r.width) * 100);
+  }
+  function toggleMute() {
+    onLocalPatch(device.id, { mute: !muted });
+    setMediaState(device.id, { mute: !muted });
+  }
+
+  const fill = muted ? 0 : volume;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "0.7rem" }}>
+        <button
+          onClick={toggleMute}
+          title={muted ? "Unmute" : "Mute"}
+          style={{ background: "none", border: "none", cursor: "pointer", padding: 0, color: muted ? color.violet : T.text, display: "grid", placeItems: "center" }}
+        >
+          <Glyph name={muted ? "mute" : "volume"} size={18} />
+        </button>
+        <div
+          ref={trackRef}
+          onPointerDown={(e) => {
+            e.currentTarget.setPointerCapture(e.pointerId);
+            fromPointer(e.clientX);
+          }}
+          onPointerMove={(e) => {
+            if (e.buttons === 1) fromPointer(e.clientX);
+          }}
+          style={{
+            position: "relative",
+            flex: 1,
+            height: 10,
+            borderRadius: 999,
+            cursor: "pointer",
+            background: alpha(color.text, 0.1),
+            boxShadow: "inset 0 1px 2px rgba(0,0,0,0.45)",
+            touchAction: "none",
+          }}
+        >
+          <div
+            style={{
+              position: "absolute",
+              left: 0,
+              top: 0,
+              bottom: 0,
+              width: `${fill}%`,
+              borderRadius: 999,
+              background: `linear-gradient(90deg, ${alpha(color.violet, 0.6)}, ${color.violet})`,
+              boxShadow: muted ? "none" : `0 0 12px ${alpha(color.violet, 0.55)}`,
+              transition: "width 0.08s",
+            }}
+          />
+          <div
+            style={{
+              position: "absolute",
+              top: "50%",
+              left: `${fill}%`,
+              transform: "translate(-50%, -50%)",
+              width: 18,
+              height: 18,
+              borderRadius: "50%",
+              background: "#fff",
+              boxShadow: `0 0 0 4px ${alpha(color.violet, 0.3)}, 0 2px 6px rgba(0,0,0,0.55)`,
+              transition: "left 0.08s",
+            }}
+          />
+        </div>
+        <span style={{ fontSize: "0.8rem", color: T.dim, width: 28, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+          {volume}
+        </span>
+      </div>
+      {receiverName && <div style={{ fontSize: "0.7rem", color: T.dim }}>Volume → {receiverName}</div>}
     </div>
   );
 }

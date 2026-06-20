@@ -586,6 +586,7 @@ fn parse_light_state(e: &HaEntity) -> LightState {
         reachable: Some(e.state != "unavailable"),
         effect,
         transport: None,
+        ip: None,
     }
 }
 
@@ -664,6 +665,7 @@ fn parse_media_state(e: &HaEntity) -> MediaState {
         now_playing,
         reachable: Some(reachable),
         group_coordinator: None, // HA media_player grouping not modelled yet
+        ip: None,
     }
 }
 
@@ -1158,6 +1160,7 @@ fn parse_remote_state(e: &HaEntity) -> RemoteState {
         on: e.state == "on",
         current_app: attr_str(&e.attributes, "current_activity"),
         reachable: Some(e.state != "unavailable"),
+        ip: None,
     }
 }
 

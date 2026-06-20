@@ -54,17 +54,9 @@ export function useRemote(remoteId: string) {
   return { currentApp, apps, send, press, togglePin };
 }
 
-/** The keypad — circular D-pad + OK on top, then nav, volume, and transport rows
- * (Prev · Play/Pause · Next sit beneath the D-pad). */
-export function RemotePad({
-  press,
-  onVolume,
-}: {
-  press: (k: RemoteKey) => () => void;
-  /** When the TV's volume is owned by a bound receiver (M22), the volume keys
-   * call this instead of sending TV remote keys. */
-  onVolume?: (key: "volume_up" | "volume_down" | "mute") => void;
-}) {
+/** The keypad — circular D-pad + OK on top, then the nav and transport rows
+ * (Prev · Play/Pause · Next). Volume lives above the keypad as a slider, not here. */
+export function RemotePad({ press }: { press: (k: RemoteKey) => () => void }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "0.9rem" }}>
       {/* Circular D-pad */}
@@ -115,13 +107,6 @@ export function RemotePad({
         <Key glyph="back" label="Back" onClick={press("back")} />
         <Key glyph="home" label="Home" onClick={press("home")} />
         <Key glyph="menu" label="Menu" onClick={press("menu")} />
-      </Row>
-
-      {/* Volume — routes to the receiver when the device is bound (onVolume). */}
-      <Row>
-        <Key glyph="volume_down" label="Volume down" onClick={onVolume ? () => onVolume("volume_down") : press("volume_down")} />
-        <Key glyph="mute" label="Mute" onClick={onVolume ? () => onVolume("mute") : press("mute")} />
-        <Key glyph="volume" label="Volume up" onClick={onVolume ? () => onVolume("volume_up") : press("volume_up")} />
       </Row>
 
       {/* Transport */}

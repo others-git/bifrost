@@ -636,6 +636,7 @@ impl MediaProvider for OnkyoProvider {
             now_playing,
             reachable: Some(true),
             group_coordinator: None, // receiver zones aren't sync groups
+            ip: Some(self.host.clone()),
         })
     }
 

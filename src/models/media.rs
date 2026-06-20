@@ -98,6 +98,10 @@ pub struct MediaState {
     /// control from them (no group device is stored). `None` = standalone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_coordinator: Option<String>,
+    /// The device's network address, when the provider knows it (a Sonos player's
+    /// IP, a TV's host, …). Read-only status surfaced on the Devices page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

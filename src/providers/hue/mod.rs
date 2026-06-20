@@ -327,6 +327,7 @@ fn hue_resource_to_light(r: HueLightResource, hw_id: Option<String>) -> Light {
             reachable: None,
             effect,
             transport: None,
+            ip: None, // Zigbee bulbs have no IP of their own (behind the bridge)
         },
         capabilities: LightCapabilities {
             dimmable: true,
@@ -767,6 +768,7 @@ pub fn parse_patch_from_event(item: &serde_json::Value) -> crate::models::LightS
         reachable: None,
         effect,
         transport: None,
+        ip: None,
     }
 }
 
@@ -901,6 +903,7 @@ mod tests {
             reachable: None,
             effect: None,
             transport: None,
+            ip: None,
         };
         mock_provider(&server)
             .await
@@ -980,6 +983,7 @@ mod tests {
             reachable: None,
             effect: None,
             transport: None,
+            ip: None,
         };
 
         let start = std::time::Instant::now();

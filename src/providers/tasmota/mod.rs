@@ -126,6 +126,7 @@ fn parse_tasmota_state(s: &TasmotaState) -> LightState {
         reachable: None,
         effect: None,
         transport: None,
+        ip: None,
     }
 }
 
@@ -436,6 +437,7 @@ mod tests {
             reachable: None,
             effect: None,
             transport: None,
+            ip: None,
         };
         TasmotaProvider::new_for_test(server.uri())
             .unwrap()

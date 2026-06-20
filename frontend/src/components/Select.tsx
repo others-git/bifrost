@@ -54,6 +54,7 @@ export function MenuItem({
   const [hover, setHover] = useState(false);
   return (
     <button
+      type="button"
       onClick={onClick}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
@@ -202,6 +203,7 @@ export function Select<T extends string>({
   return (
     <>
       <button
+        type="button"
         ref={triggerRef}
         disabled={disabled}
         title={title}

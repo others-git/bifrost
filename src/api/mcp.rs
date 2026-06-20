@@ -964,6 +964,7 @@ fn build_light_state(
         reachable: None,
         effect: effect.filter(|e| !e.is_empty()),
         transport: None,
+        ip: None,
     })
 }
 

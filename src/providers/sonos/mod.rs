@@ -460,6 +460,14 @@ impl SonosProvider {
             now_playing,
             reachable: Some(true),
             group_coordinator: None, // set by discover from the topology
+            // The player's LAN IP, pulled from its base URL (http://<ip>:1400).
+            ip: player
+                .base_url
+                .trim_start_matches("http://")
+                .split(['/', ':'])
+                .next()
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
         })
     }
 

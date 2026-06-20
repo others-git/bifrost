@@ -45,6 +45,9 @@ pub struct RemoteState {
     /// Whether the device is reachable by its provider (`None` = not reported).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reachable: Option<bool>,
+    /// The device's network address, when the provider knows it (a TV's host).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip: Option<String>,
 }
 
 /// The canonical remote keys `BifrostRemote` renders. Providers translate each

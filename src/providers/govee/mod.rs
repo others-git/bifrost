@@ -895,12 +895,19 @@ impl LightProvider for GoveeProvider {
             .collect();
         let scanned_macs: std::collections::HashSet<String> =
             scans.iter().filter_map(|s| mac_hw_id(&s.mac)).collect();
+        // mac → LAN IP, so a cloud device that also answered the scan shows its IP.
+        let scanned_ips: std::collections::HashMap<String, String> = scans
+            .iter()
+            .filter_map(|s| mac_hw_id(&s.mac).map(|k| (k, s.ip.to_string())))
+            .collect();
         let mut lights = cloud_lights;
         // Stamp how each cloud device will be reached so the UI shows it up front
         // (control prefers LAN whenever the device answered a scan).
         for l in &mut lights {
-            let on_lan = mac_hw_id(&l.provider_id).is_some_and(|k| scanned_macs.contains(&k));
+            let key = mac_hw_id(&l.provider_id);
+            let on_lan = key.as_ref().is_some_and(|k| scanned_macs.contains(k));
             l.state.transport = Some(if on_lan { "lan" } else { "cloud" }.to_string());
+            l.state.ip = key.and_then(|k| scanned_ips.get(&k).cloned());
         }
         for s in scans {
             let known = mac_hw_id(&s.mac).is_some_and(|k| cloud_macs.contains(&k));
@@ -1028,6 +1035,7 @@ fn lan_only_light(s: &LanScan) -> Light {
         // Seen only on the LAN → that's how it's reached.
         state: LightState {
             transport: Some("lan".to_string()),
+            ip: Some(s.ip.to_string()),
             ..Default::default()
         },
         capabilities: LightCapabilities {

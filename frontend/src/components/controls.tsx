@@ -151,12 +151,16 @@ export function Segmented<T extends string>({
   onChange,
   compact,
   accent = color.cyan,
+  variant = "fill",
 }: {
   value: T;
   options: { value: T; label: ReactNode; activeBg?: string }[];
   onChange: (v: T) => void;
   compact?: boolean;
   accent?: string;
+  /** `fill` = solid accent active pill (default); `outline` = a glassy accent-tinted
+   * pill with a hairline outline (subtler, for page-level tabs). */
+  variant?: "fill" | "outline";
 }) {
   return (
     <div
@@ -187,8 +191,16 @@ export function Segmented<T extends string>({
               borderRadius: 9,
               border: "none",
               cursor: "pointer",
-              color: active ? color.ink : color.dim,
-              background: active ? (o.activeBg ?? accent) : "transparent",
+              transition: "color 0.15s, background 0.15s, box-shadow 0.15s",
+              ...(active
+                ? variant === "outline"
+                  ? {
+                      color: color.text,
+                      background: alpha(accent, 0.12),
+                      boxShadow: `inset 0 0 0 1px ${alpha(accent, 0.5)}, 0 1px 8px ${alpha(accent, 0.14)}`,
+                    }
+                  : { color: color.ink, background: o.activeBg ?? accent }
+                : { color: color.dim, background: "transparent" }),
             }}
           >
             {o.label}

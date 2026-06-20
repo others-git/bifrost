@@ -12,6 +12,8 @@ export interface LightState {
   /** How the device is currently reached, for multi-transport providers (Govee):
    * "lan" = local network, "cloud" = cloud API. Undefined for single-transport. */
   transport?: string;
+  /** The device's network address, when the provider knows it. */
+  ip?: string;
 }
 
 /** Partial state carried by live events — absent fields are unchanged. */
@@ -442,6 +444,8 @@ export interface MediaState {
    * the group's coordinator. Devices sharing this are playing in sync; the UI
    * derives a single grouped control from them. null/absent = standalone. */
   group_coordinator?: string | null;
+  /** The device's network address, when the provider knows it. */
+  ip?: string;
 }
 
 export interface MediaCapabilities {
@@ -583,6 +587,8 @@ export interface RemoteState {
   /** Foreground app's package id (e.g. `com.netflix.ninja`), if reported. */
   current_app?: string;
   reachable?: boolean;
+  /** The device's network address, when the provider knows it. */
+  ip?: string;
 }
 
 export interface RemoteDevice {

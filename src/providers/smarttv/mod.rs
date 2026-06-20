@@ -57,6 +57,8 @@ pub(crate) struct TvSnapshot {
     pub sources: Vec<String>,
     pub current_app: Option<String>,
     pub now_playing: Option<NowPlaying>,
+    /// The TV's network address (its configured host), if known.
+    pub ip: Option<String>,
 }
 
 /// One smart-TV brand's protocol — the *only* thing a new vendor implements.
@@ -202,6 +204,7 @@ fn tv_media_state(s: &TvSnapshot) -> MediaState {
         now_playing: s.now_playing.clone(),
         reachable: Some(s.reachable),
         group_coordinator: None,
+        ip: s.ip.clone(),
     }
 }
 
@@ -293,6 +296,7 @@ impl RemoteProvider for SmartTv {
             on: s.power,
             current_app: s.current_app,
             reachable: Some(s.reachable),
+            ip: s.ip,
         })
     }
 

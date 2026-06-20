@@ -92,6 +92,8 @@ interface Item {
   /** How a multi-transport provider (Govee) is reaching this device: "lan" |
    * "cloud". Undefined for single-transport providers. */
   transport?: string | null;
+  /** The device's network address, when the provider reports one. */
+  ip?: string | null;
 }
 
 const POWER_KIND_LABEL: Record<PowerKind, string> = {
@@ -128,6 +130,7 @@ function lightItem(l: Light): Item {
     roomId: l.room_id ?? null,
     inheritedRoomId: l.inherited_room_id ?? null,
     transport: l.last_state?.transport ?? null,
+    ip: l.last_state?.ip ?? null,
   };
 }
 
@@ -152,6 +155,7 @@ function mediaItem(a: MediaDevice): Item {
     mediaKind: a.kind,
     receiverId: a.receiver_id ?? null,
     receiverSource: a.receiver_source ?? null,
+    ip: a.state?.ip ?? null,
   };
 }
 
@@ -791,6 +795,13 @@ function DeviceCard({
               {item.deviceId}
             </span>
           </DetailRow>
+          {item.ip && (
+            <DetailRow label="IP address">
+              <span style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "0.78rem" }}>
+                {item.ip}
+              </span>
+            </DetailRow>
+          )}
           {conn && (
             <DetailRow label="Connection">
               {conn.long}
@@ -1386,6 +1397,8 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
         <Segmented
           value={tab}
           onChange={setTab}
+          variant="outline"
+          accent={ACCENT}
           options={[
             { value: "controlled", label: "Controlled" },
             { value: "detected", label: "Detected" },

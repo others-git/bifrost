@@ -63,6 +63,11 @@ pub struct LightState {
     /// on a control write — the frontend surfaces it on the Devices page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<String>,
+    /// The device's network address, when the provider knows it (a LAN-reachable
+    /// Govee/LIFX bulb's IP, the Hue bridge IP, …). Read-only status like
+    /// [`transport`]; surfaced on the Devices page. `None` = unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip: Option<String>,
 }
 
 /// A partial light-state update. Hue SSE events only carry the fields that
@@ -84,6 +89,8 @@ pub struct LightStatePatch {
     pub effect: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transport: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip: Option<String>,
 }
 
 impl LightStatePatch {
@@ -98,6 +105,7 @@ impl LightStatePatch {
             reachable: s.reachable,
             effect: s.effect.clone(),
             transport: s.transport.clone(),
+            ip: s.ip.clone(),
         }
     }
 
@@ -109,6 +117,7 @@ impl LightStatePatch {
             && self.reachable.is_none()
             && self.effect.is_none()
             && self.transport.is_none()
+            && self.ip.is_none()
     }
 
     /// Merge this patch into an existing state, leaving absent fields untouched.
@@ -124,6 +133,9 @@ impl LightStatePatch {
         }
         if let Some(t) = &self.transport {
             state.transport = Some(t.clone());
+        }
+        if let Some(ip) = &self.ip {
+            state.ip = Some(ip.clone());
         }
         // Colour, colour-temperature, and a dynamic effect are mutually exclusive
         // modes — a light is in exactly one. A patch that sets any one clears the

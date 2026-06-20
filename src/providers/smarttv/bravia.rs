@@ -31,9 +31,19 @@ fn base_url(host: &str) -> String {
 
 pub(crate) struct BraviaVendor {
     base: String,
+    /// The bare host/address (no scheme) — surfaced as the device IP.
+    ip: String,
     /// The PIN-pairing `auth` cookie value, replayed as `Cookie: auth=…`.
     auth: Option<String>,
     client: Client,
+}
+
+/// Strip the scheme to get the bare host/address.
+fn bare_host(base: &str) -> String {
+    base.trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .trim_end_matches('/')
+        .to_string()
 }
 
 impl BraviaVendor {
@@ -42,8 +52,10 @@ impl BraviaVendor {
             bail!("bravia: empty host");
         }
         let client = Client::builder().timeout(Duration::from_secs(5)).build()?;
+        let base = base_url(host);
         Ok(Self {
-            base: base_url(host),
+            ip: bare_host(&base),
+            base,
             auth,
             client,
         })
@@ -51,8 +63,10 @@ impl BraviaVendor {
 
     #[cfg(test)]
     pub(crate) fn new_for_test(base: &str, auth: Option<String>) -> Self {
+        let base = base.trim_end_matches('/').to_string();
         Self {
-            base: base.trim_end_matches('/').to_string(),
+            ip: bare_host(&base),
+            base,
             auth,
             client: Client::builder().build().unwrap(),
         }
@@ -257,6 +271,7 @@ impl SmartTvVendor for BraviaVendor {
                     sources: Vec::new(),
                     current_app: None,
                     now_playing: None,
+                    ip: Some(self.ip.clone()),
                 });
             }
         };
@@ -270,6 +285,7 @@ impl SmartTvVendor for BraviaVendor {
                 sources: Vec::new(),
                 current_app: None,
                 now_playing: None,
+                ip: Some(self.ip.clone()),
             });
         }
         let (volume, mute) = self.volume_info().await.unwrap_or((0, false));
@@ -289,6 +305,7 @@ impl SmartTvVendor for BraviaVendor {
             sources,
             current_app: None,
             now_playing,
+            ip: Some(self.ip.clone()),
         })
     }
 
@@ -506,6 +523,8 @@ mod tests {
         assert!(s.reachable && s.power);
         assert_eq!(s.volume, 30);
         assert!(!s.mute);
+        // The TV's host is surfaced as its IP.
+        assert!(s.ip.as_deref().unwrap_or("").contains("127.0.0.1"));
     }
 
     #[tokio::test]
