@@ -389,6 +389,7 @@ impl SmartTvVendor for BraviaVendor {
                 Some(RemoteCommandInfo {
                     name: name.to_string(),
                     token: value.to_string(),
+                    ..Default::default()
                 })
             })
             .collect())

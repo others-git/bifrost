@@ -12,6 +12,7 @@ import {
   getRemoteState,
   sendRemoteCommand,
   setRemoteAppPin,
+  setRemoteCommandPin,
   type RemoteApp,
   type RemoteCommand,
   type RemoteCommandInfo,
@@ -121,9 +122,74 @@ export function RemotePad({ press }: { press: (k: RemoteKey) => () => void }) {
   );
 }
 
+/** The grid layout shared by the favourites strip and the full catalogue. */
+const CMD_GRID: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fill, minmax(72px, 1fr))",
+  gap: "0.4rem",
+};
+
+/** One native-command button: tap to send, ★ (top-right) to pin/unpin. Mirrors
+ * the app grid's pin affordance. */
+function CommandButton({
+  cmd,
+  onSend,
+  onTogglePin,
+}: {
+  cmd: RemoteCommandInfo;
+  onSend: () => void;
+  onTogglePin: () => void;
+}) {
+  return (
+    <div style={{ position: "relative" }}>
+      <button
+        onClick={onSend}
+        title={cmd.name}
+        style={{
+          width: "100%",
+          minHeight: 38,
+          padding: "0.3rem 1rem 0.3rem 0.4rem", // right room for the ★
+          borderRadius: 9,
+          border: `1px solid ${cmd.pinned ? alpha(ACCENT, 0.5) : T.border}`,
+          background: cmd.pinned ? alpha(ACCENT, 0.08) : T.surface,
+          color: T.text,
+          cursor: "pointer",
+          fontSize: "0.72rem",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {cmd.name}
+      </button>
+      <button
+        onClick={onTogglePin}
+        title={cmd.pinned ? "Unpin" : "Pin"}
+        aria-label={cmd.pinned ? "Unpin" : "Pin"}
+        style={{
+          position: "absolute",
+          top: 2,
+          right: 2,
+          background: "none",
+          border: "none",
+          cursor: "pointer",
+          color: cmd.pinned ? ACCENT : T.faint,
+          padding: 3,
+          display: "grid",
+          placeItems: "center",
+          lineHeight: 1,
+        }}
+      >
+        <Glyph name={cmd.pinned ? "star_fill" : "star"} size={11} />
+      </button>
+    </div>
+  );
+}
+
 /** The expanded ("full") remote — every native command the device exposes (a
- * Bravia's IRCC catalogue), as a raw passthrough grid that slides open beneath the
- * keypad. Renders nothing when the device has no catalogue. */
+ * Bravia's IRCC catalogue). Pinned commands form an always-visible favourites
+ * strip; the rest live behind a height-capped, scrollable "Full remote" sheet so
+ * a long catalogue never runs off-screen. Renders nothing without a catalogue. */
 export function ExpandedRemote({
   remoteId,
   send,
@@ -143,9 +209,29 @@ export function ExpandedRemote({
     };
   }, [remoteId]);
 
+  const togglePin = async (c: RemoteCommandInfo) => {
+    // Optimistic flip, then reconcile with the server's view.
+    setCommands((cs) => cs.map((x) => (x.token === c.token ? { ...x, pinned: !x.pinned } : x)));
+    await setRemoteCommandPin(remoteId, c.token, !c.pinned);
+    setCommands(await getRemoteCommands(remoteId));
+  };
+
   if (commands.length === 0) return null;
+  const favourites = commands.filter((c) => c.pinned);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+      {favourites.length > 0 && (
+        <div style={CMD_GRID}>
+          {favourites.map((c) => (
+            <CommandButton
+              key={c.token}
+              cmd={c}
+              onSend={() => send({ native: { token: c.token } })}
+              onTogglePin={() => togglePin(c)}
+            />
+          ))}
+        </div>
+      )}
       <button
         onClick={() => setOpen((v) => !v)}
         style={{
@@ -168,28 +254,23 @@ export function ExpandedRemote({
         </span>
       </button>
       {open && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(72px, 1fr))", gap: "0.4rem" }}>
+        <div
+          style={{
+            ...CMD_GRID,
+            maxHeight: "min(46vh, 340px)",
+            overflowY: "auto",
+            // a touch of right padding so the scrollbar doesn't sit on the ★s
+            paddingRight: 4,
+            WebkitOverflowScrolling: "touch",
+          }}
+        >
           {commands.map((c) => (
-            <button
+            <CommandButton
               key={c.token}
-              onClick={() => send({ native: { token: c.token } })}
-              title={c.name}
-              style={{
-                minHeight: 38,
-                padding: "0.3rem 0.4rem",
-                borderRadius: 9,
-                border: `1px solid ${T.border}`,
-                background: T.surface,
-                color: T.text,
-                cursor: "pointer",
-                fontSize: "0.72rem",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {c.name}
-            </button>
+              cmd={c}
+              onSend={() => send({ native: { token: c.token } })}
+              onTogglePin={() => togglePin(c)}
+            />
           ))}
         </div>
       )}

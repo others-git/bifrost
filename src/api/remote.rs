@@ -32,6 +32,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/devices/{id}", get(get_device_handler))
         .route("/devices/{id}/command", post(command_handler))
         .route("/devices/{id}/commands", get(list_commands_handler))
+        .route("/devices/{id}/commands/pin", put(pin_command_handler))
         .route("/devices/{id}/apps", get(list_apps_handler))
         .route("/devices/{id}/apps/pin", put(pin_app_handler))
         .route("/devices/{id}/enabled", put(set_enabled_handler))
@@ -465,13 +466,67 @@ pub(crate) async fn list_remote_commands(state: &AppState, id: &str) -> Vec<Remo
     let Ok(provider) = build_remote_provider(state, &provider_type, &credentials_enc) else {
         return Vec::new();
     };
-    provider
-        .list_commands(&device_id)
+    let commands = provider.list_commands(&device_id).await.unwrap_or_else(|e| {
+        tracing::debug!(target: "bifrost::smarttv", remote = %id, "list_commands failed: {e:#}");
+        Vec::new()
+    });
+    let pinned: std::collections::HashSet<String> =
+        sqlx::query("SELECT token FROM remote_command_pins WHERE remote_id = ?")
+            .bind(id)
+            .fetch_all(&state.db)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|r| r.get::<String, _>("token"))
+            .collect();
+    overlay_pins(commands, &pinned)
+}
+
+/// Mark each command pinned when its token is a favourite. Provider order is
+/// preserved — the UI lifts the pinned ones into a favourites strip above the
+/// full catalogue, so neither order nor membership depends on the pin set.
+fn overlay_pins(
+    mut commands: Vec<RemoteCommandInfo>,
+    pinned: &std::collections::HashSet<String>,
+) -> Vec<RemoteCommandInfo> {
+    for c in &mut commands {
+        c.pinned = pinned.contains(&c.token);
+    }
+    commands
+}
+
+/// Pin or unpin a native ("Full remote") command on a remote — the user's
+/// favourites. Presence in `remote_command_pins` *is* the pin, so pinning inserts
+/// and unpinning deletes. Mirrors [`set_app_pin`]; session-only UI config.
+pub(crate) async fn set_command_pin(
+    state: &AppState,
+    remote_id: &str,
+    token: &str,
+    pinned: bool,
+) -> StatusCode {
+    let res = if pinned {
+        sqlx::query(
+            "INSERT INTO remote_command_pins (remote_id, token) VALUES (?, ?)
+             ON CONFLICT (remote_id, token) DO NOTHING",
+        )
+        .bind(remote_id)
+        .bind(token)
+        .execute(&state.db)
         .await
-        .unwrap_or_else(|e| {
-            tracing::debug!(target: "bifrost::smarttv", remote = %id, "list_commands failed: {e:#}");
-            Vec::new()
-        })
+    } else {
+        sqlx::query("DELETE FROM remote_command_pins WHERE remote_id = ? AND token = ?")
+            .bind(remote_id)
+            .bind(token)
+            .execute(&state.db)
+            .await
+    };
+    match res {
+        Ok(_) => StatusCode::NO_CONTENT,
+        Err(e) => {
+            tracing::error!("db error pinning command: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
 }
 
 // ── Handlers (session-authenticated) ─────────────────────────────────────────
@@ -497,6 +552,24 @@ async fn list_commands_handler(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     Json(list_remote_commands(&state, &id).await).into_response()
+}
+
+/// Body for pinning/unpinning a native command on a remote.
+#[derive(serde::Deserialize)]
+struct PinCommandRequest {
+    token: String,
+    pinned: bool,
+}
+
+async fn pin_command_handler(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+    Json(req): Json<PinCommandRequest>,
+) -> impl IntoResponse {
+    set_command_pin(&state, &id, &req.token, req.pinned)
+        .await
+        .into_response()
 }
 
 pub(crate) fn remote_status(outcome: RemoteOutcome) -> StatusCode {
@@ -731,8 +804,51 @@ pub(crate) async fn resolve_and_play(
 #[cfg(test)]
 mod tests {
     use super::{
-        RemoteApp, app_display_name, is_launchable_app, match_app, preferred_app, prettify_package,
+        RemoteApp, RemoteCommandInfo, app_display_name, is_launchable_app, match_app, overlay_pins,
+        preferred_app, prettify_package,
     };
+
+    #[test]
+    fn overlay_pins_marks_favourites_and_keeps_provider_order() {
+        let cmds = vec![
+            RemoteCommandInfo {
+                name: "Home".into(),
+                token: "AAAA".into(),
+                ..Default::default()
+            },
+            RemoteCommandInfo {
+                name: "Input".into(),
+                token: "BBBB".into(),
+                ..Default::default()
+            },
+            RemoteCommandInfo {
+                name: "Netflix".into(),
+                token: "CCCC".into(),
+                ..Default::default()
+            },
+        ];
+        let pinned = std::collections::HashSet::from(["CCCC".to_string(), "AAAA".to_string()]);
+        let out = overlay_pins(cmds, &pinned);
+        // Order is the provider's, untouched; only the pinned flag is overlaid.
+        assert_eq!(
+            out.iter().map(|c| c.token.as_str()).collect::<Vec<_>>(),
+            ["AAAA", "BBBB", "CCCC"]
+        );
+        assert!(out[0].pinned); // AAAA
+        assert!(!out[1].pinned); // BBBB
+        assert!(out[2].pinned); // CCCC
+    }
+
+    #[test]
+    fn overlay_pins_with_no_favourites_leaves_all_unpinned() {
+        let cmds = vec![RemoteCommandInfo {
+            name: "Home".into(),
+            token: "AAAA".into(),
+            ..Default::default()
+        }];
+        let out = overlay_pins(cmds, &std::collections::HashSet::new());
+        assert!(out.iter().all(|c| !c.pinned));
+    }
 
     fn app(package: &str, last_seen: Option<&str>) -> RemoteApp {
         RemoteApp {

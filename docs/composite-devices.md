@@ -34,7 +34,10 @@ over — when you touch any composite seam, read this first and keep it current.
   entity.
 - Resolution is **direction-independent** and **whole-composite**: it considers
   `device ∪ companions`, so which row is the primary doesn't change what controls
-  surface (fixed in 0.27.2).
+  surface. Live state is resolved the same way — the **freshest/most-capable
+  member wins**, not "the primary": power is on if any reachable view is,
+  now-playing is the richest view, and the surfaced remote is the native (richest-
+  catalogue) one — so a stale or lean primary can't mask a live sibling.
 
 ---
 
@@ -74,7 +77,12 @@ On read, each companion's complementary state is overlaid onto its primary by
 `merge_companion_into` (`src/api/media.rs`), filling only what the primary lacks
 and **unioning** the capability flags:
 
-- `now_playing`, `source`, `group_coordinator` — filled if the primary has none.
+- `now_playing` — the **richest** snapshot across the composite wins, scored by
+  `now_playing_score` (a member actually playing — has a title/artist and an active
+  `play_state` — beats one that's idle/stopped/empty, which beats `None`). So an
+  idle `media_player` view never masks the companion (a Cast entity, the native TV)
+  that knows what's on, irrespective of which row is the primary.
+- `source`, `group_coordinator` — filled if the primary has none.
 - `source_list` — union (appends entries the primary doesn't already have).
 - `volume` / `mute` — if the primary reads volume `0` and a companion carries a
   real (non-zero) volume, take the companion's (one TV view reads 0 while a
@@ -100,10 +108,20 @@ to its TV's `media_device` when they share a hardware id.
 
 On the media read path the **inverse** is surfaced: the effective device carries
 `remote_id` (the paired, enabled remote's id), resolved against the **whole
-composite** — `cm.id = <surface> OR cm.companion_of = <surface>` — so a remote
-paired to *any* companion still surfaces on the primary. The frontend reads
-`device.remote_id` directly to render the unified **AIO TV control** (keypad +
-apps fly-out) with no separate remote lookup.
+composite** — every remote paired to the surface **or any of its companions**
+(`m.id = <surface> OR m.companion_of = <surface>`, via `load_paired_remotes`).
+
+A composite can carry **several** paired remotes for the same TV — e.g. a native
+vendor remote (carrying the full IRCC/native catalogue) *and* an HA `remote.*`
+copy (an empty catalogue). `best_remote_per_surface` surfaces the
+**highest-authority** one (native over Integration; ties break on the smaller id,
+so the choice is stable), so the richer "Full remote" catalogue is **never masked
+by a leaner integration copy regardless of which device was merged into which**.
+Every paired remote's power signal still feeds the composite power resolution
+(below) — only the *surfaced* one is deduplicated, not the signals.
+
+The frontend reads `device.remote_id` directly to render the unified **AIO TV
+control** (keypad + apps fly-out) with no separate remote lookup.
 
 ### 3. Bound receiver — `receiver_id` / `receiver_source`
 
@@ -114,7 +132,10 @@ owns its volume. Stored on the *source* (`media_devices.receiver_id` +
 
 - **Read:** the effective device shows the **receiver's** volume/mute (what the
   source's volume slider actually controls). Uses the receiver's *cached* state,
-  not a live read — push-mode receivers (Onkyo) allow only one connection.
+  not a live read — push-mode receivers (Onkyo) allow only one connection. That
+  cache is kept honest by the provider's **liveness heartbeat** (the Onkyo link
+  re-queries on a timer and reconnects a silently half-open socket), so a frozen
+  link can't surface a stale bound-source volume.
 - **Write:** `volume`/`mute` route to the receiver; `power`/`source`/`transport`
   stay on the source. Powering the source **on** also wakes the receiver and
   switches it to `receiver_source`. (`MediaCommand::split_for_receiver` /
@@ -142,23 +163,32 @@ companions and one paired-remote state on demand.
 
 ### Power & reachability resolution
 
-A standby TV often reports its `media_player` as `unavailable`, even though the
-box is reachable via its remote or a sibling entity. `resolve_composite_power`
-fixes the effective on/reachable state:
+A composite's power is genuinely ambiguous: one `media_player` view of a TV can
+read `off`/`unavailable` (or go stale) while a sibling entity for the *same* box
+(a Cast `media_player`, the native row) reads `on` and playing. A stale or lean
+view must not mask the one that knows the truth — otherwise a playing TV shows
+**off** and the Dashboard hides its now-playing. `resolve_composite_power` treats
+`on` as a **positive, order-independent** signal over two tiers:
 
-- While the **primary is reachable**, it is authoritative (its `power` is the rich
-  media state) — nothing overrides it.
-- When the **primary is unreachable**, fall back to members
-  (companions + paired remote): `reachable` if **any** member is, `on` if any
-  **reachable** member reports on.
-- With **no reachable member**, leave it as-is (truly offline) — the client still
-  offers a Wake-on-LAN power-on, which can reach a fully-down NIC that a live read
-  can't.
+- **Media views** (primary + companion `media_player`s — all the same physical
+  device) are weighed **symmetrically**: if **any reachable** media view reports
+  `on`, the composite is `on`; `reachable` if any is. No view's `off` can veto a
+  sibling's `on`, and the result never depends on which row is the primary.
+- **Remotes are the standby-wake fallback** — used **only when no media view is
+  reachable** (a cold TV whose `media_player` is `unavailable`): the paired
+  remote's `(reachable, on)` then rescues the composite. A remote is **not**
+  allowed to override a reachable media view, so a stale remote-`on` can't force a
+  powered-off-but-reachable TV on.
+- With **nothing reachable**, the primary is returned as-is (truly offline) — the
+  client still offers a Wake-on-LAN power-on, which can reach a fully-down NIC that
+  a live read can't.
 
-Members are modelled as an interchangeable `PowerSignal { reachable, on }`. **This
-is the single seam a new TV control surface plugs into** — a native Bravia/Sony
-power read joins the composite by contributing a `PowerSignal`, with no
-special-casing in the resolver.
+Both tiers are modelled as interchangeable `PowerSignal { reachable, on }`
+collections. **This is the single seam a new TV control surface plugs into** — a
+native Bravia/Sony power read joins the composite by contributing a `PowerSignal`
+to the media tier, with no special-casing in the resolver. `apply_composite_power`
+then writes the resolved `(reachable, on)` back onto the effective device (it folds
+the primary in, so a stale primary is corrected by a fresher member).
 
 ---
 
@@ -183,14 +213,20 @@ skips routing and is driven directly.
 
 ### Priority — native wins (capability arbitration)
 
-When more than one backing can do the same thing, the **highest-priority** one
-wins. `backing_priority` ranks native single-domain providers (Bravia, Onkyo,
-Sonos) **above** a multi-domain **Integration** copy (Home Assistant), mirroring
-de-dup's "native wins" rule (`registry.ui_domain(type) == Integration` → `0`, else
-`1`). So merging a native TV into an HA device lets the TV take precedence for
-power/source/transport while the union of capabilities is still offered. Ties keep
-primary-first order. Two **physical-routing overrides** beat priority: volume
-follows a receiver binding, and transport follows the backing actually playing.
+When more than one backing can do the same thing, the **highest-authority** one
+wins. `backing_authority` is a deliberately **binary** "native wins": a native
+single-domain provider (Bravia, Onkyo, Sonos) outranks a multi-domain
+**Integration** copy (Home Assistant) — `registry.ui_domain(type) == Integration`
+→ `0`, else `1` — mirroring de-dup's rule. Within a composite the members are the
+*same physical device* surfaced more than once, so native-vs-Integration is the
+only authority distinction that carries information: every genuinely contested
+control is decided either by this binary rank or by physical routing, so a finer
+grade (receiver > TV API > …) would be false precision. So merging a native TV
+into an HA device lets the TV take precedence for power/source/transport while the
+union of capabilities is still offered. Ties keep primary-first order. The same `backing_authority`
+also picks the surfaced remote (the **Paired remote** ingredient above). Two
+**physical-routing overrides** beat authority: volume follows a receiver binding,
+and transport follows the backing actually playing.
 
 ### Power-on fans out to the paired remote
 
@@ -233,7 +269,7 @@ Keep these true whenever you touch the composite code:
   that already has companions).
 - **Direction independence** — resolution always considers `device ∪ companions`
   (`m.id = ? OR m.companion_of = ?`, `COALESCE(companion_of, id)`), so the
-  surfaced controls don't depend on which row was merged into which (0.27.2).
+  surfaced controls don't depend on which row was merged into which.
 - **Companions are hidden, not deleted** — excluded from control and room
   membership (`companion_of IS NULL`), collapsed in the inventory, but still
   listed (marked) so they can be un-merged.
@@ -249,7 +285,13 @@ Keep these true whenever you touch the composite code:
 
 - **Control:** `MediaEditor` / `DeviceControl` read the effective device. When
   `device.remote_id` is set they render the AIO TV control (Remote keypad + Apps,
-  with now-playing) instead of fetching remotes separately.
+  with now-playing) instead of fetching remotes separately. The **Full remote**
+  panel (`ExpandedRemote`) lists the surfaced remote's native catalogue: pinned
+  commands form an always-visible **favourites strip**, the rest live behind a
+  height-capped, scrollable sheet (so a long catalogue never runs off-screen), and
+  each button has a ★ to pin/unpin (`setRemoteCommandPin`). Pins persist per remote
+  in `remote_command_pins`; the catalogue is fetched live and the pin flag overlaid
+  server-side (`overlay_pins`), so favourites survive a remote's catalogue changing.
 - **Configuration (Devices page, `frontend/src/pages/Devices.tsx`):**
   - **Merge** — `MergePicker` lets you merge an media entity into another
     same-physical-device primary (`PUT …/media/devices/{id}/companion`
@@ -286,17 +328,21 @@ return/act on the effective device.
 | Companion column | `media_devices.companion_of` |
 | Receiver binding columns | `media_devices.receiver_id` / `receiver_source` |
 | Remote pairing column | `remote_devices.paired_media_id` |
-| Companion state merge | `merge_companion_into` — `src/api/media.rs` |
+| Companion state merge | `merge_companion_into`, `now_playing_score` — `src/api/media.rs` |
 | Effective-device assembly | `list_all_devices`, `get_device_live` — `src/api/media.rs` |
 | Power/reachability resolve | `PowerSignal`, `resolve_composite_power`, `apply_composite_power` — `src/api/media.rs` |
+| Surfaced remote (native wins) | `load_paired_remotes`, `best_remote_per_surface` — `src/api/media.rs` |
 | Command routing | `apply_media_command`, `route_across_backings`, `load_composite_backings`, `capable_backing` — `src/api/media.rs` |
-| Priority (native wins) | `backing_priority` — `src/api/media.rs` |
+| Authority (native wins) | `backing_authority` — `src/api/media.rs` |
 | Power-on remote fan-out | `wake_paired_remote` — `src/api/media.rs` |
 | Cast across backings | `cast_to_device` / `cast_one` — `src/api/media.rs` |
 | Set/clear companion | `set_media_companion` — `src/api/media.rs` |
 | Remote pairing reconcile | `reconcile_remote_pairings` — `src/api/remote.rs` |
+| Remote command favourites | `set_command_pin`, `overlay_pins`, `remote_command_pins` table — `src/api/remote.rs` |
+| Receiver-link liveness | `onkyo_link_actor` heartbeat (`HEARTBEAT`) — `src/providers/onkyo/mod.rs` |
 | Room exclusion | `effective_media_members` (`companion_of IS NULL`) — `src/api/rooms.rs` |
 | Frontend merge UI + diagnostic | `MergePicker`, `MergedCompanion`, `buildComposites` — `frontend/src/pages/Devices.tsx` |
+| Frontend full-remote + favourites | `ExpandedRemote`, `CommandButton` — `frontend/src/components/BifrostRemote.tsx` |
 
 Debug logging is on the `bifrost::composite` target.
 
@@ -305,7 +351,8 @@ Debug logging is on the `bifrost::composite` target.
 ## Extending it
 
 - **A new native TV surface (Bravia, …) joining a composite's power resolution:**
-  contribute a `PowerSignal` — no resolver changes.
+  contribute a `PowerSignal` to the **media tier** (a companion `media_player`) —
+  no resolver changes; "any reachable view on ⇒ on" already covers it.
 - **A new routable command field:** add a branch to `route_across_backings`
   choosing the owning backing by capability/physical routing, and union its
   capability flag in `merge_companion_into` so it surfaces.

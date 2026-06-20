@@ -709,6 +709,7 @@ export type RemoteCommand =
 export interface RemoteCommandInfo {
   name: string;
   token: string;
+  pinned: boolean;
 }
 
 /** The remote's expanded (native) command catalogue — empty when it has none. */
@@ -716,6 +717,21 @@ export async function getRemoteCommands(id: string): Promise<RemoteCommandInfo[]
   const res = await fetch(`/api/remote/devices/${id}/commands`);
   if (!res.ok) return [];
   return res.json();
+}
+
+/** Pin or unpin a native command as a favourite (surfaced above the full grid). */
+export async function setRemoteCommandPin(
+  id: string,
+  token: string,
+  pinned: boolean,
+): Promise<string | null> {
+  const res = await fetch(`/api/remote/devices/${id}/commands/pin`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token, pinned }),
+  });
+  if (res.ok) return null;
+  return (await res.text()) || `HTTP ${res.status}`;
 }
 
 /** A launchable app on a remote's TV (pinned ∪ recents). */

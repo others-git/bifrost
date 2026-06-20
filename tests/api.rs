@@ -7500,6 +7500,85 @@ async fn remote_apps_record_recents_pin_and_order() {
 }
 
 #[tokio::test]
+async fn remote_command_pin_route_is_session_gated_and_persists() {
+    let ha = ha_remote_mock().await;
+    let (app, prov_id) = helpers::test_app_with_ha(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    app.clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/providers/{prov_id}/discover"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let remotes = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/remote/devices", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let remote_id = remotes.as_array().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Unauthenticated pin is rejected like every other remote route.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/remote/devices/{remote_id}/commands/pin"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"token":"AAAA","pinned":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Pinning, then unpinning, a native command token both succeed (insert + delete).
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/remote/devices/{remote_id}/commands/pin"),
+            &cookie,
+            r#"{"token":"AAAA","pinned":true}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Re-pinning the same token is idempotent (ON CONFLICT DO NOTHING).
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/remote/devices/{remote_id}/commands/pin"),
+            &cookie,
+            r#"{"token":"AAAA","pinned":true}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/remote/devices/{remote_id}/commands/pin"),
+            &cookie,
+            r#"{"token":"AAAA","pinned":false}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
 async fn v1_remote_requires_bearer_and_drives_command() {
     let ha = ha_remote_mock().await;
     let (app, prov_id) = helpers::test_app_with_ha(&ha.uri()).await;

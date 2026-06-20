@@ -105,12 +105,16 @@ pub enum RemoteCommand {
 /// One entry in a remote's **expanded** command catalogue — a provider-native
 /// command the device exposes beyond the canonical [`RemoteKey`] set. Sent back
 /// as [`RemoteCommand::Native`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct RemoteCommandInfo {
     /// Human label (the device's own name for it, e.g. `"Num1"`, `"Red"`, `"Input"`).
     pub name: String,
     /// Opaque token replayed via `RemoteCommand::Native` to invoke it.
     pub token: String,
+    /// Whether the user pinned this command as a favourite (overlaid by the
+    /// service from `remote_command_pins`; always false as the provider sees it).
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 #[cfg(test)]
