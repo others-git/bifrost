@@ -14,8 +14,10 @@ import {
   getProviders,
   getRemoteDevices,
   getSettings,
+  getDeviceRaw,
   discoverAllDevices,
   type FoundDevice,
+  type DeviceRaw,
   setPowerEnabled,
   setLightEnabled,
   setMediaEnabled,
@@ -23,6 +25,9 @@ import {
   setLightGlyph,
   setMediaGlyph,
   setPowerGlyph,
+  setLightName,
+  setMediaName,
+  setPowerName,
   setLightShadow,
   setMediaShadow,
   setPowerShadow,
@@ -43,6 +48,7 @@ import {
 import { Glyph, GLYPH_OPTIONS, powerKindGlyph, mediaKindGlyph } from "../components/glyphs";
 import { PageHeader, SectionLabel } from "../components/PageHeader";
 import { Switch, Segmented } from "../components/controls";
+import { GenericDevicesSection } from "../components/GenericDevices";
 import type { AddPrefill } from "./Settings";
 import { MenuItem } from "../components/Select";
 import { AnchoredPanel } from "../components/AnchoredPanel";
@@ -190,6 +196,11 @@ const SET_GLYPH: Record<Domain, (id: string, glyph: string | null) => Promise<vo
   light: setLightGlyph,
   media: setMediaGlyph,
   power: setPowerGlyph,
+};
+const SET_NAME: Record<Domain, (id: string, name: string | null) => Promise<void>> = {
+  light: setLightName,
+  media: setMediaName,
+  power: setPowerName,
 };
 const SET_SHADOW: Record<Domain, (id: string, shadowedBy: string | null) => Promise<void>> = {
   light: setLightShadow,
@@ -553,6 +564,68 @@ function DetailRow({ label, children }: { label: string; children: React.ReactNo
   );
 }
 
+/** Inline editor for a device's friendly name — click the name to rename; an
+ * empty value reverts to the provider's discovered name. (A Bifrost convention so
+ * crazy provider names like "Onkyo receiver (192.168.1.34)" can be made sane.) */
+function NameEditor({ name, onSave }: { name: string; onSave: (name: string | null) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState(name);
+  useEffect(() => {
+    setVal(name);
+  }, [name]);
+
+  if (!editing) {
+    return (
+      <button
+        onClick={() => {
+          setVal(name);
+          setEditing(true);
+        }}
+        title="Rename — set a friendly name (clear to revert)"
+        style={{
+          background: "none",
+          border: "none",
+          padding: 0,
+          color: T.text,
+          font: "inherit",
+          textAlign: "left",
+          cursor: "text",
+          borderBottom: `1px dashed ${T.cardBorder}`,
+        }}
+      >
+        {name}
+      </button>
+    );
+  }
+  function commit() {
+    setEditing(false);
+    const t = val.trim();
+    if (t !== name) onSave(t === "" ? null : t);
+  }
+  return (
+    <input
+      autoFocus
+      value={val}
+      onChange={(e) => setVal(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") commit();
+        else if (e.key === "Escape") setEditing(false);
+      }}
+      onBlur={commit}
+      placeholder="Friendly name…"
+      style={{
+        width: "100%",
+        background: alpha(T.text, 0.06),
+        border: `1px solid ${alpha(ACCENT, 0.4)}`,
+        borderRadius: 7,
+        padding: "0.2rem 0.45rem",
+        color: T.text,
+        font: "inherit",
+      }}
+    />
+  );
+}
+
 function DeviceCard({
   item,
   rooms,
@@ -561,9 +634,11 @@ function DeviceCard({
   onToggle,
   onSetEnabled,
   onSetGlyph,
+  onSetName,
   onSetRoom,
   onSetReceiver,
   onMerge,
+  devMode,
 }: {
   item: Item;
   rooms: Room[];
@@ -573,9 +648,13 @@ function DeviceCard({
   onToggle: (next: boolean) => void;
   onSetEnabled: (enabled: boolean) => void;
   onSetGlyph: (glyph: string | null) => void;
+  /** Set the friendly name (null/empty reverts to the provider name). */
+  onSetName: (name: string | null) => void;
   onSetRoom: (roomId: string | null) => void;
   onSetReceiver: (receiverId: string | null, receiverSource: string | null) => void;
   onMerge: (primaryId: string) => void;
+  /** Developer mode — surfaces the raw upstream device data in the details. */
+  devMode: boolean;
 }) {
   const offline = item.offline;
   const disabled = !item.enabled;
@@ -588,6 +667,13 @@ function DeviceCard({
   const [roomPicking, setRoomPicking] = useState(false);
   const [receiverPicking, setReceiverPicking] = useState(false);
   const [mergePicking, setMergePicking] = useState(false);
+  const [raw, setRaw] = useState<DeviceRaw | null>(null);
+  const [rawLoading, setRawLoading] = useState(false);
+  async function loadRaw() {
+    setRawLoading(true);
+    setRaw(await getDeviceRaw(item.providerId, item.deviceId));
+    setRawLoading(false);
+  }
   const glyphBtnRef = useRef<HTMLButtonElement>(null);
   const roomBtnRef = useRef<HTMLButtonElement>(null);
   const receiverBtnRef = useRef<HTMLButtonElement>(null);
@@ -789,7 +875,9 @@ function DeviceCard({
             gap: "0.5rem",
           }}
         >
-          <DetailRow label="Name">{item.name}</DetailRow>
+          <DetailRow label="Name">
+            <NameEditor name={item.name} onSave={onSetName} />
+          </DetailRow>
           <DetailRow label="Device ID">
             <span style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: "0.78rem" }}>
               {item.deviceId}
@@ -871,6 +959,56 @@ function DeviceCard({
               )}
             </DetailRow>
           )}
+          {devMode && (
+            <DetailRow label="Upstream · dev">
+              {raw ? (
+                <RawUpstream data={raw} />
+              ) : (
+                <button onClick={loadRaw} disabled={rawLoading} style={detailBtnStyle}>
+                  {rawLoading ? "Loading…" : "Load raw device data"}
+                </button>
+              )}
+            </DetailRow>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Dev-only readout of a device's raw upstream representation — the source's
+ * state + every attribute (incl. `supported_features`), so unmodelled
+ * capabilities are visible at a glance. */
+function RawUpstream({ data }: { data: DeviceRaw }) {
+  if (data.note) {
+    return <span style={{ color: T.faint, fontSize: "0.76rem" }}>{data.note}</span>;
+  }
+  const attrs = data.attributes ?? {};
+  const mono = "ui-monospace, SFMono-Regular, Menlo, monospace";
+  return (
+    <div style={{ fontFamily: mono, fontSize: "0.72rem", display: "flex", flexDirection: "column", gap: 2, maxWidth: 440 }}>
+      <div style={{ color: T.dim }}>
+        {data.domain} · state: <span style={{ color: T.text }}>{String(data.state)}</span>
+      </div>
+      {data.supported_features != null && (
+        <div style={{ color: T.dim }}>
+          supported_features: <span style={{ color: T.text }}>{data.supported_features}</span>
+        </div>
+      )}
+      {Object.entries(attrs)
+        .filter(([k]) => k !== "supported_features")
+        .map(([k, v]) => (
+          <div key={k} style={{ display: "flex", gap: 6 }}>
+            <span style={{ color: T.faint, flexShrink: 0 }}>{k}</span>
+            <span style={{ color: T.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {JSON.stringify(v)}
+            </span>
+          </div>
+        ))}
+      {data.generic_preview && data.generic_preview.length > 0 && (
+        <div style={{ marginTop: 6, color: T.dim, whiteSpace: "normal" }}>
+          <span style={{ color: T.faint }}>would model as </span>
+          {data.generic_preview.map((c) => `${c.type}(${c.key})`).join(", ")}
         </div>
       )}
     </div>
@@ -1126,6 +1264,14 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
     await SET_GLYPH[item.domain](item.id, glyph);
   }
 
+  // Set a friendly name (null/empty reverts to the provider's). A revert needs the
+  // server's provider name, so refresh after to pick it up.
+  async function setName(item: Item, name: string | null) {
+    if (name) setItems((prev) => prev.map((d) => (d.id === item.id ? { ...d, name } : d)));
+    await SET_NAME[item.domain](item.id, name);
+    if (!name) refresh();
+  }
+
   async function setRoom(item: Item, roomId: string | null) {
     setItems((prev) => prev.map((d) => (d.id === item.id ? { ...d, roomId } : d)));
     await SET_ROOM[item.domain](item.id, roomId);
@@ -1336,9 +1482,11 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
               onToggle={(next) => toggle(d, next)}
               onSetEnabled={(en) => setEnabled(d, en)}
               onSetGlyph={(g) => setGlyph(d, g)}
+              onSetName={(n) => setName(d, n)}
               onSetRoom={(r) => setRoom(d, r)}
               onSetReceiver={(rid, rsrc) => setReceiver(d, rid, rsrc)}
               onMerge={(primaryId) => setCompanion(d, primaryId)}
+              devMode={devMode}
             />
           ))}
         </div>
@@ -1554,6 +1702,7 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
           );
         })
       )}
+          <GenericDevicesSection />
         </>
       )}
     </div>

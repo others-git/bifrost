@@ -1,3 +1,4 @@
+pub mod generic;
 pub mod media;
 pub mod power;
 pub mod remote;

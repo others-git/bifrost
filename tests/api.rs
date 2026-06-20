@@ -7052,6 +7052,198 @@ async fn remote_surfaces_on_the_primary_when_paired_to_a_companion() {
 }
 
 #[tokio::test]
+async fn friendly_name_sticks_and_reverts() {
+    let ha = ha_remote_mock().await;
+    let (app, prov_id, db) = helpers::test_app_with_ha_db(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, provider_name, kind, capabilities, last_state)
+         VALUES ('amp', ?, 'main', 'Onkyo receiver (192.168.1.34)', 'Onkyo receiver (192.168.1.34)', 'receiver', '{}', '{\"power\":true,\"volume\":0,\"mute\":false}')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    // Rename to a friendly name.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/media/devices/amp/name",
+            &cookie,
+            r#"{"name":"Living Room Amp"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let name: String = sqlx::query_scalar("SELECT name FROM media_devices WHERE id = 'amp'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(name, "Living Room Amp");
+
+    // Clearing it reverts to the provider's discovered name.
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/media/devices/amp/name",
+            &cookie,
+            r#"{"name":""}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let name: String = sqlx::query_scalar("SELECT name FROM media_devices WHERE id = 'amp'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(name, "Onkyo receiver (192.168.1.34)");
+}
+
+#[tokio::test]
+async fn dev_device_raw_returns_ha_attributes() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let ha = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/states/climate.bedroom"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entity_id": "climate.bedroom",
+            "state": "heat",
+            "attributes": {
+                "supported_features": 1,
+                "current_temperature": 19.5,
+                "temperature": 21,
+                "hvac_modes": ["off", "heat", "cool"],
+                "friendly_name": "Bedroom"
+            }
+        })))
+        .mount(&ha)
+        .await;
+
+    let (app, prov_id, db) = helpers::test_app_with_ha_db(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    sqlx::query("UPDATE config SET dev_mode = 1 WHERE id = 1")
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(helpers::authed_get(
+            &format!("/api/dev/devices/{prov_id}/climate.bedroom/raw"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let j = helpers::response_json(resp).await;
+    assert_eq!(j["domain"], "climate");
+    assert_eq!(j["supported_features"], 1);
+    assert_eq!(j["attributes"]["current_temperature"], 19.5);
+}
+
+#[tokio::test]
+async fn dev_device_raw_404_when_dev_mode_off() {
+    let ha = wiremock::MockServer::start().await; // never hit
+    let (app, prov_id, _db) = helpers::test_app_with_ha_db(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // dev_mode is off by default → the whole dev surface 404s.
+    let resp = app
+        .oneshot(helpers::authed_get(
+            &format!("/api/dev/devices/{prov_id}/climate.bedroom/raw"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn generic_devices_list_and_control_via_api() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let ha = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/states"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            { "entity_id": "cover.blinds", "state": "open",
+              "attributes": { "current_position": 60, "friendly_name": "Blinds" } }
+        ])))
+        .mount(&ha)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/services/cover/set_cover_position"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&ha)
+        .await;
+
+    let (app, prov_id) = helpers::test_app_with_ha(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // List surfaces the cover as a generic device with a position control.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/generic/devices", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let devices = helpers::response_json(resp).await;
+    let d = &devices.as_array().unwrap()[0];
+    assert_eq!(d["device_id"], "cover.blinds");
+    assert_eq!(d["kind"], "cover");
+    assert_eq!(d["provider_id"], prov_id);
+    assert!(
+        d["controls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["key"] == "position")
+    );
+
+    // A control write routes to the mapped HA service.
+    let body = format!(
+        r#"{{"provider_id":"{prov_id}","device_id":"cover.blinds","key":"position","value":40}}"#
+    );
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/generic/devices/control",
+            &cookie,
+            &body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let reqs = ha.received_requests().await.unwrap();
+    assert!(
+        reqs.iter()
+            .any(|r| r.url.path() == "/api/services/cover/set_cover_position"),
+        "control write did not reach the cover service"
+    );
+}
+
+#[tokio::test]
+async fn generic_devices_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/generic/devices")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn smarttv_pair_without_session_returns_401() {
     let app = helpers::test_app_with_password().await;
     let resp = app

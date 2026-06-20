@@ -1150,10 +1150,11 @@ async fn discover(
                 let caps = serde_json::to_string(&light.capabilities).unwrap_or_default();
                 let state_json = serde_json::to_string(&light.state).unwrap_or_default();
                 let _ = sqlx::query(
-                    "INSERT INTO lights (id, provider_id, device_id, name, capabilities, last_state, last_seen, hw_id)
-                     VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)
+                    "INSERT INTO lights (id, provider_id, device_id, name, provider_name, capabilities, last_state, last_seen, hw_id)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
                      ON CONFLICT (provider_id, device_id)
-                     DO UPDATE SET name        = excluded.name,
+                     DO UPDATE SET name        = CASE WHEN name = provider_name THEN excluded.name ELSE name END,
+                                   provider_name = excluded.provider_name,
                                    capabilities = excluded.capabilities,
                                    last_state  = excluded.last_state,
                                    last_seen   = excluded.last_seen,
@@ -1162,6 +1163,7 @@ async fn discover(
                 .bind(&light_id)
                 .bind(&id)
                 .bind(&light.provider_id)
+                .bind(&light.name)
                 .bind(&light.name)
                 .bind(&caps)
                 .bind(&state_json)

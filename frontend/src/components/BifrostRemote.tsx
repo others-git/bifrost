@@ -8,11 +8,13 @@
 import { useEffect, useState } from "react";
 import {
   getRemoteApps,
+  getRemoteCommands,
   getRemoteState,
   sendRemoteCommand,
   setRemoteAppPin,
   type RemoteApp,
   type RemoteCommand,
+  type RemoteCommandInfo,
   type RemoteKey,
 } from "../api";
 import { T, ACCENT, alpha } from "../theme";
@@ -115,6 +117,82 @@ export function RemotePad({ press }: { press: (k: RemoteKey) => () => void }) {
         <Key glyph="play_pause" label="Play / pause" onClick={press("play_pause")} />
         <Key glyph="next" label="Next" onClick={press("next")} />
       </Row>
+    </div>
+  );
+}
+
+/** The expanded ("full") remote — every native command the device exposes (a
+ * Bravia's IRCC catalogue), as a raw passthrough grid that slides open beneath the
+ * keypad. Renders nothing when the device has no catalogue. */
+export function ExpandedRemote({
+  remoteId,
+  send,
+}: {
+  remoteId: string;
+  send: (cmd: RemoteCommand) => void;
+}) {
+  const [commands, setCommands] = useState<RemoteCommandInfo[]>([]);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    getRemoteCommands(remoteId).then((c) => {
+      if (alive) setCommands(c);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [remoteId]);
+
+  if (commands.length === 0) return null;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          width: "100%",
+          padding: "0.45rem 0.7rem",
+          borderRadius: 10,
+          border: `1px solid ${T.border}`,
+          background: alpha(ACCENT, 0.06),
+          color: T.dim,
+          cursor: "pointer",
+          fontSize: "0.8rem",
+        }}
+      >
+        <span>Full remote · {commands.length}</span>
+        <span style={{ display: "grid", transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>
+          <Glyph name="chevron" size={16} />
+        </span>
+      </button>
+      {open && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(72px, 1fr))", gap: "0.4rem" }}>
+          {commands.map((c) => (
+            <button
+              key={c.token}
+              onClick={() => send({ native: { token: c.token } })}
+              title={c.name}
+              style={{
+                minHeight: 38,
+                padding: "0.3rem 0.4rem",
+                borderRadius: 9,
+                border: `1px solid ${T.border}`,
+                background: T.surface,
+                color: T.text,
+                cursor: "pointer",
+                fontSize: "0.72rem",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {c.name}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

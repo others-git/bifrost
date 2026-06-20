@@ -13,9 +13,10 @@ pub mod wled;
 
 use discovery::DeviceDiscovery;
 
+use crate::models::generic::{Control, GenericDevice};
 use crate::models::media::{MediaCommand, MediaDevice, MediaEvent, MediaFavorite, MediaState};
 use crate::models::power::{PowerDevice, PowerState};
-use crate::models::remote::{RemoteDevice, RemoteKey, RemoteState};
+use crate::models::remote::{RemoteCommandInfo, RemoteDevice, RemoteKey, RemoteState};
 use crate::models::{Light, LightState};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -300,6 +301,16 @@ pub trait RemoteProvider: Send + Sync {
     /// Launch an app by package id or deep-link URL.
     async fn launch_app(&self, device_id: &str, activity: &str) -> Result<()>;
     async fn set_power(&self, device_id: &str, on: bool) -> Result<()>;
+    /// The device's **expanded** command catalogue — the keys beyond the canonical
+    /// set it exposes (a Bravia's IRCC list, …). Default: none.
+    async fn list_commands(&self, _device_id: &str) -> Result<Vec<RemoteCommandInfo>> {
+        Ok(Vec::new())
+    }
+    /// Send a native command by its `token` (from [`Self::list_commands`]).
+    /// Default: unsupported.
+    async fn send_native(&self, _device_id: &str, _token: &str) -> Result<()> {
+        anyhow::bail!("this remote has no expanded commands")
+    }
 }
 
 /// Factory for one remote provider type (see [`PowerProviderFactory`] for the
@@ -311,6 +322,35 @@ pub trait RemoteProviderFactory: Send + Sync {
     }
     fn build(&self, credentials_json: &str) -> Result<Box<dyn RemoteProvider>>;
     fn credentials_schema(&self) -> &'static [CredentialField];
+}
+
+/// A **generic "passthrough" device** — the long tail of source device types
+/// Bifrost doesn't natively model (climate, cover, lock, `number`, `select`,
+/// `button`, …). Each device is just a set of control primitives ([`Control`]),
+/// so one mapping + one fuzzy UI covers dozens of HA domains. Registered in
+/// addition to a provider's other domains (HA serves it alongside light/power/
+/// media/remote). Devices are read live, not persisted.
+#[async_trait]
+pub trait GenericProvider: Send + Sync {
+    fn name(&self) -> &str;
+    async fn discover(&self) -> Result<Vec<GenericDevice>>;
+    /// Re-read one device's current control primitives.
+    async fn get_controls(&self, device_id: &str) -> Result<Vec<Control>>;
+    /// Apply a control write — `key` identifies the primitive, `value` is its new
+    /// value (bool / number / string; ignored for a button).
+    async fn set_control(
+        &self,
+        device_id: &str,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<()>;
+}
+
+/// Factory for one generic provider type (see [`PowerProviderFactory`] for the
+/// multi-domain registration pattern).
+pub trait GenericProviderFactory: Send + Sync {
+    fn provider_type(&self) -> &'static str;
+    fn build(&self, credentials_json: &str) -> Result<Box<dyn GenericProvider>>;
 }
 
 // ── Credential schema (for the setup UI) ───────────────────────────────────
@@ -405,6 +445,7 @@ pub struct ProviderRegistry {
     media_factories: HashMap<&'static str, Box<dyn MediaProviderFactory>>,
     power_factories: HashMap<&'static str, Box<dyn PowerProviderFactory>>,
     remote_factories: HashMap<&'static str, Box<dyn RemoteProviderFactory>>,
+    generic_factories: HashMap<&'static str, Box<dyn GenericProviderFactory>>,
 }
 
 impl ProviderRegistry {
@@ -414,6 +455,7 @@ impl ProviderRegistry {
             media_factories: HashMap::new(),
             power_factories: HashMap::new(),
             remote_factories: HashMap::new(),
+            generic_factories: HashMap::new(),
         }
     }
 
@@ -469,6 +511,25 @@ impl ProviderRegistry {
             .get(provider_type)
             .ok_or_else(|| anyhow!("unknown remote provider type: {provider_type}"))?
             .build(credentials_json)
+    }
+
+    pub fn register_generic<F: GenericProviderFactory + 'static>(&mut self, factory: F) {
+        self.generic_factories
+            .insert(factory.provider_type(), Box::new(factory));
+    }
+    pub fn build_generic(
+        &self,
+        provider_type: &str,
+        credentials_json: &str,
+    ) -> Result<Box<dyn GenericProvider>> {
+        self.generic_factories
+            .get(provider_type)
+            .ok_or_else(|| anyhow!("unknown generic provider type: {provider_type}"))?
+            .build(credentials_json)
+    }
+    /// Whether this provider type serves generic (passthrough) devices.
+    pub fn has_generic(&self, provider_type: &str) -> bool {
+        self.generic_factories.contains_key(provider_type)
     }
 
     /// Returns true if `provider_type` serves the remote domain.
@@ -665,6 +726,9 @@ pub fn default_registry() -> ProviderRegistry {
     r.register_power(ha::HaPowerFactory);
     r.register_media(ha::HaMediaFactory);
     r.register_remote(ha::HaRemoteFactory);
+    // The generic "passthrough" surface for HA's controllable long tail (climate,
+    // cover, lock, number, select, button, …) — one mapping, many device types.
+    r.register_generic(ha::HaGenericFactory);
     r.register_media(onkyo::OnkyoProviderFactory);
     r.register_media(sonos::SonosProviderFactory);
     // Smart TVs serve two domains from one provider row (media + remote), like HA:

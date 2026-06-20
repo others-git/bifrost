@@ -133,6 +133,21 @@ export async function setPowerGlyph(id: string, glyph: string | null): Promise<v
   });
 }
 
+/** Set a device's friendly name (`null`/empty reverts to the provider's name). */
+async function setDeviceName(path: string, name: string | null): Promise<void> {
+  await fetch(path, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+}
+export const setLightName = (id: string, name: string | null) =>
+  setDeviceName(`/api/lights/${id}/name`, name);
+export const setMediaName = (id: string, name: string | null) =>
+  setDeviceName(`/api/media/devices/${id}/name`, name);
+export const setPowerName = (id: string, name: string | null) =>
+  setDeviceName(`/api/power/devices/${id}/name`, name);
+
 /** Manually link a device as a duplicate of `shadowed_by` (or `null` to clear
  * the link → device becomes visible again). The de-dup auto-reconciler handles
  * exact hardware matches; this is the no-hw_id fallback and user override. */
@@ -299,6 +314,75 @@ export async function getSettings(): Promise<AppSettings> {
  * ones we don't model yet, etc.). 404s when dev mode is off. */
 export async function getDevProviderDebug(id: string): Promise<unknown | null> {
   const res = await fetch(`/api/dev/providers/${id}/debug`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+/** The raw upstream representation of one device (HA: state + attributes +
+ * supported_features). Dev-mode only — 404s when off. */
+/** One generic control primitive on a passthrough device. */
+export interface GenericControl {
+  type: "toggle" | "number" | "enum" | "button" | "readout";
+  key: string;
+  label: string;
+  value?: unknown;
+  min?: number;
+  max?: number;
+  step?: number;
+  options?: string[];
+  unit?: string;
+}
+
+/** A generic "passthrough" device — a source device Bifrost doesn't natively
+ * model (climate, cover, lock, …), surfaced as a set of control primitives. */
+export interface GenericDevice {
+  provider_id: string;
+  device_id: string;
+  name: string;
+  /** Source domain (climate, cover, …) — drives the glyph/label. */
+  kind: string;
+  controls: GenericControl[];
+  hw_id?: string | null;
+}
+
+/** Live list of generic devices across every provider that serves them (HA). */
+export async function getGenericDevices(): Promise<GenericDevice[]> {
+  const res = await fetch("/api/generic/devices");
+  if (!res.ok) return [];
+  return res.json();
+}
+
+/** Apply a control write to a generic device. `value` is the primitive's new
+ * value (bool / number / string; ignored for a button). */
+export async function setGenericControl(
+  providerId: string,
+  deviceId: string,
+  key: string,
+  value: unknown,
+): Promise<string | null> {
+  const res = await fetch("/api/generic/devices/control", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ provider_id: providerId, device_id: deviceId, key, value }),
+  });
+  if (res.ok) return null;
+  return (await res.text()) || `HTTP ${res.status}`;
+}
+
+export interface DeviceRaw {
+  provider_type: string;
+  entity_id?: string;
+  domain?: string;
+  state?: unknown;
+  supported_features?: number | null;
+  attributes?: Record<string, unknown>;
+  /** How a generic passthrough device would model this entity (dev preview). */
+  generic_preview?: GenericControl[];
+  note?: string;
+}
+
+export async function getDeviceRaw(providerId: string, deviceId: string): Promise<DeviceRaw | null> {
+  const res = await fetch(`/api/dev/devices/${providerId}/${encodeURIComponent(deviceId)}/raw`);
   if (!res.ok) return null;
   return res.json();
 }
@@ -618,7 +702,21 @@ export type RemoteCommand =
   | { key: { key: RemoteKey; hold_secs?: number } }
   | { text: { text: string } }
   | { launch_app: { activity: string } }
-  | { power: { on: boolean } };
+  | { power: { on: boolean } }
+  | { native: { token: string } };
+
+/** One entry in a remote's expanded command catalogue (Bravia IRCC list, …). */
+export interface RemoteCommandInfo {
+  name: string;
+  token: string;
+}
+
+/** The remote's expanded (native) command catalogue — empty when it has none. */
+export async function getRemoteCommands(id: string): Promise<RemoteCommandInfo[]> {
+  const res = await fetch(`/api/remote/devices/${id}/commands`);
+  if (!res.ok) return [];
+  return res.json();
+}
 
 /** A launchable app on a remote's TV (pinned ∪ recents). */
 export interface RemoteApp {

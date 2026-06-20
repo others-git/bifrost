@@ -12,7 +12,7 @@
 
 use super::{SmartTvVendor, TvIdentity, TvSnapshot};
 use crate::models::media::{NowPlaying, PlayState};
-use crate::models::remote::RemoteKey;
+use crate::models::remote::{RemoteCommandInfo, RemoteKey};
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use reqwest::Client;
@@ -369,6 +369,34 @@ impl SmartTvVendor for BraviaVendor {
             .await
             .map(|_| ())
     }
+
+    async fn commands(&self) -> Result<Vec<RemoteCommandInfo>> {
+        // result = [<meta>, [{ "name": "Power", "value": "AAAA…" }, …]] — the TV's
+        // full IRCC catalogue. The token we replay is the IRCC code itself.
+        let r = self
+            .scalar("system", "getRemoteControllerInfo", "1.0", json!([]))
+            .await?;
+        let list = r
+            .get(1)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok(list
+            .iter()
+            .filter_map(|c| {
+                let name = c.get("name").and_then(Value::as_str)?;
+                let value = c.get("value").and_then(Value::as_str)?;
+                Some(RemoteCommandInfo {
+                    name: name.to_string(),
+                    token: value.to_string(),
+                })
+            })
+            .collect())
+    }
+
+    async fn send_command(&self, token: &str) -> Result<()> {
+        self.ircc(token).await
+    }
 }
 
 /// Sony's published IRCC code for each canonical key. `Power` is the TV-power
@@ -573,6 +601,41 @@ mod tests {
 
         let v = BraviaVendor::new_for_test(&tv.uri(), Some("c".into()));
         v.send_key(RemoteKey::Up).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn commands_lists_the_ircc_catalogue() {
+        let tv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/sony/system"))
+            .and(body_string_contains("getRemoteControllerInfo"))
+            .respond_with(ok_result(json!({
+                "result": [
+                    { "bundled": true },
+                    [ { "name": "Num1", "value": "AAAAAQAAAAEAAAAAAw==" },
+                      { "name": "Input", "value": "AAAAAQAAAAEAAAAlAw==" } ]
+                ]
+            })))
+            .mount(&tv)
+            .await;
+        let v = BraviaVendor::new_for_test(&tv.uri(), Some("c".into()));
+        let cmds = v.commands().await.unwrap();
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds[0].name, "Num1");
+        assert!(cmds[1].token.starts_with("AAAA"));
+    }
+
+    #[tokio::test]
+    async fn send_command_posts_the_native_ircc_token() {
+        let tv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/sony/IRCC"))
+            .and(body_string_contains("MYTOKEN"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&tv)
+            .await;
+        let v = BraviaVendor::new_for_test(&tv.uri(), Some("c".into()));
+        v.send_command("MYTOKEN").await.unwrap();
     }
 
     #[tokio::test]

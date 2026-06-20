@@ -14,7 +14,7 @@
 
 use crate::AppState;
 use crate::api::auth::Session;
-use crate::models::remote::{RemoteCommand, RemoteState};
+use crate::models::remote::{RemoteCommand, RemoteCommandInfo, RemoteState};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -31,6 +31,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/devices", get(list_devices_handler))
         .route("/devices/{id}", get(get_device_handler))
         .route("/devices/{id}/command", post(command_handler))
+        .route("/devices/{id}/commands", get(list_commands_handler))
         .route("/devices/{id}/apps", get(list_apps_handler))
         .route("/devices/{id}/apps/pin", put(pin_app_handler))
         .route("/devices/{id}/enabled", put(set_enabled_handler))
@@ -366,6 +367,7 @@ pub(crate) async fn apply_remote_command(
             }
             provider.set_power(&device_id, *on).await
         }
+        RemoteCommand::Native { token } => provider.send_native(&device_id, token).await,
     };
     match result {
         Ok(()) => {
@@ -443,6 +445,35 @@ pub(crate) async fn list_remotes(state: &AppState) -> Vec<RemoteDeviceRow> {
         .collect()
 }
 
+/// The remote's **expanded** command catalogue (the keys beyond the canonical set
+/// it exposes, e.g. a Bravia's full IRCC list). Empty for remotes without one.
+pub(crate) async fn list_remote_commands(state: &AppState, id: &str) -> Vec<RemoteCommandInfo> {
+    let row = sqlx::query(
+        "SELECT r.device_id, p.provider_type, p.credentials
+           FROM remote_devices r JOIN providers p ON r.provider_id = p.id
+          WHERE r.id = ? AND p.enabled = 1 AND r.enabled = 1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let Some(row) = row else { return Vec::new() };
+    let device_id: String = row.get("device_id");
+    let provider_type: String = row.get("provider_type");
+    let credentials_enc: String = row.get("credentials");
+    let Ok(provider) = build_remote_provider(state, &provider_type, &credentials_enc) else {
+        return Vec::new();
+    };
+    provider
+        .list_commands(&device_id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::debug!(target: "bifrost::smarttv", remote = %id, "list_commands failed: {e:#}");
+            Vec::new()
+        })
+}
+
 // ── Handlers (session-authenticated) ─────────────────────────────────────────
 
 async fn list_devices_handler(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
@@ -458,6 +489,14 @@ async fn get_device_handler(
         Some(s) => Json(s).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+async fn list_commands_handler(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    Json(list_remote_commands(&state, &id).await).into_response()
 }
 
 pub(crate) fn remote_status(outcome: RemoteOutcome) -> StatusCode {

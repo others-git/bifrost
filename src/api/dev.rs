@@ -31,6 +31,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/info", get(info_handler))
         .route("/providers", get(providers_handler))
         .route("/providers/{id}/debug", get(provider_debug_handler))
+        .route(
+            "/devices/{provider_id}/{device_id}/raw",
+            get(device_raw_handler),
+        )
 }
 
 /// Whether developer mode is on (`config.dev_mode`).
@@ -119,6 +123,71 @@ async fn provider_debug_handler(
         Some(v) => Json(v).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+async fn device_raw_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((provider_id, device_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    if let Err(code) = guard(&state, &headers).await {
+        return code.into_response();
+    }
+    match device_raw(&state, &provider_id, &device_id).await {
+        Some(v) => Json(v).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// The **raw upstream representation** of one device — everything the source
+/// exposes, including the parts Bifrost doesn't model (the `supported_features`
+/// bitmask and every attribute). For Home Assistant that's `GET /api/states/
+/// <entity_id>`; it's the introspection that drives generic "passthrough" mapping
+/// and capability auditing. Non-HA providers don't have an analog yet.
+async fn device_raw(state: &AppState, provider_id: &str, device_id: &str) -> Option<Value> {
+    let row = sqlx::query("SELECT provider_type, credentials FROM providers WHERE id = ?")
+        .bind(provider_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()?;
+    let ptype: String = row.get("provider_type");
+    if ptype != "ha" {
+        return Some(json!({
+            "provider_type": ptype,
+            "device_id": device_id,
+            "note": "raw upstream introspection is available for Home Assistant devices",
+        }));
+    }
+    let creds = state
+        .decrypt_credentials(&row.get::<String, _>("credentials"))
+        .ok()?;
+    let v: Value = serde_json::from_str(&creds).ok()?;
+    let base = v["base_url"].as_str()?.trim_end_matches('/');
+    let token = v["token"].as_str()?;
+    let entity: Value = reqwest::Client::new()
+        .get(format!("{base}/api/states/{device_id}"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    let attrs = entity.get("attributes").cloned().unwrap_or(Value::Null);
+    let domain = device_id.split('.').next().unwrap_or("");
+    let state_str = entity.get("state").and_then(Value::as_str).unwrap_or("");
+    Some(json!({
+        "provider_type": "ha",
+        "entity_id": device_id,
+        "domain": domain,
+        "state": entity.get("state"),
+        "supported_features": attrs.get("supported_features"),
+        "attributes": attrs,
+        // How a generic "passthrough" device would model this entity — the #2
+        // mapping, previewed here so it can be iterated against live entities.
+        "generic_preview": crate::models::generic::controls_from_ha(domain, state_str, &attrs),
+    }))
 }
 
 /// Build the provider and ask it for diagnostics (`debug_info`). Light providers

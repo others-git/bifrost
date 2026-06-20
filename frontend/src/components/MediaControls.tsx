@@ -4,8 +4,9 @@
 // favorites; power lives in the surrounding chrome (card header / fly-out title)
 // via the exported PowerButton.
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
+  getMediaDevices,
   getMediaFavorites,
   playMediaFavorite,
   setMediaState,
@@ -14,7 +15,7 @@ import {
   type MediaFavorite,
 } from "../api";
 import { DisableRow } from "./PowerFlyout";
-import { useRemote, RemotePad, RemoteApps } from "./BifrostRemote";
+import { useRemote, RemotePad, RemoteApps, ExpandedRemote } from "./BifrostRemote";
 import { PowerToggle, Segmented } from "./controls";
 import { Flyout, FlyoutHeader } from "./Flyout";
 import { Select } from "./Select";
@@ -373,6 +374,7 @@ function TvAio({
           <TvNowPlaying device={device} />
           <FancyVolume device={device} onLocalPatch={onLocalPatch} receiverName={receiverName} />
           <RemotePad press={remote.press} />
+          <ExpandedRemote remoteId={remoteId} send={remote.send} />
         </div>
       ) : (
         <RemoteApps
@@ -430,6 +432,29 @@ function FancyVolume({
   const muted = st.mute ?? false;
   const trackRef = useRef<HTMLDivElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  // In receiver-paired mode the receiver itself is hidden, so surface a small
+  // power toggle for it beside the "Volume → receiver" line. Its power isn't on
+  // the TV device, so read it from the cached device list once.
+  const [receiverPower, setReceiverPower] = useState<boolean | null>(null);
+  useEffect(() => {
+    const rid = device.receiver_id;
+    if (!rid) return;
+    let alive = true;
+    getMediaDevices().then((ds) => {
+      if (alive) setReceiverPower(ds.find((d) => d.id === rid)?.state.power ?? null);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [device.receiver_id]);
+  function toggleReceiver() {
+    const rid = device.receiver_id;
+    if (!rid || receiverPower === null) return;
+    const next = !receiverPower;
+    setReceiverPower(next);
+    setMediaState(rid, { power: next });
+  }
 
   function commit(v: number) {
     const clamped = Math.max(0, Math.min(100, Math.round(v)));
@@ -511,7 +536,16 @@ function FancyVolume({
           {volume}
         </span>
       </div>
-      {receiverName && <div style={{ fontSize: "0.7rem", color: T.dim }}>Volume → {receiverName}</div>}
+      {receiverName && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.5rem" }}>
+          <span style={{ fontSize: "0.7rem", color: T.dim, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            Volume → {receiverName}
+          </span>
+          {receiverPower !== null && (
+            <PowerToggle on={receiverPower} accent={color.gold} size={22} onToggle={toggleReceiver} />
+          )}
+        </div>
+      )}
     </div>
   );
 }

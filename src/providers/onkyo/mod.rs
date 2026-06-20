@@ -437,6 +437,21 @@ fn link_for(host: &str, port: u16) -> Arc<OnkyoLink> {
     link
 }
 
+/// Liveness/resync heartbeat. If the receiver sends nothing for this long, the
+/// actor re-queries the full state battery — a reply proves the link is alive
+/// **and** re-syncs the cache against any push it missed. The eISCP socket can go
+/// **half-open with no FIN** (the receiver drops us on standby, or a LAN blip),
+/// which leaves `read` blocking forever and freezes the cached state; the
+/// heartbeat is what detects that. Short in tests so the reconnect path is fast.
+const HEARTBEAT: Duration = if cfg!(test) {
+    Duration::from_millis(100)
+} else {
+    Duration::from_secs(30)
+};
+/// Reconnect after this many consecutive heartbeats go unanswered (a live but
+/// quiet receiver answers the very first probe, resetting the count).
+const MAX_SILENT_HEARTBEATS: u32 = 2;
+
 /// Owns the single socket: connects (refreshing full state each time), then
 /// loops writing queued batches and broadcasting decoded replies/echoes.
 async fn onkyo_link_actor(
@@ -460,6 +475,7 @@ async fn onkyo_link_actor(
             if stream.write_all(&init).await.is_ok() {
                 let mut buf: Vec<u8> = Vec::with_capacity(1024);
                 let mut chunk = [0u8; 1024];
+                let mut silent: u32 = 0;
                 loop {
                     tokio::select! {
                         biased;
@@ -471,9 +487,10 @@ async fn onkyo_link_actor(
                             }
                             None => return, // all senders dropped (link gone)
                         },
-                        r = stream.read(&mut chunk) => match r {
-                            Ok(0) | Err(_) => break, // closed → reconnect
-                            Ok(n) => {
+                        r = tokio::time::timeout(HEARTBEAT, stream.read(&mut chunk)) => match r {
+                            Ok(Ok(0)) | Ok(Err(_)) => break, // closed/errored → reconnect
+                            Ok(Ok(n)) => {
+                                silent = 0;
                                 buf.extend_from_slice(&chunk[..n]);
                                 while let Some((msg, consumed)) = decode_packet(&buf) {
                                     buf.drain(..consumed);
@@ -482,6 +499,23 @@ async fn onkyo_link_actor(
                                     }
                                     let (code, data) = msg.split_at(3);
                                     let _ = events.send((code.to_string(), data.to_string()));
+                                }
+                            }
+                            Err(_) => {
+                                // Idle for HEARTBEAT: a live receiver is just quiet,
+                                // so probe it (which also re-syncs the cache); a
+                                // silently half-open socket never answers, so give
+                                // up after a few unanswered probes and reconnect.
+                                silent += 1;
+                                if silent > MAX_SILENT_HEARTBEATS {
+                                    break;
+                                }
+                                let mut probe = Vec::new();
+                                for q in STATE_QUERIES {
+                                    probe.extend_from_slice(&encode_packet(q));
+                                }
+                                if stream.write_all(&probe).await.is_err() {
+                                    break;
                                 }
                             }
                         },
@@ -700,6 +734,12 @@ impl MediaProvider for OnkyoProvider {
             };
             let mut main_state = fresh();
             let mut zone2_state = fresh();
+            // Last snapshot emitted per zone, so we forward only real changes: a
+            // heartbeat re-query (or a duplicate push) of unchanged state stays
+            // silent, while a push the link missed is corrected the instant the
+            // heartbeat re-reads it.
+            let mut last_main: Option<MediaState> = None;
+            let mut last_zone2: Option<MediaState> = None;
             loop {
                 let (code, data) = match rx.recv().await {
                     Ok(m) => m,
@@ -714,21 +754,25 @@ impl MediaProvider for OnkyoProvider {
                 let Some((device_id, canon)) = canonical(&code) else {
                     continue;
                 };
-                let state = if device_id == "zone2" {
-                    &mut zone2_state
+                let (state, last) = if device_id == "zone2" {
+                    (&mut zone2_state, &mut last_zone2)
                 } else {
-                    &mut main_state
+                    (&mut main_state, &mut last_main)
                 };
-                if apply_message(state, canon, &data)
-                    && tx
+                apply_message(state, canon, &data);
+                if last.as_ref() != Some(&*state) {
+                    let snapshot = state.clone();
+                    *last = Some(snapshot.clone());
+                    if tx
                         .send(MediaEvent {
                             device_id: device_id.to_string(),
-                            state: state.clone(),
+                            state: snapshot,
                         })
                         .await
                         .is_err()
-                {
-                    return; // consumer dropped → stop
+                    {
+                        return; // consumer dropped → stop
+                    }
                 }
             }
         });
@@ -1421,6 +1465,91 @@ mod tests {
             conns.load(Ordering::SeqCst),
             1,
             "all I/O must share one connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn link_reconnects_when_the_receiver_goes_silent() {
+        // A receiver whose eISCP socket goes half-open *without* a FIN (it drops
+        // us on standby, or a LAN blip) must be detected by the heartbeat and
+        // reconnected, re-syncing fresh state — instead of `read` blocking forever
+        // and the cache freezing on the last value (the 0.27.x Onkyo "isn't
+        // sync'd" bug). The first connection answers once then falls silent; the
+        // reconnect reports a new volume the push channel must surface.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let conns = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&conns);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let nth = counter.fetch_add(1, Ordering::SeqCst); // 0 = first connection
+                tokio::spawn(async move {
+                    let vol = if nth == 0 { "1E" } else { "28" }; // 30, then 40
+                    let mut answered = false;
+                    let mut buf: Vec<u8> = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    loop {
+                        let Ok(n) = sock.read(&mut chunk).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        while let Some((msg, consumed)) = decode_packet(&buf) {
+                            buf.drain(..consumed);
+                            if msg.len() < 3 {
+                                continue;
+                            }
+                            if nth == 0 && answered {
+                                continue; // first connection falls silent after one reply
+                            }
+                            let (code, data) = msg.split_at(3);
+                            if data != "QSTN" {
+                                continue;
+                            }
+                            let v = match code {
+                                "MVL" => vol,
+                                "PWR" => "01",
+                                "AMT" => "00",
+                                "SLI" => "12",
+                                _ => "N/A",
+                            };
+                            let _ = sock.write_all(&encode_packet(&format!("{code}{v}"))).await;
+                            answered = true;
+                        }
+                    }
+                });
+            }
+        });
+
+        let p = OnkyoProvider::new_for_test("127.0.0.1", port);
+        let mut rx = p.event_stream().await.unwrap();
+
+        // The reconnect resync must surface the new volume (40 = 0x28).
+        let mut saw_new_volume = false;
+        for _ in 0..30 {
+            match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+                Ok(Some(ev)) if ev.state.volume == 40 => {
+                    saw_new_volume = true;
+                    break;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => break, // channel closed
+                Err(_) => {}       // idle tick — keep waiting through the reconnect
+            }
+        }
+        assert!(
+            saw_new_volume,
+            "the link must reconnect after silence and resync the new volume"
+        );
+        assert!(
+            conns.load(Ordering::SeqCst) >= 2,
+            "the dead link should have been reconnected"
         );
     }
 

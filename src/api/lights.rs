@@ -18,6 +18,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{id}", get(get_light).put(set_light_state))
         .route("/{id}/enabled", axum::routing::put(set_light_enabled))
         .route("/{id}/glyph", axum::routing::put(set_light_glyph))
+        .route("/{id}/name", axum::routing::put(set_light_name))
         .route("/{id}/shadow", axum::routing::put(set_light_shadow))
         .route("/{id}/room", axum::routing::put(set_light_room))
         .route("/{id}/segments", axum::routing::put(set_light_segments))
@@ -353,6 +354,17 @@ async fn set_light_glyph(
     Json(req): Json<crate::api::SetGlyphRequest>,
 ) -> impl IntoResponse {
     crate::api::set_device_glyph(&state, "lights", &id, req.glyph)
+        .await
+        .into_response()
+}
+
+async fn set_light_name(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+    Json(req): Json<crate::api::SetNameRequest>,
+) -> impl IntoResponse {
+    crate::api::set_device_name(&state, "lights", &id, crate::api::clean_name(req.name))
         .await
         .into_response()
 }

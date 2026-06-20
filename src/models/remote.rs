@@ -95,6 +95,22 @@ pub enum RemoteCommand {
     LaunchApp { activity: String },
     /// Power the device on/off.
     Power { on: bool },
+    /// Send a provider-native command by its opaque `token` (from
+    /// [`RemoteCommandInfo`]) — the keys beyond the canonical set that a specific
+    /// device exposes (number pad, colour buttons, Input, Guide, …). The provider
+    /// interprets the token (a Bravia IRCC code, an HA `send_command` name, …).
+    Native { token: String },
+}
+
+/// One entry in a remote's **expanded** command catalogue — a provider-native
+/// command the device exposes beyond the canonical [`RemoteKey`] set. Sent back
+/// as [`RemoteCommand::Native`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RemoteCommandInfo {
+    /// Human label (the device's own name for it, e.g. `"Num1"`, `"Red"`, `"Input"`).
+    pub name: String,
+    /// Opaque token replayed via `RemoteCommand::Native` to invoke it.
+    pub token: String,
 }
 
 #[cfg(test)]

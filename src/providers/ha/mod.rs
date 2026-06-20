@@ -42,6 +42,9 @@
 //! - **Device grouping:** the registry also gives each entity's `device_id` — the
 //!   basis for grouping a device's entities (the deferred device-registry import).
 
+use crate::models::generic::{
+    Control, GENERIC_HA_DOMAINS, GenericDevice, control_write_to_ha, controls_from_ha,
+};
 use crate::models::media::{
     MediaCapabilities, MediaCommand, MediaDevice, MediaDeviceKind, MediaEvent, MediaState,
     NowPlaying, PlayState, TransportCmd,
@@ -50,8 +53,9 @@ use crate::models::power::{PowerDevice, PowerKind, PowerState};
 use crate::models::remote::{RemoteDevice, RemoteKey, RemoteState};
 use crate::models::{Color, Light, LightCapabilities, LightState, Provider};
 use crate::providers::{
-    CredentialField, FieldKind, LightProvider, MediaProvider, MediaProviderFactory, PowerProvider,
-    PowerProviderFactory, ProviderFactory, ProviderGroup, RemoteProvider, RemoteProviderFactory,
+    CredentialField, FieldKind, GenericProvider, GenericProviderFactory, LightProvider,
+    MediaProvider, MediaProviderFactory, PowerProvider, PowerProviderFactory, ProviderFactory,
+    ProviderGroup, RemoteProvider, RemoteProviderFactory,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
@@ -1388,6 +1392,70 @@ impl RemoteProviderFactory for HaRemoteFactory {
     }
 }
 
+// ── Generic passthrough (the controllable long tail) ─────────────────────────
+
+#[async_trait]
+impl GenericProvider for HaProvider {
+    fn name(&self) -> &str {
+        "Home Assistant"
+    }
+
+    async fn discover(&self) -> Result<Vec<GenericDevice>> {
+        let reg = self.entity_registry().await;
+        let hw = self.entity_hw_ids().await;
+        Ok(self
+            .get_states()
+            .await?
+            .into_iter()
+            .filter(|e| {
+                GENERIC_HA_DOMAINS
+                    .iter()
+                    .any(|p| e.entity_id.starts_with(p))
+                    && keep_entity(&reg, &e.entity_id)
+            })
+            .map(|e| {
+                let kind = e.entity_id.split('.').next().unwrap_or("").to_string();
+                GenericDevice {
+                    provider_id: String::new(), // set by the API layer
+                    name: friendly_name(&e.entity_id, &e.attributes),
+                    controls: controls_from_ha(&kind, &e.state, &e.attributes),
+                    kind,
+                    hw_id: hw.get(&e.entity_id).cloned(),
+                    device_id: e.entity_id,
+                }
+            })
+            .collect())
+    }
+
+    async fn get_controls(&self, device_id: &str) -> Result<Vec<Control>> {
+        let e = self.get_entity(device_id).await?;
+        let domain = device_id.split('.').next().unwrap_or("");
+        Ok(controls_from_ha(domain, &e.state, &e.attributes))
+    }
+
+    async fn set_control(&self, device_id: &str, key: &str, value: &Value) -> Result<()> {
+        let domain = device_id.split('.').next().unwrap_or("");
+        let (svc_domain, service, extra) = control_write_to_ha(domain, key, value)
+            .ok_or_else(|| anyhow!("no service mapping for {domain} control '{key}'"))?;
+        self.call_service(&svc_domain, &service, device_id, extra)
+            .await
+    }
+}
+
+/// Generic-passthrough side of the HA adapter — climate, cover, lock, `number`,
+/// `select`, `button`, … surfaced as control primitives. Registered with
+/// `register_generic(...)` alongside the other HA factories.
+pub struct HaGenericFactory;
+
+impl GenericProviderFactory for HaGenericFactory {
+    fn provider_type(&self) -> &'static str {
+        "ha"
+    }
+    fn build(&self, credentials_json: &str) -> Result<Box<dyn GenericProvider>> {
+        Ok(Box::new(HaProvider::from_credentials(credentials_json)?))
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 //
 // These run as soon as `pub mod ha;` is added. They use wiremock like the other
@@ -1798,6 +1866,62 @@ mod tests {
         let reqs = server.received_requests().await.unwrap();
         let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
         assert_eq!(body["entity_id"], "fan.bedroom");
+    }
+
+    #[tokio::test]
+    async fn discover_generic_maps_climate_and_excludes_native_domains() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/states"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "entity_id": "climate.bedroom", "state": "heat",
+                  "attributes": { "temperature": 21, "min_temp": 7, "max_temp": 35,
+                                  "hvac_modes": ["off", "heat"], "current_temperature": 19,
+                                  "friendly_name": "Bedroom" } },
+                { "entity_id": "switch.porch", "state": "on", "attributes": {} }
+            ])))
+            .mount(&server)
+            .await;
+
+        let p = HaProvider::new_for_test(server.uri()).unwrap();
+        let devices = GenericProvider::discover(&p).await.unwrap();
+        // The switch belongs to the power domain, not generic.
+        assert_eq!(devices.len(), 1);
+        let tv = &devices[0];
+        assert_eq!(tv.device_id, "climate.bedroom");
+        assert_eq!(tv.kind, "climate");
+        assert_eq!(tv.name, "Bedroom");
+        assert!(
+            tv.controls
+                .iter()
+                .any(|c| matches!(c, Control::Number { key, .. } if key == "temperature"))
+        );
+        assert!(
+            tv.controls
+                .iter()
+                .any(|c| matches!(c, Control::Enum { key, .. } if key == "hvac_mode"))
+        );
+    }
+
+    #[tokio::test]
+    async fn generic_set_control_calls_the_mapped_service() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/services/climate/set_temperature"))
+            .and(body_string_contains("climate.bedroom"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let p = HaProvider::new_for_test(server.uri()).unwrap();
+        GenericProvider::set_control(&p, "climate.bedroom", "temperature", &json!(21))
+            .await
+            .unwrap();
+
+        let reqs = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["temperature"].as_f64(), Some(21.0));
     }
 
     fn remote_entity() -> Value {

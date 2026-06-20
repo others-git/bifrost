@@ -45,6 +45,15 @@ const BODIES: Record<string, JSX.Element> = {
       <path d="M17 18q2.6.5 2.8 3.4" strokeWidth={1.2} />
     </>
   ),
+  triangle: (
+    // A strip of joined triangular light panels (up · down · up) — the Nanoleaf
+    // flagship shape, distinct from a plain warning/play triangle.
+    <>
+      <path d="M3 18 L7.5 7 L12 18 Z" />
+      <path d="M7.5 7 L12 18 L16.5 7 Z" />
+      <path d="M12 18 L16.5 7 L21 18 Z" />
+    </>
+  ),
   speaker: (
     <>
       <path d="M4 9.5v5h3.5L13 19V5L7.5 9.5H4Z" />
@@ -301,6 +310,7 @@ const BODIES: Record<string, JSX.Element> = {
 export const GLYPH_OPTIONS: { name: string; label: string }[] = [
   { name: "bulb", label: "Bulb" },
   { name: "led_strip", label: "LED strip" },
+  { name: "triangle", label: "Triangle panels" },
   { name: "speaker", label: "Speaker" },
   { name: "speaker_group", label: "Speaker group" },
   { name: "receiver", label: "Receiver" },
@@ -323,6 +333,7 @@ export const CONTROL_GLYPH_OPTIONS: { name: string; label: string }[] = [
   { name: "scene", label: "Scene" },
   { name: "bulb", label: "Bulb" },
   { name: "led_strip", label: "LED strip" },
+  { name: "triangle", label: "Triangle panels" },
   { name: "speaker", label: "Speaker" },
   { name: "fan", label: "Fan" },
   { name: "plug", label: "Plug" },

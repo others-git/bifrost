@@ -33,6 +33,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/devices/{id}/ungroup", post(ungroup_handler))
         .route("/devices/{id}/enabled", put(set_enabled_handler))
         .route("/devices/{id}/glyph", put(set_glyph_handler))
+        .route("/devices/{id}/name", put(set_name_handler))
         .route("/devices/{id}/shadow", put(set_shadow_handler))
         .route("/devices/{id}/room", put(set_room_handler))
         .route("/devices/{id}/receiver", put(set_receiver_handler))
@@ -77,6 +78,22 @@ async fn set_glyph_handler(
     crate::api::set_device_glyph(&state, "media_devices", &id, req.glyph)
         .await
         .into_response()
+}
+
+async fn set_name_handler(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+    Json(req): Json<crate::api::SetNameRequest>,
+) -> impl IntoResponse {
+    crate::api::set_device_name(
+        &state,
+        "media_devices",
+        &id,
+        crate::api::clean_name(req.name),
+    )
+    .await
+    .into_response()
 }
 
 async fn set_shadow_handler(
@@ -200,13 +217,37 @@ fn row_to_device(r: sqlx::sqlite::SqliteRow) -> MediaDeviceRow {
     }
 }
 
-/// M26: overlay a companion's complementary state onto its primary — fill
-/// now-playing, source/source-list, and **surface the companion's receiver
-/// binding** where the primary lacks them, and union the offered capabilities.
-/// The receiver volume overlay (run afterwards) then shows the receiver's volume
-/// on the merged binding. Nothing is hidden — the union lives on the primary.
+/// How much real "what's playing" a now-playing snapshot carries, for picking the
+/// richest one across a composite's views: a member actually reporting a title
+/// (or artist/album) with active playback outranks an empty/idle/stopped one,
+/// which outranks `None`. Lets [`merge_companion_into`] surface the view that
+/// knows what's on without an idle `media_player` masking it — irrespective of
+/// which row is the primary (the M26 order-independence rule).
+fn now_playing_score(np: &Option<crate::models::media::NowPlaying>) -> u8 {
+    use crate::models::media::PlayState;
+    match np {
+        None => 0,
+        Some(n) => {
+            let has_content = n.title.is_some() || n.artist.is_some() || n.album.is_some();
+            let active = matches!(n.play_state, Some(PlayState::Playing | PlayState::Paused));
+            u8::from(has_content) * 2 + u8::from(active)
+        }
+    }
+}
+
+/// M26: overlay a companion's complementary state onto its primary — surface the
+/// **richest** now-playing, fill source/source-list, surface the companion's
+/// **receiver binding** where the primary lacks them, and union the offered
+/// capabilities. The receiver volume overlay (run afterwards) then shows the
+/// receiver's volume on the merged binding. Nothing is hidden — the union lives
+/// on the primary.
 fn merge_companion_into(primary: &mut MediaDeviceRow, companion: &MediaDeviceRow) {
-    if primary.state.now_playing.is_none() {
+    // A companion that's actually playing wins now-playing over an idle/empty
+    // primary (one media_player view of a TV reads idle while a Cast view for the
+    // same TV carries the title) — order-independent, never masked.
+    if now_playing_score(&companion.state.now_playing)
+        > now_playing_score(&primary.state.now_playing)
+    {
         primary
             .state
             .now_playing
@@ -219,6 +260,21 @@ fn merge_companion_into(primary: &mut MediaDeviceRow, companion: &MediaDeviceRow
         if !primary.state.source_list.contains(s) {
             primary.state.source_list.push(s.clone());
         }
+    }
+    // A merged-in backing that carries the real volume/mute fills the primary when
+    // it reports none — e.g. one media_player view of a TV reads volume 0 while
+    // another merged-in view (a Cast/Google-TV entity, a soundbar) carries the
+    // real volume. (The receiver overlay, run after, still wins for a bound source.)
+    if primary.state.volume == 0 && companion.state.volume > 0 {
+        primary.state.volume = companion.state.volume;
+        primary.state.mute = companion.state.mute;
+    }
+    // Surface a companion's live sync-group membership too.
+    if primary.state.group_coordinator.is_none() {
+        primary
+            .state
+            .group_coordinator
+            .clone_from(&companion.state.group_coordinator);
     }
     // A receiver binding on the companion takes volume-control precedence.
     if primary.receiver_id.is_none() {
@@ -277,98 +333,155 @@ impl PowerSignal {
     }
 }
 
-/// Resolve a composite's effective `(reachable, on)` from its primary plus member
-/// signals. The primary is authoritative **while it is reachable** — its `power`
-/// is the rich media state, so nothing overrides it. When the primary is
-/// unreachable (a standby TV reports its `media_player` `unavailable`), fall back
-/// to the members: reachable if any member is, on if any reachable member reports
-/// on. With no reachable member it stays as-is (truly offline) — the client still
-/// offers a Wake-on-LAN power-on, which reaches a fully-down NIC a live read
-/// can't. This is the single seam a new TV surface plugs into.
-fn resolve_composite_power(primary: PowerSignal, members: &[PowerSignal]) -> PowerSignal {
-    if primary.reachable {
-        return primary;
-    }
-    let mut reachable_member = false;
-    let mut any_on = false;
-    for m in members.iter().filter(|m| m.reachable) {
-        reachable_member = true;
-        any_on |= m.on;
-    }
-    if reachable_member {
-        PowerSignal {
+/// Resolve a composite's effective `(reachable, on)` from its **media** views
+/// (the primary + companion `media_player`s — all the same physical device) and
+/// its paired **remotes**.
+///
+/// `on` is a **positive** signal: a device any reachable media view reports as
+/// on/playing *is* on, so a leaner or stale sibling reading `off` can never mask
+/// the view that knows it's playing. The media views are weighed symmetrically —
+/// order-independent, the M26 rule — so the result never depends on which row is
+/// the primary. (This is the exact Bravia case: the `media_player` Bifrost merged
+/// as primary can go `unavailable`/`off` while a companion Cast entity for the
+/// same TV stays live and playing.)
+///
+/// Remotes are the **standby-wake fallback**: when *no* media view is reachable
+/// (a cold TV whose `media_player` reads `unavailable`), the paired remote's
+/// `(reachable, on)` rescues the composite. A remote is not allowed to override a
+/// reachable media view (a stale remote-on must not force a powered-off TV on).
+/// With nothing reachable the primary is returned as-is — truly offline — and the
+/// client still offers Wake-on-LAN, which reaches a down NIC a live read can't.
+fn resolve_composite_power(
+    primary: PowerSignal,
+    media_members: &[PowerSignal],
+    remotes: &[PowerSignal],
+) -> PowerSignal {
+    let reachable_media: Vec<&PowerSignal> = std::iter::once(&primary)
+        .chain(media_members)
+        .filter(|s| s.reachable)
+        .collect();
+    if !reachable_media.is_empty() {
+        return PowerSignal {
             reachable: true,
-            on: any_on,
-        }
-    } else {
-        primary
+            on: reachable_media.iter().any(|s| s.on),
+        };
     }
+    let reachable_remotes: Vec<&PowerSignal> = remotes.iter().filter(|s| s.reachable).collect();
+    if !reachable_remotes.is_empty() {
+        return PowerSignal {
+            reachable: true,
+            on: reachable_remotes.iter().any(|s| s.on),
+        };
+    }
+    primary
 }
 
-/// Overlay the composite resolution onto `device` from its member signals
-/// (companions + the paired remote, today). Only an unreachable primary that a
-/// member can rescue is changed; otherwise `device` is left untouched.
-fn apply_composite_power(device: &mut MediaDeviceRow, members: &[PowerSignal]) {
-    if members.is_empty() {
+/// Overlay the composite power resolution onto `device` from its member signals —
+/// companion `media_player`s and the paired remotes. The resolved `(reachable,
+/// on)` already folds in the primary itself, so it's written verbatim: a stale or
+/// `off` primary is corrected by a fresher member, and vice-versa. No-op when the
+/// device has no members (a plain, non-composite device).
+fn apply_composite_power(
+    device: &mut MediaDeviceRow,
+    media_members: &[PowerSignal],
+    remotes: &[PowerSignal],
+) {
+    if media_members.is_empty() && remotes.is_empty() {
         return;
     }
-    let resolved = resolve_composite_power(PowerSignal::media(device), members);
-    if device.state.reachable == Some(false) && resolved.reachable {
+    let resolved = resolve_composite_power(PowerSignal::media(device), media_members, remotes);
+    if device.state.power != resolved.on || device.state.reachable != Some(resolved.reachable) {
         tracing::debug!(
             target: "bifrost::composite",
             media = %device.id,
             on = resolved.on,
-            members = members.len(),
-            "media_player unreachable — resolved reachable/power from a composite member",
+            reachable = resolved.reachable,
+            media_members = media_members.len(),
+            remotes = remotes.len(),
+            "composite power resolved from member signals",
         );
-        device.state.reachable = Some(true);
-        device.state.power = resolved.on;
     }
+    device.state.reachable = Some(resolved.reachable);
+    device.state.power = resolved.on;
 }
 
-/// Stored state of every enabled remote paired to a media device, keyed by the
-/// **surface** (control) device id — the primary if the paired device is itself a
-/// companion, so a remote paired to any composite member contributes to the
-/// primary's power / reachability (cheap; no live round trip).
-async fn load_paired_remote_states(
-    state: &AppState,
-) -> std::collections::HashMap<String, RemoteState> {
-    sqlx::query(
-        "SELECT COALESCE(m.companion_of, m.id) AS surface_id, r.last_state
-         FROM remote_devices r JOIN media_devices m ON r.paired_media_id = m.id
+/// One remote paired to a media **surface** (the primary if the remote is paired
+/// to a companion), with what the composite needs to choose and resolve it: the
+/// remote's id, its **backing authority** (a native vendor remote outranks an
+/// integration `remote.*` for the same TV — [`backing_authority`]), and its
+/// cached state.
+struct PairedRemote {
+    surface_id: String,
+    remote_id: String,
+    priority: u8,
+    state: Option<RemoteState>,
+}
+
+/// Every enabled remote paired to a media surface — optionally only `surface`'s
+/// composite (the device or any of its companions). A composite can carry
+/// **several** (a native vendor remote *and* an HA `remote.*` for the same TV), so
+/// callers pick by need: the richest one for control ([`best_remote_per_surface`])
+/// or *every* one's signal for the power/reachability OR. Returning all of them —
+/// not an arbitrary `LIMIT 1` — is what keeps a composite from masking a member's
+/// remote capabilities depending on which device was merged into which.
+async fn load_paired_remotes(state: &AppState, surface: Option<&str>) -> Vec<PairedRemote> {
+    let mut sql = String::from(
+        "SELECT COALESCE(m.companion_of, m.id) AS surface_id, r.id AS remote_id,
+                r.last_state, p.provider_type
+         FROM remote_devices r
+         JOIN media_devices m ON r.paired_media_id = m.id
+         JOIN providers p ON r.provider_id = p.id
          WHERE r.enabled = 1",
-    )
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| tracing::error!("db error loading paired remote states: {e}"))
-    .unwrap_or_default()
-    .into_iter()
-    .filter_map(|r| {
-        let surface_id: String = r.get("surface_id");
-        let st: RemoteState = r
-            .get::<Option<String>, _>("last_state")
-            .and_then(|s| serde_json::from_str(&s).ok())?;
-        Some((surface_id, st))
-    })
-    .collect()
+    );
+    if surface.is_some() {
+        sql.push_str(" AND (m.id = ? OR m.companion_of = ?)");
+    }
+    let mut q = sqlx::query(&sql);
+    if let Some(s) = surface {
+        q = q.bind(s).bind(s);
+    }
+    q.fetch_all(&state.db)
+        .await
+        .map_err(|e| tracing::error!("db error loading paired remotes: {e}"))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| {
+            let provider_type: String = r.get("provider_type");
+            PairedRemote {
+                surface_id: r.get("surface_id"),
+                remote_id: r.get("remote_id"),
+                priority: backing_authority(&state.registry, &provider_type),
+                state: r
+                    .get::<Option<String>, _>("last_state")
+                    .and_then(|s| serde_json::from_str(&s).ok()),
+            }
+        })
+        .collect()
 }
 
-/// Stored state of the single remote paired to `media_id`'s composite (the device
-/// or any of its companions), if any.
-async fn load_one_paired_remote_state(state: &AppState, media_id: &str) -> Option<RemoteState> {
-    let row = sqlx::query(
-        "SELECT r.last_state FROM remote_devices r
-           JOIN media_devices cm ON r.paired_media_id = cm.id
-          WHERE r.enabled = 1 AND (cm.id = ? OR cm.companion_of = ?) LIMIT 1",
-    )
-    .bind(media_id)
-    .bind(media_id)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()?;
-    row.get::<Option<String>, _>("last_state")
-        .and_then(|s| serde_json::from_str(&s).ok())
+/// The remote to surface for control, per composite: the **highest-priority** one
+/// wins (a native vendor remote over an HA `remote.*` for the same TV), so the
+/// richer command catalogue (the full IRCC/native key set behind the "Full
+/// remote") is never masked by a leaner integration copy — *irrespective of which
+/// device was merged into which*. Ties break on the smallest id, so the choice is
+/// deterministic.
+fn best_remote_per_surface(paired: &[PairedRemote]) -> std::collections::HashMap<String, String> {
+    let mut best: std::collections::HashMap<&str, &PairedRemote> = std::collections::HashMap::new();
+    for p in paired {
+        let take = match best.get(p.surface_id.as_str()) {
+            None => true,
+            Some(cur) => {
+                p.priority > cur.priority
+                    || (p.priority == cur.priority && p.remote_id < cur.remote_id)
+            }
+        };
+        if take {
+            best.insert(&p.surface_id, p);
+        }
+    }
+    best.into_iter()
+        .map(|(k, p)| (k.to_string(), p.remote_id.clone()))
+        .collect()
 }
 
 // ── Services (shared with /api/v1) ───────────────────────────────────────────
@@ -388,12 +501,7 @@ pub(crate) async fn list_all_devices(state: &AppState) -> Result<Vec<MediaDevice
                 (SELECT room_id FROM room_media_devices WHERE media_device_id = media_devices.id LIMIT 1) AS room_id,
                 (SELECT rl.room_id FROM room_links rl
                    JOIN provider_group_media_devices pga ON pga.provider_group_id = rl.provider_group_id
-                   WHERE pga.media_device_id = media_devices.id LIMIT 1) AS inherited_room_id,
-                (SELECT r.id FROM remote_devices r
-                   JOIN media_devices cm ON r.paired_media_id = cm.id
-                  WHERE r.enabled = 1
-                    AND (cm.id = media_devices.id OR cm.companion_of = media_devices.id)
-                  LIMIT 1) AS remote_id
+                   WHERE pga.media_device_id = media_devices.id LIMIT 1) AS inherited_room_id
          FROM media_devices ORDER BY name",
     )
     .fetch_all(&state.db)
@@ -421,24 +529,32 @@ pub(crate) async fn list_all_devices(state: &AppState) -> Result<Vec<MediaDevice
         }
     }
 
-    // Composite power/reachability: when a primary's own media_player is
-    // unreachable (a standby TV reports `unavailable`), fall back to its members —
-    // companions + the paired remote — so the effective device reads on/reachable
-    // if any member is. Keeps a cold-but-remote-reachable TV from showing offline.
-    let remote_states = load_paired_remote_states(state).await;
+    // Composite remote + power/reachability. A composite can carry several paired
+    // remotes (a native vendor remote *and* an HA copy of the same TV): the richest
+    // one is surfaced for control (`remote_id`), while **every** remote's signal
+    // feeds the power/reachability OR — so neither is masked by merge ordering.
+    // When a primary's own media_player is unreachable (a standby TV reports
+    // `unavailable`), the effective device still reads on/reachable if any member
+    // (a companion or a paired remote) is — keeping a cold-but-remote-reachable TV
+    // from showing offline.
+    let paired = load_paired_remotes(state, None).await;
+    let remote_ids = best_remote_per_surface(&paired);
     for d in &mut devices {
         if d.companion_of.is_some() {
             continue; // a companion is hidden, not a surface
         }
-        let mut members: Vec<PowerSignal> = companions
+        d.remote_id = remote_ids.get(&d.id).cloned();
+        let media_members: Vec<PowerSignal> = companions
             .iter()
             .filter(|c| c.companion_of.as_deref() == Some(d.id.as_str()))
             .map(PowerSignal::media)
             .collect();
-        if let Some(rs) = remote_states.get(&d.id) {
-            members.push(PowerSignal::remote(rs));
-        }
-        apply_composite_power(d, &members);
+        let remotes: Vec<PowerSignal> = paired
+            .iter()
+            .filter(|p| p.surface_id == d.id)
+            .filter_map(|p| p.state.as_ref().map(PowerSignal::remote))
+            .collect();
+        apply_composite_power(d, &media_members, &remotes);
     }
 
     // A bound source shows its receiver's volume/mute (the receiver owns volume),
@@ -473,10 +589,6 @@ pub(crate) async fn get_device_live(
                 (SELECT rl.room_id FROM room_links rl
                    JOIN provider_group_media_devices pga ON pga.provider_group_id = rl.provider_group_id
                    WHERE pga.media_device_id = a.id LIMIT 1) AS inherited_room_id,
-                (SELECT r.id FROM remote_devices r
-                   JOIN media_devices cm ON r.paired_media_id = cm.id
-                  WHERE r.enabled = 1 AND (cm.id = a.id OR cm.companion_of = a.id)
-                  LIMIT 1) AS remote_id,
                 p.provider_type, p.credentials
          FROM media_devices a JOIN providers p ON a.provider_id = p.id
          WHERE a.id = ? AND p.enabled = 1",
@@ -520,17 +632,22 @@ pub(crate) async fn get_device_live(
     // their receiver binding) onto this primary — before the receiver overlay,
     // so a companion's binding shows the receiver's volume here too. Each member
     // also contributes a power signal for the composite resolution below.
-    let mut members: Vec<PowerSignal> = Vec::new();
+    let mut media_members: Vec<PowerSignal> = Vec::new();
     for companion in load_companions(state, &device.id).await {
-        members.push(PowerSignal::media(&companion));
+        media_members.push(PowerSignal::media(&companion));
         merge_companion_into(&mut device, &companion);
     }
-    if let Some(rs) = load_one_paired_remote_state(state, &device.id).await {
-        members.push(PowerSignal::remote(&rs));
-    }
-    // Composite power/reachability: a standby TV whose media_player just read as
-    // unreachable still reads on/reachable if its remote (or a companion) is.
-    apply_composite_power(&mut device, &members);
+    // Surface the richest paired remote for control, and fold *every* paired
+    // remote's signal into the composite power resolution (see `list_all_devices`).
+    let paired = load_paired_remotes(state, Some(&device.id)).await;
+    device.remote_id = best_remote_per_surface(&paired).remove(&device.id);
+    let remotes: Vec<PowerSignal> = paired
+        .iter()
+        .filter_map(|p| p.state.as_ref().map(PowerSignal::remote))
+        .collect();
+    // Composite power/reachability: a fresher companion media_player (or, in
+    // standby, the paired remote) corrects a stale/off primary.
+    apply_composite_power(&mut device, &media_members, &remotes);
 
     // For a bound source the receiver owns volume/mute, so show the receiver's
     // values — what the source's own volume slider actually controls. Use the
@@ -733,16 +850,25 @@ struct Backing {
     receiver_bound: bool,
     /// This backing is the one actively reporting playback.
     has_now_playing: bool,
-    /// Authority for surfacing controls — a higher value wins a contested control.
-    /// Native single-domain providers (a Bravia smart-TV, Onkyo, Sonos) outrank a
-    /// multi-domain integration copy (Home Assistant), mirroring de-dup's
-    /// "native wins" rule. So merging a native TV into an HA device lets the TV
-    /// take precedence for power/source/transport while still unioning capabilities.
+    /// Last reported volume — a non-zero one marks the backing actually carrying
+    /// audio, so volume routes there even if it isn't the primary.
+    volume: u8,
+    /// Authority for a contested control: a native backing outranks its HA twin
+    /// ([`backing_authority`]), so merging a native TV into an HA device lets the
+    /// TV take precedence for power/source while still unioning capabilities.
     priority: u8,
 }
 
-/// Backing authority: native single-domain providers beat integrations (HA).
-fn backing_priority(registry: &crate::providers::ProviderRegistry, provider_type: &str) -> u8 {
+// Composite control authority: a **native** backing outranks its **integration**
+// (HA) twin for any contested control (source, power, the surfaced remote, and
+// capability ties), mirroring de-dup's "native wins". Within a composite the
+// members are the *same physical device* surfaced more than once — natively and
+// as an HA copy — so native-vs-integration is the only authority distinction that
+// carries information. Everything physical is decided **independently of this**:
+// volume follows a receiver binding (then the backing actually carrying audio)
+// and transport follows the backing actually playing (see [`route_across_backings`]).
+// Ties keep the primary-first order, so a single-provider composite is stable.
+fn backing_authority(registry: &crate::providers::ProviderRegistry, provider_type: &str) -> u8 {
     match registry.ui_domain(provider_type) {
         Some(crate::providers::ProviderDomain::Integration) => 0,
         _ => 1,
@@ -783,12 +909,13 @@ fn route_across_backings(cmd: &MediaCommand, backings: &[Backing]) -> Vec<(Strin
     let mut parts: std::collections::BTreeMap<String, MediaCommand> =
         std::collections::BTreeMap::new();
     if cmd.volume.is_some() || cmd.mute.is_some() {
-        // A receiver binding owns volume (physical routing), else the most
-        // authoritative backing.
+        // A receiver binding owns volume (physical routing); else the backing
+        // actually carrying audio (non-zero volume — a TV view that reads 0 yields
+        // to the merged view that has the real volume); else the primary.
         let target = backings
             .iter()
             .find(|b| b.receiver_bound)
-            .map_or_else(|| best(&|_| true), |b| b.id.clone());
+            .map_or_else(|| best(&|b| b.volume > 0), |b| b.id.clone());
         let e = parts.entry(target).or_default();
         e.volume = cmd.volume;
         e.mute = cmd.mute;
@@ -839,13 +966,15 @@ async fn load_composite_backings(state: &AppState, id: &str) -> Vec<Backing> {
                 .get::<Option<String>, _>("last_state")
                 .and_then(|s| serde_json::from_str(&s).ok());
             let provider_type: String = r.get("provider_type");
+            let volume = st.as_ref().map_or(0, |s| s.volume);
             Backing {
                 id: r.get("id"),
                 capabilities: serde_json::from_str(&r.get::<String, _>("capabilities"))
                     .unwrap_or_default(),
                 receiver_bound: r.get::<Option<String>, _>("receiver_id").is_some(),
                 has_now_playing: st.is_some_and(|s| s.now_playing.is_some()),
-                priority: backing_priority(&state.registry, &provider_type),
+                volume,
+                priority: backing_authority(&state.registry, &provider_type),
             }
         })
         .collect()
@@ -925,18 +1054,10 @@ async fn apply_routed(
 /// succeeded. The remote's own handler does the Wake-on-LAN nudge before the
 /// provider `turn_on` (see [`crate::api::remote::apply_remote_command`]).
 async fn wake_paired_remote(state: &AppState, media_id: &str) -> bool {
-    let remote_id: Option<String> = sqlx::query_scalar(
-        "SELECT r.id FROM remote_devices r
-           JOIN media_devices cm ON r.paired_media_id = cm.id
-          WHERE r.enabled = 1 AND (cm.id = ? OR cm.companion_of = ?) LIMIT 1",
-    )
-    .bind(media_id)
-    .bind(media_id)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
-    let Some(rid) = remote_id else { return false };
+    let paired = load_paired_remotes(state, Some(media_id)).await;
+    let Some(rid) = best_remote_per_surface(&paired).remove(media_id) else {
+        return false;
+    };
     tracing::debug!(target: "bifrost::composite", media = %media_id, remote = %rid, "composite power-on: waking paired remote (WoL + turn_on)");
     let woke = matches!(
         crate::api::remote::apply_remote_command(
@@ -1406,10 +1527,11 @@ pub(crate) async fn discover_media_devices(
             crate::models::media::MediaDeviceKind::Zone => "zone",
         };
         let _ = sqlx::query(
-            "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, last_seen, hw_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+            "INSERT INTO media_devices (id, provider_id, device_id, name, provider_name, kind, capabilities, last_state, last_seen, hw_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
              ON CONFLICT (provider_id, device_id)
-             DO UPDATE SET name         = excluded.name,
+             DO UPDATE SET name         = CASE WHEN name = provider_name THEN excluded.name ELSE name END,
+                           provider_name = excluded.provider_name,
                            kind         = excluded.kind,
                            capabilities = excluded.capabilities,
                            last_state   = excluded.last_state,
@@ -1419,6 +1541,7 @@ pub(crate) async fn discover_media_devices(
         .bind(device.id.to_string())
         .bind(provider_row_id)
         .bind(&device.provider_id)
+        .bind(&device.name)
         .bind(&device.name)
         .bind(kind)
         .bind(&caps)
@@ -1549,8 +1672,36 @@ mod tests {
             },
             receiver_bound,
             has_now_playing: now_playing,
+            volume: 0,
             priority,
         }
+    }
+
+    fn backing_vol(id: &str, volume: u8) -> Backing {
+        Backing {
+            id: id.into(),
+            capabilities: MediaCapabilities::default(),
+            receiver_bound: false,
+            has_now_playing: false,
+            volume,
+            priority: 1,
+        }
+    }
+
+    #[test]
+    fn volume_routes_to_the_backing_carrying_audio() {
+        // A TV (primary) whose media_player reads volume 0, merged with a second
+        // view that has the real volume — volume must route to the audio-carrying
+        // backing, not the silent primary.
+        let backings = vec![backing_vol("tv", 0), backing_vol("audio", 50)];
+        let cmd = MediaCommand {
+            volume: Some(30),
+            ..Default::default()
+        };
+        let routed: std::collections::HashMap<String, MediaCommand> =
+            route_across_backings(&cmd, &backings).into_iter().collect();
+        assert_eq!(routed["audio"].volume, Some(30));
+        assert!(!routed.contains_key("tv"));
     }
 
     fn sig(reachable: bool, on: bool) -> PowerSignal {
@@ -1558,32 +1709,126 @@ mod tests {
     }
 
     #[test]
-    fn reachable_primary_is_authoritative_over_members() {
-        // A reachable media_player wins even if a (stale) member disagrees.
-        let r = resolve_composite_power(sig(true, false), &[sig(true, true)]);
-        assert!(r.reachable && !r.on);
-        let r = resolve_composite_power(sig(true, true), &[sig(true, false)]);
+    fn on_media_view_overrides_a_stale_off_primary() {
+        // The exact Bravia bug: the primary media_player reads off/stale while a
+        // fresh companion media view (a Cast entity for the same TV) reports on +
+        // playing. The composite must read ON — and the same whichever row is the
+        // primary (order-independent, M26).
+        let r = resolve_composite_power(sig(true, false), &[sig(true, true)], &[]);
         assert!(r.reachable && r.on);
+        let r = resolve_composite_power(sig(true, true), &[sig(true, false)], &[]);
+        assert!(r.reachable && r.on);
+        // Every reachable media view reads off → off.
+        let r = resolve_composite_power(sig(true, false), &[sig(true, false)], &[]);
+        assert!(r.reachable && !r.on);
     }
 
     #[test]
-    fn unreachable_primary_falls_back_to_reachable_member() {
-        // Standby TV: media_player unavailable, but the paired remote reports on →
+    fn reachable_remote_does_not_override_a_reachable_media_view() {
+        // A stale paired remote reporting on must not force a powered-off (but
+        // reachable) TV on — media views win while any is reachable; the remote is
+        // only the standby-wake fallback.
+        let r = resolve_composite_power(sig(true, false), &[], &[sig(true, true)]);
+        assert!(r.reachable && !r.on);
+    }
+
+    #[test]
+    fn unreachable_primary_falls_back_to_reachable_remote() {
+        // Standby TV: no reachable media view, but the paired remote reports on →
         // the composite is on + reachable.
-        let r = resolve_composite_power(sig(false, false), &[sig(true, true)]);
+        let r = resolve_composite_power(sig(false, false), &[], &[sig(true, true)]);
         assert!(r.reachable && r.on);
         // Remote reachable but off → reachable, off.
-        let r = resolve_composite_power(sig(false, false), &[sig(true, false)]);
+        let r = resolve_composite_power(sig(false, false), &[], &[sig(true, false)]);
         assert!(r.reachable && !r.on);
     }
 
     #[test]
     fn fully_offline_composite_stays_unreachable() {
-        // No member reachable (cold TV) → left as-is; the client still offers WoL.
-        let r = resolve_composite_power(sig(false, false), &[sig(false, false)]);
+        // Nothing reachable (cold TV) → left as-is; the client still offers WoL.
+        let r = resolve_composite_power(
+            sig(false, false),
+            &[sig(false, false)],
+            &[sig(false, false)],
+        );
         assert!(!r.reachable && !r.on);
-        let r = resolve_composite_power(sig(false, false), &[]);
+        let r = resolve_composite_power(sig(false, false), &[], &[]);
         assert!(!r.reachable && !r.on);
+    }
+
+    #[test]
+    fn now_playing_score_prefers_active_content_over_idle() {
+        use crate::models::media::{NowPlaying, PlayState};
+        let none: Option<NowPlaying> = None;
+        let empty = Some(NowPlaying::default());
+        let idle_title = Some(NowPlaying {
+            title: Some("X".into()),
+            play_state: Some(PlayState::Stopped),
+            ..Default::default()
+        });
+        let playing_title = Some(NowPlaying {
+            title: Some("X".into()),
+            play_state: Some(PlayState::Playing),
+            ..Default::default()
+        });
+        let playing_no_title = Some(NowPlaying {
+            play_state: Some(PlayState::Playing),
+            ..Default::default()
+        });
+        // active+content > idle+content > active-no-content > empty == none.
+        assert!(now_playing_score(&playing_title) > now_playing_score(&idle_title));
+        assert!(now_playing_score(&idle_title) > now_playing_score(&playing_no_title));
+        assert!(now_playing_score(&playing_no_title) > now_playing_score(&empty));
+        assert_eq!(now_playing_score(&empty), now_playing_score(&none));
+        assert_eq!(now_playing_score(&none), 0);
+    }
+
+    fn paired(id: &str, priority: u8) -> PairedRemote {
+        PairedRemote {
+            surface_id: "tv".into(),
+            remote_id: id.into(),
+            priority,
+            state: None,
+        }
+    }
+
+    #[test]
+    fn composite_surfaces_the_native_remote_regardless_of_merge_order() {
+        // A composite TV paired to both a native vendor remote (priority 1, carries
+        // the full IRCC catalogue) and an HA `remote.*` copy (priority 0). The
+        // native one must win whichever device was merged into which — the bug was
+        // a `LIMIT 1` that could surface the catalogue-less HA copy.
+        let native_first = best_remote_per_surface(&[paired("native", 1), paired("ha", 0)]);
+        assert_eq!(native_first.get("tv").map(String::as_str), Some("native"));
+        let ha_first = best_remote_per_surface(&[paired("ha", 0), paired("native", 1)]);
+        assert_eq!(ha_first.get("tv").map(String::as_str), Some("native"));
+    }
+
+    #[test]
+    fn equal_priority_remotes_break_ties_deterministically() {
+        // Two remotes of the same class → the smallest id, independent of order, so
+        // the surfaced remote never flickers with load ordering.
+        let a = best_remote_per_surface(&[paired("zulu", 1), paired("alpha", 1)]);
+        let b = best_remote_per_surface(&[paired("alpha", 1), paired("zulu", 1)]);
+        assert_eq!(a.get("tv").map(String::as_str), Some("alpha"));
+        assert_eq!(b.get("tv").map(String::as_str), Some("alpha"));
+    }
+
+    #[test]
+    fn backing_authority_puts_native_above_its_ha_twin() {
+        let reg = crate::providers::default_registry();
+        // The only authority distinction a composite needs: a native provider
+        // (vendor TV, receiver, speaker, native remote) outranks its HA copy.
+        assert!(backing_authority(&reg, "smarttv") > backing_authority(&reg, "ha"));
+        assert!(backing_authority(&reg, "onkyo") > backing_authority(&reg, "ha"));
+        assert!(backing_authority(&reg, "sonos") > backing_authority(&reg, "ha"));
+        // Same-class natives tie — contested controls then keep the primary-first
+        // order, and physical routing (receiver binding, now-playing) decides the
+        // rest independently of authority.
+        assert_eq!(
+            backing_authority(&reg, "onkyo"),
+            backing_authority(&reg, "smarttv")
+        );
     }
 
     #[test]

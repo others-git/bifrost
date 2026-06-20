@@ -5,6 +5,7 @@ pub mod dedup;
 pub mod dev;
 pub mod enrollment;
 pub mod events;
+pub mod generic;
 pub mod kiosk_update;
 pub mod kiosks;
 pub mod lights;
@@ -37,6 +38,13 @@ pub(crate) struct SetEnabledRequest {
 #[derive(Deserialize)]
 pub(crate) struct SetGlyphRequest {
     pub glyph: Option<String>,
+}
+
+/// Body for setting a device's friendly name (`null`/empty reverts to the
+/// provider's discovered name).
+#[derive(Deserialize)]
+pub(crate) struct SetNameRequest {
+    pub name: Option<String>,
 }
 
 /// Body for manually linking a device as a duplicate of another (`null` clears
@@ -93,6 +101,40 @@ pub(crate) async fn set_device_glyph(
     }
 }
 
+/// Normalize a friendly-name request: trim whitespace, and treat an empty string
+/// as a clear (`None` → revert to the provider name).
+pub(crate) fn clean_name(name: Option<String>) -> Option<String> {
+    name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty())
+}
+
+/// Set a device's **friendly name** (the display name shown everywhere). `Some`
+/// pins a user name; `None` reverts to the provider's discovered name
+/// (`provider_name`). `table` is a fixed per-domain identifier, so the formatted
+/// SQL is injection-free.
+pub(crate) async fn set_device_name(
+    state: &AppState,
+    table: &str,
+    id: &str,
+    name: Option<String>,
+) -> StatusCode {
+    let sql = match &name {
+        Some(_) => format!("UPDATE {table} SET name = ? WHERE id = ?"),
+        None => format!("UPDATE {table} SET name = provider_name WHERE id = ?"),
+    };
+    let mut query = sqlx::query(&sql);
+    if let Some(n) = &name {
+        query = query.bind(n);
+    }
+    match query.bind(id).execute(&state.db).await {
+        Ok(r) if r.rows_affected() > 0 => StatusCode::NO_CONTENT,
+        Ok(_) => StatusCode::NOT_FOUND,
+        Err(e) => {
+            tracing::error!("db error setting {table} name: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
 /// Flip a device row's `enabled` flag. A disabled device is still tracked and
 /// keeps its room membership, but the control/membership queries skip it.
 /// `table` is a fixed identifier per domain (`lights` / `media_devices` /
@@ -131,6 +173,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .nest("/lights", lights::router())
         .nest("/plans", plans::router())
         .nest("/power", power::router())
+        .nest("/generic", generic::router())
         .nest("/provider-groups", rooms::provider_groups_router())
         .nest("/providers", providers::router())
         .nest("/remote", remote::router())

@@ -72,7 +72,7 @@ pub struct MediaFavorite {
 
 /// Full state snapshot, as returned by `get_state` and stored in
 /// `media_devices.last_state`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MediaState {
     pub power: bool,
     /// 0–100.
@@ -104,7 +104,7 @@ pub struct MediaState {
     pub ip: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct NowPlaying {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,

@@ -25,7 +25,7 @@ use crate::models::media::{
     MediaCapabilities, MediaCommand, MediaDevice, MediaDeviceKind, MediaState, NowPlaying,
     TransportCmd,
 };
-use crate::models::remote::{RemoteDevice, RemoteKey, RemoteState};
+use crate::models::remote::{RemoteCommandInfo, RemoteDevice, RemoteKey, RemoteState};
 use crate::providers::{
     CredentialField, FieldKind, MediaProvider, MediaProviderFactory, RemoteProvider,
     RemoteProviderFactory,
@@ -81,6 +81,16 @@ pub(crate) trait SmartTvVendor: Send + Sync {
     async fn send_key(&self, key: RemoteKey) -> Result<()>;
     /// Launch an app by its vendor-native id (package / uri / deep link).
     async fn launch_app(&self, app: &str) -> Result<()>;
+    /// The TV's full native command catalogue (beyond the canonical keys), if it
+    /// exposes one. Default: none.
+    async fn commands(&self) -> Result<Vec<RemoteCommandInfo>> {
+        Ok(Vec::new())
+    }
+    /// Invoke a native command by its token (from [`Self::commands`]). Default:
+    /// unsupported.
+    async fn send_command(&self, _token: &str) -> Result<()> {
+        anyhow::bail!("this TV exposes no native command catalogue")
+    }
 }
 
 // ── Credentials + vendor dispatch ────────────────────────────────────────────
@@ -313,6 +323,15 @@ impl RemoteProvider for SmartTv {
     async fn launch_app(&self, _device_id: &str, activity: &str) -> Result<()> {
         tracing::debug!(target: "bifrost::smarttv", brand = self.vendor.brand(), activity, "launch app");
         self.vendor.launch_app(activity).await
+    }
+
+    async fn list_commands(&self, _device_id: &str) -> Result<Vec<RemoteCommandInfo>> {
+        self.vendor.commands().await
+    }
+
+    async fn send_native(&self, _device_id: &str, token: &str) -> Result<()> {
+        tracing::debug!(target: "bifrost::smarttv", brand = self.vendor.brand(), token, "native command");
+        self.vendor.send_command(token).await
     }
 
     async fn set_power(&self, _device_id: &str, on: bool) -> Result<()> {

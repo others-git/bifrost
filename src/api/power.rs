@@ -29,6 +29,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/devices/{id}/state", put(set_device_handler))
         .route("/devices/{id}/enabled", put(set_enabled_handler))
         .route("/devices/{id}/glyph", put(set_glyph_handler))
+        .route("/devices/{id}/name", put(set_name_handler))
         .route("/devices/{id}/shadow", put(set_shadow_handler))
         .route("/devices/{id}/room", put(set_room_handler))
 }
@@ -298,10 +299,11 @@ pub(crate) async fn discover_power_devices(
     for device in &devices {
         let state_json = serde_json::to_string(&device.state).unwrap_or_default();
         let _ = sqlx::query(
-            "INSERT INTO power_devices (id, provider_id, device_id, name, kind, last_state, last_seen, hw_id)
-             VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)
+            "INSERT INTO power_devices (id, provider_id, device_id, name, provider_name, kind, last_state, last_seen, hw_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
              ON CONFLICT (provider_id, device_id)
-             DO UPDATE SET name       = excluded.name,
+             DO UPDATE SET name       = CASE WHEN name = provider_name THEN excluded.name ELSE name END,
+                           provider_name = excluded.provider_name,
                            kind       = excluded.kind,
                            last_state = excluded.last_state,
                            last_seen  = excluded.last_seen,
@@ -310,6 +312,7 @@ pub(crate) async fn discover_power_devices(
         .bind(device.id.to_string())
         .bind(provider_row_id)
         .bind(&device.provider_id)
+        .bind(&device.name)
         .bind(&device.name)
         .bind(kind_str(device.kind))
         .bind(&state_json)
@@ -374,6 +377,22 @@ async fn set_glyph_handler(
     crate::api::set_device_glyph(&state, "power_devices", &id, req.glyph)
         .await
         .into_response()
+}
+
+async fn set_name_handler(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+    Json(req): Json<crate::api::SetNameRequest>,
+) -> impl IntoResponse {
+    crate::api::set_device_name(
+        &state,
+        "power_devices",
+        &id,
+        crate::api::clean_name(req.name),
+    )
+    .await
+    .into_response()
 }
 
 async fn set_shadow_handler(
