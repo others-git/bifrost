@@ -4,20 +4,18 @@
 // favorites; power lives in the surrounding chrome (card header / fly-out title)
 // via the exported PowerButton.
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import {
   getMediaFavorites,
-  getRemoteDevices,
   playMediaFavorite,
   setMediaState,
   type MediaCommand,
   type MediaDevice,
   type MediaFavorite,
-  type RemoteDevice,
 } from "../api";
 import { DisableRow } from "./PowerFlyout";
-import { BifrostRemote } from "./BifrostRemote";
-import { PowerToggle } from "./controls";
+import { useRemote, RemotePad, RemoteApps } from "./BifrostRemote";
+import { PowerToggle, Segmented } from "./controls";
 import { Flyout, FlyoutHeader } from "./Flyout";
 import { Select } from "./Select";
 import { Glyph } from "./glyphs";
@@ -38,6 +36,7 @@ export function MediaControls({
   onLocalPatch,
   compact = false,
   receiverName,
+  hideTransport = false,
 }: {
   device: MediaDevice;
   onLocalPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
@@ -46,6 +45,9 @@ export function MediaControls({
   /** When this source is bound to a receiver (M22), the receiver's name — shown
    * by the volume row, since volume/mute control the receiver, not this device. */
   receiverName?: string;
+  /** Hide the big transport buttons (the AIO TV "Watch" tab has them on the
+   * Remote tab instead). */
+  hideTransport?: boolean;
 }) {
   const volumeTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const s = device.state;
@@ -119,7 +121,7 @@ export function MediaControls({
       </div>
 
       {/* Transport */}
-      {cap.transport && !offline && (
+      {cap.transport && !offline && !hideTransport && (
         <div style={{ display: "flex", justifyContent: "center", gap: compact ? "0.4rem" : "0.6rem", alignItems: "center" }}>
           <TransportButton glyph="prev" title="Previous" compact={compact} onClick={() => send({ transport: "previous" })} />
           <TransportButton glyph={playing ? "pause" : "play"} title="Play / pause" big compact={compact} onClick={() => send({ transport: "toggle" })} />
@@ -283,89 +285,44 @@ export function MediaEditor({
   const cap = device.capabilities;
   const offline = device.state.reachable === false;
 
-  // A TV may have a paired remote (M24) — surface a button into `BifrostRemote`.
-  const [pairedRemote, setPairedRemote] = useState<RemoteDevice | null>(null);
-  const [remoteOpen, setRemoteOpen] = useState(false);
-  const remoteOpenRef = useRef(false);
-  remoteOpenRef.current = remoteOpen;
-
-  useEffect(() => {
-    if (device.kind !== "tv") return;
-    let alive = true;
-    getRemoteDevices().then((rs) => {
-      if (alive) setPairedRemote(rs.find((r) => r.paired_media_id === device.id && r.enabled) ?? null);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [device.kind, device.id]);
+  // A TV's paired remote is resolved server-side onto the effective device
+  // (`remote_id`) — its presence turns the fly-out into the unified AIO TV
+  // control (Remote / Watch / Apps) instead of the plain media body.
+  const pairedRemoteId = device.kind === "tv" ? (device.remote_id ?? null) : null;
 
   function togglePower() {
-    onLocalPatch(device.id, { power: !device.state.power });
-    setMediaState(device.id, { power: !device.state.power });
+    const next = !device.state.power;
+    // Optimistic: powering a standby TV on also marks it reachable, so the UI
+    // reflects the wake immediately (the composite read confirms it shortly).
+    onLocalPatch(device.id, next ? { power: next, reachable: true } : { power: next });
+    setMediaState(device.id, { power: next });
   }
 
+  // A TV with a paired remote is a wake-capable composite: keep offering its
+  // control (and power) even when the media_player is unreachable — the remote +
+  // Wake-on-LAN can bring a cold box up, which is exactly when it's needed. (The
+  // backend already reports the composite reachable whenever the remote is.)
+  const isTv = !!pairedRemoteId;
+  // Power for a TV-with-remote shows regardless of media reachability; for other
+  // media it needs source switching and a reachable device.
+  const showPower = isTv || (!offline && cap.sources);
+
   return (
-    <Flyout anchor={anchor} onClose={onClose} width={260} closeGuard={() => remoteOpenRef.current}>
-      {/* Audio is the violet domain — the shared header carries that accent. */}
+    <Flyout anchor={anchor} onClose={onClose} width={isTv ? 320 : 260}>
+      {/* Media is the violet domain — the shared header carries that accent. */}
       <FlyoutHeader
         title={device.name}
-        subtitle={KIND_LABEL[device.kind] ?? device.kind}
+        subtitle={device.kind === "tv" ? "TV" : (KIND_LABEL[device.kind] ?? device.kind)}
         accent={color.violet}
-        leading={cap.sources && !offline ? <PowerButton on={device.state.power} onToggle={togglePower} /> : undefined}
+        leading={showPower ? <PowerButton on={device.state.power} onToggle={togglePower} /> : undefined}
         onClose={onClose}
       />
-      {pairedRemote && !offline && (
-        <button
-          onClick={() => setRemoteOpen(true)}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: "0.5rem",
-            width: "100%",
-            padding: "0.55rem",
-            borderRadius: 10,
-            border: `1px solid ${alpha(ACCENT, 0.33)}`,
-            background: `${alpha(ACCENT, 0.08)}`,
-            color: T.text,
-            cursor: "pointer",
-            fontSize: "0.85rem",
-          }}
-        >
-          <Glyph name="tv" size={16} /> Remote
-        </button>
-      )}
-      {offline ? (
+      {pairedRemoteId ? (
+        <TvAio device={device} remoteId={pairedRemoteId} onLocalPatch={onLocalPatch} receiverName={receiverName} />
+      ) : offline ? (
         <div style={{ fontSize: "0.8rem", color: "#c66" }}>Device offline.</div>
       ) : (
         <MediaControls device={device} onLocalPatch={onLocalPatch} receiverName={receiverName} />
-      )}
-      {remoteOpen && pairedRemote && (
-        <BifrostRemote
-          remoteId={pairedRemote.id}
-          name={device.name}
-          initialOn={device.state.power}
-          anchor={anchor}
-          onClose={() => setRemoteOpen(false)}
-          // Bound to a receiver (M22): the remote's volume/mute drive the device,
-          // which the backend routes to the receiver — not the TV's own volume.
-          onVolume={
-            device.receiver_id
-              ? (k) => {
-                  const st = device.state;
-                  if (k === "mute") {
-                    onLocalPatch(device.id, { mute: !st.mute });
-                    setMediaState(device.id, { mute: !st.mute });
-                  } else {
-                    const v = Math.max(0, Math.min(100, (st.volume ?? 0) + (k === "volume_up" ? 2 : -2)));
-                    onLocalPatch(device.id, { volume: v });
-                    setMediaState(device.id, { volume: v });
-                  }
-                }
-              : undefined
-          }
-        />
       )}
       {onSetEnabled && (
         <DisableRow
@@ -374,5 +331,73 @@ export function MediaEditor({
         />
       )}
     </Flyout>
+  );
+}
+
+/** The unified "AIO TV Control" — composed from what the composite (the media
+ * device ∪ its paired remote) actually exposes, not a fixed kitchen sink. The
+ * keypad **Remote** tab is always present (a paired remote always has the
+ * canonical keyset); **Watch** (now-playing, volume, source) appears only when
+ * the media side reports any of those capabilities; **Apps** (the launchable
+ * grid) appears when app launch is available (the LCD across remotes). When only
+ * one surface qualifies, the tab bar is dropped entirely. */
+function TvAio({
+  device,
+  remoteId,
+  onLocalPatch,
+  receiverName,
+}: {
+  device: MediaDevice;
+  remoteId: string;
+  onLocalPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
+  receiverName?: string;
+}) {
+  const remote = useRemote(remoteId);
+  const cap = device.capabilities;
+  const hasWatch = cap.now_playing || cap.transport || cap.sources || cap.favorites;
+
+  type TvTab = "remote" | "watch" | "apps";
+  const tabs: { value: TvTab; label: string }[] = [{ value: "remote", label: "Remote" }];
+  if (hasWatch) tabs.push({ value: "watch", label: "Watch" });
+  tabs.push({ value: "apps", label: "Apps" });
+
+  const [tab, setTab] = useState<TvTab>("remote");
+  // Guard against a stale selection if the available surfaces change.
+  const active = tabs.some((t) => t.value === tab) ? tab : tabs[0].value;
+
+  // Bound to a receiver (M22): the remote's volume/mute drive the device, which
+  // the backend routes to the receiver — not the TV's own volume keys.
+  const onVolume = device.receiver_id
+    ? (k: "volume_up" | "volume_down" | "mute") => {
+        const st = device.state;
+        if (k === "mute") {
+          onLocalPatch(device.id, { mute: !st.mute });
+          setMediaState(device.id, { mute: !st.mute });
+        } else {
+          const v = Math.max(0, Math.min(100, (st.volume ?? 0) + (k === "volume_up" ? 2 : -2)));
+          onLocalPatch(device.id, { volume: v });
+          setMediaState(device.id, { volume: v });
+        }
+      }
+    : undefined;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "0.9rem" }}>
+      {tabs.length > 1 && (
+        <Segmented value={active} onChange={setTab} accent={color.violet} options={tabs} />
+      )}
+      {active === "remote" && <RemotePad press={remote.press} onVolume={onVolume} />}
+      {active === "watch" && (
+        <MediaControls device={device} onLocalPatch={onLocalPatch} receiverName={receiverName} hideTransport />
+      )}
+      {active === "apps" && (
+        <RemoteApps
+          apps={remote.apps}
+          currentApp={remote.currentApp}
+          onLaunch={(pkg) => remote.send({ launch_app: { activity: pkg } })}
+          onPin={remote.togglePin}
+        />
+      )}
+    </div>
   );
 }

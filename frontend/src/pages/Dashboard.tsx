@@ -15,7 +15,6 @@ import {
   setMediaEnabled,
   setMediaState,
   setLightEnabled,
-  setLightSegments,
   setLightState,
   setPowerEnabled,
   setPowerState,
@@ -34,12 +33,13 @@ import {
   type Scene,
 } from "../api";
 import { MediaEditor } from "../components/MediaControls";
+import { DeviceControl } from "../components/DeviceControl";
 import { Glyph, powerKindGlyph, mediaKindGlyph } from "../components/glyphs";
 import { hexToRgb, LightEditor, type LightControlChange } from "../components/LightEditor";
 import { T, font, glassCard, radius, color, glow, alpha } from "../theme";
 import { CornerFiligree } from "../components/ornament";
 import { PageHeader } from "../components/PageHeader";
-import { DisableRow, PowerFlyout } from "../components/PowerFlyout";
+import { DisableRow } from "../components/PowerFlyout";
 import { SceneButton, SceneModal } from "../components/scenes";
 import { useDialogs, type Dialogs } from "../components/dialogs";
 import { useViewport } from "../useViewport";
@@ -1138,42 +1138,13 @@ function LightButton({
 }) {
   const ref = useRef<HTMLButtonElement>(null);
   const [editing, setEditing] = useState(false);
-  const commitTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const isOn = light.last_state?.on ?? false;
   const offline = light.last_state?.reachable === false;
   const serverColor = light.last_state?.color;
   const hex = serverColor ? rgbToHex(...xyToRgb(serverColor.x, serverColor.y, serverColor.brightness)) : "#ffb84d";
-  const brightness = light.last_state?.brightness ?? 100;
-  const mirek = light.last_state?.color_temp_mirek ?? 366;
-  // A light is in white mode when it reports a temperature and no color.
-  const whiteMode = light.last_state?.color_temp_mirek != null && !light.last_state?.color;
 
-  function handleEditorChange(change: LightControlChange) {
-    // Only the moved dimension changes; color and temperature are exclusive. The
-    // previous `effect` is deliberately cleared (undefined → omitted from the PUT):
-    // it rides along only on an actual effect pick, so a colour/brightness tweak
-    // never re-fires a transient effect (LIFX breathe/pulse) on the provider.
-    const next: LightState = { ...(light.last_state ?? {}), on: true, effect: undefined };
-    if (change.field === "brightness") {
-      if (light.capabilities.dimmable) next.brightness = change.brightness;
-    } else if (change.field === "color") {
-      if (light.capabilities.color_rgb) {
-        next.color = rgbToXy(...hexToRgb(change.hex));
-        next.color_temp_mirek = undefined;
-      }
-    } else if (change.field === "temp") {
-      if (light.capabilities.color_temperature) {
-        next.color_temp_mirek = change.mirek;
-        next.color = undefined;
-      }
-    } else if (change.field === "effect") {
-      next.effect = change.effect;
-    }
-    onLightUpdate(light.id, next);
-    clearTimeout(commitTimer.current);
-    commitTimer.current = setTimeout(() => { setLightState(light.id, next); }, 200);
-  }
-
+  // Quick power toggle (long-press) — refreshes after, unlike the editor's
+  // debounced live commits, so a power flip reconciles against the server.
   async function toggle() {
     const next: LightState = { ...(light.last_state ?? { on: false }), on: !isOn };
     onLightUpdate(light.id, next);
@@ -1196,30 +1167,18 @@ function LightButton({
         <Glyph name={light.glyph ?? "bulb"} />
       </GlyphButton>
       {editing && ref.current && (
-        <LightEditor
+        <DeviceControl
+          domain="light"
+          light={light}
           anchor={ref.current}
-          title={light.name}
-          initialHex={hex}
-          initialBrightness={brightness}
-          initialMirek={mirek}
-          initialMode={whiteMode ? "white" : "color"}
-          showColor={light.capabilities.color_rgb}
-          showWhite={light.capabilities.color_temperature}
-          showBrightness={light.capabilities.dimmable}
-          effects={light.capabilities.effects}
-          initialEffect={light.last_state?.effect}
-          segments={light.capabilities.segments}
-          onSegments={(segs) => setLightSegments(light.id, segs)}
-          on={isOn}
-          onToggle={toggle}
-          onChange={handleEditorChange}
+          onLocalPatch={onLightUpdate}
           onClose={() => setEditing(false)}
         >
           <DisableRow
             enabled={light.enabled !== false}
             onSetEnabled={(en) => { onSetEnabled(light.id, en); if (!en) setEditing(false); }}
           />
-        </LightEditor>
+        </DeviceControl>
       )}
     </>
   );
@@ -1252,7 +1211,8 @@ function PowerButton({
         <Glyph name={device.glyph ?? powerKindGlyph(device.kind)} />
       </GlyphButton>
       {open && ref.current && (
-        <PowerFlyout
+        <DeviceControl
+          domain="power"
           device={device}
           anchor={ref.current}
           onToggle={(next) => onToggle(device.id, next)}
@@ -1305,7 +1265,8 @@ function MediaButton({
         <Glyph name={grouped ? "speaker_group" : (device.glyph ?? mediaKindGlyph(device.kind))} />
       </GlyphButton>
       {open && ref.current && (
-        <MediaEditor
+        <DeviceControl
+          domain="media"
           device={device}
           anchor={ref.current}
           onLocalPatch={onMediaPatch}

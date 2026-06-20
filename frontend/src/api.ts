@@ -495,6 +495,10 @@ export interface MediaDevice {
   receiver_id?: string | null;
   /** The receiver input to select when this source becomes active; null = none. */
   receiver_source?: string | null;
+  /** M24 composite: the paired remote's id when this TV's media_player shares
+   * hardware with an enabled remote — resolved server-side so the unified TV
+   * control renders without a separate remote lookup. null = no paired remote. */
+  remote_id?: string | null;
 }
 
 /** Sparse command — only the fields present are applied. */
@@ -1453,6 +1457,22 @@ export async function pairHueBridge(bridgeIp: string): Promise<HuePairResult> {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ bridge_ip: bridgeIp }),
+  });
+  return res.json();
+}
+
+export type SmartTvPairResult =
+  | { status: "pin_displayed"; message: string }
+  | { status: "paired"; auth: string }
+  | { error: string; message: string };
+
+/** Smart-TV (Bravia) PIN pairing. Call with no `pin` to make the TV show a PIN,
+ * then again with that `pin` to receive the `auth` token. */
+export async function pairSmartTv(host: string, pin?: string): Promise<SmartTvPairResult> {
+  const res = await fetch("/api/providers/smarttv/pair", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ host, pin: pin || undefined }),
   });
   return res.json();
 }

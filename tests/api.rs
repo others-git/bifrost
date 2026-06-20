@@ -6899,6 +6899,242 @@ async fn discover_ha_populates_remotes_then_command_drives_service() {
 }
 
 #[tokio::test]
+async fn media_device_exposes_paired_remote_id() {
+    let ha = ha_remote_mock().await;
+    let (app, prov_id, db) = helpers::test_app_with_ha_db(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Seed a TV media device and an enabled remote paired to it — the linkage the
+    // hw_id reconciler establishes for an Android TV's media_player + remote.
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, hw_id)
+         VALUES ('tv1', ?, 'media_player.bedroom_tv', 'Bedroom TV', 'tv', '{}', '{\"power\":true,\"volume\":0,\"mute\":false}', 'mac:aa')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO remote_devices (id, provider_id, device_id, name, enabled, hw_id, paired_media_id)
+         VALUES ('rem1', ?, 'remote.bedroom_tv', 'Bedroom TV', 1, 'mac:aa', 'tv1')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    // A standalone speaker (no remote) and a disabled remote both read as null.
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, hw_id)
+         VALUES ('spk1', ?, 'media_player.kitchen', 'Kitchen', 'speaker', '{}', '{\"power\":false,\"volume\":0,\"mute\":false}', 'mac:bb')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO remote_devices (id, provider_id, device_id, name, enabled, hw_id, paired_media_id)
+         VALUES ('rem2', ?, 'remote.kitchen', 'Kitchen', 0, 'mac:bb', 'spk1')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/media/devices", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let devices = helpers::response_json(resp).await;
+    let by = |id: &str| {
+        devices
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("{id} not in media list"))
+    };
+    // The TV surfaces its paired remote as part of the effective device.
+    assert_eq!(by("tv1")["remote_id"], "rem1");
+    // A speaker whose only paired remote is disabled reports no remote.
+    assert!(by("spk1")["remote_id"].is_null());
+}
+
+#[tokio::test]
+async fn standby_tv_reads_on_and_reachable_via_paired_remote() {
+    let ha = ha_remote_mock().await;
+    let (app, prov_id, db) = helpers::test_app_with_ha_db(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // The TV's media_player reads unavailable (reachable:false, power:false) — the
+    // standby case — but its paired remote reports the box on + reachable.
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state)
+         VALUES ('tv1', ?, 'media_player.bedroom_tv', 'Bedroom TV', 'tv', '{}', '{\"power\":false,\"volume\":0,\"mute\":false,\"reachable\":false}')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO remote_devices (id, provider_id, device_id, name, enabled, paired_media_id, last_state)
+         VALUES ('rem1', ?, 'remote.bedroom_tv', 'Bedroom TV', 1, 'tv1', '{\"on\":true,\"reachable\":true}')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/media/devices", &cookie))
+        .await
+        .unwrap();
+    let devices = helpers::response_json(resp).await;
+    let tv = devices
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == "tv1")
+        .expect("tv in list");
+    // The composite resolves on + reachable from the remote — not "offline".
+    assert_eq!(tv["state"]["power"], true);
+    assert_eq!(tv["state"]["reachable"], true);
+}
+
+#[tokio::test]
+async fn smarttv_pair_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers/smarttv/pair")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"host":"1.2.3.4"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn smarttv_pair_begin_reports_pin_displayed() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // A Bravia answers the first (unauthenticated) actRegister with 401 + shows a PIN.
+    let tv = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/sony/accessControl"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&tv)
+        .await;
+
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let body = format!(r#"{{"host":"{}"}}"#, tv.uri());
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "POST",
+            "/api/providers/smarttv/pair",
+            &cookie,
+            &body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        helpers::response_json(resp).await["status"],
+        "pin_displayed"
+    );
+}
+
+#[tokio::test]
+async fn media_power_on_also_wakes_paired_remote() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let ha = MockServer::start().await;
+    for svc in [
+        "media_player/turn_on",
+        "media_player/turn_off",
+        "remote/turn_on",
+        "remote/turn_off",
+    ] {
+        Mock::given(method("POST"))
+            .and(path(format!("/api/services/{svc}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&ha)
+            .await;
+    }
+    let (app, prov_id, db) = helpers::test_app_with_ha_db(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state)
+         VALUES ('tv1', ?, 'media_player.bedroom_tv', 'Bedroom TV', 'tv', '{\"sources\":true}', '{\"power\":false,\"volume\":0,\"mute\":false}')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO remote_devices (id, provider_id, device_id, name, enabled, paired_media_id)
+         VALUES ('rem1', ?, 'remote.bedroom_tv', 'Bedroom TV', 1, 'tv1')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    // Power-on through the media device must drive media_player AND wake the
+    // paired remote (the reliable WoL/turn_on standby wake).
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/media/devices/tv1/state",
+            &cookie,
+            r#"{"power":true}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let reqs = ha.received_requests().await.unwrap();
+    assert!(
+        reqs.iter()
+            .any(|r| r.url.path() == "/api/services/media_player/turn_on"),
+        "media_player was not powered on"
+    );
+    assert!(
+        reqs.iter()
+            .any(|r| r.url.path() == "/api/services/remote/turn_on"),
+        "the paired remote was not woken on composite power-on"
+    );
+
+    // Power-off is left to the media_player — it must NOT fan to the remote.
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/media/devices/tv1/state",
+            &cookie,
+            r#"{"power":false}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let reqs = ha.received_requests().await.unwrap();
+    assert!(
+        !reqs
+            .iter()
+            .any(|r| r.url.path() == "/api/services/remote/turn_off"),
+        "power-off should not fan to the remote"
+    );
+}
+
+#[tokio::test]
 async fn remote_apps_record_recents_pin_and_order() {
     let ha = ha_remote_mock().await;
     let (app, prov_id) = helpers::test_app_with_ha(&ha.uri()).await;

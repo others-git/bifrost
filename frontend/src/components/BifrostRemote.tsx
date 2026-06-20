@@ -1,10 +1,9 @@
-// BifrostRemote — a provider-agnostic on-screen smart remote for a TV / streamer.
-// Opened from the TV's Control / Floor-Plan audio fly-out; renders the canonical
-// key set (a circular D-pad, nav, volume, transport) plus dynamic app-launch
-// tiles, all driven through the shared remote API (session → the same service
-// layer as v1/MCP). Uses the shared `Flyout`/`FlyoutHeader` shell so it matches
-// every other control fly-out (anchored desktop · centred modal on tablet ·
-// bottom sheet on phone · header power button).
+// Smart-remote pieces for a TV / streamer — a `useRemote` hook plus two embeddable
+// panels: `RemotePad` (the canonical keypad — circular D-pad + OK, then nav,
+// volume, and transport rows) and `RemoteApps` (the launchable app grid). These
+// are composed into the unified "AIO TV Control" fly-out (see MediaControls'
+// MediaEditor); all driven through the shared remote API (session → the same
+// service layer as v1/MCP).
 
 import { useEffect, useState } from "react";
 import {
@@ -15,42 +14,21 @@ import {
   type RemoteApp,
   type RemoteCommand,
   type RemoteKey,
-  type RemoteState,
 } from "../api";
 import { T, ACCENT, alpha } from "../theme";
-import { Flyout, FlyoutHeader } from "./Flyout";
-import { PowerToggle } from "./controls";
 import { Glyph } from "./glyphs";
 
-export function BifrostRemote({
-  remoteId,
-  name,
-  initialOn,
-  anchor,
-  onClose,
-  onVolume,
-}: {
-  remoteId: string;
-  name: string;
-  /** Power state from the opening fly-out, shown until the live read lands. */
-  initialOn?: boolean;
-  /** Where to anchor the desktop popover (the opening fly-out's anchor). */
-  anchor: HTMLElement | { x: number; y: number };
-  onClose: () => void;
-  /** When the paired device routes volume elsewhere (e.g. a receiver it's bound
-   * to, M22), the volume/mute keys call this instead of sending TV remote keys —
-   * so the buttons drive the device that actually owns the volume. */
-  onVolume?: (key: "volume_up" | "volume_down" | "mute") => void;
-}) {
-  const [state, setState] = useState<RemoteState | null>(null);
+/** Live apps + foreground app for `remoteId`, with the command helpers. Polls the
+ * current app on a short interval so the launchable grid's highlight stays fresh. */
+export function useRemote(remoteId: string) {
+  const [currentApp, setCurrentApp] = useState<string | undefined>(undefined);
   const [apps, setApps] = useState<RemoteApp[]>([]);
 
-  // Live state + apps on open; keep power / current-app fresh on a short poll.
   useEffect(() => {
     let alive = true;
     const load = () =>
       getRemoteState(remoteId).then((s) => {
-        if (alive && s) setState(s);
+        if (alive && s) setCurrentApp(s.current_app);
       });
     load();
     getRemoteApps(remoteId).then((a) => {
@@ -63,38 +41,32 @@ export function BifrostRemote({
     };
   }, [remoteId]);
 
-  const on = state?.on ?? initialOn ?? false;
-  const currentApp = state?.current_app;
-  const currentAppName = currentApp
-    ? (apps.find((a) => a.package === currentApp)?.name ?? currentApp.split(".").pop() ?? currentApp)
-    : undefined;
-
-  function send(cmd: RemoteCommand) {
+  const send = (cmd: RemoteCommand) =>
     sendRemoteCommand(remoteId, cmd).then((err) => {
       if (err) console.warn("remote command failed:", err);
     });
-  }
   const press = (k: RemoteKey) => () => send({ key: { key: k } });
-  function togglePower() {
-    setState((s) => ({ ...(s ?? { on }), on: !on }));
-    send({ power: { on: !on } });
-  }
   async function togglePin(app: RemoteApp) {
     await setRemoteAppPin(remoteId, app.package, !app.pinned);
     setApps(await getRemoteApps(remoteId));
   }
 
-  return (
-    <Flyout anchor={anchor} onClose={onClose} width={320} gap="1rem">
-      <FlyoutHeader
-        title={name}
-        subtitle={on ? (currentAppName ? `▶ ${currentAppName}` : "On") : "Standby"}
-        icon={<Glyph name="tv" size={22} />}
-        accent={ACCENT}
-        leading={<PowerToggle on={on} accent={ACCENT} onToggle={togglePower} />}
-        onClose={onClose}
-      />
+  return { currentApp, apps, send, press, togglePin };
+}
 
+/** The keypad — circular D-pad + OK on top, then nav, volume, and transport rows
+ * (Prev · Play/Pause · Next sit beneath the D-pad). */
+export function RemotePad({
+  press,
+  onVolume,
+}: {
+  press: (k: RemoteKey) => () => void;
+  /** When the TV's volume is owned by a bound receiver (M22), the volume keys
+   * call this instead of sending TV remote keys. */
+  onVolume?: (key: "volume_up" | "volume_down" | "mute") => void;
+}) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "0.9rem" }}>
       {/* Circular D-pad */}
       <div
         style={{
@@ -124,7 +96,7 @@ export function BifrostRemote({
             width: 74,
             height: 74,
             borderRadius: "50%",
-            border: `1px solid ${alpha(ACCENT, 0.40)}`,
+            border: `1px solid ${alpha(ACCENT, 0.4)}`,
             background: "radial-gradient(circle at 50% 35%, rgba(56,189,248,0.22), rgba(56,189,248,0.05))",
             color: "#fff",
             fontWeight: 700,
@@ -158,72 +130,84 @@ export function BifrostRemote({
         <Key glyph="play_pause" label="Play / pause" onClick={press("play_pause")} />
         <Key glyph="next" label="Next" onClick={press("next")} />
       </Row>
+    </div>
+  );
+}
 
-      {/* Apps */}
-      <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: "0.8rem" }}>
-        <div style={{ fontSize: "0.7rem", color: T.dim, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: "0.55rem" }}>
-          Apps
-        </div>
-        {apps.length === 0 ? (
-          <div style={{ fontSize: "0.8rem", color: T.faint }}>No apps yet — they appear here as you open them on the TV.</div>
-        ) : (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(72px, 1fr))", gap: "0.5rem" }}>
-            {apps.map((a) => {
-              const active = a.package === currentApp;
-              return (
-                <div key={a.package} style={{ position: "relative" }}>
-                  <button
-                    onClick={() => send({ launch_app: { activity: a.package } })}
-                    title={`Launch ${a.name}`}
-                    style={{
-                      width: "100%",
-                      minHeight: 66,
-                      borderRadius: 12,
-                      border: `1px solid ${active ? ACCENT : T.border}`,
-                      background: active ? `${alpha(ACCENT, 0.10)}` : T.surface,
-                      color: T.text,
-                      cursor: "pointer",
-                      display: "flex",
-                      flexDirection: "column",
-                      alignItems: "center",
-                      gap: "0.35rem",
-                      padding: "0.55rem 0.35rem 0.45rem",
-                    }}
-                  >
-                    <span
-                      style={{
-                        width: 28,
-                        height: 28,
-                        borderRadius: "50%",
-                        display: "grid",
-                        placeItems: "center",
-                        fontSize: "0.85rem",
-                        fontWeight: 700,
-                        background: active ? ACCENT : "rgba(255,255,255,0.08)",
-                        color: active ? "#0b1220" : T.text,
-                      }}
-                    >
-                      {a.name.charAt(0).toUpperCase()}
-                    </span>
-                    <span style={{ fontSize: "0.72rem", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {a.name}
-                    </span>
-                  </button>
-                  <button
-                    onClick={() => togglePin(a)}
-                    title={a.pinned ? "Unpin" : "Pin"}
-                    aria-label={a.pinned ? "Unpin" : "Pin"}
-                    style={{ position: "absolute", top: 3, right: 3, background: "none", border: "none", cursor: "pointer", color: a.pinned ? ACCENT : T.faint, padding: 2, display: "grid", placeItems: "center", lineHeight: 1 }}
-                  >
-                    <Glyph name={a.pinned ? "star_fill" : "star"} size={13} />
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        )}
+/** The launchable app grid (pinned + recents): tap to launch, ★ to pin. */
+export function RemoteApps({
+  apps,
+  currentApp,
+  onLaunch,
+  onPin,
+}: {
+  apps: RemoteApp[];
+  currentApp?: string;
+  onLaunch: (pkg: string) => void;
+  onPin: (app: RemoteApp) => void;
+}) {
+  if (apps.length === 0) {
+    return (
+      <div style={{ fontSize: "0.8rem", color: T.faint }}>
+        No apps yet — they appear here as you open them on the TV.
       </div>
-    </Flyout>
+    );
+  }
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(72px, 1fr))", gap: "0.5rem" }}>
+      {apps.map((a) => {
+        const active = a.package === currentApp;
+        return (
+          <div key={a.package} style={{ position: "relative" }}>
+            <button
+              onClick={() => onLaunch(a.package)}
+              title={`Launch ${a.name}`}
+              style={{
+                width: "100%",
+                minHeight: 66,
+                borderRadius: 12,
+                border: `1px solid ${active ? ACCENT : T.border}`,
+                background: active ? `${alpha(ACCENT, 0.1)}` : T.surface,
+                color: T.text,
+                cursor: "pointer",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                gap: "0.35rem",
+                padding: "0.55rem 0.35rem 0.45rem",
+              }}
+            >
+              <span
+                style={{
+                  width: 28,
+                  height: 28,
+                  borderRadius: "50%",
+                  display: "grid",
+                  placeItems: "center",
+                  fontSize: "0.85rem",
+                  fontWeight: 700,
+                  background: active ? ACCENT : "rgba(255,255,255,0.08)",
+                  color: active ? "#0b1220" : T.text,
+                }}
+              >
+                {a.name.charAt(0).toUpperCase()}
+              </span>
+              <span style={{ fontSize: "0.72rem", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {a.name}
+              </span>
+            </button>
+            <button
+              onClick={() => onPin(a)}
+              title={a.pinned ? "Unpin" : "Pin"}
+              aria-label={a.pinned ? "Unpin" : "Pin"}
+              style={{ position: "absolute", top: 3, right: 3, background: "none", border: "none", cursor: "pointer", color: a.pinned ? ACCENT : T.faint, padding: 2, display: "grid", placeItems: "center", lineHeight: 1 }}
+            >
+              <Glyph name={a.pinned ? "star_fill" : "star"} size={13} />
+            </button>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

@@ -18,6 +18,7 @@ The table below is the **full set of supported devices** and how each connects.
 | LIFX | Light | Lights | Cloud API + LAN (UDP) | Poll (≈2 min) | Account token and/or LAN interface |
 | Onkyo / Integra | Media | Receivers + zones | LAN (eISCP) | Push | Receiver IP |
 | Sonos | Media | Speakers | LAN (UPnP) | Push (events + poll) | Any player's IP |
+| Smart TV | Media + Remote | TVs (Sony Bravia) | LAN (vendor HTTP API) | Poll | Auto-discovered IP + PIN pairing |
 | Home Assistant | Integration | Lights · media · power · remotes | REST + WebSocket | WebSocket push | Base URL + long-lived token |
 
 ---
@@ -63,6 +64,55 @@ its volume here, so "turn the TV up" controls the right box.
 !!! note "Newer integration"
     Sonos control, favorites, and grouping are implemented and addable; it's
     less battle-tested than the other providers, so report anything off.
+
+## Smart TV
+
+- **Category** Media + Remote · **Transport** the TV's own LAN HTTP API · **Live** polling.
+- **Capabilities** power (on/off, with the composite Wake-on-LAN/remote wake), volume, mute, transport, and a full **remote** (D-pad, navigation/media keys, app launch) — one TV surfaces as both a media device and a remote, unified into the **AIO TV control**.
+- **Vendors** **Sony Bravia** today (the ScalarWeb JSON API for state/power/audio + IRCC for key codes). The integration is a vendor-agnostic framework (`BifrostSmartTv`); more brands are added as self-contained vendor files.
+
+### Pairing a Sony Bravia (PIN)
+
+Bravia control is authorised by a token you get through an on-screen **PIN**, so
+there's nothing to copy off a website. The TV and your Bifrost host must be on the
+**same network** (in Docker, auto-detect needs host networking).
+
+**1 — Allow control on the TV (one-time).** The exact menu wording differs by model:
+
+- **Google TV / Android TV Bravia** (2015 and later): being on the same network is
+  usually enough — the registration dialog (with the PIN) pops up the first time
+  Bifrost pairs. If it never appears, enable the TV's IP/remote-device control under
+  **Settings → Network & Internet** (look for *Home network*, *IP control*, or
+  *Remote device / renderer*) and make sure the TV isn't in a store/restricted mode.
+- **Older Linux Bravia** (KDL-series): **Settings → Network → Home Network Setup →
+  IP Control** — set **Authentication** to *Normal and Pre-Shared Key* and turn
+  **Simple IP Control** **On**.
+
+**2 — Pair in Bifrost.**
+
+1. **Settings → Providers → Add Provider**, and choose **Smart TV** as the type.
+2. Click **Scan network** and pick your TV — its **IP auto-fills** and the vendor
+   (Bravia) is auto-selected. (Or type the TV's IP into the *TV IP address* field.)
+3. Click **Pair**. Bifrost asks the TV to register Bifrost; the TV shows a **4-digit
+   PIN** on screen.
+4. Type that PIN into the field that appears and click **Submit PIN**. On success the
+   *Pairing token* is filled in for you (✓ Paired with TV).
+5. Give the provider a **name** and click **Add**. Bifrost discovers the TV as a media
+   device **and** a remote (one physical box), and you control it from the unified TV
+   fly-out.
+
+**Notes**
+
+- The token is long-lived; you only re-pair if it's revoked (a TV factory reset, or
+  Bifrost removed from the TV's list of registered remote devices).
+- "Pair" greys out until the **TV IP** is set. If pairing reports the TV is
+  unreachable, confirm the IP and that step 1 is done.
+- Power-on uses the composite wake (Wake-on-LAN + the remote), so a TV in standby
+  comes up even when its API is briefly unreachable.
+
+!!! note "Newest integration"
+    The Smart TV framework and the Bravia vendor are new and the least
+    hardware-tested — please report anything off.
 
 ## Home Assistant
 

@@ -9,7 +9,7 @@ import { DevicesPage } from "./pages/Devices";
 import { ScenesPage } from "./pages/Scenes";
 import { RoomsPage } from "./pages/Rooms";
 import { FloorPlanPage } from "./pages/FloorPlan";
-import { SettingsPage } from "./pages/Settings";
+import { SettingsPage, type AddPrefill } from "./pages/Settings";
 import { S } from "./styles";
 import { color, font, navAurora as NAV_AURORA, alpha } from "./theme";
 import { useViewport } from "./useViewport";
@@ -70,6 +70,9 @@ const NAV_ITEMS: { id: NavPage; glyph: string; label: string }[] = [
 
 export function App() {
   const [page, setPage] = useState<Page>("loading");
+  // A device picked on the Devices "Detected" tab, handed to Settings to pre-fill
+  // the Add Provider form.
+  const [pendingAdd, setPendingAdd] = useState<AddPrefill | null>(null);
   const [lights, setLights] = useState<Light[]>([]);
   const [version, setVersion] = useState("");
   const { isMobile, isCompact } = useViewport();
@@ -160,7 +163,14 @@ export function App() {
           <DashboardPage lights={lights} onRefresh={refreshLights} onNavigate={(p) => setPage(p)} />
         )}
         {page === "media" && <MediaPage />}
-        {page === "devices" && <DevicesPage />}
+        {page === "devices" && (
+          <DevicesPage
+            onAddDetected={(p) => {
+              setPendingAdd(p);
+              setPage("settings");
+            }}
+          />
+        )}
         {page === "scenes" && <ScenesPage />}
         {page === "rooms" && <RoomsPage />}
         {page === "plan" &&
@@ -171,7 +181,13 @@ export function App() {
           ) : (
             <FloorPlanPage lights={lights} />
           ))}
-        {page === "settings" && <SettingsPage onNavigate={(p) => setPage(p)} />}
+        {page === "settings" && (
+          <SettingsPage
+            onNavigate={(p) => setPage(p)}
+            initialAdd={pendingAdd}
+            onConsumeAdd={() => setPendingAdd(null)}
+          />
+        )}
       </main>
 
       {isCompact && <BottomNav page={page} onNavigate={navigate} showPlan={!isMobile} />}

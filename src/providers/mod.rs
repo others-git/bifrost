@@ -6,6 +6,7 @@ pub mod hue;
 pub mod lifx;
 pub mod onkyo;
 pub mod shelly;
+pub mod smarttv;
 pub mod sonos;
 pub mod tasmota;
 pub mod wled;
@@ -666,6 +667,11 @@ pub fn default_registry() -> ProviderRegistry {
     r.register_remote(ha::HaRemoteFactory);
     r.register_media(onkyo::OnkyoProviderFactory);
     r.register_media(sonos::SonosProviderFactory);
+    // Smart TVs serve two domains from one provider row (media + remote), like HA:
+    // a vendor-agnostic framework (`smarttv`) with per-brand adapters (Bravia
+    // today). The IP is auto-discovered; the vendor is auto-selected.
+    r.register_media(smarttv::SmartTvMediaFactory);
+    r.register_remote(smarttv::SmartTvRemoteFactory);
     r
 }
 

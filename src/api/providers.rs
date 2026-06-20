@@ -22,6 +22,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/scan/{provider_type}", post(scan_network))
         .route("/discover-all", get(discover_all))
         .route("/hue/pair", post(hue_pair))
+        .route("/smarttv/pair", post(smarttv_pair))
         .route("/{id}", delete(remove_provider))
         .route("/{id}/config", get(provider_config))
         .route("/{id}/credentials", put(update_credentials))
@@ -154,30 +155,40 @@ async fn discover_all(State(state): State<Arc<AppState>>, _: Session) -> impl In
                 return Vec::new();
             };
             match discoverer.scan(&opts).await {
-                Ok(devices) => devices
-                    .into_iter()
-                    .map(|d| FoundDevice {
-                        provider_type: ptype,
-                        type_name,
-                        host: d.host,
-                        label: d.label,
-                        credentials: d.credentials,
-                    })
-                    .collect(),
+                Ok(devices) => {
+                    tracing::debug!(target: "bifrost::discover", ptype, answered = devices.len(), "auto-scan: type probed");
+                    devices
+                        .into_iter()
+                        .map(|d| FoundDevice {
+                            provider_type: ptype,
+                            type_name,
+                            host: d.host,
+                            label: d.label,
+                            credentials: d.credentials,
+                        })
+                        .collect()
+                }
                 Err(e) => {
-                    tracing::warn!("auto-discovery scan for '{ptype}' could not probe: {e:#}");
+                    tracing::warn!(target: "bifrost::discover", ptype, "auto-scan: '{ptype}' could not probe: {e:#}");
                     Vec::new()
                 }
             }
         }
     });
 
+    tracing::debug!(target: "bifrost::discover", known_hosts = known_hosts.len(), "auto-scan: probing all discoverable provider types");
     let found: Vec<FoundDevice> = futures_util::future::join_all(scans)
         .await
         .into_iter()
         .flatten()
         .filter(|d| !known_hosts.contains(&d.host))
         .collect();
+    tracing::debug!(
+        target: "bifrost::discover",
+        detected = found.len(),
+        hosts = ?found.iter().map(|d| format!("{}:{}", d.provider_type, d.host)).collect::<Vec<_>>(),
+        "auto-scan: complete (new, not-yet-added devices)",
+    );
 
     Json(found).into_response()
 }
@@ -979,6 +990,48 @@ async fn hue_pair(_: Session, Json(req): Json<HuePairRequest>) -> impl IntoRespo
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({ "error": "bridge_unreachable", "message": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+// ── Smart-TV (Bravia) PIN pairing ───────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct SmartTvPairRequest {
+    /// The TV's IP / host (or a full base URL in tests).
+    host: String,
+    /// The on-screen PIN, when completing pairing. Absent/empty = begin (the TV
+    /// then displays a PIN to submit on the next call).
+    #[serde(default)]
+    pin: Option<String>,
+}
+
+/// Two-phase TV pairing: a first call (no `pin`) makes the TV show a PIN; a
+/// second call with that `pin` returns the `auth` token to store as the
+/// provider's credential alongside `host`.
+async fn smarttv_pair(_: Session, Json(req): Json<SmartTvPairRequest>) -> impl IntoResponse {
+    use crate::providers::smarttv::{self, SmartTvPairOutcome};
+
+    tracing::debug!(target: "bifrost::smarttv", host = %req.host, step = if req.pin.as_deref().is_some_and(|p| !p.is_empty()) { "submit-pin" } else { "begin" }, "smart-TV pair request");
+    let outcome = match req.pin.as_deref() {
+        Some(pin) if !pin.is_empty() => smarttv::pair_complete(&req.host, pin)
+            .await
+            .map(|auth| SmartTvPairOutcome::Paired { auth }),
+        _ => smarttv::pair_begin(&req.host).await,
+    };
+    match outcome {
+        Ok(SmartTvPairOutcome::Paired { auth }) => {
+            Json(serde_json::json!({ "status": "paired", "auth": auth })).into_response()
+        }
+        Ok(SmartTvPairOutcome::PinDisplayed) => Json(serde_json::json!({
+            "status": "pin_displayed",
+            "message": "Enter the PIN shown on the TV screen."
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": "tv_unreachable", "message": e.to_string() })),
         )
             .into_response(),
     }

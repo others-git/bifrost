@@ -18,7 +18,6 @@ import {
   removeScene,
   rgbToHex,
   rgbToXy,
-  setLightSegments,
   setLightState,
   setRoomState,
   xyToRgb,
@@ -35,7 +34,7 @@ import {
   type Scene,
 } from "../api";
 import { ColorWheel, hexToHs, hexToRgb, hsvToRgb, LightEditor, type LightControlChange } from "../components/LightEditor";
-import { MediaEditor } from "../components/MediaControls";
+import { DeviceControl } from "../components/DeviceControl";
 import { RoomVolumeStrip } from "../components/RoomMedia";
 import { SceneButton, SceneModal } from "../components/scenes";
 import { Modal, useDialogs } from "../components/dialogs";
@@ -356,13 +355,6 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
     }
   }
 
-  async function toggleLight(lightId: string) {
-    const current = statesById.get(lightId) ?? { on: false };
-    const next = { ...current, on: !current.on };
-    setStatesById((prev) => new Map(prev).set(lightId, next)); // optimistic
-    await setLightState(lightId, next);
-  }
-
   async function setRoom(room: Room, on: boolean) {
     setStatesById((prev) => {
       const next = new Map(prev);
@@ -444,12 +436,9 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
           : change.field === "brightness"
             ? { on: true, brightness: change.brightness }
             : { on: true };
-    if (target.kind === "light") {
-      const next = apply(statesById.get(target.id) ?? {});
-      setStatesById((prevMap) => new Map(prevMap).set(target.id, next));
-      clearTimeout(editTimer.current);
-      editTimer.current = setTimeout(() => { setLightState(target.id, next); }, 200);
-    } else if (target.kind === "room") {
+    // Per-device light edits go through the shared DeviceControl/LightFlyout now;
+    // this handler is the room cascade only (fan one moved dimension to members).
+    if (target.kind === "room") {
       const room = allRooms.find((r) => r.id === target.roomId);
       if (!room) return;
       // Compute each member's next state up front (read from current state), so we
@@ -886,28 +875,16 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
       {editor && (() => {
         if (editor.kind === "light") {
           const light = lights.find((l) => l.id === editor.id);
-          const st = statesById.get(editor.id);
-          const hex = st?.color
-            ? rgbToHex(...xyToRgb(st.color.x, st.color.y, st.color.brightness))
-            : "#ffb84d";
+          if (!light) return null;
+          // Feed the editor the live state (more current than the stored
+          // last_state); optimistic edits land back in `statesById`.
+          const merged = { ...light, last_state: statesById.get(editor.id) ?? light.last_state };
           return (
-            <LightEditor
+            <DeviceControl
+              domain="light"
+              light={merged}
               anchor={editor.anchor}
-              title={light ? lightLabel(light) : "Light"}
-              initialHex={hex}
-              initialBrightness={st?.brightness ?? 100}
-              initialMirek={st?.color_temp_mirek ?? 366}
-              initialMode={st?.color_temp_mirek != null && !st?.color ? "white" : "color"}
-              showColor={light?.capabilities.color_rgb ?? true}
-              showWhite={light?.capabilities.color_temperature ?? false}
-              showBrightness={light?.capabilities.dimmable ?? true}
-              effects={light?.capabilities.effects}
-              initialEffect={st?.effect}
-              segments={light?.capabilities.segments}
-              onSegments={(segs) => setLightSegments(editor.id, segs)}
-              on={st?.on ?? false}
-              onToggle={() => toggleLight(editor.id)}
-              onChange={(ch) => editorChange(editor, ch)}
+              onLocalPatch={(id, next) => setStatesById((m) => new Map(m).set(id, next))}
               onClose={() => setEditor(null)}
             />
           );
@@ -916,7 +893,8 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
           const device = mediaById.get(editor.id);
           if (!device) return null;
           return (
-            <MediaEditor
+            <DeviceControl
+              domain="media"
               device={device}
               anchor={editor.anchor}
               onLocalPatch={patchAudio}

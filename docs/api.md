@@ -224,6 +224,30 @@ unknown source — message in body), `502` device unreachable.
 A bound source's read (`GET …/{id}`) reports the **receiver's** volume/mute,
 and its `receiver_id` / `receiver_source` fields name the binding.
 
+A media device is returned as an **effective device** — composite links are
+resolved server-side. A companion's state and `capabilities` are merged into its
+primary; a TV (`kind: "tv"`) whose `media_player` shares hardware with a paired,
+enabled remote reports that remote's id as **`remote_id`** (else `null`), so a
+client can render the unified TV control (keypad + app launch) straight from the
+device without a separate remote lookup.
+
+`state.reachable` / `state.power` are **composite-resolved**, not just the
+`media_player`'s. The `media_player` is authoritative while reachable; when it is
+unreachable (a standby TV reports `unavailable`), Bifrost falls back to the
+device's members — the paired remote, companions — so the device reads
+`reachable: true` / `power` from whichever member is up, instead of "offline."
+With no member reachable it stays unreachable (a cold box) — a client can still
+issue `{"power": true}`, which wakes it over Wake-on-LAN. (A future native
+smart-TV provider joins this resolution as just another member.)
+
+Power fans across the composite. A `{"power": true}` command drives the
+`media_player` **and** wakes the paired remote (a Wake-on-LAN nudge + the
+provider's `turn_on`) — the reliable way to bring a TV out of standby, where its
+`media_player` often reports unavailable; the command succeeds if either path
+works. A bound source's power-on also wakes its receiver and selects
+`receiver_source`. Power-**off** is left to the `media_player` (the remote/box is
+the same device, and a shared receiver may still serve others).
+
 #### Cast media
 
 Play media on a TV / media player. `content_id` + `content_type` are passed

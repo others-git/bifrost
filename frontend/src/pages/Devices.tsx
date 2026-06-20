@@ -12,6 +12,10 @@ import {
   getPowerDevices,
   getRooms,
   getProviders,
+  getRemoteDevices,
+  getSettings,
+  discoverAllDevices,
+  type FoundDevice,
   setPowerEnabled,
   setLightEnabled,
   setMediaEnabled,
@@ -34,10 +38,12 @@ import {
   type PowerKind,
   type Room,
   type Provider,
+  type RemoteDevice,
 } from "../api";
 import { Glyph, GLYPH_OPTIONS, powerKindGlyph, mediaKindGlyph } from "../components/glyphs";
 import { PageHeader, SectionLabel } from "../components/PageHeader";
-import { Switch } from "../components/controls";
+import { Switch, Segmented } from "../components/controls";
+import type { AddPrefill } from "./Settings";
 import { MenuItem } from "../components/Select";
 import { AnchoredPanel } from "../components/AnchoredPanel";
 import { useViewport } from "../useViewport";
@@ -970,13 +976,84 @@ const SECTIONS: { domain: Domain; title: string }[] = [
   { domain: "power", title: "Power" },
 ];
 
-export function DevicesPage() {
+/** One member of a composite (its role within the aggregate + a short detail). */
+interface CompositeMember {
+  role: string;
+  name: string;
+  detail: string;
+}
+/** A "composite" device — a single control surface that aggregates more than one
+ * underlying entity (a TV + its paired remote, a primary + merged companions, a
+ * source whose volume routes to a receiver). Surfaced read-only in dev mode. */
+interface CompositeView {
+  id: string;
+  name: string;
+  kindLabel: string;
+  members: CompositeMember[];
+}
+
+function mediaCapsSummary(cap: MediaDevice["capabilities"]): string {
+  const flags = [
+    cap.sources && "sources",
+    cap.transport && "transport",
+    cap.now_playing && "now-playing",
+    cap.favorites && "favorites",
+    cap.grouping && "grouping",
+  ].filter(Boolean) as string[];
+  return flags.length ? flags.join(" · ") : "power only";
+}
+
+/** Derive composite devices from the loaded inventory. Anchored on whatever media
+ * device is the user-facing control surface (not TV-specific), so new composite
+ * shapes show up here automatically as they're added. */
+function buildComposites(
+  media: MediaDevice[],
+  remotes: RemoteDevice[],
+  items: Item[],
+): CompositeView[] {
+  const out: CompositeView[] = [];
+  for (const a of media) {
+    if (a.shadowed_by || a.companion_of) continue; // a hidden/merged entity isn't a surface
+    const members: CompositeMember[] = [];
+    // Pairing is resolved server-side onto the effective device (`remote_id`).
+    const remote = a.remote_id ? remotes.find((r) => r.id === a.remote_id) : undefined;
+    if (remote) members.push({ role: "Remote", name: remote.name, detail: "D-pad · keys · app launch" });
+    for (const it of items) {
+      if (it.companionOf === a.id) members.push({ role: "Companion", name: it.name, detail: it.typeLabel });
+    }
+    if (a.receiver_id) {
+      const rcv = media.find((m) => m.id === a.receiver_id);
+      members.push({
+        role: "Volume → receiver",
+        name: rcv?.name ?? "receiver",
+        detail: a.receiver_source ? `input ${a.receiver_source}` : "",
+      });
+    }
+    if (members.length === 0) continue;
+    out.push({
+      id: a.id,
+      name: a.name,
+      kindLabel: AUDIO_KIND_LABEL[a.kind] ?? "Media",
+      members: [
+        { role: "Primary", name: a.name, detail: mediaCapsSummary(a.capabilities) },
+        ...members,
+      ],
+    });
+  }
+  return out;
+}
+
+export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill) => void }) {
+  const [tab, setTab] = useState<"controlled" | "detected">("controlled");
   const [items, setItems] = useState<Item[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
   // Raw audio devices kept around so the receiver-binding picker has names +
   // each receiver's input list (the normalized Item drops device state).
   const [mediaDevices, setMediaDevices] = useState<MediaDevice[]>([]);
+  // Remotes + dev mode drive the dev-only Composite-devices diagnostic panel.
+  const [remotes, setRemotes] = useState<RemoteDevice[]>([]);
+  const [devMode, setDevMode] = useState(false);
   const [loading, setLoading] = useState(true);
   // Live pointer-drag reordering of provider groups: `drag` drives the render
   // (the floating section's offset + where the others make room); `sectionRefs`
@@ -995,18 +1072,22 @@ export function DevicesPage() {
   const { isMobile } = useViewport();
 
   const refresh = useCallback(async () => {
-    const [lights, audio, power, roomList, providerList] = await Promise.all([
+    const [lights, audio, power, roomList, providerList, remoteList, settings] = await Promise.all([
       getLights(),
       getMediaDevices(),
       getPowerDevices(),
       getRooms(),
       getProviders(),
+      getRemoteDevices(),
+      getSettings(),
     ]);
     const lightItems = lights === "unauthorized" ? [] : lights.map(lightItem);
     setItems([...lightItems, ...audio.map(mediaItem), ...power.map(powerItem)]);
     setMediaDevices(audio);
     setRooms(roomList);
     setProviders(providerList);
+    setRemotes(remoteList);
+    setDevMode(!!settings.dev_mode);
     setLoading(false);
   }, []);
 
@@ -1075,6 +1156,9 @@ export function DevicesPage() {
   }
 
   const byId = new Map(items.map((d) => [d.id, d] as const));
+
+  // Dev-only diagnostic: devices that aggregate several underlying entities.
+  const composites = devMode ? buildComposites(mediaDevices, remotes, items) : [];
 
   // Merge (M26) matches the *same physical device*, which a different provider
   // may also serve — so candidates are all visible audio devices, not just the
@@ -1298,6 +1382,58 @@ export function DevicesPage() {
         }
       />
 
+      <div style={{ marginBottom: "1.4rem", maxWidth: 360 }}>
+        <Segmented
+          value={tab}
+          onChange={setTab}
+          options={[
+            { value: "controlled", label: "Controlled" },
+            { value: "detected", label: "Detected" },
+          ]}
+        />
+      </div>
+
+      {tab === "detected" ? (
+        <DetectedDevices onAdd={onAddDetected} />
+      ) : (
+        <>
+      {devMode && composites.length > 0 && (
+        <section style={{ marginBottom: "2rem" }}>
+          <SectionLabel style={{ fontSize: "0.7rem", color: T.faint, marginBottom: "0.6rem" }}>
+            Composite devices · dev
+          </SectionLabel>
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem", maxWidth: 560 }}>
+            {composites.map((c) => (
+              <div
+                key={c.id}
+                style={{
+                  border: `1px solid ${T.cardBorder}`,
+                  borderRadius: 12,
+                  padding: "0.7rem 0.9rem",
+                  background: alpha(ACCENT, 0.04),
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "baseline", gap: "0.5rem", marginBottom: "0.55rem" }}>
+                  <span style={{ fontWeight: 600, color: T.text, fontSize: "0.9rem" }}>{c.name}</span>
+                  <span style={{ color: T.faint, fontSize: "0.68rem", letterSpacing: "0.07em", textTransform: "uppercase" }}>
+                    {c.kindLabel}
+                  </span>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+                  {c.members.map((m, i) => (
+                    <div key={i} style={{ display: "flex", gap: "0.5rem", fontSize: "0.78rem", lineHeight: 1.3 }}>
+                      <span style={{ minWidth: 120, flexShrink: 0, color: T.dim }}>{m.role}</span>
+                      <span style={{ color: T.text }}>{m.name}</span>
+                      {m.detail && <span style={{ color: T.faint }}>· {m.detail}</span>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
       {loading ? (
         <div style={{ color: T.faint, fontSize: "0.9rem" }}>Loading…</div>
       ) : items.length === 0 ? (
@@ -1404,6 +1540,120 @@ export function DevicesPage() {
             </section>
           );
         })
+      )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** The "Detected" tab: devices found on the network that aren't added yet. Scans
+ * on open and re-scans periodically; "Add" hands the device to the Settings add
+ * form (pre-filled), where pairing / keys are completed. */
+function DetectedDevices({ onAdd }: { onAdd?: (p: AddPrefill) => void }) {
+  const [scanning, setScanning] = useState(false);
+  const [scanned, setScanned] = useState(false);
+  const [found, setFound] = useState<FoundDevice[]>([]);
+
+  const scan = useCallback(async () => {
+    setScanning(true);
+    setFound(await discoverAllDevices());
+    setScanned(true);
+    setScanning(false);
+  }, []);
+
+  // Scan on open, then re-scan every couple of minutes while the tab is viewed.
+  useEffect(() => {
+    scan();
+    const t = setInterval(scan, 120_000);
+    return () => clearInterval(t);
+  }, [scan]);
+
+  return (
+    <div style={{ maxWidth: 620 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "0.8rem", marginBottom: "1rem" }}>
+        <button
+          onClick={scan}
+          disabled={scanning}
+          style={{
+            padding: "0.35rem 0.9rem",
+            borderRadius: 8,
+            border: `1px solid ${T.cardBorder}`,
+            background: "transparent",
+            color: T.dim,
+            cursor: scanning ? "default" : "pointer",
+            fontSize: "0.8rem",
+          }}
+        >
+          {scanning ? "Scanning…" : "Scan now"}
+        </button>
+        <span style={{ color: T.faint, fontSize: "0.76rem" }}>Re-scans automatically every few minutes.</span>
+      </div>
+
+      {found.length === 0 ? (
+        <div
+          style={{
+            color: T.dim,
+            fontSize: "0.85rem",
+            border: `1px dashed ${T.cardBorder}`,
+            borderRadius: 12,
+            padding: "1.5rem",
+          }}
+        >
+          {scanned
+            ? "No new devices detected. Auto-detect finds LAN gear that announces itself (Sonos, Onkyo, Sony TVs); cloud providers (Hue, Govee, LIFX) need a key — add those from Settings → Providers."
+            : "Scanning the network…"}
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+          {found.map((d) => (
+            <div
+              key={`${d.provider_type}:${d.host}`}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: "1rem",
+                border: `1px solid ${T.cardBorder}`,
+                borderRadius: 12,
+                padding: "0.7rem 0.9rem",
+                background: alpha(ACCENT, 0.04),
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 600, color: T.text, fontSize: "0.9rem" }}>
+                  {d.label ?? d.host}
+                </div>
+                <div style={{ color: T.faint, fontSize: "0.75rem" }}>
+                  {d.type_name} · {d.host}
+                </div>
+              </div>
+              <button
+                onClick={() =>
+                  onAdd?.({
+                    provider_type: d.provider_type,
+                    name: d.label ?? d.type_name,
+                    credentials: Object.fromEntries(
+                      Object.entries(d.credentials).map(([k, v]) => [k, String(v)]),
+                    ),
+                  })
+                }
+                style={{
+                  flexShrink: 0,
+                  padding: "0.4rem 1rem",
+                  borderRadius: 8,
+                  border: `1px solid ${ACCENT}`,
+                  background: alpha(ACCENT, 0.12),
+                  color: T.text,
+                  cursor: "pointer",
+                  fontSize: "0.82rem",
+                }}
+              >
+                Add
+              </button>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );

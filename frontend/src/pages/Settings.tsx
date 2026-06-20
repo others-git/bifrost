@@ -9,6 +9,7 @@ import {
   setProviderPrune,
   syncProviderGroups,
   pairHueBridge,
+  pairSmartTv,
   scanForDevices,
   discoverAllDevices,
   type DiscoveredDevice,
@@ -62,6 +63,10 @@ import { speak } from "../tts";
 
 interface Props {
   onNavigate: (page: "dashboard") => void;
+  /** When set (from the Devices "Detected" tab), open the Add Provider form
+   * pre-filled with this device; `onConsumeAdd` clears it once consumed. */
+  initialAdd?: AddPrefill | null;
+  onConsumeAdd?: () => void;
 }
 
 type SettingsTab = "providers" | "voice" | "clients" | "appearance" | "developer";
@@ -79,7 +84,7 @@ const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
 const IS_KIOSK = /\bBifrostKiosk\//.test(navigator.userAgent);
 const VISIBLE_TABS = SETTINGS_TABS.filter((t) => t.id !== "clients" || !IS_KIOSK);
 
-export function SettingsPage({ onNavigate: _onNavigate }: Props) {
+export function SettingsPage({ onNavigate: _onNavigate, initialAdd, onConsumeAdd }: Props) {
   const dialogs = useDialogs();
   const { isMobile } = useViewport();
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -94,6 +99,17 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
     setPrefill(p);
     setShowAdd(true);
   }
+
+  // Arriving from the Devices "Detected" tab: jump to Providers and open the
+  // pre-filled add form (pairing/keys completed there).
+  useEffect(() => {
+    if (initialAdd) {
+      setTab("providers");
+      openAdd(initialAdd);
+      onConsumeAdd?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialAdd]);
 
   async function loadProviders() {
     setProviders(await getProviders());
@@ -318,7 +334,7 @@ export function SettingsPage({ onNavigate: _onNavigate }: Props) {
 // ── Found devices (auto-discovery) ───────────────────────────────────────────
 
 /** Pre-fills the add-provider form from a found device. */
-interface AddPrefill {
+export interface AddPrefill {
   provider_type: string;
   name: string;
   credentials: Record<string, string>;
@@ -1208,12 +1224,37 @@ function AddProviderForm({
   const [loading, setLoading] = useState(false);
   const [pairing, setPairing] = useState(false);
   const [pairMsg, setPairMsg] = useState("");
+  // Smart-TV PIN pairing: once the TV shows a PIN, collect it here for step 2.
+  const [tvPin, setTvPin] = useState("");
+  const [tvPinStep, setTvPinStep] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [scanned, setScanned] = useState(false);
   const [found, setFound] = useState<DiscoveredDevice[]>([]);
 
   const selected = types.find((t) => t.provider_type === selectedType);
   const schema: CredentialField[] = selected?.schema ?? [];
+
+  // Default the provider name to the selected type's display name (e.g. "Smart
+  // TV"), until the user types their own — so the name field is never empty.
+  const autoName = useRef(name);
+  useEffect(() => {
+    if (!name.trim() && selected?.display_name) {
+      setName(selected.display_name);
+      autoName.current = selected.display_name;
+    }
+    // Only seed from the initial type once types load; later changes go via pickType.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [types.length]);
+
+  function pickType(t: string) {
+    setSelectedType(t);
+    const dn = types.find((x) => x.provider_type === t)?.display_name ?? "";
+    // Re-default the name only while it's still an auto value (or blank).
+    if (dn && (!name.trim() || name === autoName.current)) {
+      setName(dn);
+      autoName.current = dn;
+    }
+  }
 
   // Clear per-type state when the user switches the provider type — but not on
   // the first render, so a prefilled (found-device) form keeps its credentials.
@@ -1279,6 +1320,26 @@ function AddProviderForm({
     }
   }
 
+  // Smart-TV (Bravia) PIN pairing — two steps: first call makes the TV show a
+  // PIN; the second submits it and stores the returned auth token.
+  async function handleTvPair() {
+    setPairing(true);
+    setPairMsg("");
+    const result = await pairSmartTv(credentials.host ?? "", tvPinStep ? tvPin : undefined);
+    setPairing(false);
+    if ("status" in result && result.status === "paired") {
+      setField("auth", result.auth);
+      setTvPinStep(false);
+      setTvPin("");
+      setPairMsg("✓ Paired with TV.");
+    } else if ("status" in result && result.status === "pin_displayed") {
+      setTvPinStep(true);
+      setPairMsg("Enter the PIN shown on the TV, then click Submit PIN.");
+    } else if ("error" in result) {
+      setPairMsg(`Could not reach the TV: ${result.message}`);
+    }
+  }
+
   return (
     <form onSubmit={submit} style={{ ...S.card, border: "1px solid var(--bf-border)" }}>
       <h3 style={{ margin: 0, fontSize: "1rem", color: "var(--bf-dim)" }}>Add Provider</h3>
@@ -1299,7 +1360,7 @@ function AddProviderForm({
         <span>Type</span>
         <Select
           value={selectedType}
-          onChange={setSelectedType}
+          onChange={pickType}
           style={{ width: "100%" }}
           options={(["light", "media", "integration"] as const).flatMap((kind) =>
             types
@@ -1346,18 +1407,25 @@ function AddProviderForm({
       {schema.map((field) => {
         // Hue's app key comes from link-button pairing, not manual entry.
         const isHueAppKey = selectedType === "hue" && field.name === "app_key";
+        // A Smart TV's auth token comes from PIN pairing, not manual entry.
+        const isTvAuth = selectedType === "smarttv" && field.name === "auth";
         return (
           <label key={field.name} style={labelStyle}>
             <span>
               {field.label}
               {field.required && <span style={{ color: ACCENT }}> *</span>}
             </span>
-            {!isHueAppKey && field.hint && (
+            {!isHueAppKey && !isTvAuth && field.hint && (
               <span style={{ color: "var(--bf-faint)", fontSize: "0.78rem" }}>{field.hint}</span>
             )}
             {isHueAppKey && (
               <span style={{ color: "var(--bf-faint)", fontSize: "0.78rem" }}>
                 Press the link button on the bridge, then click Pair — or paste a key manually.
+              </span>
+            )}
+            {isTvAuth && (
+              <span style={{ color: "var(--bf-faint)", fontSize: "0.78rem" }}>
+                Click Pair — the TV shows a PIN — then enter it. (Set the TV's IP above first.)
               </span>
             )}
             <div style={{ display: "flex", gap: "0.5rem" }}>
@@ -1378,8 +1446,37 @@ function AddProviderForm({
                   {pairing ? "Pairing…" : "Pair"}
                 </Button>
               )}
+              {isTvAuth && !tvPinStep && (
+                <Button
+                  variant="ghost"
+                  type="button"
+                  onClick={handleTvPair}
+                  disabled={pairing || !(credentials.host ?? "").trim()}
+                >
+                  {pairing ? "Pairing…" : "Pair"}
+                </Button>
+              )}
             </div>
-            {isHueAppKey && pairMsg && (
+            {isTvAuth && tvPinStep && (
+              <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.4rem" }}>
+                <input
+                  value={tvPin}
+                  onChange={(e) => setTvPin(e.target.value)}
+                  placeholder="PIN from TV"
+                  inputMode="numeric"
+                  style={{ ...S.input, flex: 1 }}
+                />
+                <Button
+                  variant="ghost"
+                  type="button"
+                  onClick={handleTvPair}
+                  disabled={pairing || !tvPin.trim()}
+                >
+                  {pairing ? "Submitting…" : "Submit PIN"}
+                </Button>
+              </div>
+            )}
+            {(isHueAppKey || isTvAuth) && pairMsg && (
               <span
                 style={{
                   fontSize: "0.78rem",
