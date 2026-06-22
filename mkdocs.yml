@@ -66,6 +66,7 @@ nav:
   - Home: index.md
   - Setup guide: setup.md
   - Rooms & devices: rooms-and-devices.md
+  - Boards: boards.md
   - Composite devices: composite-devices.md
   - Voice & assistants: voice.md
   - Providers: providers.md

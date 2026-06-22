@@ -174,6 +174,13 @@ const BODIES: Record<string, JSX.Element> = {
       <path d="M3 3v5h5" />
     </>
   ),
+  gear: (
+    // A cog — configure / settings.
+    <>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </>
+  ),
 
   // ── Smart-remote keys (themed, replacing emoji) ──────────────────────────────
   chevron: (
@@ -303,7 +310,92 @@ const BODIES: Record<string, JSX.Element> = {
       <rect x="11.6" y="15.3" width="3.8" height="5.7" rx="1.1" />
     </>
   ),
+
+  // ── Weather condition icons (mapped from a HA weather entity's condition) ──
+  wx_sun: (
+    <>
+      <circle cx="12" cy="12" r="4.2" />
+      <path d="M12 2v2.4M12 19.6V22M4.2 4.2l1.7 1.7M18.1 18.1l1.7 1.7M2 12h2.4M19.6 12H22M4.2 19.8l1.7-1.7M18.1 5.9l1.7-1.7" />
+    </>
+  ),
+  wx_moon: <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z" />,
+  wx_cloud: <path d="M17.5 19a4.5 4.5 0 0 0 .5-9 7 7 0 0 0-13.4 2A4 4 0 0 0 5 19Z" />,
+  wx_partly: (
+    <>
+      <circle cx="7.5" cy="7" r="3" />
+      <path d="M7.5 1.7v1.6M2.2 7H3.8M3.6 3.1l1.1 1.1M11.4 3.1l-1.1 1.1" />
+      <path d="M17.5 20a4 4 0 0 0 .4-8 6.2 6.2 0 0 0-11.7 1.6A3.6 3.6 0 0 0 6.2 20Z" />
+    </>
+  ),
+  wx_rain: (
+    <>
+      <path d="M17.5 16a4.2 4.2 0 0 0 .4-8.4 6.6 6.6 0 0 0-12.5 1.7A3.8 3.8 0 0 0 6 16Z" />
+      <path d="M8 19l-1 2.4M12 19l-1 2.4M16 19l-1 2.4" />
+    </>
+  ),
+  wx_snow: (
+    <>
+      <path d="M17.5 15a4.2 4.2 0 0 0 .4-8.4 6.6 6.6 0 0 0-12.5 1.7A3.8 3.8 0 0 0 6 15Z" />
+      <circle cx="8" cy="19" r="0.7" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="20.5" r="0.7" fill="currentColor" stroke="none" />
+      <circle cx="16" cy="19" r="0.7" fill="currentColor" stroke="none" />
+    </>
+  ),
+  wx_storm: (
+    <>
+      <path d="M17.5 14a4.2 4.2 0 0 0 .4-8.4 6.6 6.6 0 0 0-12.5 1.7A3.8 3.8 0 0 0 6 14Z" />
+      <path d="M12 13l-2.5 4H12l-1.2 4 3.2-5h-2.2L13 13Z" fill="currentColor" stroke="none" />
+    </>
+  ),
+  wx_fog: (
+    <>
+      <path d="M17.5 11.5a4.2 4.2 0 0 0 .4-8.4A6.6 6.6 0 0 0 5.4 4.8 3.8 3.8 0 0 0 6 11.5Z" />
+      <path d="M4 15.5h16M6 19h12" />
+    </>
+  ),
 };
+
+// HA weather conditions → a small icon set. Keeps the Boards weather widget
+// glanceable without a per-condition glyph.
+export function weatherGlyph(condition: string | undefined | null): string {
+  switch ((condition ?? "").toLowerCase()) {
+    case "sunny":
+    case "clear":
+      return "wx_sun";
+    case "clear-night":
+      return "wx_moon";
+    case "partlycloudy":
+      return "wx_partly";
+    case "cloudy":
+    case "exceptional":
+      return "wx_cloud";
+    case "rainy":
+    case "pouring":
+    case "hail":
+      return "wx_rain";
+    case "snowy":
+    case "snowy-rainy":
+      return "wx_snow";
+    case "lightning":
+    case "lightning-rainy":
+      return "wx_storm";
+    case "fog":
+    case "windy":
+    case "windy-variant":
+      return "wx_fog";
+    default:
+      return "wx_cloud";
+  }
+}
+
+// Human-readable label for a HA weather condition token.
+export function weatherLabel(condition: string | undefined | null): string {
+  const c = (condition ?? "").trim();
+  if (!c) return "—";
+  return c
+    .replace(/-/g, " ")
+    .replace(/\b\w/g, (m) => m.toUpperCase());
+}
 
 /// User-pickable override glyphs, with display labels (the per-kind power glyphs
 /// are reachable too, so a fan-driving switch can borrow the fan icon).
@@ -342,7 +434,7 @@ export const CONTROL_GLYPH_OPTIONS: { name: string; label: string }[] = [
 ];
 
 /// Render any glyph by name. Unknown names fall back to the generic glyph.
-export function Glyph({ name, size = 22 }: { name: string; size?: number }) {
+export function Glyph({ name, size = 22 }: { name: string; size?: number | string }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" {...base}>
       {BODIES[name] ?? BODIES.generic}

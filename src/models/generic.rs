@@ -45,6 +45,7 @@ pub const GENERIC_HA_DOMAINS: &[&str] = &[
     "button.",
     "input_button.",
     "scene.",
+    "weather.",
 ];
 
 /// Map a generic control write (entity `domain` + control `key` + JSON `value`)
@@ -246,6 +247,34 @@ pub fn controls_from_ha(domain: &str, state: &str, attrs: &Value) -> Vec<Control
                 label: "Press".into(),
             }]
         }
+        "weather" => {
+            // A weather entity's `state` is the condition (e.g. "partlycloudy");
+            // temperature/humidity are attributes. Surfaced as readouts — the Boards
+            // weather widget reads `condition` + `temperature` and draws the icon.
+            let mut c = vec![Control::Readout {
+                key: "condition".into(),
+                label: "Condition".into(),
+                value: state.to_string(),
+                unit: None,
+            }];
+            if let Some(t) = attr_f64(attrs, "temperature") {
+                c.push(Control::Readout {
+                    key: "temperature".into(),
+                    label: "Temperature".into(),
+                    value: format_num(t),
+                    unit: attr_str(attrs, "temperature_unit").or_else(|| Some("°".into())),
+                });
+            }
+            if let Some(h) = attr_f64(attrs, "humidity") {
+                c.push(Control::Readout {
+                    key: "humidity".into(),
+                    label: "Humidity".into(),
+                    value: format_num(h),
+                    unit: Some("%".into()),
+                });
+            }
+            c
+        }
         // Unknown domain: surface the raw state as a readout so it's never blank.
         _ => vec![Control::Readout {
             key: "state".into(),
@@ -326,6 +355,28 @@ mod tests {
     fn unknown_domain_falls_back_to_a_readout() {
         let c = controls_from_ha("water_heater", "eco", &json!({}));
         assert!(matches!(&c[0], Control::Readout { value, .. } if value == "eco"));
+    }
+
+    #[test]
+    fn weather_yields_condition_temperature_and_humidity() {
+        let c = controls_from_ha(
+            "weather",
+            "partlycloudy",
+            &json!({ "temperature": 18.5, "temperature_unit": "°C", "humidity": 64 }),
+        );
+        assert!(
+            matches!(&c[0], Control::Readout { key, value, .. } if key == "condition" && value == "partlycloudy")
+        );
+        assert!(
+            c.iter()
+                .any(|x| matches!(x, Control::Readout { key, value, unit, .. }
+                if key == "temperature" && value == "18.5" && unit.as_deref() == Some("°C")))
+        );
+        assert!(
+            c.iter()
+                .any(|x| matches!(x, Control::Readout { key, unit, .. }
+                if key == "humidity" && unit.as_deref() == Some("%")))
+        );
     }
 
     #[test]

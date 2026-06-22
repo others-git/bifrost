@@ -36,7 +36,7 @@ import { MediaEditor } from "../components/MediaControls";
 import { DeviceControl } from "../components/DeviceControl";
 import { Glyph, powerKindGlyph, mediaKindGlyph } from "../components/glyphs";
 import { hexToRgb, LightEditor, type LightControlChange } from "../components/LightEditor";
-import { T, font, glassCard, radius, color, glow, alpha } from "../theme";
+import { T, font, glassCard, radius, color, glow, alpha, nicheStyle } from "../theme";
 import { CornerFiligree } from "../components/ornament";
 import { PageHeader } from "../components/PageHeader";
 import { DisableRow } from "../components/PowerFlyout";
@@ -753,7 +753,7 @@ function RoomBox({
  * 0034 / RoomControlsPanel). `power` toggles its targets and `scene` applies a
  * scene directly; `brightness`/`volume` open the shared LightEditor/MediaEditor
  * scoped to the targets (fanning to all of them). */
-function RoomControlButton({
+export function RoomControlButton({
   control,
   lights,
   power,
@@ -1039,7 +1039,7 @@ function RestoreHomeButton({ name, onRestore }: { name: string; onRestore: () =>
 
 /** Shared shell: a square button showing a device-type glyph, glowing in its
  * accent when on. The full name lives in the fly-out it opens. */
-function GlyphButton({
+export function GlyphButton({
   on,
   accent,
   offline,
@@ -1105,17 +1105,8 @@ function GlyphButton({
         placeItems: "center",
         borderRadius: radius.md,
         cursor: "pointer",
-        color: on ? accent : T.dim,
-        // On: lit niche — accent top-light over glass + outer neon bloom. Off: a
-        // recessed gothic niche with a faint gold-hairline edge.
-        background: on
-          ? `radial-gradient(130% 130% at 50% 0%, ${alpha(accent, 0.19)}, transparent 62%), ${color.surface}`
-          : color.surfaceOff,
-        border: `1px solid ${active ? color.cyan : on ? `${alpha(accent, 0.40)}` : color.hairline}`,
-        boxShadow: on
-          ? `${glow(accent, 22)}, inset 0 0 16px -9px ${accent}`
-          : "inset 0 1px 0 rgba(236,230,240,0.04), inset 0 0 18px -13px #000",
-        textShadow: on ? `0 0 12px ${alpha(accent, 0.67)}` : undefined,
+        // The lit-niche surface, shared with the Boards widget plates.
+        ...nicheStyle(accent, on, active),
         opacity: offline ? 0.4 : 1,
         transition: "color 0.2s, background 0.2s, border-color 0.2s, box-shadow 0.2s",
       }}

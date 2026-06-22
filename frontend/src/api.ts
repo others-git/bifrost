@@ -999,6 +999,16 @@ export async function createScene(
   return res.json();
 }
 
+/** Overwrite an existing scene with a fresh snapshot of the current state — keeps
+ * its name, scope and default flag, just re-captures what's showing now. */
+export async function recaptureScene(
+  id: string,
+): Promise<{ id: string; lights: number; power: number }> {
+  const res = await fetch(`/api/scenes/${id}/recapture`, { method: "POST" });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+  return res.json();
+}
+
 export async function activateScene(
   id: string,
   lightIds?: string[],
@@ -1615,6 +1625,13 @@ export function rgbToXy(r: number, g: number, b: number): { x: number; y: number
   return { x: X / sum, y: Y / sum, brightness: Y };
 }
 
+/** A light's current colour as a hex, or a warm-white fallback when it's on
+ * without a colour (so a lit surface always has a glow colour to wear). */
+export function lightHex(l: Light): string {
+  const c = l.last_state?.color;
+  return c ? rgbToHex(...xyToRgb(c.x, c.y, c.brightness)) : "#ffb84d";
+}
+
 /** Sync the provider's rooms/zones into mirrors and keep Rooms in step. */
 export async function syncProviderGroups(
   id: string,
@@ -1622,4 +1639,73 @@ export async function syncProviderGroups(
   const res = await fetch(`/api/providers/${id}/sync-groups`, { method: "POST" });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
+}
+
+// ── Dashboards ("Boards") ─────────────────────────────────────────────────────
+
+/** One placed widget on a board. `type`/`config` are frontend-defined; the backend
+ * stores them verbatim. `x`/`y` are grid cells, `w`/`h` are spans. */
+export interface Widget {
+  id: string;
+  type: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  config?: unknown;
+}
+
+/** A user-composed dashboard. */
+export interface Dashboard {
+  id: string;
+  name: string;
+  position: number;
+  widgets: Widget[];
+}
+
+export async function getDashboards(): Promise<Dashboard[]> {
+  const res = await fetch("/api/dashboards");
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function getDashboard(id: string): Promise<Dashboard | null> {
+  const res = await fetch(`/api/dashboards/${id}`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function createDashboard(name: string): Promise<Dashboard> {
+  const res = await fetch("/api/dashboards", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+  return res.json();
+}
+
+/** Save a board's name and/or full widget layout. Omit a field to leave it as-is. */
+export async function updateDashboard(
+  id: string,
+  patch: { name?: string; widgets?: Widget[] },
+): Promise<void> {
+  const res = await fetch(`/api/dashboards/${id}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+}
+
+export async function deleteDashboard(id: string): Promise<void> {
+  await fetch(`/api/dashboards/${id}`, { method: "DELETE" });
+}
+
+export async function reorderDashboards(ids: string[]): Promise<void> {
+  await fetch("/api/dashboards/reorder", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ids }),
+  });
 }

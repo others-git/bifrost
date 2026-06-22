@@ -897,6 +897,7 @@ fn save_scene_result(
         )),
         Err(SceneCaptureError::EmptyName) => Ok(fail("scene name is required")),
         Err(SceneCaptureError::RoomNotFound) => Ok(fail("room not found")),
+        Err(SceneCaptureError::NotFound) => Ok(fail("scene not found")),
         Err(SceneCaptureError::Db) => Err(internal("saving scene")),
     }
 }

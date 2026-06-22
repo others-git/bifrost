@@ -10,6 +10,7 @@ import {
   createScene,
   getRooms,
   getScenes,
+  recaptureScene,
   removeScene,
   setDefaultScene,
   type Room,
@@ -53,6 +54,21 @@ export function ScenesPage() {
   async function toggleHomeDefault(scene: Scene) {
     await setDefaultScene(scene.id, !scene.is_default);
     await load();
+  }
+
+  async function overwrite(scene: Scene) {
+    const ok = await dialogs.confirm({
+      title: `Overwrite "${scene.name}"`,
+      message: "Replace this scene with a fresh snapshot of everything's current state?",
+      confirmLabel: "Overwrite",
+    });
+    if (!ok) return;
+    try {
+      await recaptureScene(scene.id);
+      await load();
+    } catch (e) {
+      await dialogs.alert({ title: "Couldn't overwrite", message: e instanceof Error ? e.message : String(e) });
+    }
   }
 
   async function remove(scene: Scene, scope: string) {
@@ -122,6 +138,9 @@ export function ScenesPage() {
                     </div>
                   </div>
                   <Button variant="ghost" onClick={() => apply(s)}>Apply</Button>
+                  <Button variant="ghost" onClick={() => overwrite(s)} title="Replace with the current state">
+                    Overwrite
+                  </Button>
                   <Button variant="ghost" onClick={() => toggleHomeDefault(s)}>
                     {s.is_default ? "Unset" : "Set default"}
                   </Button>

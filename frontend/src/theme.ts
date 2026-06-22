@@ -67,6 +67,22 @@ export const glow = (c: string, spread = 18) => `0 0 ${spread}px -6px ${c}`;
 export const alpha = (c: string, a: number) =>
   `color-mix(in srgb, ${c} ${Math.round(a * 100)}%, transparent)`;
 
+/** The recessed "lit niche" surface shared by every device-lit control — the
+ * `GlyphButton` and the Boards widget plates. Lights in `accent` when `on`
+ * (accent top-light + outer bloom + inner glow), dark/tarnished when off; `active`
+ * gives the cyan selection edge. Spread into a `style`; the caller owns size/radius. */
+export const nicheStyle = (accent: string, on: boolean, active = false) => ({
+  color: on ? accent : color.dim,
+  background: on
+    ? `radial-gradient(130% 130% at 50% 0%, ${alpha(accent, 0.19)}, transparent 62%), ${color.surface}`
+    : color.surfaceOff,
+  border: `1px solid ${active ? color.cyan : on ? alpha(accent, 0.4) : color.hairline}`,
+  boxShadow: on
+    ? `${glow(accent, 22)}, inset 0 0 16px -9px ${accent}`
+    : "inset 0 1px 0 rgba(236,230,240,0.04), inset 0 0 18px -13px #000",
+  textShadow: on ? `0 0 12px ${alpha(accent, 0.67)}` : undefined,
+});
+
 /** Spacing scale (px). */
 export const space = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32 } as const;
 

@@ -1,6 +1,7 @@
 pub mod ai_endpoints;
 pub mod apikeys;
 pub mod auth;
+pub mod dashboards;
 pub mod dedup;
 pub mod dev;
 pub mod enrollment;
@@ -166,6 +167,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .nest("/api-keys", apikeys::router())
         .nest("/media", media::router())
         .nest("/auth", auth::router())
+        .nest("/dashboards", dashboards::router())
         .nest("/dev", dev::router())
         .nest("/enrollment", enrollment::router())
         .nest("/events", events::router())

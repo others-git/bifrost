@@ -196,7 +196,9 @@ async fn create_scene(
         Err(SceneCaptureError::EmptyName) => {
             (StatusCode::UNPROCESSABLE_ENTITY, "scene name is required").into_response()
         }
-        Err(SceneCaptureError::RoomNotFound) => StatusCode::NOT_FOUND.into_response(),
+        Err(SceneCaptureError::RoomNotFound | SceneCaptureError::NotFound) => {
+            StatusCode::NOT_FOUND.into_response()
+        }
         Err(SceneCaptureError::Db) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

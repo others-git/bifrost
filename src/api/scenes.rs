@@ -24,11 +24,18 @@ use sqlx::Row;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Max simultaneous light writes during a scene apply. A whole-home scene can span
+/// many bulbs on one Hue bridge, which drops requests past ~10 commands/sec — so we
+/// cap the burst (and reuse one connection per provider) instead of firing every
+/// light at once, which made "Restore Home" apply only part of the scene.
+const SCENE_FANOUT_CONCURRENCY: usize = 6;
+
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(list_scenes).post(create_scene))
         .route("/restore-default", post(restore_default))
         .route("/{id}", delete(remove_scene))
+        .route("/{id}/recapture", post(recapture_handler))
         .route("/{id}/activate", post(activate_scene))
         .route("/{id}/default", put(set_default))
 }
@@ -97,6 +104,8 @@ pub(crate) enum SceneCaptureError {
     EmptyName,
     /// A room scope named an unknown room.
     RoomNotFound,
+    /// Overwrite target scene doesn't exist.
+    NotFound,
     /// The DB write failed.
     Db,
 }
@@ -124,30 +133,83 @@ pub(crate) async fn capture_scene(
     if name.is_empty() {
         return Err(SceneCaptureError::EmptyName);
     }
+    if let Some(rid) = room_id
+        && !crate::api::rooms::room_exists(state, rid).await
+    {
+        return Err(SceneCaptureError::RoomNotFound);
+    }
+    let scene_id = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO scenes (id, name, room_id) VALUES (?, ?, ?)")
+        .bind(&scene_id)
+        .bind(name)
+        .bind(room_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!("db error: {e}");
+            SceneCaptureError::Db
+        })?;
+    snapshot_into(state, &scene_id, room_id).await
+}
 
+/// Re-snapshot the current state into an existing scene — the **overwrite**/update
+/// path. Keeps the scene's id, name, scope and default flag; replaces its entries
+/// with a fresh snapshot, so "save over my Home Scene" doesn't make a duplicate.
+pub(crate) async fn recapture_scene(
+    state: &AppState,
+    scene_id: &str,
+) -> Result<SceneCapture, SceneCaptureError> {
+    let room_id = match sqlx::query("SELECT room_id FROM scenes WHERE id = ?")
+        .bind(scene_id)
+        .fetch_optional(&state.db)
+        .await
+    {
+        Ok(Some(row)) => row.get::<Option<String>, _>("room_id"),
+        Ok(None) => return Err(SceneCaptureError::NotFound),
+        Err(e) => {
+            tracing::error!("db error: {e}");
+            return Err(SceneCaptureError::Db);
+        }
+    };
+    // Replace the old entries wholesale, then re-snapshot in the same scope.
+    let _ = sqlx::query("DELETE FROM scene_entries WHERE scene_id = ?")
+        .bind(scene_id)
+        .execute(&state.db)
+        .await;
+    let _ = sqlx::query("DELETE FROM scene_power_entries WHERE scene_id = ?")
+        .bind(scene_id)
+        .execute(&state.db)
+        .await;
+    snapshot_into(state, scene_id, room_id.as_deref()).await
+}
+
+/// Snapshot the current light + power state into an **existing** `scene_id`, scoped
+/// to `room_id` (None = whole home). The `scenes` row must already exist; this only
+/// (re)writes its entries. Shared by [`capture_scene`] (fresh) and
+/// [`recapture_scene`] (overwrite).
+async fn snapshot_into(
+    state: &AppState,
+    scene_id: &str,
+    room_id: Option<&str>,
+) -> Result<SceneCapture, SceneCaptureError> {
     // A room scene is scoped to that room's effective members; a home scene to
     // everything. We over-fetch all devices and filter by the membership set
     // (avoids a dynamic `IN (…)` and reuses the shared room helpers).
     let (light_scope, power_scope) = match room_id {
-        Some(rid) => {
-            if !crate::api::rooms::room_exists(state, rid).await {
-                return Err(SceneCaptureError::RoomNotFound);
-            }
-            (
-                Some(
-                    crate::api::rooms::effective_member_ids(state, rid)
-                        .await
-                        .into_iter()
-                        .collect::<std::collections::HashSet<_>>(),
-                ),
-                Some(
-                    crate::api::rooms::effective_power_member_ids(state, rid)
-                        .await
-                        .into_iter()
-                        .collect::<std::collections::HashSet<_>>(),
-                ),
-            )
-        }
+        Some(rid) => (
+            Some(
+                crate::api::rooms::effective_member_ids(state, rid)
+                    .await
+                    .into_iter()
+                    .collect::<std::collections::HashSet<_>>(),
+            ),
+            Some(
+                crate::api::rooms::effective_power_member_ids(state, rid)
+                    .await
+                    .into_iter()
+                    .collect::<std::collections::HashSet<_>>(),
+            ),
+        ),
         None => (None, None),
     };
     let in_scope = |id: &str, scope: &Option<std::collections::HashSet<String>>| {
@@ -170,18 +232,6 @@ pub(crate) async fn capture_scene(
     .await
     .unwrap_or_default();
 
-    let scene_id = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO scenes (id, name, room_id) VALUES (?, ?, ?)")
-        .bind(&scene_id)
-        .bind(name)
-        .bind(room_id)
-        .execute(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("db error: {e}");
-            SceneCaptureError::Db
-        })?;
-
     let mut captured = 0usize;
     for row in &lights {
         let light_id: String = row.get("id");
@@ -190,7 +240,7 @@ pub(crate) async fn capture_scene(
         }
         let last_state: String = row.get("last_state");
         if sqlx::query("INSERT INTO scene_entries (scene_id, light_id, state) VALUES (?, ?, ?)")
-            .bind(&scene_id)
+            .bind(scene_id)
             .bind(&light_id)
             .bind(&last_state)
             .execute(&state.db)
@@ -216,7 +266,7 @@ pub(crate) async fn capture_scene(
         if sqlx::query(
             "INSERT INTO scene_power_entries (scene_id, power_device_id, on_state) VALUES (?, ?, ?)",
         )
-        .bind(&scene_id)
+        .bind(scene_id)
         .bind(&id)
         .bind(on as i64)
         .execute(&state.db)
@@ -227,9 +277,9 @@ pub(crate) async fn capture_scene(
         }
     }
 
-    tracing::debug!(scene = %scene_id, name, room = ?room_id, lights = captured, power = power_captured, "scene captured");
+    tracing::debug!(scene = %scene_id, room = ?room_id, lights = captured, power = power_captured, "scene snapshot");
     Ok(SceneCapture {
-        id: scene_id,
+        id: scene_id.to_string(),
         lights: captured,
         power: power_captured,
     })
@@ -249,8 +299,24 @@ async fn create_scene(
         Err(SceneCaptureError::EmptyName) => {
             (StatusCode::UNPROCESSABLE_ENTITY, "scene name is required").into_response()
         }
-        Err(SceneCaptureError::RoomNotFound) => StatusCode::NOT_FOUND.into_response(),
+        Err(SceneCaptureError::RoomNotFound | SceneCaptureError::NotFound) => {
+            StatusCode::NOT_FOUND.into_response()
+        }
         Err(SceneCaptureError::Db) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Re-snapshot the live state over an existing scene (the "Overwrite" button).
+async fn recapture_handler(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match recapture_scene(&state, &id).await {
+        Ok(c) => Json(serde_json::json!({ "id": c.id, "lights": c.lights, "power": c.power }))
+            .into_response(),
+        Err(SceneCaptureError::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -357,6 +423,14 @@ pub(crate) async fn apply_scene_entries(
         None => light_rows,
     };
 
+    // Share ONE provider (and its keep-alive connection pool) per credential set,
+    // so a whole-home scene doesn't open a fresh connection per light and stampede
+    // a single Hue bridge with N simultaneous writes — the cause of flaky, partial
+    // restores. Mirrors the room cascade's per-credential provider reuse.
+    let mut providers: std::collections::HashMap<
+        String,
+        Option<Arc<dyn crate::providers::LightProvider>>,
+    > = std::collections::HashMap::new();
     let mut jobs = Vec::new();
     for row in light_rows {
         let light_id: String = row.get("light_id");
@@ -369,13 +443,19 @@ pub(crate) async fn apply_scene_entries(
             Ok(s) => s,
             Err(_) => continue,
         };
-        let provider = match build_provider(state, &provider_type, &credentials_enc) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::error!("scene activate: provider build failed: {e:#}");
-                continue;
-            }
-        };
+        let provider = providers
+            .entry(credentials_enc.clone())
+            .or_insert_with(
+                || match build_provider(state, &provider_type, &credentials_enc) {
+                    Ok(p) => Some(Arc::from(p)),
+                    Err(e) => {
+                        tracing::error!("scene apply: provider build failed: {e:#}");
+                        None
+                    }
+                },
+            )
+            .clone();
+        let Some(provider) = provider else { continue };
 
         let db = state.db.clone();
         jobs.push(async move {
@@ -391,14 +471,21 @@ pub(crate) async fn apply_scene_entries(
                     true
                 }
                 Err(e) => {
-                    tracing::error!("scene activate: set_state failed for {device_id}: {e:#}");
+                    tracing::error!("scene apply: set_state failed for {device_id}: {e:#}");
                     false
                 }
             }
         });
     }
 
-    let results = futures_util::future::join_all(jobs).await;
+    // Bound the fan-out so a whole-home restore never bursts more than a handful of
+    // simultaneous writes at one backend (a Hue bridge drops requests past ~10/sec),
+    // which is what made the "Restore Home" button apply only part of the scene.
+    use futures_util::stream::StreamExt;
+    let results: Vec<bool> = futures_util::stream::iter(jobs)
+        .buffer_unordered(SCENE_FANOUT_CONCURRENCY)
+        .collect()
+        .await;
     let mut applied = results.iter().filter(|ok| **ok).count();
     let mut failed = results.len() - applied;
 

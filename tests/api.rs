@@ -736,6 +736,178 @@ async fn create_scene_snapshots_current_light_states() {
 }
 
 #[tokio::test]
+async fn recapture_overwrites_a_scene_in_place() {
+    let bridge = wled_mock().await;
+    let (app, _light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/scenes",
+            &cookie,
+            r#"{"name":"Default"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let scene_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Unauthenticated overwrite is rejected.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/scenes/{scene_id}/recapture"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Overwrite re-snapshots into the same scene (same id, not a duplicate).
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/scenes/{scene_id}/recapture"),
+            &cookie,
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["id"], scene_id);
+    assert_eq!(body["lights"], 1);
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/scenes", &cookie))
+        .await
+        .unwrap();
+    let scenes = helpers::response_json(resp).await;
+    assert_eq!(
+        scenes.as_array().unwrap().len(),
+        1,
+        "overwrite must not duplicate"
+    );
+
+    // Overwriting an unknown scene → 404.
+    let resp = app
+        .oneshot(helpers::authed_post(
+            "/api/scenes/nope/recapture",
+            &cookie,
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn dashboards_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/dashboards")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn dashboard_crud_persists_name_and_widget_layout() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/dashboards",
+            &cookie,
+            r#"{"name":"Living Room"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let board = helpers::response_json(resp).await;
+    let id = board["id"].as_str().unwrap().to_string();
+    assert_eq!(board["name"], "Living Room");
+    assert_eq!(board["widgets"].as_array().unwrap().len(), 0);
+
+    // Empty name is rejected.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/dashboards",
+            &cookie,
+            r#"{"name":"  "}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Rename + save a widget layout (full replacement).
+    let body = r#"{"name":"Lounge","widgets":[{"id":"w1","type":"device","x":0,"y":0,"w":2,"h":2,"config":{"device_id":"d1","domain":"light"}}]}"#;
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/dashboards/{id}"),
+            &cookie,
+            body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Read back — name + widget box + config persisted verbatim.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get(
+            &format!("/api/dashboards/{id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    let board = helpers::response_json(resp).await;
+    assert_eq!(board["name"], "Lounge");
+    let widgets = board["widgets"].as_array().unwrap();
+    assert_eq!(widgets.len(), 1);
+    assert_eq!(widgets[0]["type"], "device");
+    assert_eq!(widgets[0]["w"], 2);
+    assert_eq!(widgets[0]["config"]["device_id"], "d1");
+
+    // Delete → gone.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_delete(
+            &format!("/api/dashboards/{id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = app
+        .oneshot(helpers::authed_get(
+            &format!("/api/dashboards/{id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn create_scene_rejects_empty_name() {
     let app = helpers::test_app_with_password().await;
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;

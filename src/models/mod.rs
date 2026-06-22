@@ -1,3 +1,4 @@
+pub mod dashboard;
 pub mod generic;
 pub mod media;
 pub mod power;
