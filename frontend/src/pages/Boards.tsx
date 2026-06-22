@@ -104,6 +104,7 @@ export function BoardsPage() {
   const [adding, setAdding] = useState(false);
   const [creating, setCreating] = useState(false);
   const [editingBoard, setEditingBoard] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [configuring, setConfiguring] = useState<Widget | null>(null);
 
   // Device fleet + scenes, fetched once and patched optimistically.
@@ -242,6 +243,44 @@ export function BoardsPage() {
     await updateDashboard(board.id, { name: name.trim(), aspect });
     await reloadBoards();
   }
+
+  // Export the active board to a JSON file (name + aspect + widget layout). Widget
+  // device/scene references are ids, so an export re-imports cleanly on the same
+  // hub (backup / duplicate); on a different hub the device ids won't resolve.
+  function exportBoard() {
+    if (!board) return;
+    const payload = { bifrost_board: 1, name: board.name, aspect: board.aspect, widgets: board.widgets };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${board.name.replace(/[^\w.-]+/g, "_") || "board"}.bifrost-board.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // Create a new board from exported JSON (envelope or a bare {name,aspect,widgets}).
+  async function importBoard(text: string) {
+    let data: { name?: unknown; aspect?: unknown; widgets?: unknown };
+    try {
+      data = JSON.parse(text);
+    } catch {
+      await dialogs.alert({ title: "Import failed", message: "That isn't valid JSON." });
+      return;
+    }
+    if (!data || !Array.isArray(data.widgets)) {
+      await dialogs.alert({ title: "Import failed", message: "No widget layout found in that file." });
+      return;
+    }
+    setImporting(false);
+    const name = (typeof data.name === "string" && data.name.trim()) || "Imported board";
+    const aspect = typeof data.aspect === "string" ? data.aspect : "16:9";
+    const b = await createDashboard(name, aspect);
+    await updateDashboard(b.id, { widgets: data.widgets as Widget[] });
+    await reloadBoards();
+    setActiveId(b.id);
+    setEdit(true);
+  }
   async function deleteBoard() {
     if (!board) return;
     const ok = await dialogs.confirm({
@@ -321,6 +360,11 @@ export function BoardsPage() {
         <button onClick={newBoard} style={{ ...TAB, borderStyle: "dashed", color: T.accent }}>
           + Board
         </button>
+        {!isMobile && (
+          <button onClick={() => setImporting(true)} style={{ ...TAB, borderStyle: "dashed", color: T.dim }} title="Create a board from an exported JSON file">
+            Import
+          </button>
+        )}
         {board && !isMobile && (
           <div style={{ marginLeft: "auto", display: "flex", gap: "0.4rem" }}>
             {edit && (
@@ -342,6 +386,7 @@ export function BoardsPage() {
             {edit && (
               <>
                 <Button variant="ghost" onClick={() => setEditingBoard(true)}>Edit board</Button>
+                <Button variant="ghost" onClick={exportBoard} title="Download this board as a JSON file">Export</Button>
                 <Button
                   variant="ghost"
                   onClick={deleteBoard}
@@ -435,6 +480,7 @@ export function BoardsPage() {
           onSubmit={saveBoardEdits}
         />
       )}
+      {importing && <ImportBoardModal onClose={() => setImporting(false)} onImport={importBoard} />}
 
       {/* Device / media fly-out for tile widgets */}
       {flyout &&
@@ -1161,9 +1207,13 @@ function GroupWidget({
   const [open, setOpen] = useState(false);
   const commitTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
-  const tLights = domain === "light" ? lights.filter((l) => ids.includes(l.id)) : [];
-  const tMedia = domain === "media" ? media.filter((m) => ids.includes(m.id)) : [];
-  const tPower = domain === "power" ? power.filter((p) => ids.includes(p.id)) : [];
+  // `all` is a mixed power group: every selected device of any type, controlled by
+  // the one action shared across all domains — power on/off. The typed domains keep
+  // their richer controls (brightness/volume), so they stay single-type.
+  const all = domain === "all";
+  const tLights = domain === "light" || all ? lights.filter((l) => ids.includes(l.id)) : [];
+  const tMedia = domain === "media" || all ? media.filter((m) => ids.includes(m.id)) : [];
+  const tPower = domain === "power" || all ? power.filter((p) => ids.includes(p.id)) : [];
   const total = tLights.length + tMedia.length + tPower.length;
   const onCount =
     tLights.filter((l) => l.last_state?.on).length +
@@ -1171,6 +1221,8 @@ function GroupWidget({
     tPower.filter((p) => p.state.on).length;
   const anyOn = onCount > 0;
   const accent = domain === "light" ? T.accent : domain === "media" ? T.media : color.gold;
+  // Only the single-type light/media groups have a richer editor; power & mixed
+  // ("all") groups are on/off only.
   const hasEditor = domain === "light" || domain === "media";
 
   function togglePower() {
@@ -1257,7 +1309,7 @@ function GroupWidget({
       ? tLights[0].last_state?.effect
       : undefined;
 
-  const kindWord = domain === "light" ? "light" : domain === "media" ? "speaker" : "switch";
+  const kindWord = domain === "light" ? "light" : domain === "media" ? "speaker" : domain === "power" ? "switch" : "device";
   const label = cfg.name || cfg.label || `${total} ${kindWord}${total !== 1 ? "s" : ""}`;
 
   // Inline master controls — brightness for a dimmable light group, volume for a
@@ -1555,6 +1607,39 @@ function BoardModal({
   );
 }
 
+/** Import a board from an exported JSON file (upload or paste) → a new board. */
+function ImportBoardModal({ onClose, onImport }: { onClose: () => void; onImport: (text: string) => void }) {
+  const [text, setText] = useState("");
+  function pickFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    if (f) f.text().then(setText);
+  }
+  return (
+    <Modal title="Import board" onClose={onClose}>
+      <Field label="Board file (.json)">
+        <input type="file" accept="application/json,.json" onChange={pickFile} style={{ color: T.dim, fontSize: "0.8rem" }} />
+      </Field>
+      <Field label="…or paste the JSON">
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          rows={8}
+          placeholder='{ "bifrost_board": 1, "name": "…", "aspect": "16:9", "widgets": [ … ] }'
+          style={{ ...INPUT, fontFamily: "monospace", fontSize: "0.74rem", resize: "vertical", width: "100%" }}
+        />
+      </Field>
+      <div style={{ fontSize: "0.66rem", color: T.dim, marginTop: "0.2rem" }}>
+        Creates a new board. Device and scene references are by id, so importing onto a different hub
+        may leave some widgets unresolved.
+      </div>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1rem" }}>
+        <Button variant="ghost" onClick={onClose}>Cancel</Button>
+        <Button variant="primary" onClick={() => onImport(text)} disabled={!text.trim()}>Import</Button>
+      </div>
+    </Modal>
+  );
+}
+
 // ── Add / configure widget modal ──────────────────────────────────────────────
 
 type WidgetSpec = Partial<Pick<Widget, "type" | "config" | "w" | "h">> & { type: WidgetType; config: unknown };
@@ -1699,17 +1784,28 @@ function WidgetEditorModal({
 
       {(type === "group" || type === "button") && (
         <>
-          <Field label="Domain">
+          <Field label="Controls">
             <Select
               value={groupDomain}
               onChange={(d) => { setGroupDomain(d); setGroupIds([]); }}
-              options={[{ value: "light", label: "Lights" }, { value: "media", label: "Media / speakers" }, { value: "power", label: "Switches / plugs" }]}
+              options={[
+                { value: "light", label: "Lights — brightness / colour" },
+                { value: "media", label: "Media / speakers — volume" },
+                { value: "power", label: "Switches / plugs — on/off" },
+                { value: "all", label: "Any device — power on/off" },
+              ]}
             />
           </Field>
           <Field label={type === "button" ? "Device or group (pick one for a single device)" : "Devices"}>
             <div style={{ maxHeight: 240, overflowY: "auto", display: "flex", flexDirection: "column", gap: "0.1rem" }}>
               {groupByRoom(
-                (groupDomain === "light" ? lights : groupDomain === "media" ? media : power) as RoomedDevice[],
+                (groupDomain === "light"
+                  ? lights
+                  : groupDomain === "media"
+                    ? media
+                    : groupDomain === "power"
+                      ? power
+                      : [...lights, ...media, ...power]) as RoomedDevice[],
                 rooms,
               ).map(({ room, devices }) => (
                 <div key={room}>
