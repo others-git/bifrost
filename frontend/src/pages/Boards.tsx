@@ -15,6 +15,7 @@ import {
   getLights,
   getMediaDevices,
   getPowerDevices,
+  getRooms,
   getScenes,
   lightHex,
   mergePatch,
@@ -32,6 +33,7 @@ import {
   type MediaCommand,
   type MediaDevice,
   type PowerDevice,
+  type Room,
   type RoomControl,
   type Scene,
   type Widget,
@@ -96,6 +98,7 @@ export function BoardsPage() {
   const [power, setPower] = useState<PowerDevice[]>([]);
   const [scenes, setScenes] = useState<Scene[]>([]);
   const [generic, setGeneric] = useState<GenericDevice[]>([]);
+  const [rooms, setRooms] = useState<Room[]>([]);
   const [flyout, setFlyout] = useState<{ widget: Widget; anchor: HTMLElement } | null>(null);
 
   const reloadBoards = useCallback(async () => {
@@ -105,18 +108,20 @@ export function BoardsPage() {
   }, []);
 
   const reloadDevices = useCallback(async () => {
-    const [l, m, p, s, g] = await Promise.all([
+    const [l, m, p, s, g, r] = await Promise.all([
       getLights(),
       getMediaDevices(),
       getPowerDevices(),
       getScenes(),
       getGenericDevices(),
+      getRooms(),
     ]);
     if (l !== "unauthorized") setLights(l);
     setMedia(m);
     setPower(p);
     setScenes(s);
     setGeneric(g);
+    setRooms(r);
   }, []);
 
   useEffect(() => {
@@ -358,6 +363,7 @@ export function BoardsPage() {
           power={power}
           scenes={scenes}
           generic={generic}
+          rooms={rooms}
           onClose={() => { setAdding(false); setConfiguring(null); }}
           onSave={(spec) => {
             if (configuring) {
@@ -451,6 +457,29 @@ export function BoardsPage() {
 // Parse an "<w>:<h>" aspect into a grid: `BASE` cells on the longer axis, the
 // shorter axis scaled to keep cells ≈ square. Falls back to 16:9 for junk.
 const GRID_BASE = 48;
+// Group a device list by its room (direct `room_id`, else the inherited
+// provider-group room), so the picker reads room-by-room. Rooms come first in
+// name order; devices with no room fall into a trailing "No room" bucket.
+type RoomedDevice = { id: string; name: string; room_id?: string | null; inherited_room_id?: string | null };
+function groupByRoom<T extends RoomedDevice>(devices: T[], rooms: Room[]): { room: string; devices: T[] }[] {
+  const nameOf = (id?: string | null) => (id ? rooms.find((r) => r.id === id)?.name : undefined);
+  const buckets = new Map<string, T[]>();
+  for (const d of devices) {
+    const key = nameOf(d.room_id) ?? nameOf(d.inherited_room_id) ?? "";
+    (buckets.get(key) ?? buckets.set(key, []).get(key)!).push(d);
+  }
+  return [...buckets.entries()]
+    .sort((a, b) => {
+      if (a[0] === "") return 1; // "No room" last
+      if (b[0] === "") return -1;
+      return a[0].localeCompare(b[0]);
+    })
+    .map(([room, devs]) => ({
+      room: room || "No room",
+      devices: devs.slice().sort((x, y) => x.name.localeCompare(y.name)),
+    }));
+}
+
 function aspectGrid(aspect: string): { ar: number; cols: number; rows: number } {
   const [aw, ah] = aspect.split(":").map((n) => Number(n));
   const w = aw > 0 ? aw : 16;
@@ -1331,6 +1360,7 @@ function WidgetEditorModal({
   power,
   scenes,
   generic,
+  rooms,
   onClose,
   onSave,
 }: {
@@ -1340,6 +1370,7 @@ function WidgetEditorModal({
   power: PowerDevice[];
   scenes: Scene[];
   generic: GenericDevice[];
+  rooms: Room[];
   onClose: () => void;
   onSave: (spec: WidgetSpec) => void;
 }) {
@@ -1467,18 +1498,26 @@ function WidgetEditorModal({
             />
           </Field>
           <Field label="Devices">
-            <div style={{ maxHeight: 200, overflowY: "auto", display: "flex", flexDirection: "column", gap: "0.25rem" }}>
-              {(groupDomain === "light" ? lights : groupDomain === "media" ? media : power).map((d) => (
-                <label key={d.id} style={CHECK_ROW}>
-                  <input
-                    type="checkbox"
-                    checked={groupIds.includes(d.id)}
-                    onChange={() =>
-                      setGroupIds((cur) => (cur.includes(d.id) ? cur.filter((x) => x !== d.id) : [...cur, d.id]))
-                    }
-                  />
-                  <span style={ELLIPSIS}>{d.name}</span>
-                </label>
+            <div style={{ maxHeight: 240, overflowY: "auto", display: "flex", flexDirection: "column", gap: "0.1rem" }}>
+              {groupByRoom(
+                (groupDomain === "light" ? lights : groupDomain === "media" ? media : power) as RoomedDevice[],
+                rooms,
+              ).map(({ room, devices }) => (
+                <div key={room}>
+                  <div style={ROOM_HEADER}>{room}</div>
+                  {devices.map((d) => (
+                    <label key={d.id} style={CHECK_ROW}>
+                      <input
+                        type="checkbox"
+                        checked={groupIds.includes(d.id)}
+                        onChange={() =>
+                          setGroupIds((cur) => (cur.includes(d.id) ? cur.filter((x) => x !== d.id) : [...cur, d.id]))
+                        }
+                      />
+                      <span style={ELLIPSIS}>{d.name}</span>
+                    </label>
+                  ))}
+                </div>
               ))}
             </div>
           </Field>
@@ -1783,6 +1822,14 @@ const CHECK_ROW: React.CSSProperties = {
   gap: "0.5rem",
   fontSize: "0.82rem",
   color: T.text,
-  padding: "0.2rem 0.1rem",
+  padding: "0.2rem 0.1rem 0.2rem 0.6rem",
   cursor: "pointer",
+};
+const ROOM_HEADER: React.CSSProperties = {
+  fontSize: "0.64rem",
+  textTransform: "uppercase",
+  letterSpacing: "0.06em",
+  color: T.dim,
+  margin: "0.5rem 0 0.15rem",
+  fontWeight: 600,
 };
