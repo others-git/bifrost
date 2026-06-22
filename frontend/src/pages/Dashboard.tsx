@@ -1061,7 +1061,8 @@ export function GlyphButton({
   /** Press-and-hold (~500ms) action; suppresses the click that would follow.
    * Used as a quick power toggle so a tap still opens the fly-out. */
   onLongPress?: () => void;
-  size?: number;
+  /** Square px size, or a CSS length (e.g. "100%") to fill its container. */
+  size?: number | string;
   children: React.ReactNode;
 }) {
   const holdTimer = useRef<ReturnType<typeof setTimeout>>(undefined);

@@ -75,7 +75,16 @@ const GAP = 8;
 // Fixed row height only for the phone fallback's stacked, view-only list.
 const ROW_H = 42;
 
-type WidgetType = "device" | "group" | "now_playing" | "scene" | "control" | "sensor" | "weather" | "clock" | "label";
+type WidgetType = "device" | "button" | "group" | "now_playing" | "scene" | "control" | "sensor" | "weather" | "clock" | "label" | "exit";
+
+// The kiosk-exit control is a special built-in widget: present on every board,
+// movable (positioned in edit mode) but not user-addable or removable. It renders
+// only in edit (to place it) and kiosk (the small ✕ that leaves full-screen).
+const EXIT_ID = "__exit__";
+const DEFAULT_EXIT: Widget = { id: EXIT_ID, type: "exit", x: 0, y: 9999, w: 4, h: 4, config: {} };
+function withExit(ws: Widget[]): Widget[] {
+  return ws.some((w) => w.type === "exit") ? ws : [...ws, DEFAULT_EXIT];
+}
 
 /** A locally-generated widget id. */
 const newId = () => `w_${Math.random().toString(36).slice(2, 10)}`;
@@ -201,7 +210,11 @@ export function BoardsPage() {
 
   function patchWidget(id: string, next: Widget) {
     if (!board) return;
-    saveWidgets(widgets.map((w) => (w.id === id ? next : w)));
+    // Upsert: moving the built-in exit widget (synthesized, not yet stored) adds
+    // it to the layout on first drag so its position persists.
+    saveWidgets(
+      widgets.some((w) => w.id === id) ? widgets.map((w) => (w.id === id ? next : w)) : [...widgets, next],
+    );
   }
   function removeWidget(id: string) {
     if (!board) return;
@@ -253,7 +266,12 @@ export function BoardsPage() {
     setPowerState(id, next);
   };
 
-  const renderWidget = (w: Widget) => (
+  const renderWidget = (w: Widget) =>
+    w.type === "exit" ? (
+      // Inert while editing (the box's content is non-interactive then, so it
+      // drags); in kiosk the ✕ leaves full-screen.
+      <ExitWidget onExit={() => setKiosk(false)} />
+    ) : (
     <WidgetContent
       w={w}
       lights={lights}
@@ -352,6 +370,7 @@ export function BoardsPage() {
           // Phones: a simple stacked, view-only render (editing happens on a bigger screen).
           <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: GAP }}>
             {[...widgets]
+              .filter((w) => w.type !== "exit")
               .sort((a, b) => a.y - b.y || a.x - b.x)
               .map((w) => (
                 <div key={w.id} style={{ minHeight: ROW_H }}>
@@ -361,7 +380,7 @@ export function BoardsPage() {
           </div>
         ) : (
           <BoardGrid
-            widgets={widgets}
+            widgets={edit ? withExit(widgets) : widgets.filter((w) => w.type !== "exit")}
             aspect={board?.aspect ?? "16:9"}
             edit={edit}
             onChange={patchWidget}
@@ -440,28 +459,21 @@ export function BoardsPage() {
           ) : null;
         })()}
 
-      {/* Kiosk: the board fills the whole screen (over the nav), view-only — for a
-          wall tablet. Sits below fly-outs (z 60) so widget controls still open. */}
+      {/* Kiosk: the board fills the whole screen edge-to-edge — over the bottom nav
+          (z 40) and top bar — view-only, for a wall tablet. Sits below fly-outs
+          (z 60) so widget controls still open above it. The built-in exit widget
+          (a small ✕, positioned in edit mode) leaves full-screen. */}
       {kiosk && board && (
-        <div style={{ position: "fixed", inset: 0, zIndex: 40, background: color.void, display: "flex", flexDirection: "column", padding: "1.1rem" }}>
-          <button
-            onClick={() => setKiosk(false)}
-            title="Exit kiosk"
-            style={{ position: "absolute", top: 10, right: 14, zIndex: 1, padding: "0.35rem 0.7rem", borderRadius: radius.frame, border: `1px solid ${T.hairline}`, background: alpha(color.void, 0.6), color: T.dim, cursor: "pointer", fontSize: "0.8rem" }}
-          >
-            ✕ Exit
-          </button>
-          {widgets.length > 0 && (
-            <BoardGrid
-              widgets={widgets}
-              aspect={board?.aspect ?? "16:9"}
-              edit={false}
-              onChange={() => {}}
-              onConfigure={() => {}}
-              onRemove={() => {}}
-              renderWidget={renderWidget}
-            />
-          )}
+        <div style={{ position: "fixed", inset: 0, zIndex: 50, background: color.void, display: "flex", flexDirection: "column" }}>
+          <BoardGrid
+            widgets={withExit(widgets)}
+            aspect={board?.aspect ?? "16:9"}
+            edit={false}
+            onChange={() => {}}
+            onConfigure={() => {}}
+            onRemove={() => {}}
+            renderWidget={renderWidget}
+          />
         </div>
       )}
 
@@ -727,12 +739,17 @@ function WidgetBox({
 
       {edit && (
         <>
-          <button onClick={onConfigure} onPointerDown={(e) => e.stopPropagation()} title="Configure" style={CORNER_BTN(4, 28)}>
-            <Glyph name="gear" size={13} />
-          </button>
-          <button onClick={onRemove} onPointerDown={(e) => e.stopPropagation()} title="Remove" style={{ ...CORNER_BTN(4, 4), color: "#c77" }}>
-            ×
-          </button>
+          {/* The built-in exit control has no config and can't be removed. */}
+          {w.type !== "exit" && (
+            <>
+              <button onClick={onConfigure} onPointerDown={(e) => e.stopPropagation()} title="Configure" style={CORNER_BTN(4, 28)}>
+                <Glyph name="gear" size={13} />
+              </button>
+              <button onClick={onRemove} onPointerDown={(e) => e.stopPropagation()} title="Remove" style={{ ...CORNER_BTN(4, 4), color: "#c77" }}>
+                ×
+              </button>
+            </>
+          )}
           <div
             onPointerDown={(e) => down(e, "resize")}
             title="Resize"
@@ -787,7 +804,7 @@ function WidgetContent({
   if (w.type === "sensor") return <SensorWidget cfg={cfg} generic={generic} />;
   if (w.type === "weather") return <WeatherWidget cfg={cfg} generic={generic} />;
 
-  if (w.type === "group") {
+  if (w.type === "group" || w.type === "button") {
     return (
       <GroupWidget
         cfg={cfg as { domain?: string; ids?: string[]; label?: string }}
@@ -795,6 +812,7 @@ function WidgetContent({
         media={media}
         power={power}
         edit={edit}
+        compact={w.type === "button"}
         onLightUpdate={onLightUpdate}
         onMediaPatch={onMediaPatch}
         onPowerToggle={onPowerToggle}
@@ -946,12 +964,13 @@ function DeviceTile({
     if (light) onLightUpdate(light.id, { ...(light.last_state ?? { on: true }), on: true, brightness: v });
     else if (mediaDev) onMediaPatch(mediaDev.id, { volume: v });
   };
+  // Write only ~300ms after the drag stops (on release) — never spam mid-drag.
   const onCommit = (v: number) => {
     clearTimeout(commitTimer.current);
     commitTimer.current = setTimeout(() => {
       if (light) setLightState(light.id, { on: true, brightness: v });
       else if (mediaDev) setMediaState(mediaDev.id, { volume: v });
-    }, 120);
+    }, 300);
   };
 
   // A power device is strictly on/off — its tile is just a big centered power
@@ -1044,6 +1063,33 @@ function DeviceTile({
   );
 }
 
+/** The built-in kiosk-exit control: a small ✕ that leaves full-screen. Movable in
+ * edit mode (positioned like any widget) but never removed. Scales to its box. */
+function ExitWidget({ onExit }: { onExit: () => void }) {
+  return (
+    <button
+      onClick={onExit}
+      title="Exit full-screen"
+      style={{
+        width: "100%",
+        height: "100%",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        border: `1px solid ${T.hairline}`,
+        borderRadius: radius.frame,
+        background: alpha(color.void, 0.5),
+        color: T.dim,
+        cursor: "pointer",
+        fontSize: "clamp(0.9rem, 42cqmin, 2.6rem)",
+        lineHeight: 1,
+      }}
+    >
+      ✕
+    </button>
+  );
+}
+
 /** A live clock tile. `cfg.format` = "24h" | "12h". */
 function ClockWidget({ cfg }: { cfg: Record<string, unknown> }) {
   const [now, setNow] = useState(() => new Date());
@@ -1091,6 +1137,7 @@ function GroupWidget({
   media,
   power,
   edit,
+  compact = false,
   onLightUpdate,
   onMediaPatch,
   onPowerToggle,
@@ -1100,6 +1147,10 @@ function GroupWidget({
   media: MediaDevice[];
   power: PowerDevice[];
   edit: boolean;
+  /** Bare glyph-button form (the "button" widget): the whole box is one device-lit
+   * GlyphButton — tap opens the controls, hold toggles power. Bound to a single
+   * device or a group, just like the full card. */
+  compact?: boolean;
   onLightUpdate: (id: string, st: LightState) => void;
   onMediaPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
   onPowerToggle: (id: string, next: boolean) => void;
@@ -1136,25 +1187,35 @@ function GroupWidget({
     for (const p of tPower) onPowerToggle(p.id, next);
   }
 
-  // Per-light cascade (mirrors the room-header cascade, fanned per device).
+  // Per-light cascade (mirrors the room-header cascade, fanned per device). An
+  // effect is per-light — fanned out only to members that support it, keeping
+  // each light's own colour — like the room control.
   function cascade(change: LightControlChange) {
-    if (change.field === "effect") return;
     const updates: [string, LightState][] = [];
-    for (const l of tLights) {
-      const next: LightState = { ...(l.last_state ?? { on: true }), on: true };
-      if (change.field === "brightness") {
-        if (l.capabilities.dimmable) next.brightness = change.brightness;
-      } else if (change.field === "color") {
-        if (l.capabilities.color_rgb) {
-          next.color = rgbToXy(...hexToRgb(change.hex));
-          next.color_temp_mirek = undefined;
-        }
-      } else if (l.capabilities.color_temperature) {
-        next.color_temp_mirek = change.mirek;
-        next.color = undefined;
+    if (change.field === "effect") {
+      for (const l of tLights) {
+        if (!(l.capabilities.effects ?? []).includes(change.effect)) continue;
+        const next: LightState = { ...(l.last_state ?? { on: true }), on: true, effect: change.effect };
+        onLightUpdate(l.id, next);
+        updates.push([l.id, next]);
       }
-      onLightUpdate(l.id, next);
-      updates.push([l.id, next]);
+    } else {
+      for (const l of tLights) {
+        const next: LightState = { ...(l.last_state ?? { on: true }), on: true };
+        if (change.field === "brightness") {
+          if (l.capabilities.dimmable) next.brightness = change.brightness;
+        } else if (change.field === "color") {
+          if (l.capabilities.color_rgb) {
+            next.color = rgbToXy(...hexToRgb(change.hex));
+            next.color_temp_mirek = undefined;
+          }
+        } else if (l.capabilities.color_temperature) {
+          next.color_temp_mirek = change.mirek;
+          next.color = undefined;
+        }
+        onLightUpdate(l.id, next);
+        updates.push([l.id, next]);
+      }
     }
     clearTimeout(commitTimer.current);
     commitTimer.current = setTimeout(() => {
@@ -1182,6 +1243,19 @@ function GroupWidget({
     ? Math.round(lit.reduce((s, l) => s + (l.last_state?.brightness ?? 100), 0) / lit.length)
     : 0;
   const initMirek = lit.map((l) => l.last_state?.color_temp_mirek).find((m): m is number => m != null) ?? 366;
+  // Effects common to every member light (intersection), so a chosen effect
+  // applies group-wide; preselect the running one only when all members agree.
+  const groupEffects = tLights.reduce<string[]>(
+    (acc, l, i) => {
+      const e = l.capabilities.effects ?? [];
+      return i === 0 ? [...e] : acc.filter((x) => e.includes(x));
+    },
+    [],
+  );
+  const groupEffect =
+    groupEffects.length > 0 && tLights.every((l) => l.last_state?.effect === tLights[0].last_state?.effect)
+      ? tLights[0].last_state?.effect
+      : undefined;
 
   const kindWord = domain === "light" ? "light" : domain === "media" ? "speaker" : "switch";
   const label = cfg.name || cfg.label || `${total} ${kindWord}${total !== 1 ? "s" : ""}`;
@@ -1191,7 +1265,21 @@ function GroupWidget({
   const groupDimmable = tLights.some((l) => l.capabilities.dimmable);
   const groupVolume = tMedia.length ? Math.round(tMedia.reduce((s, m) => s + (m.state.volume ?? 0), 0) / tMedia.length) : 0;
   const showSlider = (domain === "light" && groupDimmable && total > 0) || (domain === "media" && tMedia.length > 0);
-  const slideBrightness = (v: number) => cascade({ field: "brightness", brightness: v });
+  // The inline bars update local state live but only write to the devices ~300ms
+  // after the drag stops (on release), so a drag doesn't spam the providers.
+  const slideBrightnessChange = (v: number) => {
+    for (const l of tLights) {
+      if (l.capabilities.dimmable) onLightUpdate(l.id, { ...(l.last_state ?? { on: true }), on: true, brightness: v });
+    }
+  };
+  const slideBrightnessCommit = (v: number) => {
+    clearTimeout(commitTimer.current);
+    commitTimer.current = setTimeout(() => {
+      for (const l of tLights) {
+        if (l.capabilities.dimmable) setLightState(l.id, { ...(l.last_state ?? { on: true }), on: true, brightness: v });
+      }
+    }, 300);
+  };
   const slideVolumeChange = (v: number) => {
     for (const m of tMedia) onMediaPatch(m.id, { volume: v, power: true });
   };
@@ -1199,11 +1287,71 @@ function GroupWidget({
     clearTimeout(commitTimer.current);
     commitTimer.current = setTimeout(() => {
       for (const m of tMedia) setMediaState(m.id, { volume: v });
-    }, 120);
+    }, 300);
   };
 
   const litHexes = anyOn ? (domain === "light" && lit.length ? lit.map(lightHex) : [accent]) : undefined;
   const dotColor = litHexes?.[0] ?? accent;
+  const buttonAccent = domain === "light" ? dotColor : accent;
+
+  // The shared light/media editor popovers, anchored on `ref` — reused by both the
+  // full card and the compact button.
+  const editors = (
+    <>
+      {open && domain === "light" && ref.current && (
+        <LightEditor
+          anchor={ref.current}
+          title={label}
+          initialHex={initHex}
+          initialBrightness={initBrightness}
+          initialMirek={initMirek}
+          showColor={tLights.some((l) => l.capabilities.color_rgb)}
+          showWhite={tLights.some((l) => l.capabilities.color_temperature)}
+          showBrightness={tLights.some((l) => l.capabilities.dimmable)}
+          effects={groupEffects.length > 0 ? groupEffects : undefined}
+          initialEffect={groupEffect}
+          on={anyOn}
+          onToggle={togglePower}
+          onChange={cascade}
+          onClose={() => setOpen(false)}
+        />
+      )}
+      {open && domain === "media" && tMedia[0] && ref.current && (
+        <MediaEditor device={tMedia[0]} anchor={ref.current} onLocalPatch={fanMedia} onClose={() => setOpen(false)} />
+      )}
+    </>
+  );
+
+  // Compact "button" form: the whole box is one device-lit GlyphButton — like a
+  // room card's per-device glyph button. Tap opens the controls (or toggles a
+  // power group, which has none); hold toggles power.
+  if (compact) {
+    // A single bound device shows its own glyph; a group shows the domain glyph.
+    const single = total === 1 ? (tLights[0] ?? tMedia[0] ?? tPower[0]) : undefined;
+    const compactGlyph =
+      (single as { glyph?: string | null } | undefined)?.glyph ??
+      (domain === "light" ? "bulb" : domain === "media" ? "speaker" : "power");
+    return (
+      <>
+        <GlyphButton
+          on={anyOn}
+          accent={buttonAccent}
+          title={label}
+          active={open}
+          buttonRef={ref}
+          onClick={() => (hasEditor ? setOpen(true) : togglePower())}
+          onLongPress={togglePower}
+          size="100%"
+        >
+          <span style={{ fontSize: "clamp(16px, 44cqmin, 80px)", lineHeight: 0 }}>
+            <Glyph name={compactGlyph} size="1em" />
+          </span>
+        </GlyphButton>
+        {editors}
+      </>
+    );
+  }
+
   return (
     <div
       style={{
@@ -1259,32 +1407,15 @@ function GroupWidget({
         {showSlider && (
           <div style={{ flex: "0 0 40%", minHeight: 26, display: "flex" }}>
             {domain === "light" ? (
-              <InlineSlider fill value={initBrightness} accent={accent} unit="%" onChange={slideBrightness} onCommit={() => {}} />
+              // The brightness bar takes the bulb colour (like the dot), not the theme accent.
+              <InlineSlider fill value={initBrightness} accent={dotColor} unit="%" onChange={slideBrightnessChange} onCommit={slideBrightnessCommit} />
             ) : (
               <InlineSlider fill value={groupVolume} accent={accent} unit="" onChange={slideVolumeChange} onCommit={slideVolumeCommit} />
             )}
           </div>
         )}
       </div>
-      {open && domain === "light" && ref.current && (
-        <LightEditor
-          anchor={ref.current}
-          title={label}
-          initialHex={initHex}
-          initialBrightness={initBrightness}
-          initialMirek={initMirek}
-          showColor={tLights.some((l) => l.capabilities.color_rgb)}
-          showWhite={tLights.some((l) => l.capabilities.color_temperature)}
-          showBrightness={tLights.some((l) => l.capabilities.dimmable)}
-          on={anyOn}
-          onToggle={togglePower}
-          onChange={cascade}
-          onClose={() => setOpen(false)}
-        />
-      )}
-      {open && domain === "media" && tMedia[0] && ref.current && (
-        <MediaEditor device={tMedia[0]} anchor={ref.current} onLocalPatch={fanMedia} onClose={() => setOpen(false)} />
-      )}
+      {editors}
     </div>
   );
 }
@@ -1503,6 +1634,9 @@ function WidgetEditorModal({
     } else if (type === "group") {
       if (groupIds.length === 0) return;
       onSave({ type, config: { domain: groupDomain, ids: groupIds, name: nm }, w: 16, h: 8 });
+    } else if (type === "button") {
+      if (groupIds.length === 0) return;
+      onSave({ type, config: { domain: groupDomain, ids: groupIds, name: nm }, w: 6, h: 6 });
     } else if (type === "scene") {
       onSave({
         type,
@@ -1532,7 +1666,7 @@ function WidgetEditorModal({
       {!existing && (
         <Field label="Type">
           <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem" }}>
-            {(["device", "group", "now_playing", "scene", "control", "sensor", "weather", "clock", "label"] as WidgetType[]).map((t) => (
+            {(["device", "button", "group", "now_playing", "scene", "control", "sensor", "weather", "clock", "label"] as WidgetType[]).map((t) => (
               <button key={t} onClick={() => setType(t)} style={{ ...CHIP, ...(type === t ? CHIP_ON : {}) }}>
                 {WIDGET_LABELS[t]}
               </button>
@@ -1563,7 +1697,7 @@ function WidgetEditorModal({
         </>
       )}
 
-      {type === "group" && (
+      {(type === "group" || type === "button") && (
         <>
           <Field label="Domain">
             <Select
@@ -1572,7 +1706,7 @@ function WidgetEditorModal({
               options={[{ value: "light", label: "Lights" }, { value: "media", label: "Media / speakers" }, { value: "power", label: "Switches / plugs" }]}
             />
           </Field>
-          <Field label="Devices">
+          <Field label={type === "button" ? "Device or group (pick one for a single device)" : "Devices"}>
             <div style={{ maxHeight: 240, overflowY: "auto", display: "flex", flexDirection: "column", gap: "0.1rem" }}>
               {groupByRoom(
                 (groupDomain === "light" ? lights : groupDomain === "media" ? media : power) as RoomedDevice[],
@@ -1818,10 +1952,12 @@ const WIDGET_LABELS: Record<WidgetType, string> = {
   now_playing: "Now playing",
   scene: "Scene button",
   control: "Custom control",
+  button: "Button",
   sensor: "Sensor",
   weather: "Weather",
   clock: "Clock",
   label: "Label / heading",
+  exit: "Exit",
 };
 
 const TAB: React.CSSProperties = {

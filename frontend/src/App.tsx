@@ -1,5 +1,5 @@
 import { useEffect, useState, type MouseEvent } from "react";
-import { getHealth, getLights, logout, getSetupStatus, kioskLogin, type Light } from "./api";
+import { getHealth, getLights, logout, getSetupStatus, kioskLogin, getKioskSelf, type Light } from "./api";
 import { Glyph } from "./components/glyphs";
 import { SetupPage } from "./pages/Setup";
 import { LoginPage } from "./pages/Login";
@@ -103,6 +103,12 @@ export function App() {
     const result = await lightsWithKioskAuth();
     if (result === "unauthorized") { setPage("login"); return; }
     setLights(result);
+    // A wall-tablet kiosk with an assigned board lands straight on Boards (which
+    // then opens that board full-screen); otherwise the dashboard is home.
+    if (IS_KIOSK && (await getKioskSelf())?.default_board_id) {
+      setPage("boards");
+      return;
+    }
     setPage("dashboard");
   }
 
