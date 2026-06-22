@@ -162,13 +162,16 @@ export function Select<T extends string>({
       ref={listRef}
       style={
         isCompact
-          ? { ...sheetStyle, padding: 6, gap: 2 }
+          ? // Above any modal (z 100) it's opened from — it's portaled to <body>.
+            { ...sheetStyle, zIndex: 200, padding: 6, gap: 2 }
           : {
               position: "fixed",
               left: pos?.left ?? -9999,
               top: pos?.top ?? -9999,
               visibility: pos ? "visible" : "hidden",
-              zIndex: 70,
+              // Above the Modal overlay (z 100) so the list isn't hidden behind a
+              // dialog it's opened within (it's portaled to <body>).
+              zIndex: 200,
               minWidth: pos?.minWidth,
               maxHeight: 300,
               overflowY: "auto",

@@ -1323,6 +1323,8 @@ export interface Kiosk {
   authorized: boolean;
   /** Assigned Room id (the kiosk's voice context / location), or null. */
   room_id: string | null;
+  /** Board this kiosk auto-launches full-screen on load, or null. */
+  default_board_id: string | null;
   /** Battery / power telemetry from the last check-in (null on older apps). */
   battery_level: number | null;
   battery_charging: boolean | null;
@@ -1361,6 +1363,25 @@ export async function setKioskRoom(id: string, room_id: string | null): Promise<
     body: JSON.stringify({ room_id }),
   });
   if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+}
+
+/** Set the kiosk's auto-launch board (full-screen on load), or clear with null. */
+export async function setKioskBoard(id: string, board_id: string | null): Promise<void> {
+  const res = await fetch(`/api/kiosks/${id}/board`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ board_id }),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+}
+
+/** This kiosk's own identity + assigned board, resolved from its `bfr_key`
+ * cookie. Null when not served on a registered kiosk (no/unknown key). Lets a
+ * kiosk-served Boards page auto-launch its configured board. */
+export async function getKioskSelf(): Promise<{ id: string; name: string; default_board_id: string | null } | null> {
+  const res = await fetch("/api/kiosks/self");
+  if (!res.ok) return null;
+  return res.json();
 }
 
 /** Revoke the kiosk's key — it must re-enroll via QR. */

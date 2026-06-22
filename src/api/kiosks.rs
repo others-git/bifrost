@@ -57,6 +57,7 @@ pub fn router() -> Router<Arc<AppState>> {
     use crate::api::kiosk_update as upd;
     Router::new()
         .route("/checkin", post(checkin))
+        .route("/self", get(self_info))
         .route("/stream", get(stream))
         .route("/", get(list))
         // OTA relay: session triggers/inspects the cache; key-auth endpoints feed
@@ -67,6 +68,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/update/apk", get(upd::serve_apk))
         .route("/{id}/command", post(command))
         .route("/{id}/room", axum::routing::put(set_room))
+        .route("/{id}/board", axum::routing::put(set_board))
         .route("/{id}/deauth", post(deauth))
         .route("/{id}", delete(forget))
 }
@@ -103,6 +105,9 @@ struct CheckinResponse {
     /// The kiosk's assigned Room **name**, if any — the app adopts it as the
     /// voice context room (so "turn on the lights" resolves to that room).
     room: Option<String>,
+    /// The board this kiosk should auto-launch full-screen, if configured. The
+    /// web client also reads this via `GET /self`; surfaced here for the app.
+    default_board_id: Option<String>,
 }
 
 /// `POST /api/kiosks/checkin` (API-key auth) — the kiosk heartbeat. Upserts the
@@ -194,7 +199,58 @@ async fn checkin(
     .ok()
     .flatten();
 
-    Json(CheckinResponse { command, room }).into_response()
+    let default_board_id: Option<String> =
+        sqlx::query_scalar("SELECT default_board_id FROM kiosks WHERE id = ?")
+            .bind(&kiosk_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+
+    Json(CheckinResponse {
+        command,
+        room,
+        default_board_id,
+    })
+    .into_response()
+}
+
+#[derive(Serialize)]
+struct SelfResponse {
+    id: String,
+    name: String,
+    /// The board to auto-launch full-screen on this kiosk, if configured.
+    default_board_id: Option<String>,
+}
+
+/// `GET /api/kiosks/self` — the kiosk asks *which kiosk am I and what should I
+/// show*. Resolved from the `bfr_key` cookie the WebView carries (not a session,
+/// which isn't tied to a kiosk), so the web client can auto-launch its assigned
+/// board. 401 without a valid kiosk key; 404 if the key isn't a registered kiosk.
+async fn self_info(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+    let Some(key) = crate::api::auth::kiosk_cookie_key(&headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Some(key_id) = crate::api::apikeys::validate_key(&state, &key).await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let row = sqlx::query("SELECT id, name, default_board_id FROM kiosks WHERE api_key_id = ?")
+        .bind(&key_id)
+        .fetch_optional(&state.db)
+        .await;
+    match row {
+        Ok(Some(r)) => Json(SelfResponse {
+            id: r.get("id"),
+            name: r.get("name"),
+            default_board_id: r.get("default_board_id"),
+        })
+        .into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("db error resolving kiosk self: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -212,6 +268,8 @@ struct KioskRow {
     authorized: bool,
     /// Assigned Room id (its voice context), or null. Set via `PUT …/room`.
     room_id: Option<String>,
+    /// Board to auto-launch full-screen, or null. Set via `PUT …/board`.
+    default_board_id: Option<String>,
     // Battery / power telemetry from the latest check-in (null on older apps).
     battery_level: Option<i64>,
     battery_charging: Option<bool>,
@@ -226,6 +284,7 @@ struct KioskRow {
 async fn list(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
     let rows = sqlx::query(&format!(
         "SELECT id, name, app_version, screen_on, last_seen, pending_command, room_id,
+                default_board_id,
                 battery_level, battery_charging, battery_voltage_mv, battery_current_ua,
                 battery_temp_dc, power_source,
                 api_key_id IS NOT NULL AS authorized,
@@ -248,6 +307,7 @@ async fn list(State(state): State<Arc<AppState>>, _: Session) -> impl IntoRespon
                     pending_command: r.get("pending_command"),
                     authorized: r.get::<i64, _>("authorized") != 0,
                     room_id: r.get("room_id"),
+                    default_board_id: r.get("default_board_id"),
                     battery_level: r.get("battery_level"),
                     battery_charging: r.get::<Option<i64>, _>("battery_charging").map(|v| v != 0),
                     battery_voltage_mv: r.get("battery_voltage_mv"),
@@ -373,6 +433,36 @@ async fn set_room(
         Ok(_) => StatusCode::NOT_FOUND,
         Err(e) => {
             tracing::error!("db error setting kiosk room: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SetBoardRequest {
+    /// Board id to auto-launch full-screen, or null to clear it.
+    board_id: Option<String>,
+}
+
+/// `PUT /api/kiosks/{id}/board` (session) — set (or clear) the board this kiosk
+/// auto-launches full-screen on load. Configured from a main (non-kiosk) client;
+/// the kiosk picks it up on its next load via `GET /self`.
+async fn set_board(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+    Json(req): Json<SetBoardRequest>,
+) -> impl IntoResponse {
+    match sqlx::query("UPDATE kiosks SET default_board_id = ? WHERE id = ?")
+        .bind(&req.board_id)
+        .bind(&id)
+        .execute(&state.db)
+        .await
+    {
+        Ok(r) if r.rows_affected() > 0 => StatusCode::NO_CONTENT,
+        Ok(_) => StatusCode::NOT_FOUND,
+        Err(e) => {
+            tracing::error!("db error setting kiosk board: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }

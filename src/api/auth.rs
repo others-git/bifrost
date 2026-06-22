@@ -163,6 +163,12 @@ fn extract_session(headers: &HeaderMap) -> Option<String> {
     extract_cookie(headers, SESSION_COOKIE)
 }
 
+/// The raw `bfr_` API key a kiosk WebView carries in its `bfr_key` cookie, if
+/// present. Lets a kiosk-served page resolve *its own* kiosk record server-side.
+pub(crate) fn kiosk_cookie_key(headers: &HeaderMap) -> Option<String> {
+    extract_cookie(headers, KIOSK_KEY_COOKIE)
+}
+
 /// Pull a named cookie's value out of the `Cookie` header.
 fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     let cookie_hdr = headers.get(header::COOKIE)?.to_str().ok()?;

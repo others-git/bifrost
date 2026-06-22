@@ -491,6 +491,97 @@ async fn kiosk_login_exchanges_key_for_session() {
 }
 
 #[tokio::test]
+async fn kiosk_default_board_set_and_self_resolves_it() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "wall tablet").await;
+
+    // Check in (Bearer key) to register the kiosk row.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/kiosks/checkin")
+                .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The clients list shows it with no board yet.
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let id = list[0]["id"].as_str().unwrap().to_string();
+    assert!(list[0]["default_board_id"].is_null());
+
+    // Create a board and assign it as this kiosk's default (from the main client).
+    let board = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_post(
+                "/api/dashboards",
+                &cookie,
+                r#"{"name":"Wall"}"#,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let board_id = board["id"].as_str().unwrap().to_string();
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/kiosks/{id}/board"),
+            &cookie,
+            &format!(r#"{{"board_id":"{board_id}"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // The kiosk resolves its own assignment via /self (bfr_key cookie auth).
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/kiosks/self")
+                .header(header::COOKIE, format!("bfr_key={key}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        helpers::response_json(resp).await["default_board_id"],
+        board_id
+    );
+
+    // /self without the kiosk key cookie → 401.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/kiosks/self")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn reorder_providers_persists_display_order() {
     let (app, state) = helpers::test_app_with_password_and_state().await;
     for (id, name) in [("p-a", "Alpha"), ("p-b", "Bravo"), ("p-c", "Charlie")] {

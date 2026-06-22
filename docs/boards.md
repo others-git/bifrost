@@ -49,3 +49,11 @@ the device's.
 
 Tap **Kiosk** to fill the whole screen with the board (tap **✕ Exit** to leave) —
 the always-on look for a wall display.
+
+### Auto-launch on a wall tablet
+
+A paired kiosk can open straight into a board, full-screen, on load — no tapping.
+Set it **per device** from a normal (non-kiosk) browser: **Settings → Clients**, and
+on the kiosk's row pick its **board** (next to its room). That tablet then auto-opens
+that board in kiosk mode every time it loads. Different tablets can show different
+boards. Choose "No board" to turn auto-launch off.

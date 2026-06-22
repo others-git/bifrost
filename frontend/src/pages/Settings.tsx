@@ -34,6 +34,8 @@ import {
   kioskCommand,
   kioskDeauth,
   setKioskRoom,
+  setKioskBoard,
+  getDashboards,
   forgetKiosk,
   getKioskUpdateConfig,
   setKioskUpdateConfig,
@@ -43,6 +45,7 @@ import {
   type ApiKey,
   type AiEndpoint,
   type AiRole,
+  type Dashboard,
   type Kiosk,
   type KioskUpdateManifest,
   type Room,
@@ -1797,6 +1800,7 @@ function KiosksSection({
 }) {
   const [kiosks, setKiosks] = useState<Kiosk[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
+  const [boards, setBoards] = useState<Dashboard[]>([]);
   // kioskId → target version we pushed, so the row can show "Updating…" until the
   // kiosk re-checks-in reporting that version (it goes offline mid-install).
   const [updating, setUpdating] = useState<Record<string, string>>({});
@@ -1806,6 +1810,7 @@ function KiosksSection({
   useEffect(() => {
     load();
     getRooms().then(setRooms);
+    getDashboards().then(setBoards);
   }, []);
 
   // While any update is in flight, poll so the version/online status refresh as
@@ -1833,6 +1838,10 @@ function KiosksSection({
 
   async function assignRoom(k: Kiosk, roomId: string | null) {
     await setKioskRoom(k.id, roomId);
+    await load();
+  }
+  async function assignBoard(k: Kiosk, boardId: string | null) {
+    await setKioskBoard(k.id, boardId);
     await load();
   }
 
@@ -1937,6 +1946,27 @@ function KiosksSection({
                 {rooms.map((r) => (
                   <option key={r.id} value={r.id}>
                     {r.name}
+                  </option>
+                ))}
+              </select>
+              {/* Auto-launch board: the kiosk opens this board full-screen on load. */}
+              <select
+                value={k.default_board_id ?? ""}
+                onChange={(e) => assignBoard(k, e.target.value || null)}
+                title="Board this kiosk auto-launches full-screen"
+                style={{
+                  background: "var(--bf-panel, #1a1320)",
+                  color: "var(--bf-text, #eee)",
+                  border: "1px solid var(--bf-hairline, #333)",
+                  borderRadius: 6,
+                  padding: "0.3rem 0.5rem",
+                  fontSize: "0.78rem",
+                }}
+              >
+                <option value="">No board</option>
+                {boards.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.name}
                   </option>
                 ))}
               </select>

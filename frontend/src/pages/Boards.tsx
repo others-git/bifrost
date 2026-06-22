@@ -12,6 +12,7 @@ import {
   deleteDashboard,
   getDashboards,
   getGenericDevices,
+  getKioskSelf,
   getLights,
   getMediaDevices,
   getPowerDevices,
@@ -79,6 +80,10 @@ type WidgetType = "device" | "group" | "now_playing" | "scene" | "control" | "se
 /** A locally-generated widget id. */
 const newId = () => `w_${Math.random().toString(36).slice(2, 10)}`;
 
+/** Served inside the Bifrost kiosk WebView (it appends `BifrostKiosk/<v>` to the
+ * UA). A wall fixture auto-launches its assigned board full-screen. */
+const IS_KIOSK = /\bBifrostKiosk\//.test(navigator.userAgent);
+
 export function BoardsPage() {
   const { isMobile } = useViewport();
   const dialogs = useDialogs();
@@ -128,6 +133,19 @@ export function BoardsPage() {
     reloadBoards();
     reloadDevices();
   }, [reloadBoards, reloadDevices]);
+
+  // On a wall-tablet kiosk, auto-launch the board assigned to this device
+  // (configured per-kiosk from a main client, resolved via the kiosk's own key
+  // cookie) straight into full-screen — no tapping needed on a static fixture.
+  useEffect(() => {
+    if (!IS_KIOSK) return;
+    getKioskSelf().then((self) => {
+      if (self?.default_board_id) {
+        setActiveId(self.default_board_id);
+        setKiosk(true);
+      }
+    });
+  }, []);
 
   // Live device state via the shared `/api/events` SSE stream (instant push, same
   // as the Control page) — plus a slow poll for generic readouts (sensors), which
@@ -480,6 +498,21 @@ function groupByRoom<T extends RoomedDevice>(devices: T[], rooms: Room[]): { roo
     }));
 }
 
+// Clamp a widget's box into the current grid, so a widget can never render off
+// the (non-scrolling) canvas — e.g. after the board's aspect ratio changes the
+// row/column count, or a board is opened on a different grid than it was built on.
+function clampWidget(w: Widget, cols: number, rows: number): Widget {
+  const ww = Math.max(1, Math.min(w.w, cols));
+  const wh = Math.max(1, Math.min(w.h, rows));
+  return {
+    ...w,
+    w: ww,
+    h: wh,
+    x: Math.max(0, Math.min(cols - ww, w.x)),
+    y: Math.max(0, Math.min(rows - wh, w.y)),
+  };
+}
+
 function aspectGrid(aspect: string): { ar: number; cols: number; rows: number } {
   const [aw, ah] = aspect.split(":").map((n) => Number(n));
   const w = aw > 0 ? aw : 16;
@@ -581,7 +614,7 @@ function BoardGrid({
         {widgets.map((w) => (
           <WidgetBox
             key={w.id}
-            w={w}
+            w={clampWidget(w, cols, rows)}
             cols={cols}
             rows={rows}
             cellW={cellW}
@@ -904,7 +937,11 @@ function DeviceTile({
 
   const dimmable = !!light?.capabilities.dimmable;
   const showSlider = dimmable || !!mediaDev;
-  const sliderVal = Math.round((light?.last_state?.brightness ?? mediaDev?.state.volume ?? 0) as number);
+  // A light that's off reads 0% (not its stored brightness); media volume is shown
+  // regardless of power.
+  const sliderVal = Math.round(
+    (light ? (on ? (light.last_state?.brightness ?? 0) : 0) : (mediaDev?.state.volume ?? 0)) as number,
+  );
   const onSlide = (v: number) => {
     if (light) onLightUpdate(light.id, { ...(light.last_state ?? { on: true }), on: true, brightness: v });
     else if (mediaDev) onMediaPatch(mediaDev.id, { volume: v });
@@ -916,6 +953,42 @@ function DeviceTile({
       else if (mediaDev) setMediaState(mediaDev.id, { volume: v });
     }, 120);
   };
+
+  // A power device is strictly on/off — its tile is just a big centered power
+  // button (like its fly-out), with the name as a caption that opens the fly-out.
+  if (powerDev) {
+    return (
+      <div
+        style={{
+          ...widgetPlate(accent, on),
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: "0.5rem",
+          padding: "0.6rem",
+          opacity: reachable ? 1 : 0.45,
+        }}
+      >
+        <CornerFiligree colors={on ? [accent] : undefined} />
+        <button
+          disabled={edit}
+          onClick={(e) => onOpenFlyout(e.currentTarget)}
+          title={name}
+          style={{ position: "relative", display: "flex", alignItems: "center", gap: "0.4rem", border: "none", background: "none", color: on ? accent : T.dim, cursor: edit ? "default" : "pointer", padding: 0, maxWidth: "100%" }}
+        >
+          <Glyph name={glyph} size={15} />
+          <span style={{ ...TILE_LABEL, color: T.text }}>{name}</span>
+        </button>
+        <GlyphButton on={on} accent={accent} title={on ? "Turn off" : "Turn on"} active={false} buttonRef={null} onClick={togglePower} size={54}>
+          <Glyph name="power" size={24} />
+        </GlyphButton>
+        <span style={{ position: "relative", fontSize: "0.7rem", color: on ? accent : T.faint }}>
+          {reachable ? (on ? "On" : "Off") : "Offline"}
+        </span>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -1103,9 +1176,11 @@ function GroupWidget({
 
   const lit = tLights.filter((l) => l.last_state?.on);
   const initHex = lit.length ? lightHex(lit[0]) : "#ffb84d";
+  // Average brightness of the *lit* members; an all-off group reads empty (0%),
+  // not a stale 100%, so the bar honestly reflects that it's off.
   const initBrightness = lit.length
     ? Math.round(lit.reduce((s, l) => s + (l.last_state?.brightness ?? 100), 0) / lit.length)
-    : 100;
+    : 0;
   const initMirek = lit.map((l) => l.last_state?.color_temp_mirek).find((m): m is number => m != null) ?? 366;
 
   const kindWord = domain === "light" ? "light" : domain === "media" ? "speaker" : "switch";
