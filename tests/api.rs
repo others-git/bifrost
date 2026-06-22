@@ -843,6 +843,21 @@ async fn dashboard_crud_persists_name_and_widget_layout() {
     let id = board["id"].as_str().unwrap().to_string();
     assert_eq!(board["name"], "Living Room");
     assert_eq!(board["widgets"].as_array().unwrap().len(), 0);
+    // Aspect defaults to 16:9 when omitted.
+    assert_eq!(board["aspect"], "16:9");
+
+    // A board can be created with a custom (normalized) aspect ratio.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/dashboards",
+            &cookie,
+            r#"{"name":"Wall","aspect":" 4 : 3 "}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(helpers::response_json(resp).await["aspect"], "4:3");
 
     // Empty name is rejected.
     let resp = app
@@ -856,8 +871,8 @@ async fn dashboard_crud_persists_name_and_widget_layout() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
-    // Rename + save a widget layout (full replacement).
-    let body = r#"{"name":"Lounge","widgets":[{"id":"w1","type":"device","x":0,"y":0,"w":2,"h":2,"config":{"device_id":"d1","domain":"light"}}]}"#;
+    // Rename + change aspect + save a widget layout (full replacement).
+    let body = r#"{"name":"Lounge","aspect":"21:9","widgets":[{"id":"w1","type":"device","x":0,"y":0,"w":2,"h":2,"config":{"device_id":"d1","domain":"light"}}]}"#;
     let resp = app
         .clone()
         .oneshot(helpers::authed_json(
@@ -881,6 +896,7 @@ async fn dashboard_crud_persists_name_and_widget_layout() {
         .unwrap();
     let board = helpers::response_json(resp).await;
     assert_eq!(board["name"], "Lounge");
+    assert_eq!(board["aspect"], "21:9");
     let widgets = board["widgets"].as_array().unwrap();
     assert_eq!(widgets.len(), 1);
     assert_eq!(widgets[0]["type"], "device");

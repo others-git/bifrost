@@ -6,9 +6,12 @@ anywhere.
 
 ## Building a board
 
-1. Open **Boards** and tap **+ Board**, then give it a name. You can have as many
-   boards as you like (one per room, or one for the morning, …) — switch between
-   them with the tabs.
+1. Open **Boards** and tap **+ Board**, give it a name, and pick its **aspect
+   ratio** — match the screen you'll show it on (16:9 for most monitors, or a
+   tablet's own ratio such as **18.5:9** for a Galaxy A9; you can type a custom one).
+   The board is shaped to that ratio and scales to fill the screen. You can have as
+   many boards as you like (one per room, or one for the morning, …) — switch
+   between them with the tabs.
 2. Tap **Edit**, then **+ Widget** to add a widget and choose what it controls.
 3. In edit mode, **drag a widget** to move it and **drag its bottom-right corner**
    to resize. The grid snaps to keep things tidy. Positions and sizes are

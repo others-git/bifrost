@@ -5,7 +5,7 @@
 
 use crate::AppState;
 use crate::api::auth::Session;
-use crate::models::dashboard::{Dashboard, Widget, parse_layout};
+use crate::models::dashboard::{Dashboard, Widget, clean_aspect, parse_layout};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -33,19 +33,22 @@ fn row_to_dashboard(r: &sqlx::sqlite::SqliteRow) -> Dashboard {
         id: r.get("id"),
         name: r.get("name"),
         position: r.get("position"),
+        aspect: r.get("aspect"),
         widgets: parse_layout(&r.get::<String, _>("layout")),
     }
 }
 
 pub(crate) async fn list_dashboards(state: &AppState) -> Vec<Dashboard> {
-    sqlx::query("SELECT id, name, position, layout FROM dashboards ORDER BY position, created_at")
-        .fetch_all(&state.db)
-        .await
-        .map_err(|e| tracing::error!("db error listing dashboards: {e}"))
-        .unwrap_or_default()
-        .iter()
-        .map(row_to_dashboard)
-        .collect()
+    sqlx::query(
+        "SELECT id, name, position, aspect, layout FROM dashboards ORDER BY position, created_at",
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| tracing::error!("db error listing dashboards: {e}"))
+    .unwrap_or_default()
+    .iter()
+    .map(row_to_dashboard)
+    .collect()
 }
 
 async fn list_handler(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
@@ -55,6 +58,9 @@ async fn list_handler(State(state): State<Arc<AppState>>, _: Session) -> impl In
 #[derive(Deserialize)]
 struct CreateRequest {
     name: String,
+    /// Aspect ratio for the board canvas (e.g. `"16:9"`); defaults to 16:9.
+    #[serde(default)]
+    aspect: Option<String>,
 }
 
 async fn create_handler(
@@ -66,6 +72,7 @@ async fn create_handler(
     if name.is_empty() {
         return (StatusCode::UNPROCESSABLE_ENTITY, "board name is required").into_response();
     }
+    let aspect = clean_aspect(req.aspect.as_deref());
     let id = Uuid::new_v4().to_string();
     // Append at the end of the picker order.
     let position: i64 =
@@ -73,12 +80,15 @@ async fn create_handler(
             .fetch_one(&state.db)
             .await
             .unwrap_or(0);
-    match sqlx::query("INSERT INTO dashboards (id, name, position, layout) VALUES (?, ?, ?, '[]')")
-        .bind(&id)
-        .bind(name)
-        .bind(position)
-        .execute(&state.db)
-        .await
+    match sqlx::query(
+        "INSERT INTO dashboards (id, name, position, aspect, layout) VALUES (?, ?, ?, ?, '[]')",
+    )
+    .bind(&id)
+    .bind(name)
+    .bind(position)
+    .bind(&aspect)
+    .execute(&state.db)
+    .await
     {
         Ok(_) => (
             StatusCode::CREATED,
@@ -86,6 +96,7 @@ async fn create_handler(
                 id,
                 name: name.to_string(),
                 position,
+                aspect,
                 widgets: Vec::new(),
             }),
         )
@@ -102,7 +113,7 @@ async fn get_handler(
     _: Session,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match sqlx::query("SELECT id, name, position, layout FROM dashboards WHERE id = ?")
+    match sqlx::query("SELECT id, name, position, aspect, layout FROM dashboards WHERE id = ?")
         .bind(&id)
         .fetch_optional(&state.db)
         .await
@@ -120,6 +131,9 @@ async fn get_handler(
 struct UpdateRequest {
     #[serde(default)]
     name: Option<String>,
+    /// New aspect ratio (omit to leave it unchanged).
+    #[serde(default)]
+    aspect: Option<String>,
     /// Full replacement of the widget layout (omit to leave it unchanged).
     #[serde(default)]
     widgets: Option<Vec<Widget>>,
@@ -148,6 +162,13 @@ async fn update_handler(
         }
         let _ = sqlx::query("UPDATE dashboards SET name = ? WHERE id = ?")
             .bind(name)
+            .bind(&id)
+            .execute(&state.db)
+            .await;
+    }
+    if let Some(aspect) = req.aspect.as_deref() {
+        let _ = sqlx::query("UPDATE dashboards SET aspect = ? WHERE id = ?")
+            .bind(clean_aspect(Some(aspect)))
             .bind(&id)
             .execute(&state.db)
             .await;

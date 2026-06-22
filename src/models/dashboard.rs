@@ -24,13 +24,43 @@ pub struct Widget {
     pub config: serde_json::Value,
 }
 
-/// A user-composed dashboard ("Board"): a name, an order position, and its widgets.
+/// A user-composed dashboard ("Board"): a name, an order position, a fixed
+/// `aspect` ratio (e.g. `"16:9"`) the canvas is shaped to, and its widgets.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Dashboard {
     pub id: String,
     pub name: String,
     pub position: i64,
+    pub aspect: String,
     pub widgets: Vec<Widget>,
+}
+
+/// Default board aspect ratio.
+pub const DEFAULT_ASPECT: &str = "16:9";
+
+/// Normalize a board aspect ratio to `"<w>:<h>"` with positive (possibly decimal,
+/// e.g. `18.5:9` for a Galaxy tablet) terms, falling back to [`DEFAULT_ASPECT`]
+/// for anything malformed. Keeps a stray value from producing a zero/negative
+/// canvas. Whole-number terms are emitted without a trailing `.0`.
+pub fn clean_aspect(raw: Option<&str>) -> String {
+    raw.and_then(|s| {
+        let (w, h) = s.trim().split_once(':')?;
+        let w = w.trim().parse::<f64>().ok()?;
+        let h = h.trim().parse::<f64>().ok()?;
+        (w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0)
+            .then(|| format!("{}:{}", trim_num(w), trim_num(h)))
+    })
+    .unwrap_or_else(|| DEFAULT_ASPECT.to_string())
+}
+
+/// Format an aspect term: drop the fraction when whole (`16.0` → `16`), else keep
+/// it (`18.5` → `18.5`).
+fn trim_num(n: f64) -> String {
+    if n.fract() == 0.0 {
+        format!("{}", n as i64)
+    } else {
+        format!("{n}")
+    }
 }
 
 /// Parse a stored `layout` JSON column into widgets, tolerating a malformed/empty
@@ -65,6 +95,18 @@ mod tests {
         assert!(parse_layout("").is_empty());
         assert!(parse_layout("not json").is_empty());
         assert!(parse_layout("[]").is_empty());
+    }
+
+    #[test]
+    fn clean_aspect_normalizes_or_falls_back() {
+        assert_eq!(clean_aspect(Some(" 16 : 9 ")), "16:9");
+        assert_eq!(clean_aspect(Some("4:3")), "4:3");
+        // Decimal terms (e.g. a Galaxy A9's 18.5:9) are preserved.
+        assert_eq!(clean_aspect(Some("18.5:9")), "18.5:9");
+        assert_eq!(clean_aspect(Some("16.0:9.0")), "16:9");
+        assert_eq!(clean_aspect(Some("16:0")), DEFAULT_ASPECT);
+        assert_eq!(clean_aspect(Some("garbage")), DEFAULT_ASPECT);
+        assert_eq!(clean_aspect(None), DEFAULT_ASPECT);
     }
 
     #[test]

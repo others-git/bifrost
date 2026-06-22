@@ -1660,6 +1660,8 @@ export interface Dashboard {
   id: string;
   name: string;
   position: number;
+  /** Aspect ratio for the board canvas, e.g. "16:9". */
+  aspect: string;
   widgets: Widget[];
 }
 
@@ -1675,20 +1677,21 @@ export async function getDashboard(id: string): Promise<Dashboard | null> {
   return res.json();
 }
 
-export async function createDashboard(name: string): Promise<Dashboard> {
+export async function createDashboard(name: string, aspect?: string): Promise<Dashboard> {
   const res = await fetch("/api/dashboards", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, aspect }),
   });
   if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
   return res.json();
 }
 
-/** Save a board's name and/or full widget layout. Omit a field to leave it as-is. */
+/** Save a board's name, aspect ratio, and/or full widget layout. Omit a field to
+ * leave it as-is. */
 export async function updateDashboard(
   id: string,
-  patch: { name?: string; widgets?: Widget[] },
+  patch: { name?: string; aspect?: string; widgets?: Widget[] },
 ): Promise<void> {
   const res = await fetch(`/api/dashboards/${id}`, {
     method: "PUT",

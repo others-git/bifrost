@@ -68,8 +68,6 @@ const widgetPlate = (accent: string, on: boolean): React.CSSProperties => ({
 // phone, a desktop, or a wall tablet proportionally, with every widget scaling to
 // the available space rather than living at a fixed pixel size. (≈ square cells on
 // a 16:9 screen.) Default widget sizes are in these grid units.
-const COLS = 24;
-const ROWS = 14;
 const GAP = 8;
 // Fixed row height only for the phone fallback's stacked, view-only list.
 const ROW_H = 42;
@@ -88,6 +86,8 @@ export function BoardsPage() {
   const [edit, setEdit] = useState(false);
   const [kiosk, setKiosk] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [editingBoard, setEditingBoard] = useState(false);
   const [configuring, setConfiguring] = useState<Widget | null>(null);
 
   // Device fleet + scenes, fetched once and patched optimistically.
@@ -190,29 +190,20 @@ export function BoardsPage() {
   }
 
   // ── board CRUD ──
-  async function newBoard() {
-    const name = await dialogs.prompt({
-      title: "New board",
-      message: "Name this dashboard.",
-      placeholder: "e.g. Living Room",
-      confirmLabel: "Create",
-    });
-    if (!name?.trim()) return;
-    const b = await createDashboard(name.trim());
+  function newBoard() {
+    setCreating(true);
+  }
+  async function createBoard(name: string, aspect: string) {
+    setCreating(false);
+    const b = await createDashboard(name.trim(), aspect);
     await reloadBoards();
     setActiveId(b.id);
     setEdit(true);
   }
-  async function renameBoard() {
+  async function saveBoardEdits(name: string, aspect: string) {
     if (!board) return;
-    const name = await dialogs.prompt({
-      title: "Rename board",
-      message: "New name.",
-      placeholder: board.name,
-      confirmLabel: "Save",
-    });
-    if (!name?.trim()) return;
-    await updateDashboard(board.id, { name: name.trim() });
+    setEditingBoard(false);
+    await updateDashboard(board.id, { name: name.trim(), aspect });
     await reloadBoards();
   }
   async function deleteBoard() {
@@ -309,7 +300,7 @@ export function BoardsPage() {
             </Button>
             {edit && (
               <>
-                <Button variant="ghost" onClick={renameBoard}>Rename</Button>
+                <Button variant="ghost" onClick={() => setEditingBoard(true)}>Edit board</Button>
                 <Button
                   variant="ghost"
                   onClick={deleteBoard}
@@ -348,6 +339,7 @@ export function BoardsPage() {
         ) : (
           <BoardGrid
             widgets={widgets}
+            aspect={board?.aspect ?? "16:9"}
             edit={edit}
             onChange={patchWidget}
             onConfigure={(w) => setConfiguring(w)}
@@ -371,13 +363,33 @@ export function BoardsPage() {
             if (configuring) {
               patchWidget(configuring.id, { ...configuring, ...spec });
             } else {
-              // Place a new widget at the bottom-left, sized per type.
-              const y = widgets.reduce((m, w) => Math.max(m, w.y + w.h), 0);
-              addWidget({ id: newId(), x: 0, y, w: spec.w ?? 6, h: spec.h ?? 4, ...spec });
+              // Place a new widget at the bottom-left, sized per type but clamped to
+              // the board's grid so it can never land off the (non-scrolling) canvas.
+              const { cols, rows } = aspectGrid(board.aspect);
+              const ww = Math.min(spec.w ?? 12, cols);
+              const wh = Math.min(spec.h ?? 8, rows);
+              const bottom = widgets.reduce((m, w) => Math.max(m, w.y + w.h), 0);
+              const y = Math.max(0, Math.min(rows - wh, bottom));
+              addWidget({ id: newId(), x: 0, y, ...spec, w: ww, h: wh });
             }
             setAdding(false);
             setConfiguring(null);
           }}
+        />
+      )}
+
+      {/* New board: name + aspect ratio */}
+      {creating && (
+        <BoardModal title="New board" confirmLabel="Create" onClose={() => setCreating(false)} onSubmit={createBoard} />
+      )}
+      {editingBoard && board && (
+        <BoardModal
+          title="Edit board"
+          confirmLabel="Save"
+          initialName={board.name}
+          initialAspect={board.aspect}
+          onClose={() => setEditingBoard(false)}
+          onSubmit={saveBoardEdits}
         />
       )}
 
@@ -418,6 +430,7 @@ export function BoardsPage() {
           {widgets.length > 0 && (
             <BoardGrid
               widgets={widgets}
+              aspect={board?.aspect ?? "16:9"}
               edit={false}
               onChange={() => {}}
               onConfigure={() => {}}
@@ -435,8 +448,22 @@ export function BoardsPage() {
 
 // ── The drag-resize grid ──────────────────────────────────────────────────────
 
+// Parse an "<w>:<h>" aspect into a grid: `BASE` cells on the longer axis, the
+// shorter axis scaled to keep cells ≈ square. Falls back to 16:9 for junk.
+const GRID_BASE = 48;
+function aspectGrid(aspect: string): { ar: number; cols: number; rows: number } {
+  const [aw, ah] = aspect.split(":").map((n) => Number(n));
+  const w = aw > 0 ? aw : 16;
+  const h = ah > 0 ? ah : 9;
+  const ar = w / h;
+  const cols = ar >= 1 ? GRID_BASE : Math.max(1, Math.round(GRID_BASE * ar));
+  const rows = ar >= 1 ? Math.max(1, Math.round(GRID_BASE / ar)) : GRID_BASE;
+  return { ar, cols, rows };
+}
+
 function BoardGrid({
   widgets,
+  aspect,
   edit,
   onChange,
   onConfigure,
@@ -444,6 +471,7 @@ function BoardGrid({
   renderWidget,
 }: {
   widgets: Widget[];
+  aspect: string;
   edit: boolean;
   onChange: (id: string, next: Widget) => void;
   onConfigure: (w: Widget) => void;
@@ -461,39 +489,72 @@ function BoardGrid({
     return () => ro.disconnect();
   }, []);
 
-  // Both cell dimensions are a ratio of the board's actual size, so a widget keeps
-  // its proportions on any screen and the grid always fills the visible area. The
-  // canvas matches the viewport; in edit mode it grows a little past it so there's
-  // room to drop, and so a stray out-of-range widget stays reachable.
-  const cellW = size.w / COLS;
-  const cellH = size.h / ROWS;
-  const usedRows = widgets.reduce((m, w) => Math.max(m, w.y + w.h), 0);
-  const contentRows = edit ? Math.max(ROWS, usedRows) + 2 : Math.max(ROWS, usedRows);
-  const canvasH = Math.max(size.h, contentRows * cellH);
+  // The canvas is a fixed-aspect box letterboxed inside the available space: its
+  // size depends only on the container and the board's aspect ratio — never on the
+  // widgets — so there's no measure→grow→re-measure feedback loop. The grid is
+  // COLS×ROWS derived from the aspect, and a widget is a fraction of the canvas, so
+  // a board looks identical (just scaled) on a phone, desktop, or wall tablet.
+  const { ar, cols, rows } = aspectGrid(aspect);
+  let canvasW = size.w;
+  let canvasH = canvasW / ar;
+  if (canvasH > size.h) {
+    canvasH = size.h;
+    canvasW = canvasH * ar;
+  }
+  const cellW = canvasW / cols;
+  const cellH = canvasH / rows;
+
+  // Three tiers of edit guides, painted top→bottom: a thick center cross, medium
+  // quarter lines (¼/½/¾), and the faint fine cell grid. The center & quarters give
+  // orientation points; the cells give fine snap targets.
+  const fine = T.border;
+  const quart = alpha(T.accent, 0.28);
+  const cen = alpha(T.accent, 0.6);
+  const cenV = `linear-gradient(90deg, transparent calc(50% - 1px), ${cen} calc(50% - 1px), ${cen} calc(50% + 1px), transparent calc(50% + 1px))`;
+  const cenH = `linear-gradient(0deg, transparent calc(50% - 1px), ${cen} calc(50% - 1px), ${cen} calc(50% + 1px), transparent calc(50% + 1px))`;
+  const quartV = `repeating-linear-gradient(90deg, ${quart} 0, ${quart} 1px, transparent 1px, transparent 25%)`;
+  const quartH = `repeating-linear-gradient(0deg, ${quart} 0, ${quart} 1px, transparent 1px, transparent 25%)`;
+  const fineV = `linear-gradient(90deg, ${fine} 1px, transparent 1px)`;
+  const fineH = `linear-gradient(0deg, ${fine} 1px, transparent 1px)`;
+  const guides = edit
+    ? {
+        backgroundImage: `${cenV}, ${cenH}, ${quartV}, ${quartH}, ${fineV}, ${fineH}`,
+        backgroundSize: `100% 100%, 100% 100%, 100% 100%, 100% 100%, ${cellW}px 100%, 100% ${cellH}px`,
+      }
+    : {};
 
   return (
     <div
       ref={ref}
-      style={{ flex: 1, minHeight: 0, width: "100%", overflow: "auto", position: "relative", borderRadius: radius.lg }}
+      style={{
+        flex: 1,
+        minHeight: 0,
+        width: "100%",
+        overflow: "hidden",
+        position: "relative",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
     >
       <div
         style={{
           position: "relative",
-          width: "100%",
+          width: canvasW,
           height: canvasH,
-          // Faint grid guides while editing.
-          backgroundImage: edit
-            ? `linear-gradient(${T.border} 1px, transparent 1px), linear-gradient(90deg, ${T.border} 1px, transparent 1px)`
-            : undefined,
-          backgroundSize: edit ? `${cellW}px ${cellH}px` : undefined,
+          borderRadius: radius.lg,
+          // A faint frame + tiered grid guides while editing, so the canvas bounds
+          // and its center/quarters read at a glance.
+          outline: edit ? `1px solid ${T.hairline}` : undefined,
+          ...guides,
         }}
       >
         {widgets.map((w) => (
           <WidgetBox
             key={w.id}
             w={w}
-            cols={COLS}
-            rows={ROWS}
+            cols={cols}
+            rows={rows}
             cellW={cellW}
             cellH={cellH}
             edit={edit}
@@ -1189,6 +1250,76 @@ function WeatherWidget({ cfg, generic }: { cfg: Record<string, unknown>; generic
   );
 }
 
+// ── Board create / edit: name + aspect ratio ──────────────────────────────────
+
+const ASPECT_PRESETS = ["16:9", "16:10", "18.5:9", "4:3", "3:2", "21:9", "1:1", "9:16"];
+
+function BoardModal({
+  title,
+  confirmLabel,
+  initialName = "",
+  initialAspect = "16:9",
+  onClose,
+  onSubmit,
+}: {
+  title: string;
+  confirmLabel: string;
+  initialName?: string;
+  initialAspect?: string;
+  onClose: () => void;
+  onSubmit: (name: string, aspect: string) => void;
+}) {
+  const [name, setName] = useState(initialName);
+  const [aspect, setAspect] = useState(initialAspect);
+  const isPreset = ASPECT_PRESETS.includes(aspect);
+
+  function submit() {
+    if (!name.trim()) return;
+    onSubmit(name, aspect.trim() || "16:9");
+  }
+
+  return (
+    <Modal title={title} onClose={onClose}>
+      <Field label="Name">
+        <input
+          autoFocus
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+          placeholder="e.g. Living Room"
+          style={INPUT}
+        />
+      </Field>
+      <Field label="Aspect ratio">
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem" }}>
+          {ASPECT_PRESETS.map((p) => (
+            <button key={p} onClick={() => setAspect(p)} style={{ ...CHIP, ...(aspect === p ? CHIP_ON : {}) }}>
+              {p}
+            </button>
+          ))}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.5rem" }}>
+          <span style={{ fontSize: "0.72rem", color: T.dim }}>Custom</span>
+          <input
+            value={isPreset ? "" : aspect}
+            onChange={(e) => setAspect(e.target.value)}
+            placeholder="e.g. 18.5:9"
+            style={{ ...INPUT, maxWidth: 150 }}
+          />
+        </div>
+        <div style={{ fontSize: "0.66rem", color: T.dim, marginTop: "0.4rem" }}>
+          The board is shaped to this ratio and scales to fit any screen (match your tablet — e.g. a
+          Galaxy A9 is 18.5:9). Changing it rescales the existing widgets.
+        </div>
+      </Field>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1rem" }}>
+        <Button variant="ghost" onClick={onClose}>Cancel</Button>
+        <Button variant="primary" onClick={submit}>{confirmLabel}</Button>
+      </div>
+    </Modal>
+  );
+}
+
 // ── Add / configure widget modal ──────────────────────────────────────────────
 
 type WidgetSpec = Partial<Pick<Widget, "type" | "config" | "w" | "h">> & { type: WidgetType; config: unknown };
@@ -1260,33 +1391,33 @@ function WidgetEditorModal({
       onSave({
         type,
         config: { domain: type === "now_playing" ? "media" : domain, id, name: nm },
-        w: type === "now_playing" ? 8 : 6,
-        h: 4,
+        w: type === "now_playing" ? 16 : 12,
+        h: 8,
       });
     } else if (type === "group") {
       if (groupIds.length === 0) return;
-      onSave({ type, config: { domain: groupDomain, ids: groupIds, name: nm }, w: 8, h: 4 });
+      onSave({ type, config: { domain: groupDomain, ids: groupIds, name: nm }, w: 16, h: 8 });
     } else if (type === "scene") {
       onSave({
         type,
         config: { ...(restoreHome ? { restore_home: true } : { scene_id: sceneId }), name: nm },
-        w: 6,
-        h: 2,
+        w: 12,
+        h: 4,
       });
     } else if (type === "sensor") {
       const [pid, did] = sensorDev.split("|");
       if (!pid || !did || !sensorKey) return;
-      onSave({ type, config: { provider_id: pid, device_id: did, key: sensorKey, name: nm }, w: 4, h: 4 });
+      onSave({ type, config: { provider_id: pid, device_id: did, key: sensorKey, name: nm }, w: 8, h: 8 });
     } else if (type === "weather") {
       const [pid, did] = sensorDev.split("|");
       if (!pid || !did) return;
-      onSave({ type, config: { provider_id: pid, device_id: did, name: nm }, w: 6, h: 4 });
+      onSave({ type, config: { provider_id: pid, device_id: did, name: nm }, w: 12, h: 8 });
     } else if (type === "clock") {
-      onSave({ type, config: { format: clockFormat, name: nm }, w: 6, h: 4 });
+      onSave({ type, config: { format: clockFormat, name: nm }, w: 12, h: 8 });
     } else if (type === "label") {
-      onSave({ type, config: { text: labelText.trim() || nm || "Label", heading: labelHeading }, w: 8, h: 2 });
+      onSave({ type, config: { text: labelText.trim() || nm || "Label", heading: labelHeading }, w: 16, h: 4 });
     } else {
-      onSave({ type, config: { ...control, name: nm }, w: 4, h: 4 });
+      onSave({ type, config: { ...control, name: nm }, w: 8, h: 8 });
     }
   }
 
