@@ -8361,6 +8361,92 @@ async fn disabled_power_device_rejects_commands_but_stays_listed() {
 }
 
 #[tokio::test]
+async fn disabled_power_device_drops_out_of_room_membership() {
+    let ha = ha_power_mock().await;
+    let (app, prov_id) = helpers::test_app_with_ha(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    app.clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/providers/{prov_id}/discover"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/power/devices", &cookie))
+        .await
+        .unwrap();
+    let id = helpers::response_json(resp).await[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/rooms",
+            &cookie,
+            r#"{"name":"Garage","light_ids":[]}"#,
+        ))
+        .await
+        .unwrap();
+    let room_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    app.clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/power"),
+            &cookie,
+            &format!(r#"{{"power_device_ids":["{id}"]}}"#),
+        ))
+        .await
+        .unwrap();
+
+    // Enabled → the room lists it as a member.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/rooms", &cookie))
+        .await
+        .unwrap();
+    let rooms = helpers::response_json(resp).await;
+    let room = rooms
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == room_id)
+        .unwrap();
+    assert_eq!(room["power_device_ids"], serde_json::json!([id]));
+
+    // Disable it → it must drop out of room membership (was leaking before).
+    app.clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/power/devices/{id}/enabled"),
+            &cookie,
+            r#"{"enabled":false}"#,
+        ))
+        .await
+        .unwrap();
+    let resp = app
+        .oneshot(helpers::authed_get("/api/rooms", &cookie))
+        .await
+        .unwrap();
+    let rooms = helpers::response_json(resp).await;
+    let room = rooms
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == room_id)
+        .unwrap();
+    assert_eq!(room["power_device_ids"], serde_json::json!([]));
+}
+
+#[tokio::test]
 async fn set_light_glyph_overrides_then_clears() {
     let server = wiremock::MockServer::start().await;
     let (app, light_id) = helpers::test_app_with_light(&server.uri()).await;

@@ -30,7 +30,6 @@ import {
   type Light,
   type LightState,
   type LightStatePatch,
-  type MediaCommand,
   type MediaDevice,
   type PowerDevice,
   type Room,
@@ -40,15 +39,20 @@ import {
 } from "../api";
 import { DeviceControl } from "../components/DeviceControl";
 import { LightEditor, type LightControlChange } from "../components/LightEditor";
-import { lightOptimistic, lightSupports, lightWrite } from "../components/lightControl";
-import { MediaEditor } from "../components/MediaControls";
+import {
+  aggregateLightState,
+  lightOptimistic,
+  lightSupports,
+  lightWrite,
+} from "../components/lightControl";
+import { MediaEditor, fanMediaCommand } from "../components/MediaControls";
 import { InlineSlider } from "../components/InlineSlider";
 import { RoomControlButton, GlyphButton, RestoreHomeButton } from "./Dashboard";
 import { CornerFiligree } from "../components/ornament";
 import { Button, Segmented } from "../components/controls";
 import { Modal, useDialogs } from "../components/dialogs";
 import { Select } from "../components/Select";
-import { CONTROL_GLYPH_OPTIONS, Glyph, weatherGlyph, weatherLabel } from "../components/glyphs";
+import { CONTROL_GLYPH_OPTIONS, Glyph, GlyphGrid, weatherGlyph, weatherLabel } from "../components/glyphs";
 import { PageHeader } from "../components/PageHeader";
 import { useViewport } from "../useViewport";
 import { S } from "../styles";
@@ -1428,37 +1432,19 @@ function GroupWidget({
 
   // Media cascade: the editor commits its own `device`; fan the rest.
   function fanMedia(id: string, patch: Partial<MediaDevice["state"]>) {
-    const cmd: MediaCommand = {};
-    if (patch.volume !== undefined) cmd.volume = patch.volume;
-    if (patch.mute !== undefined) cmd.mute = patch.mute;
-    if (patch.power !== undefined) cmd.power = patch.power;
-    for (const d of tMedia) {
-      onMediaPatch(d.id, patch);
-      if (d.id !== id && Object.keys(cmd).length > 0) setMediaState(d.id, cmd);
-    }
+    fanMediaCommand(tMedia, id, patch, { onPatch: onMediaPatch, commit: setMediaState });
   }
 
+  // All editor readouts (hex / 0%-when-off brightness / mirek / effect
+  // intersection) come from the one shared aggregator. `lit` stays local (typed
+  // `Light[]`) for the filigree hexes below.
   const lit = tLights.filter((l) => l.last_state?.on);
-  const initHex = lit.length ? lightHex(lit[0]) : "#ffb84d";
-  // Average brightness of the *lit* members; an all-off group reads empty (0%),
-  // not a stale 100%, so the bar honestly reflects that it's off.
-  const initBrightness = lit.length
-    ? Math.round(lit.reduce((s, l) => s + (l.last_state?.brightness ?? 100), 0) / lit.length)
-    : 0;
-  const initMirek = lit.map((l) => l.last_state?.color_temp_mirek).find((m): m is number => m != null) ?? 366;
-  // Effects common to every member light (intersection), so a chosen effect
-  // applies group-wide; preselect the running one only when all members agree.
-  const groupEffects = tLights.reduce<string[]>(
-    (acc, l, i) => {
-      const e = l.capabilities.effects ?? [];
-      return i === 0 ? [...e] : acc.filter((x) => e.includes(x));
-    },
-    [],
-  );
-  const groupEffect =
-    groupEffects.length > 0 && tLights.every((l) => l.last_state?.effect === tLights[0].last_state?.effect)
-      ? tLights[0].last_state?.effect
-      : undefined;
+  const agg = aggregateLightState(tLights);
+  const initHex = agg.hex;
+  const initBrightness = agg.brightness;
+  const initMirek = agg.mirek;
+  const groupEffects = agg.effects;
+  const groupEffect = agg.commonEffect;
 
   const kindWord = domain === "light" ? "light" : domain === "media" ? "speaker" : domain === "power" ? "switch" : "device";
   const label = cfg.name || cfg.label || `${total} ${kindWord}${total !== 1 ? "s" : ""}`;
@@ -2001,7 +1987,7 @@ function WidgetEditorModal({
           </Field>
           {type === "button" && (
             <Field label="Icon">
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.3rem", maxHeight: 92, overflowY: "auto" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem", maxHeight: 120, overflowY: "auto" }}>
                 <button
                   title="Auto (from the device)"
                   onClick={() => setButtonGlyph("")}
@@ -2009,16 +1995,7 @@ function WidgetEditorModal({
                 >
                   Auto
                 </button>
-                {CONTROL_GLYPH_OPTIONS.map((g) => (
-                  <button
-                    key={g.name}
-                    title={g.label}
-                    onClick={() => setButtonGlyph(g.name)}
-                    style={{ ...GLYPH_OPT, ...(buttonGlyph === g.name ? CHIP_ON : {}) }}
-                  >
-                    <Glyph name={g.name} size={18} />
-                  </button>
-                ))}
+                <GlyphGrid options={CONTROL_GLYPH_OPTIONS} value={buttonGlyph} onPick={setButtonGlyph} size={34} />
               </div>
             </Field>
           )}
@@ -2195,17 +2172,13 @@ function ControlEditor({
         />
       </Field>
       <Field label="Glyph">
-        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.3rem", maxHeight: 92, overflowY: "auto" }}>
-          {CONTROL_GLYPH_OPTIONS.map((g) => (
-            <button
-              key={g.name}
-              title={g.label}
-              onClick={() => onChange({ ...control, glyph: g.name })}
-              style={{ ...GLYPH_OPT, ...(control.glyph === g.name ? CHIP_ON : {}) }}
-            >
-              <Glyph name={g.name} size={18} />
-            </button>
-          ))}
+        <div style={{ maxHeight: 120, overflowY: "auto" }}>
+          <GlyphGrid
+            options={CONTROL_GLYPH_OPTIONS}
+            value={control.glyph ?? null}
+            onPick={(n) => onChange({ ...control, glyph: n })}
+            size={34}
+          />
         </div>
       </Field>
       <Field label="Label (optional)">

@@ -208,7 +208,7 @@ impl GoveeLanProvider {
             ));
         }
         if let Some(mirek) = state.color_temp_mirek {
-            let kelvin = 1_000_000u32 / u32::from(mirek.max(1));
+            let kelvin = crate::models::mirek_to_kelvin(mirek);
             packets.push(command(
                 "colorwc",
                 json!({ "color": { "r": 0, "g": 0, "b": 0 }, "colorTemInKelvin": kelvin }),
@@ -305,7 +305,7 @@ fn devstatus_to_state(d: DevStatusData) -> LightState {
     // A non-zero Kelvin means the device is in colour-temperature mode (its rgb
     // reads as 0,0,0); otherwise the rgb is the active colour.
     match d.color_temp_kelvin {
-        Some(k) if k > 0 => state.color_temp_mirek = Some((1_000_000 / k) as u16),
+        Some(k) if k > 0 => state.color_temp_mirek = Some(crate::models::kelvin_to_mirek(k)),
         _ => {
             if let Some(c) = d.color {
                 state.color = Some(Color::from_rgb(c.r, c.g, c.b));

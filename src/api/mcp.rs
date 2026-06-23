@@ -414,7 +414,7 @@ impl BifrostMcp {
     }
 
     #[tool(
-        description = "Control an media device: power, volume (0–100), mute, input source, and/or transport (play/pause/stop/next/previous/toggle). Only the given fields are sent."
+        description = "Control a media device: power, volume (0–100), mute, input source, and/or transport (play/pause/stop/next/previous/toggle). Only the given fields are sent."
     )]
     async fn set_media(
         &self,
@@ -474,7 +474,7 @@ impl BifrostMcp {
     }
 
     #[tool(
-        description = "List an media device's saved favorites (e.g. Sonos Favorites: stations, playlists)."
+        description = "List a media device's saved favorites (e.g. Sonos Favorites: stations, playlists)."
     )]
     async fn list_media_favorites(
         &self,
@@ -496,7 +496,7 @@ impl BifrostMcp {
     }
 
     #[tool(
-        description = "Play one of an media device's saved favorites, matched by id, exact title, or title substring. E.g. play the 'jazz' favorite in the office."
+        description = "Play one of a media device's saved favorites, matched by id, exact title, or title substring. E.g. play the 'jazz' favorite in the office."
     )]
     async fn play_media_favorite(
         &self,

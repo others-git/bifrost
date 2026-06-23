@@ -24,6 +24,30 @@ import { T, domain, color, alpha, labelType } from "../theme";
 
 const ACCENT = domain.media; // violet — audio's accent
 
+/** Fan a media-state change to every device in a group: optimistically patch all
+ * of them, and commit the volume/mute/power command to every device except the
+ * `source` one (which committed its own write — e.g. the MediaEditor's `device`).
+ * Shared by the Dashboard room control and the Boards group widget so the two
+ * can't drift. */
+export function fanMediaCommand(
+  devices: MediaDevice[],
+  source: string,
+  patch: Partial<MediaDevice["state"]>,
+  cbs: {
+    onPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
+    commit: (id: string, cmd: MediaCommand) => void;
+  },
+) {
+  const cmd: MediaCommand = {};
+  if (patch.volume !== undefined) cmd.volume = patch.volume;
+  if (patch.mute !== undefined) cmd.mute = patch.mute;
+  if (patch.power !== undefined) cmd.power = patch.power;
+  for (const d of devices) {
+    cbs.onPatch(d.id, patch);
+    if (d.id !== source && Object.keys(cmd).length > 0) cbs.commit(d.id, cmd);
+  }
+}
+
 export const KIND_LABEL: Record<string, string> = {
   receiver: "Receiver",
   speaker: "Speaker",

@@ -9,8 +9,20 @@
 // a colour clobbering a just-set effect). The server merges the patch onto the
 // light's cached state and preserves the untouched dimensions.
 
-import { rgbToXy, type LightCapabilities, type LightState } from "../api";
+import {
+  rgbToHex,
+  rgbToXy,
+  xyToRgb,
+  type Light,
+  type LightCapabilities,
+  type LightState,
+} from "../api";
 import { hexToRgb, type LightControlChange } from "./LightEditor";
+
+/** The state-bearing shape the aggregate helpers need — satisfied by `Light` and
+ * by the Floor Plan's synthesized `{ capabilities, last_state }` members (whose
+ * live state lives in a separate map, not on the `Light` object). */
+export type LightLike = Pick<Light, "capabilities"> & { last_state?: LightState };
 
 /** The provider-native tokens that all mean "no effect is running" (mirrors the
  * backend's `is_clear_effect`); such a pick clears effect mode rather than
@@ -34,6 +46,67 @@ export function lightWrite(change: LightControlChange): LightState {
     case "effect":
       return { on: true, effect: change.effect };
   }
+}
+
+/** The dynamic effects common to EVERY light in a group — the intersection of
+ * each member's catalog, so a chosen effect applies to all of them. Empty when
+ * any member has no effects (which hides the group's effects UI). Shared by every
+ * aggregate surface (room card, Boards group, Floor Plan) that offers effects. */
+export function commonLightEffects(lights: LightLike[]): string[] {
+  return lights.reduce<string[]>(
+    (acc, l, i) => {
+      const e = l.capabilities.effects ?? [];
+      return i === 0 ? [...e] : acc.filter((x) => e.includes(x));
+    },
+    [],
+  );
+}
+
+/** The running effect to pre-select for a group: defined only when the group has
+ * common effects AND every member is currently running the same one. */
+export function commonEffect(lights: LightLike[]): string | undefined {
+  if (lights.length === 0 || commonLightEffects(lights).length === 0) return undefined;
+  const first = lights[0].last_state?.effect;
+  return lights.every((l) => l.last_state?.effect === first) ? first : undefined;
+}
+
+/** Everything an aggregate light control (room card, Boards group, Floor-Plan
+ * room editor) needs to render itself from its member lights — computed one way,
+ * everywhere. `hex`/`brightness`/`mirek` describe the **lit** members (a fully-off
+ * group reads 0% brightness, not a stale value); `effects`/`commonEffect` are the
+ * group intersection; `show*` are the capability union (any member offering it). */
+export interface AggregateLight {
+  lit: LightLike[];
+  anyLit: boolean;
+  showColor: boolean;
+  showWhite: boolean;
+  showBrightness: boolean;
+  hex: string;
+  brightness: number;
+  mirek: number;
+  effects: string[];
+  commonEffect?: string;
+}
+
+export function aggregateLightState(lights: LightLike[]): AggregateLight {
+  const lit = lights.filter((l) => l.last_state?.on);
+  const firstColor = lit.map((l) => l.last_state?.color).find((c) => !!c);
+  return {
+    lit,
+    anyLit: lit.length > 0,
+    showColor: lights.some((l) => l.capabilities.color_rgb),
+    showWhite: lights.some((l) => l.capabilities.color_temperature),
+    showBrightness: lights.some((l) => l.capabilities.dimmable),
+    hex: firstColor
+      ? rgbToHex(...xyToRgb(firstColor.x, firstColor.y, firstColor.brightness))
+      : "#ffb84d",
+    brightness: lit.length
+      ? Math.round(lit.reduce((s, l) => s + (l.last_state?.brightness ?? 100), 0) / lit.length)
+      : 0,
+    mirek: lit.map((l) => l.last_state?.color_temp_mirek).find((m): m is number => m != null) ?? 366,
+    effects: commonLightEffects(lights),
+    commonEffect: commonEffect(lights),
+  };
 }
 
 /** Whether a light can actually take this change, so an aggregate (room/group)

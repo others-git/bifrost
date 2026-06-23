@@ -141,24 +141,31 @@ pub(crate) struct MemberRow {
     pub(crate) credentials: String,
 }
 
+/// The shared FROM/WHERE/UNION/ORDER body for a room's effective light members —
+/// direct (`room_lights`) ∪ linked provider-group lights, enabled + unshadowed,
+/// ordered by name. `effective_members` and `effective_member_ids` select
+/// different columns over this **same** predicate, so the membership rule can't
+/// drift between them.
+const ROOM_LIGHT_MEMBER_BODY: &str = "
+    FROM lights l
+    JOIN providers p ON p.id = l.provider_id
+    WHERE p.enabled = 1 AND l.enabled = 1 AND l.shadowed_by IS NULL AND l.id IN (
+        SELECT light_id FROM room_lights WHERE room_id = ?1
+        UNION
+        SELECT pgl.light_id
+        FROM room_links rl
+        JOIN provider_group_lights pgl ON pgl.provider_group_id = rl.provider_group_id
+        WHERE rl.room_id = ?1
+    )
+    ORDER BY l.name";
+
 /// All effective members of a room (links ∪ direct), with provider info,
 /// deduplicated, ordered by light name for stable palette distribution.
 pub(crate) async fn effective_members(state: &AppState, room_id: &str) -> Vec<MemberRow> {
-    sqlx::query(
-        "SELECT DISTINCT l.id AS light_id, l.device_id, l.provider_id,
-                p.provider_type, p.credentials, l.name
-         FROM lights l
-         JOIN providers p ON p.id = l.provider_id
-         WHERE p.enabled = 1 AND l.enabled = 1 AND l.shadowed_by IS NULL AND l.id IN (
-             SELECT light_id FROM room_lights WHERE room_id = ?1
-             UNION
-             SELECT pgl.light_id
-             FROM room_links rl
-             JOIN provider_group_lights pgl ON pgl.provider_group_id = rl.provider_group_id
-             WHERE rl.room_id = ?1
-         )
-         ORDER BY l.name",
-    )
+    sqlx::query(&format!(
+        "SELECT DISTINCT l.id AS light_id, l.device_id, l.provider_id, \
+                p.provider_type, p.credentials, l.name {ROOM_LIGHT_MEMBER_BODY}"
+    ))
     .bind(room_id)
     .fetch_all(&state.db)
     .await
@@ -178,20 +185,9 @@ pub(crate) async fn effective_members(state: &AppState, room_id: &str) -> Vec<Me
 /// doesn't fetch and decrypt-bearing columns (`provider_type`, `credentials`)
 /// only to discard them; mirrors `effective_members`' filter/union/order.
 pub(crate) async fn effective_member_ids(state: &AppState, room_id: &str) -> Vec<String> {
-    sqlx::query(
-        "SELECT DISTINCT l.id AS light_id, l.name
-         FROM lights l
-         JOIN providers p ON p.id = l.provider_id
-         WHERE p.enabled = 1 AND l.enabled = 1 AND l.shadowed_by IS NULL AND l.id IN (
-             SELECT light_id FROM room_lights WHERE room_id = ?1
-             UNION
-             SELECT pgl.light_id
-             FROM room_links rl
-             JOIN provider_group_lights pgl ON pgl.provider_group_id = rl.provider_group_id
-             WHERE rl.room_id = ?1
-         )
-         ORDER BY l.name",
-    )
+    sqlx::query(&format!(
+        "SELECT DISTINCT l.id AS light_id, l.name {ROOM_LIGHT_MEMBER_BODY}"
+    ))
     .bind(room_id)
     .fetch_all(&state.db)
     .await
@@ -210,7 +206,7 @@ pub(crate) async fn effective_power_member_ids(state: &AppState, room_id: &str) 
         "SELECT pd.id AS power_device_id
          FROM power_devices pd
          JOIN providers p ON p.id = pd.provider_id
-         WHERE p.enabled = 1 AND pd.shadowed_by IS NULL
+         WHERE p.enabled = 1 AND pd.enabled = 1 AND pd.shadowed_by IS NULL
            AND pd.id IN (
                SELECT power_device_id FROM room_power_devices WHERE room_id = ?1
                UNION
@@ -332,7 +328,7 @@ pub(crate) async fn effective_media_members(
          FROM media_devices d
          LEFT JOIN room_media_devices rad
            ON rad.room_id = ?1 AND rad.media_device_id = d.id
-         WHERE d.shadowed_by IS NULL AND d.companion_of IS NULL AND d.id IN (
+         WHERE d.enabled = 1 AND d.shadowed_by IS NULL AND d.companion_of IS NULL AND d.id IN (
              SELECT media_device_id FROM room_media_devices WHERE room_id = ?1
              UNION
              SELECT pga.media_device_id

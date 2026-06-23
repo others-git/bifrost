@@ -587,10 +587,9 @@ fn parse_govee_state(caps: Vec<GoveeStateCapability>) -> LightState {
                 }
             }
             "colorTemperatureK" => {
-                // Convert Kelvin to mirek (1_000_000 / K). 0 means "not in
-                // color-temperature mode" — checked_div skips it.
-                if let Some(m) = v.as_u64().and_then(|k| 1_000_000u64.checked_div(k)) {
-                    state.color_temp_mirek = Some(m as u16);
+                // 0 Kelvin means "not in color-temperature mode" — skip it.
+                if let Some(k) = v.as_u64().filter(|k| *k > 0) {
+                    state.color_temp_mirek = Some(crate::models::kelvin_to_mirek(k as u32));
                 }
             }
             _ => {}
@@ -658,7 +657,7 @@ impl LightProvider for GoveeCloud {
         }
 
         if let Some(mirek) = state.color_temp_mirek {
-            let kelvin = 1_000_000u32 / mirek.max(1) as u32;
+            let kelvin = crate::models::mirek_to_kelvin(mirek);
             commands.push(json!({
                 "type": "devices.capabilities.color_setting",
                 "instance": "colorTemperatureK",

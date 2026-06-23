@@ -75,12 +75,9 @@ pub struct HueProvider {
 impl HueProvider {
     pub fn new(bridge_ip: impl Into<String>, app_key: impl Into<String>) -> Result<Self> {
         let ip = bridge_ip.into();
-        // Accept a full base URL too (used by tests and unusual setups).
-        let bridge_base = if ip.starts_with("http://") || ip.starts_with("https://") {
-            ip
-        } else {
-            format!("https://{ip}")
-        };
+        // Accept a full base URL too (used by tests and unusual setups); Hue is
+        // HTTPS-only.
+        let bridge_base = crate::providers::base_url(&ip, "https", None);
         Self::new_with_base(bridge_base, app_key.into(), true)
     }
 

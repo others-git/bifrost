@@ -287,7 +287,7 @@ fn state_to_body(state: &LightState) -> serde_json::Value {
         let (hue, sat) = rgb_to_hs(r, g, b);
         body["color"] = json!(format!("hue:{hue:.1} saturation:{sat:.4}"));
     } else if let Some(mirek) = state.color_temp_mirek {
-        let kelvin = (1_000_000u32 / mirek.max(1) as u32).clamp(1500, 9000);
+        let kelvin = crate::models::mirek_to_kelvin(mirek).clamp(1500, 9000);
         body["color"] = json!(format!("kelvin:{kelvin}"));
     }
     body
@@ -314,8 +314,7 @@ fn lifx_to_light(l: LifxLight) -> Light {
         let (r, g, b) = hsv_to_rgb(l.color.hue, l.color.saturation, 1.0);
         state.color = Some(Color::from_rgb(r, g, b));
     } else if l.color.kelvin > 0 {
-        state.color_temp_mirek =
-            Some((1_000_000u32 / l.color.kelvin.max(1)).clamp(1, 65535) as u16);
+        state.color_temp_mirek = Some(crate::models::kelvin_to_mirek(l.color.kelvin));
     }
     // The cloud reports the last-known power for a disconnected bulb; treat it off.
     if !l.connected {

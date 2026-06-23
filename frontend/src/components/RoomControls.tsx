@@ -19,7 +19,7 @@ import {
 import { Button } from "./controls";
 import { SelectRow } from "./SelectRow";
 import { Select } from "./Select";
-import { CONTROL_GLYPH_OPTIONS, Glyph } from "./glyphs";
+import { CONTROL_GLYPH_OPTIONS, Glyph, GlyphGrid } from "./glyphs";
 import { ACCENT } from "../styles";
 
 const KINDS: { value: ControlKind; label: string; hint: string }[] = [
@@ -296,33 +296,12 @@ function ControlEditor({
       {/* Glyph picker. */}
       <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
         <span style={{ fontSize: "0.76rem", color: "var(--bf-dim)" }}>Glyph</span>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
-          {CONTROL_GLYPH_OPTIONS.map((g) => {
-            const on = glyph === g.name;
-            return (
-              <button
-                key={g.name}
-                type="button"
-                title={g.label}
-                aria-label={g.label}
-                onClick={() => { setGlyph(g.name); setGlyphPinned(true); }}
-                style={{
-                  width: 42,
-                  height: 42,
-                  display: "grid",
-                  placeItems: "center",
-                  borderRadius: 8,
-                  cursor: "pointer",
-                  color: on ? ACCENT : "var(--bf-dim)",
-                  background: on ? `${ACCENT}1f` : "rgba(255,255,255,0.03)",
-                  border: `1px solid ${on ? ACCENT : "var(--bf-border)"}`,
-                }}
-              >
-                <Glyph name={g.name} size={20} />
-              </button>
-            );
-          })}
-        </div>
+        <GlyphGrid
+          options={CONTROL_GLYPH_OPTIONS}
+          value={glyph}
+          onPick={(n) => { setGlyph(n); setGlyphPinned(true); }}
+          size={42}
+        />
       </div>
 
       {/* Targets (devices) or scene. */}

@@ -45,7 +45,7 @@ import {
   type Provider,
   type RemoteDevice,
 } from "../api";
-import { Glyph, GLYPH_OPTIONS, powerKindGlyph, mediaKindGlyph } from "../components/glyphs";
+import { Glyph, GlyphGrid, GLYPH_OPTIONS, powerKindGlyph, mediaKindGlyph } from "../components/glyphs";
 import { PageHeader, SectionLabel } from "../components/PageHeader";
 import { Switch, Segmented } from "../components/controls";
 import { GenericDevicesSection } from "../components/GenericDevices";
@@ -241,30 +241,12 @@ function GlyphPicker({
 }) {
   return (
     <AnchoredPanel anchor={anchor} isCompact={isCompact} onClose={onClose}>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: "0.3rem" }}>
-        {GLYPH_OPTIONS.map((g) => {
-          const active = current === g.name;
-          return (
-            <button
-              key={g.name}
-              onClick={() => onPick(g.name)}
-              title={g.label}
-              style={{
-                display: "grid",
-                placeItems: "center",
-                height: isCompact ? 44 : 32,
-                borderRadius: 7,
-                cursor: "pointer",
-                color: active ? ACCENT : T.dim,
-                background: active ? "rgba(56,189,248,0.12)" : "transparent",
-                border: `1px solid ${active ? "rgba(56,189,248,0.4)" : "transparent"}`,
-              }}
-            >
-              <Glyph name={g.name} size={isCompact ? 22 : 18} />
-            </button>
-          );
-        })}
-      </div>
+      <GlyphGrid
+        options={GLYPH_OPTIONS}
+        value={current}
+        onPick={onPick}
+        size={isCompact ? 44 : 36}
+      />
       <button
         onClick={() => onPick(null)}
         style={{

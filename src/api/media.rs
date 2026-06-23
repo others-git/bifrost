@@ -769,7 +769,7 @@ pub(crate) enum SetCompanionOutcome {
     Db,
 }
 
-/// M26: merge an media entity into a **primary** as its companion (the link is
+/// M26: merge a media entity into a **primary** as its companion (the link is
 /// stored on the companion as `companion_of`), or unmerge with `primary_id =
 /// None`. Unlike a shadow, the companion's capabilities are routed/overlaid onto
 /// the primary, not discarded. Rejects self-merge, an unknown/companion/shadowed
@@ -851,7 +851,7 @@ pub(crate) fn set_companion_status(outcome: SetCompanionOutcome) -> axum::respon
     }
 }
 
-/// Route a command for an media device, honouring an M22 receiver binding: a
+/// Route a command for a media device, honouring an M22 receiver binding: a
 /// bound source sends `volume`/`mute` to its receiver (and switches the receiver
 /// input on power-on) while keeping `power`/`source`/`transport` on itself.
 /// Unbound devices apply the command directly. Shared by session, `/v1`, and MCP
@@ -1180,7 +1180,7 @@ async fn apply_to_device(state: &AppState, id: &str, cmd: &MediaCommand) -> SetM
     }
 }
 
-/// Look up an media device's provider-native id and a live provider built from
+/// Look up a media device's provider-native id and a live provider built from
 /// its (decrypted) credentials. Shared by the favorites services.
 enum ProviderLookup {
     Found(String, Box<dyn crate::providers::MediaProvider>),
@@ -1434,7 +1434,7 @@ pub(crate) fn group_response(outcome: GroupOutcome) -> axum::response::Response 
     }
 }
 
-/// Cast content to an media device (the casting seam — a TV/media_player).
+/// Cast content to a media device (the casting seam — a TV/media_player).
 /// Resolves the device's provider and calls `play_media` (raw `content_id` +
 /// `content_type` passthrough). Skeleton: HA implements it via
 /// `media_player.play_media`; richer resolution (app deep-links, title search,
@@ -1526,7 +1526,7 @@ pub(crate) fn set_media_status(outcome: SetMediaOutcome) -> axum::response::Resp
     }
 }
 
-/// Discover an media provider's devices and upsert them. Returns the count.
+/// Discover a media provider's devices and upsert them. Returns the count.
 /// Called from the shared `/api/providers/{id}/discover` handler.
 pub(crate) async fn discover_media_devices(
     state: &AppState,

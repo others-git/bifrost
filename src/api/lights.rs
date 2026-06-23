@@ -171,30 +171,10 @@ pub(crate) async fn current_light_state(db: &sqlx::SqlitePool, light_id: &str) -
 /// it. Generic across every provider and surface (session / v1 / MCP / voice /
 /// room cascade).
 pub(crate) fn merge_light_state(mut merged: LightState, new: &LightState) -> LightState {
-    merged.on = new.on;
-    if new.brightness.is_some() {
-        merged.brightness = new.brightness;
-    }
-    if new.reachable.is_some() {
-        merged.reachable = new.reachable;
-    }
-    if new.color.is_some() {
-        merged.color = new.color.clone();
-        merged.color_temp_mirek = None;
-        merged.effect = None;
-    } else if new.color_temp_mirek.is_some() {
-        merged.color_temp_mirek = new.color_temp_mirek;
-        merged.color = None;
-        merged.effect = None;
-    } else if let Some(effect) = new.effect.as_deref() {
-        if crate::models::is_clear_effect(effect) {
-            merged.effect = None;
-        } else {
-            merged.effect = Some(effect.to_string());
-            merged.color = None;
-            merged.color_temp_mirek = None;
-        }
-    }
+    // The mode mutual-exclusion + field-merge logic lives in ONE place:
+    // `LightStatePatch::apply_to`. A full `new` state is a patch with every field
+    // present (`on` always set, hence forced), so this is exactly that merge.
+    crate::models::LightStatePatch::from_full(new).apply_to(&mut merged);
     merged
 }
 

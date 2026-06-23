@@ -45,12 +45,7 @@ impl TasmotaProvider {
     }
 
     pub fn new(device_ip: impl AsRef<str>) -> Result<Self> {
-        let ip = device_ip.as_ref();
-        let base_url = if ip.starts_with("http://") || ip.starts_with("https://") {
-            ip.to_string()
-        } else {
-            format!("http://{ip}")
-        };
+        let base_url = crate::providers::base_url(device_ip.as_ref(), "http", None);
         Self::new_with_base(base_url)
     }
 

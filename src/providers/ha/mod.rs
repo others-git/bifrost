@@ -352,9 +352,11 @@ impl HaProvider {
         reg
     }
 
-    /// One-shot WebSocket fetch of `config/entity_registry/list`: connect, auth
-    /// with the token, request the registry, parse, close. See `HA-API.md`.
-    async fn fetch_entity_registry(&self) -> Result<HashMap<String, EntityMeta>> {
+    /// Open a WebSocket and complete the `auth_required → auth → auth_ok`
+    /// handshake, returning the authed stream. Shared by every WS caller (the two
+    /// registry fetches and the push subscription) so the connect+auth dance lives
+    /// in one place.
+    async fn ws_connect_authed(&self) -> Result<HaWs> {
         use futures_util::SinkExt;
         use tokio_tungstenite::tungstenite::Message;
 
@@ -377,9 +379,19 @@ impl HaProvider {
         if auth.get("type").and_then(Value::as_str) != Some("auth_ok") {
             bail!("HA WebSocket auth rejected: {auth}");
         }
+        Ok(ws)
+    }
 
+    /// One-shot `config/<X>/list` WebSocket request: connect+auth, ask, wait for
+    /// the `id:1` result, close, and hand back the `result` array. Callers map the
+    /// entries (entity vs device registry differ only in that mapping).
+    async fn ws_fetch_list(&self, list_type: &str) -> Result<Vec<Value>> {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let mut ws = self.ws_connect_authed().await?;
         ws.send(Message::text(
-            json!({ "id": 1, "type": "config/entity_registry/list" }).to_string(),
+            json!({ "id": 1, "type": list_type }).to_string(),
         ))
         .await?;
         let result = loop {
@@ -391,16 +403,25 @@ impl HaProvider {
             }
         };
         let _ = ws.close(None).await;
-
-        let entries = result
+        result
             .get("result")
             .and_then(Value::as_array)
-            .ok_or_else(|| anyhow!("HA entity-registry result has no array"))?;
+            .cloned()
+            .ok_or_else(|| anyhow!("HA {list_type} result has no array"))
+    }
+
+    /// One-shot WebSocket fetch of `config/entity_registry/list`. See `HA-API.md`.
+    async fn fetch_entity_registry(&self) -> Result<HashMap<String, EntityMeta>> {
+        let entries = self.ws_fetch_list("config/entity_registry/list").await?;
         let mut map = HashMap::with_capacity(entries.len());
         for e in entries {
-            if let Some(id) = e.get("entity_id").and_then(Value::as_str) {
-                let meta: EntityMeta = serde_json::from_value(e.clone()).unwrap_or_default();
-                map.insert(id.to_string(), meta);
+            if let Some(id) = e
+                .get("entity_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            {
+                let meta: EntityMeta = serde_json::from_value(e).unwrap_or_default();
+                map.insert(id, meta);
             }
         }
         Ok(map)
@@ -428,53 +449,14 @@ impl HaProvider {
     /// device's id to a normalized hardware id taken from its `connections`
     /// (the `("mac", …)` pair). Devices without a usable MAC are omitted.
     async fn fetch_device_registry(&self) -> Result<HashMap<String, String>> {
-        use futures_util::SinkExt;
-        use tokio_tungstenite::tungstenite::Message;
-
-        let url = self.ws_url();
-        let (mut ws, _) = tokio::time::timeout(
-            Duration::from_secs(10),
-            tokio_tungstenite::connect_async(url.as_str()),
-        )
-        .await
-        .context("HA WebSocket connect timed out")?
-        .with_context(|| format!("HA WebSocket connect to {url} failed"))?;
-
-        let _ = ws_next_json(&mut ws).await?;
-        ws.send(Message::text(
-            json!({ "type": "auth", "access_token": self.token }).to_string(),
-        ))
-        .await?;
-        let auth = ws_next_json(&mut ws).await?;
-        if auth.get("type").and_then(Value::as_str) != Some("auth_ok") {
-            bail!("HA WebSocket auth rejected: {auth}");
-        }
-
-        ws.send(Message::text(
-            json!({ "id": 1, "type": "config/device_registry/list" }).to_string(),
-        ))
-        .await?;
-        let result = loop {
-            let v = ws_next_json(&mut ws).await?;
-            if v.get("id").and_then(Value::as_i64) == Some(1)
-                && v.get("type").and_then(Value::as_str) == Some("result")
-            {
-                break v;
-            }
-        };
-        let _ = ws.close(None).await;
-
-        let entries = result
-            .get("result")
-            .and_then(Value::as_array)
-            .ok_or_else(|| anyhow!("HA device-registry result has no array"))?;
+        let entries = self.ws_fetch_list("config/device_registry/list").await?;
         let mut map = HashMap::new();
         for d in entries {
-            let Some(id) = d.get("id").and_then(Value::as_str) else {
+            let Some(id) = d.get("id").and_then(Value::as_str).map(str::to_string) else {
                 continue;
             };
-            if let Some(hw) = ha_device_hw_id(d) {
-                map.insert(id.to_string(), hw);
+            if let Some(hw) = ha_device_hw_id(&d) {
+                map.insert(id, hw);
             }
         }
         Ok(map)
@@ -609,7 +591,7 @@ fn parse_light_state(e: &HaEntity) -> LightState {
     // Newer HA exposes color_temp_kelvin; older exposes color_temp in mirek.
     let color_temp_mirek = attr_u64(attrs, "color_temp_kelvin")
         .filter(|k| *k > 0)
-        .map(|k| (1_000_000 / k) as u16)
+        .map(|k| crate::models::kelvin_to_mirek(k as u32))
         .or_else(|| attr_u64(attrs, "color_temp").map(|m| m as u16));
 
     // HA reports the active effect by name, or the literal "None" when idle.
@@ -878,7 +860,7 @@ impl LightProvider for HaProvider {
             let (r, g, b) = color.to_rgb();
             data["rgb_color"] = json!([r, g, b]);
         } else if let Some(mirek) = state.color_temp_mirek {
-            data["color_temp_kelvin"] = json!(1_000_000u32 / mirek.max(1) as u32);
+            data["color_temp_kelvin"] = json!(crate::models::mirek_to_kelvin(mirek));
         }
         self.call_service("light", "turn_on", device_id, data).await
     }
@@ -1149,25 +1131,7 @@ impl HaProvider {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message;
 
-        let url = self.ws_url();
-        let (mut ws, _) = tokio::time::timeout(
-            Duration::from_secs(10),
-            tokio_tungstenite::connect_async(url.as_str()),
-        )
-        .await
-        .context("HA WebSocket connect timed out")?
-        .with_context(|| format!("HA WebSocket connect to {url} failed"))?;
-
-        // auth handshake (same as the registry fetch).
-        let _ = ws_next_json(&mut ws).await?;
-        ws.send(Message::text(
-            json!({ "type": "auth", "access_token": self.token }).to_string(),
-        ))
-        .await?;
-        let auth = ws_next_json(&mut ws).await?;
-        if auth.get("type").and_then(Value::as_str) != Some("auth_ok") {
-            bail!("HA WebSocket auth rejected: {auth}");
-        }
+        let mut ws = self.ws_connect_authed().await?;
 
         // Subscribe to state changes; expect the `result`/`success` ack.
         ws.send(Message::text(
@@ -1334,13 +1298,12 @@ impl RemoteProvider for HaProvider {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn normalise_base_url(raw: &str) -> String {
-    let with_scheme = if raw.starts_with("http://") || raw.starts_with("https://") {
-        raw.to_string()
-    } else {
-        format!("http://{raw}")
-    };
-    with_scheme.trim_end_matches('/').to_string()
+    crate::providers::base_url(raw, "http", None)
 }
+
+/// The HA WebSocket stream type returned by `ws_connect_authed`.
+type HaWs =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// Read the next text frame from a HA WebSocket as JSON, skipping ping/pong.
 async fn ws_next_json<S>(ws: &mut S) -> Result<Value>

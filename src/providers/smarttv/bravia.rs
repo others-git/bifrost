@@ -21,12 +21,7 @@ use std::time::Duration;
 
 /// `http://<host>` (or the host verbatim if it already carries a scheme).
 fn base_url(host: &str) -> String {
-    let host = host.trim();
-    if host.starts_with("http://") || host.starts_with("https://") {
-        host.trim_end_matches('/').to_string()
-    } else {
-        format!("http://{host}")
-    }
+    crate::providers::base_url(host, "http", None)
 }
 
 pub(crate) struct BraviaVendor {

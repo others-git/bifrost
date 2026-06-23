@@ -241,12 +241,7 @@ impl SonosProvider {
     }
 
     pub fn new(host: impl AsRef<str>) -> Result<Self> {
-        let host = host.as_ref().trim();
-        let base = if host.starts_with("http://") || host.starts_with("https://") {
-            host.trim_end_matches('/').to_string()
-        } else {
-            format!("http://{host}:1400")
-        };
+        let base = crate::providers::base_url(host.as_ref(), "http", Some(1400));
         Self::new_with_base(base)
     }
 

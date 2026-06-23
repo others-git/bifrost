@@ -19,7 +19,6 @@ import {
   setPowerState,
   setRoomState,
   xyToRgb,
-  type MediaCommand,
   type MediaDevice,
   type ControlTarget,
   type Light,
@@ -31,11 +30,16 @@ import {
   type RoomControl,
   type Scene,
 } from "../api";
-import { MediaEditor } from "../components/MediaControls";
+import { MediaEditor, fanMediaCommand } from "../components/MediaControls";
 import { DeviceControl } from "../components/DeviceControl";
 import { Glyph, powerKindGlyph, mediaKindGlyph } from "../components/glyphs";
 import { LightEditor, type LightControlChange } from "../components/LightEditor";
-import { lightOptimistic, lightSupports, lightWrite } from "../components/lightControl";
+import {
+  aggregateLightState,
+  lightOptimistic,
+  lightSupports,
+  lightWrite,
+} from "../components/lightControl";
 import { T, font, glassCard, radius, color, glow, alpha, nicheStyle } from "../theme";
 import { CornerFiligree } from "../components/ornament";
 import { PageHeader } from "../components/PageHeader";
@@ -450,25 +454,14 @@ function RoomBox({
   const showColor = lights.some((l) => l.capabilities.color_rgb);
   const showWhite = lights.some((l) => l.capabilities.color_temperature);
   const showBrightness = lights.some((l) => l.capabilities.dimmable);
-  // Effects are offered room-wide only when EVERY member light supports them and
-  // they share a common set (e.g. all Hue, or all LIFX): the intersection across
-  // members, so a chosen effect applies to every light. A single non-effect light
-  // (empty/absent set) collapses the intersection to nothing and hides the tab.
-  const roomEffects = lights.reduce<string[]>(
-    (acc, l, i) => {
-      const e = l.capabilities.effects ?? [];
-      return i === 0 ? [...e] : acc.filter((x) => e.includes(x));
-    },
-    [],
-  );
-  // Pre-select the running effect only when the whole room agrees on one.
-  const roomEffect =
-    roomEffects.length > 0 && lights.every((l) => l.last_state?.effect === lights[0].last_state?.effect)
-      ? lights[0].last_state?.effect
-      : undefined;
+  // Editor readouts (effect intersection + running effect, mirek, avg brightness)
+  // all come from the one shared aggregator (see Boards/FloorPlan). The filigree
+  // colours below use `litHexes`, which needs the full lit-colour list.
+  const agg = aggregateLightState(lights);
+  const roomEffects = agg.effects;
+  const roomEffect = agg.commonEffect;
   const tunable = !!roomId && (showColor || showWhite || showBrightness || roomEffects.length > 0);
-  const roomMirek =
-    lit.map((l) => l.last_state?.color_temp_mirek).find((m): m is number => m != null) ?? 366;
+  const roomMirek = agg.mirek;
 
   const counts = [
     lights.length && `${lights.length} light${lights.length !== 1 ? "s" : ""}`,
@@ -479,9 +472,7 @@ function RoomBox({
 
   const hexes = litHexes(lights);
   const roomHex = hexes[0] ?? "#ffb84d";
-  const avgBrightness = lit.length
-    ? Math.round(lit.reduce((sum, l) => sum + (l.last_state?.brightness ?? 100), 0) / lit.length)
-    : 100;
+  const avgBrightness = agg.brightness;
 
   function cascade(change: LightControlChange) {
     if (!roomId) return;
@@ -817,14 +808,7 @@ export function RoomControlButton({
   // Volume control fans changes to every target audio device. The MediaEditor
   // commits its own `device`; this wrapper fans the same command to the rest.
   function fanAudio(id: string, patch: Partial<MediaDevice["state"]>) {
-    const cmd: MediaCommand = {};
-    if (patch.volume !== undefined) cmd.volume = patch.volume;
-    if (patch.mute !== undefined) cmd.mute = patch.mute;
-    if (patch.power !== undefined) cmd.power = patch.power;
-    for (const d of tAudio) {
-      onMediaPatch(d.id, patch);
-      if (d.id !== id && Object.keys(cmd).length > 0) setMediaState(d.id, cmd);
-    }
+    fanMediaCommand(tAudio, id, patch, { onPatch: onMediaPatch, commit: setMediaState });
   }
 
   function onClick() {
@@ -833,16 +817,12 @@ export function RoomControlButton({
     else setOpen((v) => !v);
   }
 
-  const litT = tLights.filter((l) => l.last_state?.on);
-  const firstColor = litT.map((l) => l.last_state?.color).find((c) => c);
-  const initHex = firstColor
-    ? rgbToHex(...xyToRgb(firstColor.x, firstColor.y, firstColor.brightness))
-    : "#ffb84d";
-  const initBrightness = litT.length
-    ? Math.round(litT.reduce((s, l) => s + (l.last_state?.brightness ?? 100), 0) / litT.length)
-    : 100;
-  const initMirek =
-    litT.map((l) => l.last_state?.color_temp_mirek).find((m): m is number => m != null) ?? 366;
+  // Shared aggregate readouts for the targeted lights (hex / 0%-when-off
+  // brightness / mirek).
+  const agg = aggregateLightState(tLights);
+  const initHex = agg.hex;
+  const initBrightness = agg.brightness;
+  const initMirek = agg.mirek;
   const title = control.label || control.kind;
 
   return (

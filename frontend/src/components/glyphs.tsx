@@ -6,6 +6,7 @@
 // LED strip can show the led_strip glyph); see `Glyph` and `GLYPH_OPTIONS`.
 
 import type { MediaDevice, PowerKind } from "../api";
+import { ACCENT, alpha, T } from "../theme";
 
 const base = {
   fill: "none",
@@ -517,4 +518,51 @@ export function MediaGlyph({ size = 22 }: { size?: number }) {
 
 export function PowerGlyph({ kind, size = 22 }: { kind: PowerKind; size?: number }) {
   return <Glyph name={powerKindGlyph(kind)} size={size} />;
+}
+
+/** The one glyph-picker grid, reused everywhere a glyph is chosen (device glyph
+ * override, room-control buttons, board button/control icons). Renders the given
+ * `options` as a themed flex-wrap of square buttons, the selected one cyan-lit.
+ * Callers own the surrounding chrome (anchored panel / sheet) and any "Auto"
+ * (clear-override) affordance — this is just the grid. */
+export function GlyphGrid({
+  options,
+  value,
+  onPick,
+  size = 40,
+}: {
+  options: { name: string; label: string }[];
+  value: string | null;
+  onPick: (name: string) => void;
+  size?: number;
+}) {
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
+      {options.map((g) => {
+        const on = value === g.name;
+        return (
+          <button
+            key={g.name}
+            type="button"
+            title={g.label}
+            aria-label={g.label}
+            onClick={() => onPick(g.name)}
+            style={{
+              width: size,
+              height: size,
+              display: "grid",
+              placeItems: "center",
+              borderRadius: 8,
+              cursor: "pointer",
+              color: on ? ACCENT : T.dim,
+              background: on ? alpha(ACCENT, 0.12) : "rgba(255,255,255,0.03)",
+              border: `1px solid ${on ? ACCENT : T.cardBorder}`,
+            }}
+          >
+            <Glyph name={g.name} size={Math.round(size / 2)} />
+          </button>
+        );
+      })}
+    </div>
+  );
 }

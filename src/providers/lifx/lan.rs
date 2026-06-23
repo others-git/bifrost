@@ -180,7 +180,7 @@ fn state_to_hsbk(state: &LightState) -> Hsbk {
             kelvin: 3500,
         }
     } else if let Some(mirek) = state.color_temp_mirek {
-        let kelvin = (1_000_000u32 / u32::from(mirek.max(1))).clamp(1500, 9000) as u16;
+        let kelvin = crate::models::mirek_to_kelvin(mirek).clamp(1500, 9000) as u16;
         Hsbk {
             hue: 0,
             saturation: 0,
@@ -227,7 +227,7 @@ fn parse_state(p: &[u8]) -> Option<(LightState, String)> {
         );
         state.color = Some(Color::from_rgb(r, g, b));
     } else {
-        state.color_temp_mirek = Some((1_000_000u32 / u32::from(kelvin.max(1))) as u16);
+        state.color_temp_mirek = Some(crate::models::kelvin_to_mirek(u32::from(kelvin)));
     }
     Some((state, label))
 }

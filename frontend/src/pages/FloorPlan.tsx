@@ -34,7 +34,13 @@ import {
   type Scene,
 } from "../api";
 import { ColorWheel, hexToHs, hsvToRgb, LightEditor, type LightControlChange } from "../components/LightEditor";
-import { lightOptimistic, lightSupports, lightWrite } from "../components/lightControl";
+import {
+  aggregateLightState,
+  lightOptimistic,
+  lightSupports,
+  lightWrite,
+  type LightLike,
+} from "../components/lightControl";
 import { DeviceControl } from "../components/DeviceControl";
 import { RoomVolumeStrip } from "../components/RoomMedia";
 import { SceneButton, SceneModal } from "../components/scenes";
@@ -870,41 +876,26 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
         const room = allRooms.find((r) => r.id === editor.roomId);
         if (!room) return null;
         const anyOn = room.light_ids.some((id) => statesById.get(id)?.on);
-        const litColor = room.light_ids
-          .map((id) => statesById.get(id))
-          .find((st) => st?.on && st.color)?.color;
-        const hex = litColor
-          ? rgbToHex(...xyToRgb(litColor.x, litColor.y, litColor.brightness))
-          : "#ffb84d";
-        const roomSupportsWhite = room.light_ids.some(
-          (id) => lights.find((l) => l.id === id)?.capabilities.color_temperature,
-        );
-        const roomMirek =
-          room.light_ids.map((id) => statesById.get(id)?.color_temp_mirek).find((m) => m != null) ??
-          366;
-        // Effects offered room-wide only when every member light shares a common
-        // set (the intersection) — see Dashboard's `roomEffects`.
-        const roomEffects = room.light_ids.reduce<string[]>((acc, id, i) => {
-          const e = lights.find((l) => l.id === id)?.capabilities.effects ?? [];
-          return i === 0 ? [...e] : acc.filter((x) => e.includes(x));
-        }, []);
-        const roomEffect =
-          roomEffects.length > 0 &&
-          room.light_ids.every(
-            (id) => statesById.get(id)?.effect === statesById.get(room.light_ids[0] ?? "")?.effect,
-          )
-            ? statesById.get(room.light_ids[0] ?? "")?.effect
-            : undefined;
+        // Feed each member's *live* plan state (`statesById`, not `last_state`)
+        // into the one shared aggregator, so hex / brightness / mirek / effect
+        // intersection / running-effect are computed the same way as everywhere.
+        const members: LightLike[] = room.light_ids.flatMap((id) => {
+          const l = lights.find((x) => x.id === id);
+          if (!l) return [];
+          const st = statesById.get(id);
+          return [st ? { capabilities: l.capabilities, last_state: st } : { capabilities: l.capabilities }];
+        });
+        const agg = aggregateLightState(members);
         return (
           <LightEditor
             anchor={editor.anchor}
             title={room.name}
-            initialHex={hex}
-            initialBrightness={statesById.get(room.light_ids[0] ?? "")?.brightness ?? 100}
-            initialMirek={roomMirek}
-            showWhite={roomSupportsWhite}
-            effects={roomEffects.length > 0 ? roomEffects : undefined}
-            initialEffect={roomEffect}
+            initialHex={agg.hex}
+            initialBrightness={agg.brightness}
+            initialMirek={agg.mirek}
+            showWhite={agg.showWhite}
+            effects={agg.effects.length > 0 ? agg.effects : undefined}
+            initialEffect={agg.commonEffect}
             on={anyOn}
             onToggle={() => setRoom(room, !anyOn)}
             onChange={(ch) => editorChange(editor, ch)}

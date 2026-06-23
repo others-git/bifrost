@@ -173,6 +173,21 @@ pub fn is_clear_effect(effect: &str) -> bool {
     )
 }
 
+/// Colour temperature is `1_000_000 / k` in either direction (mirek ⇄ kelvin).
+/// These are the one place that reciprocal lives — providers were each
+/// reimplementing it with divergent zero-guards. A zero input is treated as 1
+/// (never a divide-by-zero); the mirek result is clamped into `u16` (≥1). Callers
+/// that need a provider-specific kelvin range (e.g. LIFX's 1500–9000) clamp the
+/// returned kelvin themselves.
+pub fn kelvin_to_mirek(kelvin: u32) -> u16 {
+    (1_000_000 / kelvin.max(1)).clamp(1, u16::MAX as u32) as u16
+}
+
+/// Mirek → kelvin (see [`kelvin_to_mirek`]).
+pub fn mirek_to_kelvin(mirek: u16) -> u32 {
+    1_000_000 / u32::from(mirek).max(1)
+}
+
 /// CIE 1931 xy + brightness, as used by Hue. Govee colors are converted to/from RGB.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Color {
@@ -384,6 +399,24 @@ mod tests {
         let (cx, cy) = HueGamut::C.clamp(white.x, white.y);
         assert!((cx - white.x).abs() < 0.01);
         assert!((cy - white.y).abs() < 0.01);
+    }
+
+    #[test]
+    fn kelvin_mirek_reciprocal_roundtrips_and_guards_zero() {
+        // Common bulb temps round-trip within rounding.
+        for k in [2700u32, 4000, 6500] {
+            let m = kelvin_to_mirek(k);
+            let back = mirek_to_kelvin(m);
+            assert!(
+                (back as i64 - k as i64).abs() <= k as i64 / 50,
+                "k={k} → m={m} → {back}"
+            );
+        }
+        // Zero never panics and never yields a zero/invalid result.
+        assert_eq!(mirek_to_kelvin(0), 1_000_000);
+        assert!(kelvin_to_mirek(0) >= 1);
+        // A tiny kelvin clamps the mirek into u16 instead of overflowing.
+        assert_eq!(kelvin_to_mirek(1), u16::MAX);
     }
 
     #[test]

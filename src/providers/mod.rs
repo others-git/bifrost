@@ -40,6 +40,22 @@ pub fn mac_hw_id(raw: &str) -> Option<String> {
     (hex.len() == 12 || hex.len() == 16).then(|| format!("mac:{hex}"))
 }
 
+/// Normalize a user-entered host into a base URL. If it already carries an
+/// `http(s)://` scheme it's used verbatim (trailing slash trimmed); otherwise it's
+/// wrapped as `<scheme>://<host>[:<port>]`. `scheme` lets an HTTPS-only device
+/// (Hue) opt in; `default_port` appends a port for protocols that pin one (Sonos
+/// 1400). Every HTTP provider routes its host handling through this.
+pub fn base_url(host: &str, scheme: &str, default_port: Option<u16>) -> String {
+    let host = host.trim();
+    if host.starts_with("http://") || host.starts_with("https://") {
+        host.trim_end_matches('/').to_string()
+    } else if let Some(port) = default_port {
+        format!("{scheme}://{host}:{port}")
+    } else {
+        format!("{scheme}://{host}")
+    }
+}
+
 /// A process-wide cache of `reqwest::Client`s keyed by an opaque config signature.
 ///
 /// HTTP providers are **rebuilt per request** (`build_provider`/`build_media_provider`
@@ -782,6 +798,25 @@ pub(crate) mod tests {
         assert_eq!(mac_hw_id("not-a-mac"), None);
         assert_eq!(mac_hw_id("AA:BB:CC"), None); // too short
         assert_eq!(mac_hw_id("light.kitchen"), None); // an HA entity id, not hardware
+    }
+
+    #[test]
+    fn base_url_wraps_host_or_respects_an_existing_scheme() {
+        assert_eq!(base_url("192.168.1.5", "http", None), "http://192.168.1.5");
+        assert_eq!(
+            base_url("192.168.1.5", "https", None),
+            "https://192.168.1.5"
+        );
+        assert_eq!(
+            base_url("192.168.1.5", "http", Some(1400)),
+            "http://192.168.1.5:1400"
+        );
+        // An explicit scheme wins; the default port is not appended, slash trimmed.
+        assert_eq!(
+            base_url("http://host:8080/", "https", Some(1400)),
+            "http://host:8080"
+        );
+        assert_eq!(base_url("  10.0.0.2  ", "http", None), "http://10.0.0.2");
     }
 
     // ── Minimal mock provider for registry tests ────────────────────────────
