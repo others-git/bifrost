@@ -217,6 +217,18 @@ export function BoardsPage() {
       widgets.some((w) => w.id === id) ? widgets.map((w) => (w.id === id ? next : w)) : [...widgets, next],
     );
   }
+  // Batch-update several widgets in one save (a group move) — a series of single
+  // patchWidget calls would each start from the same `widgets` snapshot and clobber
+  // each other, so the whole set is merged in one pass. Upserts a synthesized
+  // widget (the exit) being moved for the first time.
+  function patchManyWidgets(updated: Widget[]) {
+    if (!board || updated.length === 0) return;
+    const m = new Map(updated.map((u) => [u.id, u]));
+    const existingIds = new Set(widgets.map((w) => w.id));
+    const merged = widgets.map((w) => m.get(w.id) ?? w);
+    const added = updated.filter((u) => !existingIds.has(u.id));
+    saveWidgets([...merged, ...added]);
+  }
   function removeWidget(id: string) {
     if (!board) return;
     saveWidgets(widgets.filter((w) => w.id !== id));
@@ -429,6 +441,7 @@ export function BoardsPage() {
             aspect={board?.aspect ?? "16:9"}
             edit={edit}
             onChange={patchWidget}
+            onChangeMany={patchManyWidgets}
             onConfigure={(w) => setConfiguring(w)}
             onRemove={removeWidget}
             renderWidget={renderWidget}
@@ -518,6 +531,7 @@ export function BoardsPage() {
             aspect={board?.aspect ?? "16:9"}
             edit={false}
             onChange={() => {}}
+            onChangeMany={() => {}}
             onConfigure={() => {}}
             onRemove={() => {}}
             renderWidget={renderWidget}
@@ -597,6 +611,7 @@ function BoardGrid({
   aspect,
   edit,
   onChange,
+  onChangeMany,
   onConfigure,
   onRemove,
   renderWidget,
@@ -605,12 +620,19 @@ function BoardGrid({
   aspect: string;
   edit: boolean;
   onChange: (id: string, next: Widget) => void;
+  onChangeMany: (updated: Widget[]) => void;
   onConfigure: (w: Widget) => void;
   onRemove: (id: string) => void;
   renderWidget: (w: Widget) => React.ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 1200, h: 600 });
+  // Multi-select: drag on the empty canvas to marquee-select; then dragging any
+  // selected widget moves the whole group.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  const [groupNudge, setGroupNudge] = useState<{ dx: number; dy: number } | null>(null);
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -619,6 +641,10 @@ function BoardGrid({
     setSize({ w: el.clientWidth, h: el.clientHeight });
     return () => ro.disconnect();
   }, []);
+  // Selection only makes sense while editing; drop it when leaving edit mode.
+  useEffect(() => {
+    if (!edit) setSelected(new Set());
+  }, [edit]);
 
   // The canvas is a fixed-aspect box letterboxed inside the available space: its
   // size depends only on the container and the board's aspect ratio — never on the
@@ -634,6 +660,63 @@ function BoardGrid({
   }
   const cellW = canvasW / cols;
   const cellH = canvasH / rows;
+
+  // ── marquee select (drag on empty canvas) ──
+  const marqStart = useRef<{ x: number; y: number } | null>(null);
+  function canvasPoint(e: React.PointerEvent) {
+    const r = canvasRef.current!.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+  function marqueeDown(e: React.PointerEvent) {
+    // Only a press that lands on the canvas itself (widgets stop propagation).
+    if (!edit || e.target !== e.currentTarget) return;
+    e.preventDefault();
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    const p = canvasPoint(e);
+    marqStart.current = p;
+    setMarquee({ x0: p.x, y0: p.y, x1: p.x, y1: p.y });
+  }
+  function marqueeMove(e: React.PointerEvent) {
+    if (!marqStart.current) return;
+    const p = canvasPoint(e);
+    setMarquee({ x0: marqStart.current.x, y0: marqStart.current.y, x1: p.x, y1: p.y });
+  }
+  function marqueeUp() {
+    if (!marqStart.current || !marquee) {
+      marqStart.current = null;
+      return;
+    }
+    const l = Math.min(marquee.x0, marquee.x1), r = Math.max(marquee.x0, marquee.x1);
+    const t = Math.min(marquee.y0, marquee.y1), b = Math.max(marquee.y0, marquee.y1);
+    if (r - l < 4 && b - t < 4) {
+      setSelected(new Set()); // a click on empty canvas clears the selection
+    } else {
+      const hit = new Set<string>();
+      for (const raw of widgets) {
+        const w = clampWidget(raw, cols, rows);
+        const wl = w.x * cellW, wt = w.y * cellH, wr = (w.x + w.w) * cellW, wb = (w.y + w.h) * cellH;
+        if (!(r < wl || l > wr || b < wt || t > wb)) hit.add(w.id);
+      }
+      setSelected(hit);
+    }
+    marqStart.current = null;
+    setMarquee(null);
+  }
+
+  // Commit a group move: shift every selected widget by the same cell delta,
+  // clamping the delta so the whole selection stays on the canvas.
+  function commitGroup(dCols: number, dRows: number) {
+    const sel = widgets.filter((w) => selected.has(w.id)).map((w) => clampWidget(w, cols, rows));
+    if (sel.length === 0) { setGroupNudge(null); return; }
+    const lowDx = Math.max(...sel.map((w) => -w.x));
+    const highDx = Math.min(...sel.map((w) => cols - w.w - w.x));
+    const lowDy = Math.max(...sel.map((w) => -w.y));
+    const highDy = Math.min(...sel.map((w) => rows - w.h - w.y));
+    const ddc = Math.max(lowDx, Math.min(highDx, dCols));
+    const ddr = Math.max(lowDy, Math.min(highDy, dRows));
+    onChangeMany(sel.map((w) => ({ ...w, x: w.x + ddc, y: w.y + ddr })));
+    setGroupNudge(null);
+  }
 
   // Three tiers of edit guides, painted top→bottom: a thick center cross, medium
   // quarter lines (¼/½/¾), and the faint fine cell grid. The center & quarters give
@@ -669,11 +752,17 @@ function BoardGrid({
       }}
     >
       <div
+        ref={canvasRef}
+        onPointerDown={marqueeDown}
+        onPointerMove={marqueeMove}
+        onPointerUp={marqueeUp}
+        onPointerCancel={marqueeUp}
         style={{
           position: "relative",
           width: canvasW,
           height: canvasH,
           borderRadius: radius.lg,
+          touchAction: edit ? "none" : undefined,
           // A faint frame + tiered grid guides while editing, so the canvas bounds
           // and its center/quarters read at a glance.
           outline: edit ? `1px solid ${T.hairline}` : undefined,
@@ -689,6 +778,12 @@ function BoardGrid({
             cellW={cellW}
             cellH={cellH}
             edit={edit}
+            selected={selected.has(w.id)}
+            groupMove={selected.has(w.id) && selected.size > 1}
+            nudge={groupNudge}
+            onGroupMove={(dx, dy) => setGroupNudge({ dx, dy })}
+            onGroupCommit={commitGroup}
+            onSingleStart={() => selected.size > 0 && setSelected(new Set())}
             onChange={(next) => onChange(w.id, next)}
             onConfigure={() => onConfigure(w)}
             onRemove={() => onRemove(w.id)}
@@ -696,6 +791,22 @@ function BoardGrid({
             {renderWidget(w)}
           </WidgetBox>
         ))}
+        {marquee && (
+          <div
+            style={{
+              position: "absolute",
+              left: Math.min(marquee.x0, marquee.x1),
+              top: Math.min(marquee.y0, marquee.y1),
+              width: Math.abs(marquee.x1 - marquee.x0),
+              height: Math.abs(marquee.y1 - marquee.y0),
+              border: `1px solid ${T.accent}`,
+              background: alpha(T.accent, 0.12),
+              borderRadius: 3,
+              pointerEvents: "none",
+              zIndex: 20,
+            }}
+          />
+        )}
       </div>
     </div>
   );
@@ -708,6 +819,12 @@ function WidgetBox({
   cellW,
   cellH,
   edit,
+  selected = false,
+  groupMove = false,
+  nudge = null,
+  onGroupMove,
+  onGroupCommit,
+  onSingleStart,
   onChange,
   onConfigure,
   onRemove,
@@ -719,6 +836,17 @@ function WidgetBox({
   cellW: number;
   cellH: number;
   edit: boolean;
+  /** Part of the current multi-selection (highlighted). */
+  selected?: boolean;
+  /** Dragging this widget moves the whole selection (selected + >1 chosen). */
+  groupMove?: boolean;
+  /** Live group translate (px) applied to selected widgets that aren't the one
+   * being dragged. */
+  nudge?: { dx: number; dy: number } | null;
+  onGroupMove?: (dx: number, dy: number) => void;
+  onGroupCommit?: (dCols: number, dRows: number) => void;
+  /** Starting a plain (non-group) move clears any selection. */
+  onSingleStart?: () => void;
   onChange: (next: Widget) => void;
   onConfigure: () => void;
   onRemove: () => void;
@@ -733,17 +861,22 @@ function WidgetBox({
     e.preventDefault();
     e.stopPropagation();
     (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    if (mode === "move" && !groupMove) onSingleStart?.();
     setDrag({ mode, sx: e.clientX, sy: e.clientY, dx: 0, dy: 0 });
   }
   function move(e: React.PointerEvent) {
     if (!drag) return;
-    setDrag({ ...drag, dx: e.clientX - drag.sx, dy: e.clientY - drag.sy });
+    const dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
+    setDrag({ ...drag, dx, dy });
+    if (drag.mode === "move" && groupMove) onGroupMove?.(dx, dy);
   }
   function up() {
     if (!drag) return;
     const dCols = Math.round(drag.dx / cellW);
     const dRows = Math.round(drag.dy / cellH);
-    if (drag.mode === "move") {
+    if (drag.mode === "move" && groupMove) {
+      onGroupCommit?.(dCols, dRows); // moves the whole selection at once
+    } else if (drag.mode === "move") {
       onChange({
         ...w,
         x: Math.max(0, Math.min(cols - w.w, w.x + dCols)),
@@ -761,6 +894,10 @@ function WidgetBox({
 
   const movePx = drag?.mode === "move" ? drag : null;
   const sizePx = drag?.mode === "resize" ? drag : null;
+  // The widget being dragged uses its own delta; other selected widgets follow the
+  // live group nudge.
+  const offDx = movePx?.dx ?? (selected && !drag && nudge ? nudge.dx : 0);
+  const offDy = movePx?.dy ?? (selected && !drag && nudge ? nudge.dy : 0);
   return (
     <div
       onPointerMove={move}
@@ -769,18 +906,23 @@ function WidgetBox({
       onPointerDown={edit ? (e) => down(e, "move") : undefined}
       style={{
         position: "absolute",
-        left: w.x * cellW + (movePx?.dx ?? 0),
-        top: w.y * cellH + (movePx?.dy ?? 0),
+        left: w.x * cellW + offDx,
+        top: w.y * cellH + offDy,
         width: w.w * cellW - GAP + (sizePx?.dx ?? 0),
         height: w.h * cellH - GAP + (sizePx?.dy ?? 0),
         touchAction: edit ? "none" : undefined,
         cursor: edit ? (drag?.mode === "move" ? "grabbing" : "grab") : undefined,
-        zIndex: drag ? 10 : 1,
+        zIndex: drag || (selected && nudge) ? 10 : 1,
         borderRadius: radius.frame,
         // A label/heading is a passive overlay — in view/kiosk it's click-through so
         // a button placed under it stays usable. (Still draggable in edit mode.)
         ...(!edit && w.type === "label" ? { pointerEvents: "none" as const } : {}),
-        ...(edit ? { outline: `1px dashed ${T.hairline}`, boxShadow: drag ? "0 8px 24px -8px #000" : undefined } : {}),
+        ...(edit
+          ? {
+              outline: selected ? `2px solid ${T.accent}` : `1px dashed ${T.hairline}`,
+              boxShadow: drag ? "0 8px 24px -8px #000" : undefined,
+            }
+          : {}),
       }}
     >
       {/* Content — non-interactive while editing so drags don't trigger controls.
