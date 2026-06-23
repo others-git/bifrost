@@ -86,6 +86,17 @@ const BODIES: Record<string, JSX.Element> = {
       <path d="M12 17v4" />
     </>
   ),
+  remote: (
+    // A handheld remote: body, a D-pad ring, and a few buttons.
+    <>
+      <rect x="7" y="2.5" width="10" height="19" rx="3" />
+      <circle cx="12" cy="13" r="2.9" />
+      <circle cx="12" cy="13" r="0.7" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="6.4" r="0.85" fill="currentColor" stroke="none" />
+      <circle cx="10" cy="18.6" r="0.7" fill="currentColor" stroke="none" />
+      <circle cx="14" cy="18.6" r="0.7" fill="currentColor" stroke="none" />
+    </>
+  ),
   outlet: (
     <>
       <rect x="4" y="4" width="16" height="16" rx="3" />
@@ -397,9 +408,12 @@ export function weatherLabel(condition: string | undefined | null): string {
     .replace(/\b\w/g, (m) => m.toUpperCase());
 }
 
-/// User-pickable override glyphs, with display labels (the per-kind power glyphs
-/// are reachable too, so a fan-driving switch can borrow the fan icon).
-export const GLYPH_OPTIONS: { name: string; label: string }[] = [
+/// The full palette of pickable glyphs, with display labels — the single source
+/// every glyph picker (device override, room control, board button/control)
+/// renders, so they all show the same complete set. Add a glyph to `BODIES` and a
+/// row here and it appears everywhere.
+export const ALL_GLYPH_OPTIONS: { name: string; label: string }[] = [
+  // Devices
   { name: "bulb", label: "Bulb" },
   { name: "led_strip", label: "LED strip" },
   { name: "triangle", label: "Triangle panels" },
@@ -407,30 +421,53 @@ export const GLYPH_OPTIONS: { name: string; label: string }[] = [
   { name: "speaker_group", label: "Speaker group" },
   { name: "receiver", label: "Receiver" },
   { name: "tv", label: "TV" },
+  { name: "remote", label: "Remote" },
   { name: "outlet", label: "Outlet" },
   { name: "plug", label: "Plug" },
   { name: "switch", label: "Switch" },
   { name: "toggle", label: "Toggle" },
   { name: "fan", label: "Fan" },
+  { name: "room", label: "Room" },
+  { name: "home", label: "Home" },
   { name: "generic", label: "Generic" },
+  // Actions / control
+  { name: "power", label: "Power" },
+  { name: "brightness", label: "Brightness" },
+  { name: "volume", label: "Volume" },
+  { name: "volume_down", label: "Volume down" },
+  { name: "mute", label: "Mute" },
+  { name: "scene", label: "Scene" },
+  { name: "restore", label: "Restore" },
+  { name: "play", label: "Play" },
+  { name: "pause", label: "Pause" },
+  { name: "play_pause", label: "Play / pause" },
+  { name: "prev", label: "Previous" },
+  { name: "next", label: "Next" },
+  { name: "favorite", label: "Favorite" },
+  { name: "star", label: "Star" },
+  { name: "link", label: "Link" },
+  // Weather
+  { name: "wx_sun", label: "Sunny" },
+  { name: "wx_moon", label: "Clear night" },
+  { name: "wx_cloud", label: "Cloudy" },
+  { name: "wx_partly", label: "Partly cloudy" },
+  { name: "wx_rain", label: "Rain" },
+  { name: "wx_snow", label: "Snow" },
+  { name: "wx_storm", label: "Storm" },
+  { name: "wx_fog", label: "Fog" },
 ];
 
-/// Glyphs offered for a configured room control button (the "Add Control" flow).
-/// Control-meaningful first (power/volume/brightness/scene), then device glyphs
-/// so a button can read as the thing it drives.
+/// Device glyph-override picker — the full palette.
+export const GLYPH_OPTIONS = ALL_GLYPH_OPTIONS;
+
+/// Room/board control & button glyph picker — the full palette, with the four
+/// control-meaningful glyphs hoisted to the front so a button reads as its action.
 export const CONTROL_GLYPH_OPTIONS: { name: string; label: string }[] = [
   { name: "power", label: "Power" },
   { name: "volume", label: "Volume" },
   { name: "brightness", label: "Brightness" },
   { name: "scene", label: "Scene" },
-  { name: "bulb", label: "Bulb" },
-  { name: "led_strip", label: "LED strip" },
-  { name: "triangle", label: "Triangle panels" },
-  { name: "speaker", label: "Speaker" },
-  { name: "fan", label: "Fan" },
-  { name: "plug", label: "Plug" },
-  { name: "tv", label: "TV" },
-  { name: "generic", label: "Generic" },
+  ...ALL_GLYPH_OPTIONS.filter((g) => !["power", "volume", "brightness", "scene"].includes(g.name)),
 ];
 
 /// Render any glyph by name. Unknown names fall back to the generic glyph.

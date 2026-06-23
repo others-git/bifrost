@@ -43,7 +43,7 @@ import { DeviceControl } from "../components/DeviceControl";
 import { LightEditor, hexToRgb, type LightControlChange } from "../components/LightEditor";
 import { MediaEditor } from "../components/MediaControls";
 import { InlineSlider } from "../components/InlineSlider";
-import { RoomControlButton, GlyphButton } from "./Dashboard";
+import { RoomControlButton, GlyphButton, RestoreHomeButton } from "./Dashboard";
 import { CornerFiligree } from "../components/ornament";
 import { Button, Segmented } from "../components/controls";
 import { Modal, useDialogs } from "../components/dialogs";
@@ -449,7 +449,9 @@ export function BoardsPage() {
           onClose={() => { setAdding(false); setConfiguring(null); }}
           onSave={(spec) => {
             if (configuring) {
-              patchWidget(configuring.id, { ...configuring, ...spec });
+              // Keep the widget's existing position/size; only its type + config change
+              // (spec carries default w/h that must not clobber a resized widget).
+              patchWidget(configuring.id, { ...configuring, type: spec.type, config: spec.config as Widget["config"] });
             } else {
               // Place a new widget at the bottom-left, sized per type but clamped to
               // the board's grid so it can never land off the (non-scrolling) canvas.
@@ -569,6 +571,15 @@ function clampWidget(w: Widget, cols: number, rows: number): Widget {
     x: Math.max(0, Math.min(cols - ww, w.x)),
     y: Math.max(0, Math.min(rows - wh, w.y)),
   };
+}
+
+// Room-grouped options for a device `Select` — same room ordering as the
+// checkbox picker, so every device chooser reads room-by-room (with the Select's
+// built-in search box on top).
+function deviceSelectOptions<T extends RoomedDevice>(devices: T[], rooms: Room[]) {
+  return groupByRoom(devices, rooms).flatMap(({ room, devices }) =>
+    devices.map((d) => ({ value: d.id, label: d.name, group: room })),
+  );
 }
 
 function aspectGrid(aspect: string): { ar: number; cols: number; rows: number } {
@@ -766,6 +777,9 @@ function WidgetBox({
         cursor: edit ? (drag?.mode === "move" ? "grabbing" : "grab") : undefined,
         zIndex: drag ? 10 : 1,
         borderRadius: radius.frame,
+        // A label/heading is a passive overlay — in view/kiosk it's click-through so
+        // a button placed under it stays usable. (Still draggable in edit mode.)
+        ...(!edit && w.type === "label" ? { pointerEvents: "none" as const } : {}),
         ...(edit ? { outline: `1px dashed ${T.hairline}`, boxShadow: drag ? "0 8px 24px -8px #000" : undefined } : {}),
       }}
     >
@@ -776,7 +790,10 @@ function WidgetBox({
           width: "100%",
           height: "100%",
           overflow: "hidden",
-          pointerEvents: edit ? "none" : "auto",
+          // None while editing (so the box drags). A label is also click-through in
+          // view mode — both the outer box and this content must be `none`, or a
+          // child's `auto` re-captures clicks meant for a button under it.
+          pointerEvents: edit || w.type === "label" ? "none" : "auto",
           containerType: "size",
         }}
       >
@@ -890,15 +907,25 @@ function WidgetContent({
 
   if (w.type === "scene") {
     const isRestore = !!cfg.restore_home;
+    // Restore Home reuses the Control page's gilded two-tap seal (arm → confirm
+    // within 5s), so it looks and behaves identically wherever it appears.
+    if (isRestore) {
+      const defaultHome = scenes.find((s) => s.is_default && !s.room_id);
+      return (
+        <div style={{ ...CENTER, pointerEvents: edit ? "none" : "auto" }}>
+          <RestoreHomeButton
+            name={(cfg.name as string) || defaultHome?.name || "Home"}
+            onRestore={() => { restoreDefaultHome(); }}
+          />
+        </div>
+      );
+    }
     const scene = scenes.find((s) => s.id === cfg.scene_id);
-    const label = (cfg.name as string) || (isRestore ? "Restore Home" : (scene?.name ?? "Scene"));
+    const label = (cfg.name as string) || (scene?.name ?? "Scene");
     return (
       <button
         disabled={edit}
-        onClick={async () => {
-          if (isRestore) await restoreDefaultHome();
-          else if (scene) await activateScene(scene.id);
-        }}
+        onClick={async () => { if (scene) await activateScene(scene.id); }}
         title={label}
         style={{
           ...widgetPlate(color.gold, true),
@@ -911,7 +938,7 @@ function WidgetContent({
         }}
       >
         <CornerFiligree colors={[color.gold]} />
-        <Glyph name={isRestore ? "restore" : "scene"} size={24} />
+        <Glyph name="scene" size={24} />
         <span style={{ ...labelType, position: "relative", fontSize: "0.74rem", color: color.textAccent, ...ELLIPSIS, maxWidth: "100%" }}>
           {label}
         </span>
@@ -1100,7 +1127,7 @@ function DeviceTile({
           )}
         </div>
         {showSlider && (
-          <div style={{ flex: "0 0 40%", minHeight: 22, display: "flex" }}>
+          <div style={{ flex: "0 0 60%", minHeight: 33, display: "flex" }}>
             <InlineSlider fill value={sliderVal} accent={accent} unit={mediaDev ? "" : "%"} onChange={onSlide} onCommit={onCommit} />
           </div>
         )}
@@ -1144,13 +1171,15 @@ function ClockWidget({ cfg }: { cfg: Record<string, unknown> }) {
     return () => clearInterval(t);
   }, []);
   const h24 = cfg.format !== "12h";
+  // A size multiplier on the auto-scaling type (1 = default); still box-relative.
+  const scale = typeof cfg.scale === "number" && cfg.scale > 0 ? cfg.scale : 1;
   const time = now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: !h24 });
   const date = now.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
   return (
     <div style={{ ...widgetPlate(color.gold, false), display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "0.15rem" }}>
       <CornerFiligree />
-      <div style={{ fontSize: "clamp(1.4rem, 26cqmin, 5rem)", fontWeight: 600, color: T.text, fontVariantNumeric: "tabular-nums", letterSpacing: "0.02em", lineHeight: 1.05 }}>{time}</div>
-      <div style={{ fontSize: "clamp(0.7rem, 8cqmin, 1.4rem)", color: T.dim }}>{date}</div>
+      <div style={{ fontSize: `clamp(1rem, ${26 * scale}cqmin, ${5 * scale}rem)`, fontWeight: 600, color: T.text, fontVariantNumeric: "tabular-nums", letterSpacing: "0.02em", lineHeight: 1.05 }}>{time}</div>
+      <div style={{ fontSize: `clamp(0.65rem, ${8 * scale}cqmin, ${1.4 * scale}rem)`, color: T.dim }}>{date}</div>
     </div>
   );
 }
@@ -1188,7 +1217,7 @@ function GroupWidget({
   onMediaPatch,
   onPowerToggle,
 }: {
-  cfg: { domain?: string; ids?: string[]; label?: string; name?: string };
+  cfg: { domain?: string; ids?: string[]; label?: string; name?: string; glyph?: string };
   lights: Light[];
   media: MediaDevice[];
   power: PowerDevice[];
@@ -1381,7 +1410,8 @@ function GroupWidget({
     // A single bound device shows its own glyph; a group shows the domain glyph.
     const single = total === 1 ? (tLights[0] ?? tMedia[0] ?? tPower[0]) : undefined;
     const compactGlyph =
-      (single as { glyph?: string | null } | undefined)?.glyph ??
+      cfg.glyph || // explicit override wins
+      (single as { glyph?: string | null } | undefined)?.glyph ||
       (domain === "light" ? "bulb" : domain === "media" ? "speaker" : "power");
     return (
       <>
@@ -1457,7 +1487,7 @@ function GroupWidget({
           )}
         </div>
         {showSlider && (
-          <div style={{ flex: "0 0 40%", minHeight: 26, display: "flex" }}>
+          <div style={{ flex: "0 0 60%", minHeight: 39, display: "flex" }}>
             {domain === "light" ? (
               // The brightness bar takes the bulb colour (like the dot), not the theme accent.
               <InlineSlider fill value={initBrightness} accent={dotColor} unit="%" onChange={slideBrightnessChange} onCommit={slideBrightnessCommit} />
@@ -1682,9 +1712,14 @@ function WidgetEditorModal({
   // group
   const [groupDomain, setGroupDomain] = useState<string>((cfg.domain as string) ?? "light");
   const [groupIds, setGroupIds] = useState<string[]>((cfg.ids as string[]) ?? []);
+  // Optional glyph override for the Button widget ("" = auto from the device/domain).
+  const [buttonGlyph, setButtonGlyph] = useState<string>((cfg.glyph as string) ?? "");
+  // Filter text for the group/button device checkbox list.
+  const [groupQuery, setGroupQuery] = useState("");
 
   // clock / label
   const [clockFormat, setClockFormat] = useState<string>((cfg.format as string) ?? "24h");
+  const [clockScale, setClockScale] = useState<string>(String((cfg.scale as number) ?? 1));
   const [labelText, setLabelText] = useState<string>((cfg.text as string) ?? "");
   const [labelHeading, setLabelHeading] = useState<boolean>(cfg.heading !== false);
 
@@ -1721,7 +1756,7 @@ function WidgetEditorModal({
       onSave({ type, config: { domain: groupDomain, ids: groupIds, name: nm }, w: 16, h: 8 });
     } else if (type === "button") {
       if (groupIds.length === 0) return;
-      onSave({ type, config: { domain: groupDomain, ids: groupIds, name: nm }, w: 6, h: 6 });
+      onSave({ type, config: { domain: groupDomain, ids: groupIds, name: nm, glyph: buttonGlyph || undefined }, w: 6, h: 6 });
     } else if (type === "scene") {
       onSave({
         type,
@@ -1738,7 +1773,7 @@ function WidgetEditorModal({
       if (!pid || !did) return;
       onSave({ type, config: { provider_id: pid, device_id: did, name: nm }, w: 12, h: 8 });
     } else if (type === "clock") {
-      onSave({ type, config: { format: clockFormat, name: nm }, w: 12, h: 8 });
+      onSave({ type, config: { format: clockFormat, scale: Number(clockScale) || 1, name: nm }, w: 12, h: 8 });
     } else if (type === "label") {
       onSave({ type, config: { text: labelText.trim() || nm || "Label", heading: labelHeading }, w: 16, h: 4 });
     } else {
@@ -1775,7 +1810,7 @@ function WidgetEditorModal({
             <Select
               value={deviceId}
               onChange={setDeviceId}
-              options={(type === "now_playing" ? media : devicesFor(domain)).map((d) => ({ value: d.id, label: d.name }))}
+              options={deviceSelectOptions((type === "now_playing" ? media : devicesFor(domain)) as RoomedDevice[], rooms)}
               placeholder="Choose a device"
             />
           </Field>
@@ -1797,6 +1832,12 @@ function WidgetEditorModal({
             />
           </Field>
           <Field label={type === "button" ? "Device or group (pick one for a single device)" : "Devices"}>
+            <input
+              value={groupQuery}
+              onChange={(e) => setGroupQuery(e.target.value)}
+              placeholder="Search…"
+              style={{ ...INPUT, marginBottom: "0.4rem", fontSize: "0.82rem" }}
+            />
             <div style={{ maxHeight: 240, overflowY: "auto", display: "flex", flexDirection: "column", gap: "0.1rem" }}>
               {groupByRoom(
                 (groupDomain === "light"
@@ -1807,7 +1848,15 @@ function WidgetEditorModal({
                       ? power
                       : [...lights, ...media, ...power]) as RoomedDevice[],
                 rooms,
-              ).map(({ room, devices }) => (
+              )
+                .map(({ room, devices }) => ({
+                  room,
+                  devices: groupQuery.trim()
+                    ? devices.filter((d) => d.name.toLowerCase().includes(groupQuery.trim().toLowerCase()))
+                    : devices,
+                }))
+                .filter(({ devices }) => devices.length > 0)
+                .map(({ room, devices }) => (
                 <div key={room}>
                   <div style={ROOM_HEADER}>{room}</div>
                   {devices.map((d) => (
@@ -1826,6 +1875,29 @@ function WidgetEditorModal({
               ))}
             </div>
           </Field>
+          {type === "button" && (
+            <Field label="Icon">
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.3rem", maxHeight: 92, overflowY: "auto" }}>
+                <button
+                  title="Auto (from the device)"
+                  onClick={() => setButtonGlyph("")}
+                  style={{ ...GLYPH_OPT, ...(buttonGlyph === "" ? CHIP_ON : {}), width: "auto", padding: "0 0.5rem", fontSize: "0.72rem" }}
+                >
+                  Auto
+                </button>
+                {CONTROL_GLYPH_OPTIONS.map((g) => (
+                  <button
+                    key={g.name}
+                    title={g.label}
+                    onClick={() => setButtonGlyph(g.name)}
+                    style={{ ...GLYPH_OPT, ...(buttonGlyph === g.name ? CHIP_ON : {}) }}
+                  >
+                    <Glyph name={g.name} size={18} />
+                  </button>
+                ))}
+              </div>
+            </Field>
+          )}
         </>
       )}
 
@@ -1840,7 +1912,18 @@ function WidgetEditorModal({
           </Field>
           {!restoreHome && (
             <Field label="Scene">
-              <Select value={sceneId} onChange={setSceneId} options={scenes.map((s) => ({ value: s.id, label: s.name }))} placeholder="Choose a scene" />
+              <Select
+                value={sceneId}
+                onChange={setSceneId}
+                placeholder="Choose a scene"
+                options={[...scenes]
+                  .sort((a, b) => {
+                    const ga = a.room_name ?? "", gb = b.room_name ?? "";
+                    if (ga !== gb) return ga === "" ? -1 : gb === "" ? 1 : ga.localeCompare(gb);
+                    return a.name.localeCompare(b.name);
+                  })
+                  .map((s) => ({ value: s.id, label: s.name, group: s.room_name ?? "Home" }))}
+              />
             </Field>
           )}
         </>
@@ -1894,13 +1977,27 @@ function WidgetEditorModal({
       )}
 
       {type === "clock" && (
-        <Field label="Format">
-          <Segmented
-            value={clockFormat}
-            onChange={setClockFormat}
-            options={[{ value: "24h", label: "24-hour" }, { value: "12h", label: "12-hour" }]}
-          />
-        </Field>
+        <>
+          <Field label="Format">
+            <Segmented
+              value={clockFormat}
+              onChange={setClockFormat}
+              options={[{ value: "24h", label: "24-hour" }, { value: "12h", label: "12-hour" }]}
+            />
+          </Field>
+          <Field label="Size">
+            <Segmented
+              value={clockScale}
+              onChange={setClockScale}
+              options={[
+                { value: "0.6", label: "S" },
+                { value: "1", label: "M" },
+                { value: "1.5", label: "L" },
+                { value: "2.2", label: "XL" },
+              ]}
+            />
+          </Field>
+        </>
       )}
 
       {type === "label" && (

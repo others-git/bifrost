@@ -102,6 +102,7 @@ export function Select<T extends string>({
   width,
   title,
   empty,
+  searchable,
   style,
 }: {
   value?: T;
@@ -113,6 +114,8 @@ export function Select<T extends string>({
   title?: string;
   /** Shown in the open list when there are no options. */
   empty?: ReactNode;
+  /** Add a filter box at the top of the list. Defaults on for long lists (>7). */
+  searchable?: boolean;
   style?: CSSProperties;
 }) {
   const { isCompact } = useViewport();
@@ -120,8 +123,21 @@ export function Select<T extends string>({
   const listRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ left: number; top: number; minWidth: number } | null>(null);
+  const [query, setQuery] = useState("");
 
   const current = options.find((o) => o.value === value);
+
+  // A filter box appears for long lists (or when forced). Match on the label text
+  // (string labels) or the value, case-insensitively.
+  const showSearch = (searchable ?? options.length > 7) && !disabled;
+  const q = query.trim().toLowerCase();
+  const filtered = q
+    ? options.filter((o) => (typeof o.label === "string" ? o.label : o.value).toLowerCase().includes(q))
+    : options;
+
+  useEffect(() => {
+    if (!open) setQuery("");
+  }, [open]);
 
   useLayoutEffect(() => {
     if (!open || isCompact) return;
@@ -179,14 +195,43 @@ export function Select<T extends string>({
             }
       }
     >
-      {options.length === 0 ? (
+      {showSearch && (
+        <input
+          autoFocus
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && filtered.length > 0) {
+              onChange(filtered[0].value);
+              setOpen(false);
+            }
+          }}
+          placeholder="Search…"
+          style={{
+            position: "sticky",
+            top: -1,
+            zIndex: 1,
+            width: "100%",
+            boxSizing: "border-box",
+            marginBottom: 4,
+            padding: isCompact ? "0.6rem 0.7rem" : "0.4rem 0.55rem",
+            borderRadius: 6,
+            border: `1px solid ${color.border}`,
+            background: alpha(color.void, 0.97),
+            color: color.text,
+            fontSize: isCompact ? "0.95rem" : "0.82rem",
+            outline: "none",
+          }}
+        />
+      )}
+      {filtered.length === 0 ? (
         <div style={{ padding: "0.5rem 0.6rem", color: color.faint, fontSize: "0.82rem" }}>
-          {empty ?? "No options"}
+          {options.length === 0 ? (empty ?? "No options") : "No matches"}
         </div>
       ) : (
-        options.map((o, i) => (
+        filtered.map((o, i) => (
           <div key={o.value}>
-            {o.group && o.group !== options[i - 1]?.group && <MenuHeader>{o.group}</MenuHeader>}
+            {o.group && o.group !== filtered[i - 1]?.group && <MenuHeader>{o.group}</MenuHeader>}
             <MenuItem
               active={o.value === value}
               compact={isCompact}

@@ -924,7 +924,7 @@ export function RoomControlButton({
  * its heart) over a slow breathing gold aura, with an engraved label beneath.
  * Gold is the ornament/power accent, setting it apart from the cyan per-device
  * controls; the seal form makes the "bring everything back" action ceremonial. */
-function RestoreHomeButton({ name, onRestore }: { name: string; onRestore: () => void }) {
+export function RestoreHomeButton({ name, onRestore }: { name: string; onRestore: () => void }) {
   const [hover, setHover] = useState(false);
   // Two-tap safety: the first tap *arms* the seal (glyph spins, label flips to
   // "Confirm"); a second tap within 5s fires the restore. The arm auto-clears on
