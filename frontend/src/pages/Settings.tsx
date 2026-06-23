@@ -197,6 +197,7 @@ export function SettingsPage({ onNavigate: _onNavigate, initialAdd, onConsumeAdd
 
       {/* Tabs — keeps a growing Settings page legible. Scrolls on narrow screens. */}
       <div
+        className="bf-noscroll"
         style={{
           display: "flex",
           gap: "0.15rem",

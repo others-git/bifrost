@@ -36,6 +36,39 @@
         text-rendering: optimizeLegibility;
       }
 
+      /* ── Unified gilded scrollbar ─────────────────────────────────────────
+         One definition themes every scroll surface (effects grid, lists,
+         pickers, sheets, …): a slim antique-gold pill that floats a hair off the
+         edge (transparent border + padding-box clip) and brightens on hover/drag,
+         instead of the OS default that stuck out against the gothic black. Inline
+         styles can't reach these pseudo-elements, so it lives here. Themed via
+         --bf-gold (re-paints with the active theme); literal rgba fallbacks come
+         first for WebViews without color-mix. */
+      * {
+        scrollbar-width: thin;
+        scrollbar-color: rgba(184, 146, 74, 0.42) transparent;
+        scrollbar-color: color-mix(in srgb, var(--bf-gold, #b8924a) 42%, transparent) transparent;
+      }
+      ::-webkit-scrollbar { width: 10px; height: 10px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb {
+        border-radius: 999px;
+        border: 2px solid transparent; /* breathing room — the thumb floats */
+        background-clip: padding-box;
+        background-color: rgba(184, 146, 74, 0.38);
+        background-color: color-mix(in srgb, var(--bf-gold, #b8924a) 38%, transparent);
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background-color: rgba(216, 177, 90, 0.66);
+        background-color: color-mix(in srgb, var(--bf-goldBright, #d8b15a) 66%, transparent);
+      }
+      ::-webkit-scrollbar-thumb:active { background-color: var(--bf-gold, #b8924a); }
+      ::-webkit-scrollbar-corner { background: transparent; }
+
+      /* Opt-out for thin tab strips that scroll but shouldn't show a bar. */
+      .bf-noscroll { scrollbar-width: none; }
+      .bf-noscroll::-webkit-scrollbar { display: none; }
+
       /* Touch ergonomics on phones: bigger range thumbs + taller hit area, so
          volume/brightness sliders are easy to grab. (Inline styles can't reach
          these pseudo-elements.) */

@@ -56,7 +56,7 @@ import { CONTROL_GLYPH_OPTIONS, Glyph, GlyphGrid, weatherGlyph, weatherLabel } f
 import { PageHeader } from "../components/PageHeader";
 import { useViewport } from "../useViewport";
 import { S } from "../styles";
-import { alpha, color, labelType, nicheStyle, radius, T } from "../theme";
+import { alpha, color, glow, labelType, nicheStyle, radius, T } from "../theme";
 
 /** The full-cell "lit niche" plate every Boards widget wears — the same recessed,
  * device-lit surface as the Control room cards' `GlyphButton`s (shared
@@ -69,6 +69,32 @@ const widgetPlate = (accent: string, on: boolean): React.CSSProperties => ({
   overflow: "hidden",
   ...nicheStyle(accent, on),
 });
+
+/** A group widget's plate: like `widgetPlate`, but a **device box tracks its one
+ * light's colour** while a **group box blends ALL its lit members' colours into a
+ * gradient** (border, top tint, and glow). Falls back to the single-accent plate
+ * when off or given one colour. */
+const widgetPlateMulti = (accents: string[], on: boolean): React.CSSProperties => {
+  if (!on || accents.length <= 1) {
+    return widgetPlate(accents[0] ?? T.accent, on);
+  }
+  const border = `linear-gradient(120deg, ${accents.map((c) => alpha(c, 0.55)).join(", ")})`;
+  const tint = `linear-gradient(120deg, ${accents.map((c) => alpha(c, 0.17)).join(", ")})`;
+  return {
+    position: "relative",
+    width: "100%",
+    height: "100%",
+    borderRadius: radius.frame,
+    overflow: "hidden",
+    color: T.text,
+    // Gradient border via the transparent-border + dual background-clip trick:
+    // the tint+surface fill the interior (padding-box), the colour sweep shows
+    // through the 1px transparent border (border-box).
+    border: "1px solid transparent",
+    background: `${tint} padding-box, ${color.surface} padding-box, ${border} border-box`,
+    boxShadow: `${glow(accents[0], 22)}, ${glow(accents[accents.length - 1], 22)}, inset 0 0 16px -9px ${accents[0]}`,
+  };
+};
 
 // A fixed-ratio grid: 24 columns × 14 rows, both axes scaled to the board's
 // actual size. A layout is therefore device-independent — the same board fills a
@@ -1547,7 +1573,7 @@ function GroupWidget({
   return (
     <div
       style={{
-        ...widgetPlate(accent, anyOn),
+        ...widgetPlateMulti(litHexes ?? [accent], anyOn),
         display: "flex",
         flexDirection: "column",
         padding: "0.5rem 0.6rem",
@@ -1578,7 +1604,7 @@ function GroupWidget({
           <span style={{ ...labelType, fontSize: "0.78rem", color: "#d8cfba", ...ELLIPSIS }}>{label}</span>
           {hasEditor && total > 0 && <Glyph name="chevron" size={13} />}
         </button>
-        <GlyphButton on={anyOn} accent={accent} title="Toggle all" active={false} buttonRef={null} onClick={togglePower} size={32}>
+        <GlyphButton on={anyOn} accent={buttonAccent} title="Toggle all" active={false} buttonRef={null} onClick={togglePower} size={32}>
           <Glyph name="power" size={15} />
         </GlyphButton>
       </div>
@@ -1591,7 +1617,7 @@ function GroupWidget({
           style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", cursor: hasEditor && !edit ? "pointer" : "default" }}
         >
           {!showSlider && (
-            <span style={{ fontSize: "0.78rem", color: anyOn ? accent : T.faint }}>
+            <span style={{ fontSize: "0.78rem", color: anyOn ? buttonAccent : T.faint }}>
               {total === 0 ? "No devices" : `${onCount} of ${total} on`}
             </span>
           )}

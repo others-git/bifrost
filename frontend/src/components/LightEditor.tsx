@@ -552,14 +552,13 @@ function EffectsPanel({
               outline: "none",
             }}
           />
-          {/* Category tabs — horizontally scrollable chip row. */}
+          {/* Category tabs — a wrapping chip row so every category stays visible
+              (no horizontally-clipped tab at the panel edge). */}
           <div
             style={{
               display: "flex",
+              flexWrap: "wrap",
               gap: "0.35rem",
-              overflowX: "auto",
-              paddingBottom: 2,
-              scrollbarWidth: "none",
             }}
           >
             {tabs.map((t) => {
