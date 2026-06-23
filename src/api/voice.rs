@@ -699,6 +699,7 @@ async fn tv_play_fallback(state: &AppState, heard: &str) -> Option<ClauseResult>
     use crate::api::remote::ResolveOutcome;
     let (said, ok) =
         match crate::api::remote::resolve_and_play(state, device.trim(), query.trim()).await {
+            ResolveOutcome::Played(title) => (format!("Playing {title}."), true),
             ResolveOutcome::Launched(name) | ResolveOutcome::OpenedPreferred(name) => {
                 (format!("Opened {name}."), true)
             }

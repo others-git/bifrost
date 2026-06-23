@@ -192,6 +192,7 @@ provider-native synced playback group (see below).
 | `GET` | `/api/v1/media/devices/{id}` | One device — live read, refreshes the cache |
 | `PUT` | `/api/v1/media/devices/{id}/state` | Send a command (body below) |
 | `POST` | `/api/v1/media/devices/{id}/cast` | Cast media to a TV / media player (body below) |
+| `POST` | `/api/v1/media/play-on` | Natural-language TV control by name — play a title / open an app (body below) |
 | `GET` | `/api/v1/media/devices/{id}/favorites` | List saved favorites (live read) |
 | `POST` | `/api/v1/media/devices/{id}/favorites/play` | Start a favorite (body below) |
 | `POST` | `/api/v1/media/devices/{id}/group` | Join this speaker into a group (body below) |
@@ -264,6 +265,24 @@ input/app**, set `source` via `PUT …/state`.
 
 Responses: `204` success, `404` unknown device, `422` the device doesn't support
 casting, `502` device unreachable.
+
+#### Play on a TV by name
+
+Natural-language TV control: name a TV (or its remote) and a phrase, and the
+shared content resolver does the right thing. `"open <app>"` launches that app
+from the device's catalog; `"play <title>"` searches the TV's libraries and
+plays the best match, then falls back to opening the TV's **last-used app** as
+the best guess for where the title lives. `device` matches a remote or media
+device by id or (case-insensitive, substring) name.
+
+```json
+// POST /api/v1/media/play-on
+{ "device": "bedroom TV", "query": "play Bob's Burgers" }
+```
+
+Responses: `200 { "ok": true, "said": "Playing Bob's Burgers." }` when an action
+was taken (`ok: false` with a reason when nothing matched), `404` when no TV or
+remote matches the name, `502` when the device couldn't be reached.
 
 #### Bind a source to a receiver
 

@@ -274,6 +274,39 @@ impl HaProvider {
         Ok(())
     }
 
+    /// Call a service that **returns a response** (`?return_response=true`, e.g.
+    /// `media_player.search_media`) and hand back the parsed `service_response`
+    /// object. Like [`call_service`] but keeps the JSON body.
+    async fn call_service_with_response(
+        &self,
+        domain: &str,
+        service: &str,
+        entity_id: &str,
+        extra: Value,
+    ) -> Result<Value> {
+        let mut body = json!({ "entity_id": entity_id });
+        if let Value::Object(extra) = extra {
+            for (k, v) in extra {
+                body[k] = v;
+            }
+        }
+        let resp: Value = self
+            .client
+            .post(format!(
+                "{}/api/services/{domain}/{service}?return_response=true",
+                self.base_url
+            ))
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("HA {domain}.{service} call failed"))?
+            .error_for_status()?
+            .json()
+            .await
+            .with_context(|| format!("HA {domain}.{service} response was not JSON"))?;
+        Ok(resp.get("service_response").cloned().unwrap_or(resp))
+    }
+
     /// Render a Jinja template (`POST /api/template`) and return the plaintext.
     async fn render_template(&self, template: &str) -> Result<String> {
         let text = self
@@ -732,6 +765,34 @@ fn transport_service(cmd: TransportCmd) -> &'static str {
     }
 }
 
+/// Pick the first **playable** hit out of a `media_player.search_media` response
+/// and return its `(media_content_id, media_content_type)` to cast. Tolerates the
+/// two shapes HA emits — a bare `{ "result": [...] }` or per-entity
+/// `{ "<entity_id>": { "result": [...] } }` — and skips items HA flags
+/// `can_play: false`. `None` when nothing usable was returned.
+fn first_search_hit(service_response: &Value) -> Option<(String, String)> {
+    fn results(v: &Value) -> Option<&Vec<Value>> {
+        v.get("result").and_then(Value::as_array)
+    }
+    let items = results(service_response).or_else(|| {
+        service_response
+            .as_object()?
+            .values()
+            .find_map(|v| results(v))
+    })?;
+    items
+        .iter()
+        .filter(|it| it.get("can_play").and_then(Value::as_bool) != Some(false))
+        .find_map(|it| {
+            let id = it.get("media_content_id").and_then(Value::as_str)?;
+            let ty = it
+                .get("media_content_type")
+                .and_then(Value::as_str)
+                .unwrap_or("video");
+            Some((id.to_string(), ty.to_string()))
+        })
+}
+
 // ── Power mapping ──────────────────────────────────────────────────────────────
 
 /// Classify a power entity into a glyph-bearing `PowerKind` from its domain
@@ -910,6 +971,27 @@ impl MediaProvider for HaProvider {
             json!({ "media_content_id": content_id, "media_content_type": content_type }),
         )
         .await
+    }
+
+    /// Resolve a human title via `media_player.search_media` and cast the top
+    /// playable hit with `media_player.play_media`. `Ok(false)` when the search
+    /// returns nothing (or the integration has no search), so the caller can fall
+    /// back to just opening an app.
+    async fn search_and_play(&self, device_id: &str, query: &str) -> Result<bool> {
+        let resp = self
+            .call_service_with_response(
+                "media_player",
+                "search_media",
+                device_id,
+                json!({ "search_query": query }),
+            )
+            .await?;
+        let Some((content_id, content_type)) = first_search_hit(&resp) else {
+            return Ok(false);
+        };
+        self.play_media(device_id, &content_id, &content_type)
+            .await?;
+        Ok(true)
     }
 
     async fn group(&self, device_id: &str, coordinator_id: &str) -> Result<()> {
@@ -1764,6 +1846,88 @@ mod tests {
         assert_eq!(body["entity_id"], "media_player.tv");
         assert_eq!(body["media_content_id"], "https://example/stream.m3u8");
         assert_eq!(body["media_content_type"], "url");
+    }
+
+    #[tokio::test]
+    async fn search_and_play_casts_the_top_playable_hit() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/services/media_player/search_media"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "service_response": {
+                    "result": [
+                        { "media_content_id": "skip", "media_content_type": "app", "can_play": false },
+                        { "media_content_id": "show/bobs-burgers", "media_content_type": "tvshow", "can_play": true }
+                    ]
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/services/media_player/play_media"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let p = HaProvider::new_for_test(server.uri()).unwrap();
+        let played = p
+            .search_and_play("media_player.tv", "bobs burgers")
+            .await
+            .unwrap();
+        assert!(played);
+
+        let reqs = server.received_requests().await.unwrap();
+        // First call carries the search query; the play call casts the playable hit.
+        let search: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(search["search_query"], "bobs burgers");
+        let play: Value = serde_json::from_slice(&reqs[1].body).unwrap();
+        assert_eq!(play["media_content_id"], "show/bobs-burgers");
+        assert_eq!(play["media_content_type"], "tvshow");
+    }
+
+    #[tokio::test]
+    async fn search_and_play_is_false_when_nothing_matches() {
+        let server = MockServer::start().await;
+        // Only search is mounted; if play_media were called it would 404 → Err.
+        Mock::given(method("POST"))
+            .and(path("/api/services/media_player/search_media"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "service_response": { "result": [] } })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let p = HaProvider::new_for_test(server.uri()).unwrap();
+        let played = p.search_and_play("media_player.tv", "nonexistent").await;
+        assert!(!played.unwrap());
+    }
+
+    #[test]
+    fn first_search_hit_handles_both_shapes_and_skips_unplayable() {
+        // Bare `{ result: [...] }`.
+        let bare = json!({ "result": [
+            { "media_content_id": "a", "media_content_type": "music", "can_play": true }
+        ]});
+        assert_eq!(
+            first_search_hit(&bare),
+            Some(("a".to_string(), "music".to_string()))
+        );
+        // Per-entity nesting, first item not playable → take the next.
+        let nested = json!({ "media_player.tv": { "result": [
+            { "media_content_id": "x", "can_play": false },
+            { "media_content_id": "y" }
+        ]}});
+        // `media_content_type` defaults to "video" when absent.
+        assert_eq!(
+            first_search_hit(&nested),
+            Some(("y".to_string(), "video".to_string()))
+        );
+        // Nothing playable.
+        assert_eq!(first_search_hit(&json!({ "result": [] })), None);
     }
 
     #[tokio::test]

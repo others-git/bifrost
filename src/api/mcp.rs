@@ -691,13 +691,14 @@ impl BifrostMcp {
     }
 
     #[tool(
-        description = "Open an app or start something on a TV by name. \"open Netflix on the bedroom TV\" launches the app; \"play Bob's Burgers on the bedroom TV\" opens the TV's last-used app as the best guess for where it lives (in-app title search is limited today). Prefer this over launch_app for natural requests — it resolves app names and falls back to the last-used app."
+        description = "Open an app or play something on a TV by name. \"open Netflix on the bedroom TV\" launches the app; \"play Bob's Burgers on the bedroom TV\" searches the TV's libraries for the title and plays the best match, falling back to opening the TV's last-used app when nothing matches. Prefer this over launch_app for natural requests — it resolves app names, real titles, and the last-used app."
     )]
     async fn play_on(
         &self,
         Parameters(req): Parameters<PlayOnRequest>,
     ) -> Result<CallToolResult, ErrorData> {
         match resolve_and_play(&self.state, &req.device, &req.query).await {
+            ResolveOutcome::Played(title) => Ok(ok_text(format!("Playing {title}."))),
             ResolveOutcome::Launched(name) => Ok(ok_text(format!("Opened {name}."))),
             ResolveOutcome::OpenedPreferred(name) => Ok(ok_text(format!(
                 "Opened {name} (the last app used) — look there for what you asked for."

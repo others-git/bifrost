@@ -22,7 +22,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post, put},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::sync::Arc;
 
@@ -700,9 +700,12 @@ fn preferred_app(apps: &[RemoteApp]) -> Option<&RemoteApp> {
 pub(crate) enum ResolveOutcome {
     /// Launched the app the query named (its friendly name).
     Launched(String),
-    /// Title intent we couldn't map to an app — opened the TV's last-used app as
-    /// the best guess for where the title lives (its friendly name). True in-app
-    /// title search is a follow-up; callers may add an HA-Assist fallback.
+    /// Resolved a title to actual content and started playing it (the title we
+    /// were asked for) — the TV's media search found and cast a match.
+    Played(String),
+    /// Title intent we couldn't map to an app or resolve to content — opened the
+    /// TV's last-used app as the best guess for where the title lives (its
+    /// friendly name). Callers may add an HA-Assist fallback.
     OpenedPreferred(String),
     /// No app matched the query.
     NoMatch,
@@ -784,13 +787,22 @@ pub(crate) async fn resolve_and_play(
     }
 
     // Title/bare intent: strip a leading play-verb. If the remainder names a
-    // known app, open it ("play netflix"); otherwise open the last-used app.
+    // known app, open it ("play netflix").
     let title = ["play ", "watch ", "put on "]
         .iter()
         .find_map(|v| lower.strip_prefix(v).map(|_| q[v.len()..].trim()))
         .unwrap_or(q);
     if let Some(app) = match_app(title, &apps) {
         return launch(state, &remote_id, app).await;
+    }
+    // A real title: try to resolve it to actual content and play it on the TV
+    // (its paired media device's search). Only if that finds nothing do we fall
+    // back to opening the last-used app as the best guess for where it lives.
+    if !title.is_empty()
+        && let Some(media_id) = paired_media_id(state, &remote_id).await
+        && crate::api::media::search_and_play_on_device(state, &media_id, title).await
+    {
+        return ResolveOutcome::Played(title.to_string());
     }
     match preferred_app(&apps) {
         Some(app) => match launch(state, &remote_id, app).await {
@@ -799,6 +811,71 @@ pub(crate) async fn resolve_and_play(
         },
         None => ResolveOutcome::NoMatch,
     }
+}
+
+/// Request body for the `play-on` REST surface (session + `v1`): a TV/remote name
+/// or id and a natural phrase ("play Bob's Burgers", "open Netflix").
+#[derive(Deserialize)]
+pub(crate) struct PlayOnInput {
+    pub device: String,
+    pub query: String,
+}
+
+/// Reply body for `play-on`: whether an action was taken and a spoken-style line.
+#[derive(Serialize)]
+pub(crate) struct PlayOnResult {
+    pub ok: bool,
+    pub said: String,
+}
+
+/// Run the TV content resolver and shape it as an HTTP response — the shared body
+/// behind the session and `v1` `play-on` routes (MCP/voice phrase the same
+/// [`ResolveOutcome`] their own way). `404` when no TV/remote matched the name,
+/// `502` when the device couldn't be reached, else `200 {ok, said}`.
+pub(crate) async fn play_on_response(
+    state: &AppState,
+    device: &str,
+    query: &str,
+) -> impl IntoResponse {
+    let (status, ok, said) = match resolve_and_play(state, device, query).await {
+        ResolveOutcome::Played(title) => (StatusCode::OK, true, format!("Playing {title}.")),
+        ResolveOutcome::Launched(name) => (StatusCode::OK, true, format!("Opened {name}.")),
+        ResolveOutcome::OpenedPreferred(name) => (
+            StatusCode::OK,
+            true,
+            format!("Opened {name} (the last app used)."),
+        ),
+        ResolveOutcome::NoMatch => (
+            StatusCode::OK,
+            false,
+            "couldn't find a matching app or title on that device".to_string(),
+        ),
+        ResolveOutcome::NoRemote => (
+            StatusCode::NOT_FOUND,
+            false,
+            "no TV or remote found by that name".to_string(),
+        ),
+        ResolveOutcome::Failed => (
+            StatusCode::BAD_GATEWAY,
+            false,
+            "the device could not be reached".to_string(),
+        ),
+    };
+    (status, Json(PlayOnResult { ok, said }))
+}
+
+/// The media device (TV) paired to a remote, if any — the surface the content
+/// resolver searches when turning a title into playable content.
+async fn paired_media_id(state: &AppState, remote_id: &str) -> Option<String> {
+    sqlx::query_scalar::<_, Option<String>>(
+        "SELECT paired_media_id FROM remote_devices WHERE id = ?",
+    )
+    .bind(remote_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
 }
 
 #[cfg(test)]

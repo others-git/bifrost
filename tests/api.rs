@@ -3395,6 +3395,58 @@ fn bearer_json(method: &str, uri: &str, key: &str, body: &str) -> Request<Body> 
         .unwrap()
 }
 
+#[tokio::test]
+async fn v1_play_on_requires_auth() {
+    let app = helpers::test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/media/play-on")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"device":"bedroom TV","query":"play x"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn v1_play_on_404_when_no_tv_matches() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "k").await;
+    // No remotes/TVs configured in the fixture → the resolver finds none → 404.
+    let resp = app
+        .oneshot(bearer_json(
+            "POST",
+            "/api/v1/media/play-on",
+            &key,
+            r#"{"device":"bedroom TV","query":"play Bob's Burgers"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn session_play_on_requires_session() {
+    let app = helpers::test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/media/play-on")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"device":"tv","query":"open netflix"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 // ── Device enrollment (QR pairing) ───────────────────────────────────────────
 
 fn anon_json(method: &str, uri: &str, body: &str) -> Request<Body> {

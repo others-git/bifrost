@@ -9,7 +9,6 @@
 import { useRef, type ReactNode } from "react";
 import {
   rgbToHex,
-  rgbToXy,
   xyToRgb,
   setLightState,
   setLightSegments,
@@ -18,7 +17,8 @@ import {
   type MediaDevice,
   type PowerDevice,
 } from "../api";
-import { hexToRgb, LightEditor, type LightControlChange } from "./LightEditor";
+import { LightEditor, type LightControlChange } from "./LightEditor";
+import { lightOptimistic, lightSupports, lightWrite } from "./lightControl";
 import { MediaEditor } from "./MediaControls";
 import { PowerFlyout } from "./PowerFlyout";
 
@@ -56,29 +56,25 @@ export function LightFlyout({
   // White mode = a reported temperature and no colour.
   const whiteMode = st?.color_temp_mirek != null && !st?.color;
 
-  function commit(next: LightState) {
-    onLocalPatch(light.id, next);
+  // Power is its own independent dimension: send just `{ on }` so toggling never
+  // re-asserts a colour/effect (the server preserves the running mode on an
+  // on/off-only write). The optimistic patch keeps the full look for the UI.
+  function togglePower() {
+    const next = !isOn;
+    onLocalPatch(light.id, { ...(st ?? { on: false }), on: next });
     clearTimeout(timer.current);
-    timer.current = setTimeout(() => setLightState(light.id, next), 200);
+    timer.current = setTimeout(() => setLightState(light.id, { on: next }), 200);
   }
 
   function onChange(change: LightControlChange) {
-    // Send only the dimension that changed. Brightness and on/off are independent
-    // of the colour/temp/effect mode, so a brightness change carries no mode and
-    // the server preserves (and re-asserts) any running effect instead of dropping
-    // it. The three modes are mutually exclusive — the server clears the other two
-    // when one is set — so we never need to send them together.
-    const next: LightState = { on: true };
-    if (change.field === "brightness") {
-      if (light.capabilities.dimmable) next.brightness = change.brightness;
-    } else if (change.field === "color") {
-      if (light.capabilities.color_rgb) next.color = rgbToXy(...hexToRgb(change.hex));
-    } else if (change.field === "temp") {
-      if (light.capabilities.color_temperature) next.color_temp_mirek = change.mirek;
-    } else if (change.field === "effect") {
-      next.effect = change.effect;
-    }
-    commit(next);
+    // The shared light-control rule (see `lightControl.ts`): update the UI
+    // optimistically with the full resolved state, but **send only the dimension
+    // that moved** — never a stale colour/effect riding along with a brightness
+    // tweak. The server merges the minimal patch and preserves the rest.
+    if (!lightSupports(change, light.capabilities)) return;
+    onLocalPatch(light.id, lightOptimistic(light.last_state, change));
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setLightState(light.id, lightWrite(change)), 200);
   }
 
   return (
@@ -97,7 +93,7 @@ export function LightFlyout({
       segments={light.capabilities.segments}
       onSegments={(segs) => setLightSegments(light.id, segs)}
       on={isOn}
-      onToggle={() => commit({ ...(st ?? { on: false }), on: !isOn })}
+      onToggle={togglePower}
       onChange={onChange}
       onClose={onClose}
     >

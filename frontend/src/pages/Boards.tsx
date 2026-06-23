@@ -21,7 +21,6 @@ import {
   lightHex,
   mergePatch,
   restoreDefaultHome,
-  rgbToXy,
   setLightState,
   setMediaState,
   setPowerState,
@@ -40,7 +39,8 @@ import {
   type Widget,
 } from "../api";
 import { DeviceControl } from "../components/DeviceControl";
-import { LightEditor, hexToRgb, type LightControlChange } from "../components/LightEditor";
+import { LightEditor, type LightControlChange } from "../components/LightEditor";
+import { lightOptimistic, lightSupports, lightWrite } from "../components/lightControl";
 import { MediaEditor } from "../components/MediaControls";
 import { InlineSlider } from "../components/InlineSlider";
 import { RoomControlButton, GlyphButton, RestoreHomeButton } from "./Dashboard";
@@ -1157,9 +1157,8 @@ function DeviceTile({
 
   function togglePower() {
     if (light) {
-      const s: LightState = { ...(light.last_state ?? { on: false }), on: !on };
-      onLightUpdate(light.id, s);
-      setLightState(light.id, s);
+      onLightUpdate(light.id, { ...(light.last_state ?? { on: false }), on: !on });
+      setLightState(light.id, { on: !on }); // power only — preserves the light's mode
     } else if (mediaDev) {
       onMediaPatch(mediaDev.id, { power: !on });
       setMediaState(mediaDev.id, { power: !on });
@@ -1176,7 +1175,7 @@ function DeviceTile({
     (light ? (on ? (light.last_state?.brightness ?? 0) : 0) : (mediaDev?.state.volume ?? 0)) as number,
   );
   const onSlide = (v: number) => {
-    if (light) onLightUpdate(light.id, { ...(light.last_state ?? { on: true }), on: true, brightness: v });
+    if (light) onLightUpdate(light.id, lightOptimistic(light.last_state, { field: "brightness", brightness: v }));
     else if (mediaDev) onMediaPatch(mediaDev.id, { volume: v });
   };
   // Write only ~300ms after the drag stops (on release) — never spam mid-drag.
@@ -1399,9 +1398,8 @@ function GroupWidget({
   function togglePower() {
     const next = !anyOn;
     for (const l of tLights) {
-      const s: LightState = { ...(l.last_state ?? { on: false }), on: next };
-      onLightUpdate(l.id, s);
-      setLightState(l.id, s);
+      onLightUpdate(l.id, { ...(l.last_state ?? { on: false }), on: next });
+      setLightState(l.id, { on: next }); // power only — preserves each light's mode
     }
     for (const m of tMedia) {
       onMediaPatch(m.id, { power: next });
@@ -1410,39 +1408,21 @@ function GroupWidget({
     for (const p of tPower) onPowerToggle(p.id, next);
   }
 
-  // Per-light cascade (mirrors the room-header cascade, fanned per device). An
-  // effect is per-light — fanned out only to members that support it, keeping
-  // each light's own colour — like the room control.
+  // Per-light cascade (mirrors the room-header cascade, fanned per device) via the
+  // shared `lightControl` rule: send only the moved dimension to each capable
+  // member — an effect goes only to members whose catalog has it (never with a
+  // colour alongside, which would drop the effect), a brightness change carries
+  // just brightness, etc. Optimistic state keeps each light's full look.
   function cascade(change: LightControlChange) {
-    const updates: [string, LightState][] = [];
-    if (change.field === "effect") {
-      for (const l of tLights) {
-        if (!(l.capabilities.effects ?? []).includes(change.effect)) continue;
-        const next: LightState = { ...(l.last_state ?? { on: true }), on: true, effect: change.effect };
-        onLightUpdate(l.id, next);
-        updates.push([l.id, next]);
-      }
-    } else {
-      for (const l of tLights) {
-        const next: LightState = { ...(l.last_state ?? { on: true }), on: true };
-        if (change.field === "brightness") {
-          if (l.capabilities.dimmable) next.brightness = change.brightness;
-        } else if (change.field === "color") {
-          if (l.capabilities.color_rgb) {
-            next.color = rgbToXy(...hexToRgb(change.hex));
-            next.color_temp_mirek = undefined;
-          }
-        } else if (l.capabilities.color_temperature) {
-          next.color_temp_mirek = change.mirek;
-          next.color = undefined;
-        }
-        onLightUpdate(l.id, next);
-        updates.push([l.id, next]);
-      }
+    const ids = tLights.filter((l) => lightSupports(change, l.capabilities)).map((l) => l.id);
+    for (const l of tLights) {
+      if (ids.includes(l.id)) onLightUpdate(l.id, lightOptimistic(l.last_state, change));
+      else if (change.field !== "effect")
+        onLightUpdate(l.id, { ...(l.last_state ?? { on: true }), on: true });
     }
     clearTimeout(commitTimer.current);
     commitTimer.current = setTimeout(() => {
-      for (const [id, s] of updates) setLightState(id, s);
+      for (const id of ids) setLightState(id, lightWrite(change));
     }, 200);
   }
 
@@ -1492,14 +1472,16 @@ function GroupWidget({
   // after the drag stops (on release), so a drag doesn't spam the providers.
   const slideBrightnessChange = (v: number) => {
     for (const l of tLights) {
-      if (l.capabilities.dimmable) onLightUpdate(l.id, { ...(l.last_state ?? { on: true }), on: true, brightness: v });
+      if (l.capabilities.dimmable)
+        onLightUpdate(l.id, lightOptimistic(l.last_state, { field: "brightness", brightness: v }));
     }
   };
   const slideBrightnessCommit = (v: number) => {
     clearTimeout(commitTimer.current);
     commitTimer.current = setTimeout(() => {
+      // Brightness only — never re-send a member's colour/effect (shared rule).
       for (const l of tLights) {
-        if (l.capabilities.dimmable) setLightState(l.id, { ...(l.last_state ?? { on: true }), on: true, brightness: v });
+        if (l.capabilities.dimmable) setLightState(l.id, { on: true, brightness: v });
       }
     }, 300);
   };

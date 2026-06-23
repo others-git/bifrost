@@ -166,16 +166,47 @@ struct HueLightResource {
     color_gamut_type: Option<String>,
     #[serde(default)]
     effects: Option<HueEffects>,
+    /// Current firmware drives dynamic effects through `effects_v2`; the legacy
+    /// `effects` object above is read-only on these bridges (a write to its
+    /// `effect` field is accepted but silently ignored). Preferred when present.
+    #[serde(default)]
+    effects_v2: Option<HueEffectsV2>,
 }
 
-/// CLIP v2 dynamic effects on a light: `status` is the running effect
+/// Legacy CLIP v2 dynamic effects on a light: `status` is the running effect
 /// ("no_effect" when idle); `status_values` enumerates what this light supports.
+/// Read-only fallback for bridges that don't expose `effects_v2`.
 #[derive(Debug, Deserialize)]
 struct HueEffects {
     #[serde(default)]
     status: Option<String>,
     #[serde(default)]
     status_values: Vec<String>,
+}
+
+/// The `effects_v2` object: `status.effect` is the running effect and
+/// `status.effect_values` (or `action.effect_values`) enumerates the supported
+/// set. This is the surface a write must target to actually start an effect.
+#[derive(Debug, Deserialize)]
+struct HueEffectsV2 {
+    #[serde(default)]
+    status: Option<HueEffectsV2Status>,
+    #[serde(default)]
+    action: Option<HueEffectsV2Action>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HueEffectsV2Status {
+    #[serde(default)]
+    effect: Option<String>,
+    #[serde(default)]
+    effect_values: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HueEffectsV2Action {
+    #[serde(default)]
+    effect_values: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -267,12 +298,19 @@ struct HuePutLight {
     color: Option<HueColor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     color_temperature: Option<HueColorTemperature>,
+    /// Effects are activated through `effects_v2.action.effect` — the legacy
+    /// `effects.effect` write is ignored by current bridge firmware.
     #[serde(skip_serializing_if = "Option::is_none")]
-    effects: Option<HueEffectPut>,
+    effects_v2: Option<HueEffectsV2Put>,
 }
 
 #[derive(Debug, Serialize)]
-struct HueEffectPut {
+struct HueEffectsV2Put {
+    action: HueEffectV2ActionPut,
+}
+
+#[derive(Debug, Serialize)]
+struct HueEffectV2ActionPut {
     effect: String,
 }
 
@@ -299,8 +337,24 @@ fn hue_resource_to_light(r: HueLightResource, hw_id: Option<String>) -> Light {
     // A light that reports a color object at all is full-RGB capable.
     let has_color = r.color.is_some();
     // Dynamic effects: the running one → state, the supported set → capability.
-    let effect = r.effects.as_ref().and_then(|e| e.status.clone());
-    let effects = r.effects.map(|e| e.status_values).unwrap_or_default();
+    // Prefer `effects_v2` (what current firmware actually drives); fall back to
+    // the legacy `effects` object for older bridges.
+    let (effect, effects) = match r.effects_v2 {
+        Some(v2) => {
+            let active = v2.status.as_ref().and_then(|s| s.effect.clone());
+            let list = v2
+                .status
+                .map(|s| s.effect_values)
+                .filter(|l| !l.is_empty())
+                .or_else(|| v2.action.map(|a| a.effect_values))
+                .unwrap_or_default();
+            (active, list)
+        }
+        None => (
+            r.effects.as_ref().and_then(|e| e.status.clone()),
+            r.effects.map(|e| e.status_values).unwrap_or_default(),
+        ),
+    };
     let color = r.color.map(|c| {
         let brightness = r
             .dimming
@@ -394,10 +448,9 @@ impl LightProvider for HueProvider {
             color_temperature: state
                 .color_temp_mirek
                 .map(|m| HueColorTemperature { mirek: Some(m) }),
-            effects: state
-                .effect
-                .as_ref()
-                .map(|e| HueEffectPut { effect: e.clone() }),
+            effects_v2: state.effect.as_ref().map(|e| HueEffectsV2Put {
+                action: HueEffectV2ActionPut { effect: e.clone() },
+            }),
         };
 
         self.client
@@ -541,7 +594,7 @@ impl LightProvider for HueProvider {
                 .color_temp_mirek
                 .map(|m| HueColorTemperature { mirek: Some(m) }),
             // Effects aren't a grouped_light attribute — applied per-light only.
-            effects: None,
+            effects_v2: None,
         };
 
         self.client
@@ -753,11 +806,19 @@ pub fn parse_patch_from_event(item: &serde_json::Value) -> crate::models::LightS
         .and_then(|ct| ct.get("mirek"))
         .and_then(|v| v.as_u64())
         .map(|m| m as u16);
-    // A `status` change on the light's effects object pushes the running effect.
+    // A `status` change on the effects object pushes the running effect. Current
+    // firmware pushes it under `effects_v2.status.effect`; fall back to the legacy
+    // `effects.status` for older bridges.
     let effect = item
-        .get("effects")
+        .get("effects_v2")
         .and_then(|e| e.get("status"))
+        .and_then(|s| s.get("effect"))
         .and_then(|v| v.as_str())
+        .or_else(|| {
+            item.get("effects")
+                .and_then(|e| e.get("status"))
+                .and_then(|v| v.as_str())
+        })
         .map(str::to_string);
 
     crate::models::LightStatePatch {
@@ -920,7 +981,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discover_reads_effects_capability_and_active() {
+    async fn discover_reads_effects_v2_capability_and_active() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/clip/v2/resource/light"))
@@ -928,6 +989,35 @@ mod tests {
                 "data": [{
                     "id": "fx-1",
                     "metadata": {"name": "Candle"},
+                    "on": {"on": true},
+                    // Current firmware: a stale legacy `effects` plus the live `effects_v2`.
+                    "effects": { "status": "no_effect", "status_values": ["no_effect", "candle"] },
+                    "effects_v2": {
+                        "action": { "effect_values": ["no_effect", "candle", "fire", "prism"] },
+                        "status": { "effect": "candle", "effect_values": ["no_effect", "candle", "fire", "prism"] }
+                    }
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let lights = mock_provider(&server).await.discover().await.unwrap();
+        // effects_v2 wins over the legacy object for both active + capability.
+        assert_eq!(lights[0].state.effect.as_deref(), Some("candle"));
+        assert_eq!(
+            lights[0].capabilities.effects,
+            vec!["no_effect", "candle", "fire", "prism"]
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_falls_back_to_legacy_effects_without_v2() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/clip/v2/resource/light"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "id": "fx-1",
+                    "metadata": {"name": "Old"},
                     "on": {"on": true},
                     "effects": { "status": "candle", "status_values": ["no_effect", "candle", "fire"] }
                 }]
@@ -943,7 +1033,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_state_sends_the_effect() {
+    async fn set_state_sends_the_effect_via_effects_v2() {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
             .and(path("/clip/v2/resource/light/abc-123"))
@@ -962,7 +1052,9 @@ mod tests {
             .unwrap();
         let received = server.received_requests().await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
-        assert_eq!(body["effects"]["effect"], "fire");
+        // Activation must target effects_v2.action.effect, not the legacy field.
+        assert_eq!(body["effects_v2"]["action"]["effect"], "fire");
+        assert!(body.get("effects").is_none());
     }
 
     #[tokio::test]

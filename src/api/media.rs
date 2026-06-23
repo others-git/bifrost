@@ -38,6 +38,20 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/devices/{id}/room", put(set_room_handler))
         .route("/devices/{id}/receiver", put(set_receiver_handler))
         .route("/devices/{id}/companion", put(set_companion_handler))
+        .route("/play-on", post(play_on_handler))
+}
+
+/// `POST /api/media/play-on` — natural-language TV control ("play Bob's Burgers
+/// on the bedroom TV"): resolves the named TV/remote and plays a title, launches
+/// an app, or opens the last-used app. Delegates to the shared resolver.
+async fn play_on_handler(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Json(req): Json<crate::api::remote::PlayOnInput>,
+) -> impl IntoResponse {
+    crate::api::remote::play_on_response(&state, &req.device, &req.query)
+        .await
+        .into_response()
 }
 
 async fn set_receiver_handler(
@@ -1200,6 +1214,24 @@ async fn lookup_media_provider(state: &AppState, id: &str) -> ProviderLookup {
         Err(e) => {
             tracing::error!("failed to build media provider: {e:#}");
             ProviderLookup::Db
+        }
+    }
+}
+
+/// Best-effort title resolution for the TV content resolver: search the device's
+/// libraries for `query` and start the top hit. `true` if something was found and
+/// played, `false` if the search matched nothing, the provider has no search, or
+/// the device couldn't be reached — so the resolver falls back to opening an app.
+pub(crate) async fn search_and_play_on_device(state: &AppState, id: &str, query: &str) -> bool {
+    let (device_id, provider) = match lookup_media_provider(state, id).await {
+        ProviderLookup::Found(d, p) => (d, p),
+        _ => return false,
+    };
+    match provider.search_and_play(&device_id, query).await {
+        Ok(played) => played,
+        Err(e) => {
+            tracing::debug!("media search unavailable for {id}: {e:#}");
+            false
         }
     }
 }

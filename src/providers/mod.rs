@@ -181,6 +181,18 @@ pub trait MediaProvider: Send + Sync {
         Err(anyhow!("{} does not support casting", self.name()))
     }
 
+    /// **Search** the device's content libraries for a human title (e.g. "Bob's
+    /// Burgers") and start playing the best match — true content resolution, as
+    /// opposed to [`play_media`]'s raw `(content_id, content_type)` passthrough.
+    /// Returns `Ok(true)` when a result was found and started, `Ok(false)` when
+    /// the search ran but matched nothing **or** the provider has no search (so a
+    /// caller falls back rather than erroring), and `Err` only on a transport
+    /// failure. Default: unsupported (`Ok(false)`). Implemented by HA today
+    /// (`media_player.search_media` → `media_player.play_media` the top hit).
+    async fn search_and_play(&self, _device_id: &str, _query: &str) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Join `device_id` into the playback group coordinated by `coordinator_id`
     /// (both provider-native ids) so the two play in sync, controlled through
     /// the coordinator — the provider's own speaker grouping (e.g. Sonos),

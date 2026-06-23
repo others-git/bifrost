@@ -11,7 +11,6 @@ import {
   removeScene,
   restoreDefaultHome,
   rgbToHex,
-  rgbToXy,
   setMediaEnabled,
   setMediaState,
   setLightEnabled,
@@ -35,7 +34,8 @@ import {
 import { MediaEditor } from "../components/MediaControls";
 import { DeviceControl } from "../components/DeviceControl";
 import { Glyph, powerKindGlyph, mediaKindGlyph } from "../components/glyphs";
-import { hexToRgb, LightEditor, type LightControlChange } from "../components/LightEditor";
+import { LightEditor, type LightControlChange } from "../components/LightEditor";
+import { lightOptimistic, lightSupports, lightWrite } from "../components/lightControl";
 import { T, font, glassCard, radius, color, glow, alpha, nicheStyle } from "../theme";
 import { CornerFiligree } from "../components/ornament";
 import { PageHeader } from "../components/PageHeader";
@@ -485,55 +485,31 @@ function RoomBox({
 
   function cascade(change: LightControlChange) {
     if (!roomId) return;
-    // An effect is inherently per-light: it must carry each light's *own* current
-    // color so the provider renders the effect in that color (e.g. a LIFX pulse on
-    // a red light pulses red, not white). A uniform room PUT can't express
-    // per-light color, so fan the effect out per light, keeping each one's color.
+    // An effect is inherently per-light (a uniform room PUT can't express it), so
+    // fan it out only to members whose catalog has it, each carrying just the
+    // effect — see the shared `lightControl` rule (never a colour alongside it,
+    // which the backend would resolve as colour-mode and drop the effect).
     if (change.field === "effect") {
-      const updates: [string, LightState][] = [];
+      const ids = lights.filter((l) => lightSupports(change, l.capabilities)).map((l) => l.id);
       for (const l of lights) {
-        if (!(l.capabilities.effects ?? []).includes(change.effect)) continue;
-        const next: LightState = { ...(l.last_state ?? { on: true }), on: true, effect: change.effect };
-        onLightUpdate(l.id, next);
-        updates.push([l.id, next]);
+        if (ids.includes(l.id)) onLightUpdate(l.id, lightOptimistic(l.last_state, change));
       }
       clearTimeout(commitTimer.current);
       commitTimer.current = setTimeout(() => {
-        for (const [id, s] of updates) setLightState(id, s);
+        for (const id of ids) setLightState(id, lightWrite(change));
       }, 200);
       return;
     }
-    // Adjust only the dimension the user moved, per light by capability. A room
-    // brightness change must not overwrite each member's own color (e.g. set by a
-    // scene); color/white/effect are the three mutually-exclusive modes (set one,
-    // clear the others). The room PUT carries just the changed field — the backend
-    // merges it into each light's cached state and preserves untouched dimensions.
+    // Adjust only the dimension the user moved. Optimistically resolve each
+    // member (keeping its untouched dimensions), then drive the whole room with a
+    // single minimal PUT — the backend merges it into each light's cached state.
     for (const l of lights) {
-      const next: LightState = { ...(l.last_state ?? { on: true }), on: true };
-      if (change.field === "brightness") {
-        if (l.capabilities.dimmable) next.brightness = change.brightness;
-        next.effect = undefined;
-      } else if (change.field === "color") {
-        if (l.capabilities.color_rgb) {
-          next.color = rgbToXy(...hexToRgb(change.hex));
-          next.color_temp_mirek = undefined;
-        }
-        next.effect = undefined;
-      } else if (change.field === "temp") {
-        if (l.capabilities.color_temperature) {
-          next.color_temp_mirek = change.mirek;
-          next.color = undefined;
-        }
-        next.effect = undefined;
-      }
-      onLightUpdate(l.id, next);
+      const opt = lightSupports(change, l.capabilities)
+        ? lightOptimistic(l.last_state, change)
+        : { ...(l.last_state ?? { on: true }), on: true };
+      onLightUpdate(l.id, opt);
     }
-    const patch: LightState =
-      change.field === "color"
-        ? { on: true, color: rgbToXy(...hexToRgb(change.hex)) }
-        : change.field === "temp"
-          ? { on: true, color_temp_mirek: change.mirek }
-          : { on: true, brightness: change.brightness };
+    const patch = lightWrite(change);
     clearTimeout(commitTimer.current);
     commitTimer.current = setTimeout(() => { setRoomState(roomId, patch); }, 200);
   }
@@ -803,9 +779,8 @@ export function RoomControlButton({
   function togglePower() {
     const next = !anyOn;
     for (const l of tLights) {
-      const s: LightState = { ...(l.last_state ?? { on: false }), on: next };
-      onLightUpdate(l.id, s);
-      setLightState(l.id, s);
+      onLightUpdate(l.id, { ...(l.last_state ?? { on: false }), on: next });
+      setLightState(l.id, { on: next }); // power only — preserves each light's mode
     }
     for (const d of tPower) onPowerToggle(d.id, next);
     for (const d of tAudio) {
@@ -824,26 +799,18 @@ export function RoomControlButton({
   // debounced — mirrors the room-header cascade.
   function cascade(change: LightControlChange) {
     if (change.field === "effect") return; // per-light control, not a room cascade
-    const updates: [string, LightState][] = [];
+    // Fan only the moved dimension to the targeted lights — minimal write per
+    // light (shared `lightControl` rule), optimistic full state for the UI.
+    const ids = tLights.filter((l) => lightSupports(change, l.capabilities)).map((l) => l.id);
     for (const l of tLights) {
-      const next: LightState = { ...(l.last_state ?? { on: true }), on: true };
-      if (change.field === "brightness") {
-        if (l.capabilities.dimmable) next.brightness = change.brightness;
-      } else if (change.field === "color") {
-        if (l.capabilities.color_rgb) {
-          next.color = rgbToXy(...hexToRgb(change.hex));
-          next.color_temp_mirek = undefined;
-        }
-      } else if (l.capabilities.color_temperature) {
-        next.color_temp_mirek = change.mirek;
-        next.color = undefined;
-      }
-      onLightUpdate(l.id, next);
-      updates.push([l.id, next]);
+      const opt = lightSupports(change, l.capabilities)
+        ? lightOptimistic(l.last_state, change)
+        : { ...(l.last_state ?? { on: true }), on: true };
+      onLightUpdate(l.id, opt);
     }
     clearTimeout(commitTimer.current);
     commitTimer.current = setTimeout(() => {
-      for (const [id, s] of updates) setLightState(id, s);
+      for (const id of ids) setLightState(id, lightWrite(change));
     }, 200);
   }
 
@@ -1138,9 +1105,11 @@ function LightButton({
   // Quick power toggle (long-press) — refreshes after, unlike the editor's
   // debounced live commits, so a power flip reconciles against the server.
   async function toggle() {
-    const next: LightState = { ...(light.last_state ?? { on: false }), on: !isOn };
-    onLightUpdate(light.id, next);
-    await setLightState(light.id, next);
+    const next = !isOn;
+    // Power is independent: send only `{ on }` so a flip never re-asserts a
+    // colour/effect (the backend preserves the running mode). UI keeps the look.
+    onLightUpdate(light.id, { ...(light.last_state ?? { on: false }), on: next });
+    await setLightState(light.id, { on: next });
     onChanged();
   }
 

@@ -57,6 +57,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/media/devices/{id}", get(get_media))
         .route("/media/devices/{id}/state", put(set_media))
         .route("/media/devices/{id}/cast", post(cast_media))
+        .route("/media/play-on", post(play_on))
         .route("/media/devices/{id}/favorites", get(list_media_favorites))
         .route(
             "/media/devices/{id}/favorites/play",
@@ -280,6 +281,19 @@ async fn cast_media(
         return s.into_response();
     }
     set_media_status(cast_to_device(&state, &id, &req.content_id, &req.content_type).await)
+}
+
+async fn play_on(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<crate::api::remote::PlayOnInput>,
+) -> impl IntoResponse {
+    if let Err(s) = auth(&state, &headers).await {
+        return s.into_response();
+    }
+    crate::api::remote::play_on_response(&state, &req.device, &req.query)
+        .await
+        .into_response()
 }
 
 async fn list_media_favorites(
