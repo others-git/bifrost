@@ -429,13 +429,6 @@ export function BoardsPage() {
               <>
                 <Button variant="ghost" onClick={() => setEditingBoard(true)}>Edit board</Button>
                 <Button variant="ghost" onClick={exportBoard} title="Download this board as a JSON file">Export</Button>
-                <Button
-                  variant="ghost"
-                  onClick={deleteBoard}
-                  style={{ color: "#c77", borderColor: "#5a3636" }}
-                >
-                  Delete
-                </Button>
               </>
             )}
           </div>
@@ -523,6 +516,7 @@ export function BoardsPage() {
           initialAspect={board.aspect}
           onClose={() => setEditingBoard(false)}
           onSubmit={saveBoardEdits}
+          onDelete={deleteBoard}
         />
       )}
       {importing && <ImportBoardModal onClose={() => setImporting(false)} onImport={importBoard} />}
@@ -1714,6 +1708,7 @@ function BoardModal({
   initialAspect = "16:9",
   onClose,
   onSubmit,
+  onDelete,
 }: {
   title: string;
   confirmLabel: string;
@@ -1721,6 +1716,10 @@ function BoardModal({
   initialAspect?: string;
   onClose: () => void;
   onSubmit: (name: string, aspect: string) => void;
+  /** When present (editing an existing board), a left-aligned "Delete board"
+   * action lives here instead of the edit toolbar, so a stray click can't nuke
+   * the board — deleting is now Edit → Edit board → Delete → confirm. */
+  onDelete?: () => void;
 }) {
   const [name, setName] = useState(initialName);
   const [aspect, setAspect] = useState(initialAspect);
@@ -1765,9 +1764,18 @@ function BoardModal({
           Galaxy A9 is 18.5:9). Changing it rescales the existing widgets.
         </div>
       </Field>
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1rem" }}>
-        <Button variant="ghost" onClick={onClose}>Cancel</Button>
-        <Button variant="primary" onClick={submit}>{confirmLabel}</Button>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.5rem", marginTop: "1rem" }}>
+        {onDelete ? (
+          <Button variant="ghost" onClick={onDelete} style={{ color: "#c77", borderColor: "#5a3636" }}>
+            Delete board
+          </Button>
+        ) : (
+          <span />
+        )}
+        <div style={{ display: "flex", gap: "0.5rem" }}>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" onClick={submit}>{confirmLabel}</Button>
+        </div>
       </div>
     </Modal>
   );
