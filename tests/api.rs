@@ -1227,6 +1227,116 @@ async fn room_scene_captures_only_its_room_members() {
 }
 
 #[tokio::test]
+async fn palettes_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/palettes")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn import_palettes_endpoint_returns_count() {
+    // wled exposes no palettes, so the count is 0 — but the endpoint + auth work.
+    let bridge = wled_mock().await;
+    let (app, _a, _b) = helpers::test_app_with_two_lights(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .oneshot(helpers::authed_post("/api/palettes/import", &cookie, "{}"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(helpers::response_json(resp).await["imported"], 0);
+}
+
+#[tokio::test]
+async fn apply_palette_distributes_colours_across_room_lights() {
+    let bridge = wled_mock().await;
+    let (app, light_a, light_b, db) = helpers::test_app_with_two_lights_db(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // A room containing both lights.
+    let room = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/rooms",
+            &cookie,
+            &format!(r#"{{"name":"Den","light_ids":["{light_a}","{light_b}"]}}"#),
+        ))
+        .await
+        .unwrap();
+    let room_id = helpers::response_json(room).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Seed a two-colour palette directly (no create endpoint — import is the path).
+    sqlx::query(
+        "INSERT INTO palettes (id, name, source, source_id, colors) VALUES ('pal-1', 'Tropical', 'hue', 'scene-1', ?)",
+    )
+    .bind(r#"[{"xy":[0.6,0.3],"brightness":80.0},{"xy":[0.2,0.5]}]"#)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    // It shows up in the listing.
+    let list = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/palettes", &cookie))
+        .await
+        .unwrap();
+    let palettes = helpers::response_json(list).await;
+    assert_eq!(palettes[0]["name"], "Tropical");
+    assert_eq!(palettes[0]["colors"].as_array().unwrap().len(), 2);
+
+    // Apply distributes across both members.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/palettes/pal-1/apply",
+            &cookie,
+            &format!(r#"{{"room_id":"{room_id}"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["applied"], 2);
+    assert_eq!(body["failed"], 0);
+
+    // Both lights received a state write.
+    let writes = bridge
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.url.path() == "/json/state")
+        .count();
+    assert!(writes >= 2, "expected ≥2 device writes, got {writes}");
+}
+
+#[tokio::test]
+async fn apply_unknown_palette_returns_404() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .oneshot(helpers::authed_post(
+            "/api/palettes/nope/apply",
+            &cookie,
+            r#"{"room_id":"whatever"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn activate_unknown_scene_returns_404() {
     let app = helpers::test_app_with_password().await;
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;

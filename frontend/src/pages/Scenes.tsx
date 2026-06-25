@@ -7,16 +7,27 @@
 import { useEffect, useState } from "react";
 import {
   activateScene,
+  applyPalette,
   createScene,
+  getPalettes,
+  getProviders,
   getRooms,
   getScenes,
+  importPalettes,
   recaptureScene,
+  removePalette,
   removeScene,
+  rgbToHex,
   setDefaultScene,
+  xyToRgb,
+  type Palette,
+  type PaletteColor,
   type Room,
   type Scene,
 } from "../api";
+import { mirekToRgb } from "../components/LightEditor";
 import { Glyph } from "../components/glyphs";
+import { Select } from "../components/Select";
 import { useDialogs } from "../components/dialogs";
 import { PageHeader } from "../components/PageHeader";
 import { useViewport } from "../useViewport";
@@ -24,18 +35,61 @@ import { S } from "../styles";
 import { alpha, color, font, glow, labelType, radius } from "../theme";
 import { Button } from "../components/controls";
 
+/** One palette swatch's CSS colour — xy → sRGB, or a white temperature. */
+function paletteSwatch(c: PaletteColor): string {
+  if (c.xy) return rgbToHex(...xyToRgb(c.xy[0], c.xy[1], (c.brightness ?? 100) / 100));
+  if (c.mirek != null) return rgbToHex(...mirekToRgb(c.mirek));
+  return "#888";
+}
+
 export function ScenesPage() {
   const { isMobile } = useViewport();
   const [scenes, setScenes] = useState<Scene[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
+  const [palettes, setPalettes] = useState<Palette[]>([]);
+  // Whether any enabled provider can supply palettes (today: Hue). Gates the
+  // "Hue scenes" section so it's hidden on setups without a Hue bridge.
+  const [hueConfigured, setHueConfigured] = useState(false);
   const [loading, setLoading] = useState(true);
   const dialogs = useDialogs();
 
   async function load() {
-    const [s, r] = await Promise.all([getScenes(), getRooms()]);
+    const [s, r, p, providers] = await Promise.all([
+      getScenes(),
+      getRooms(),
+      getPalettes(),
+      getProviders(),
+    ]);
     setScenes(s);
     setRooms(r);
+    setPalettes(p);
+    setHueConfigured(providers.some((pr) => pr.provider_type === "hue" && pr.enabled));
     setLoading(false);
+  }
+
+  async function importHueScenes() {
+    try {
+      const { imported } = await importPalettes();
+      setPalettes(await getPalettes());
+      await dialogs.alert({
+        title: "Import complete",
+        message: imported > 0 ? `Imported ${imported} palette${imported !== 1 ? "s" : ""}.` : "No provider scenes found to import.",
+      });
+    } catch (e) {
+      await dialogs.alert({ title: "Couldn't import", message: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  async function removePaletteEntry(p: Palette) {
+    const ok = await dialogs.confirm({
+      title: "Delete palette",
+      message: `Delete "${p.name}"?`,
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
+    await removePalette(p.id);
+    setPalettes(await getPalettes());
   }
   useEffect(() => {
     load();
@@ -192,6 +246,57 @@ export function ScenesPage() {
               ))}
             </div>
           )}
+
+          {/* ── Hue scenes (imported colour palettes) ── only when a Hue
+              provider is configured, or stale palettes remain to manage. ── */}
+          {(hueConfigured || palettes.length > 0) && (
+            <>
+          <h3 style={{ ...SECTION_HEADING, marginTop: "1.9rem" }}>
+            <Glyph name="bulb" size={15} /> Hue scenes
+          </h3>
+          <p style={{ color: "var(--bf-dim)", fontSize: "0.82rem", margin: "0 0 0.9rem", maxWidth: 620 }}>
+            Colour palettes pulled from your Hue bridge's scenes. Unlike a snapshot, a palette is just
+            its colours — apply one to <em>any</em> room and its colours are spread across that room's lights.
+          </p>
+          <Button
+            variant="ghost"
+            onClick={importHueScenes}
+            style={{ marginBottom: "0.9rem", alignSelf: "flex-start" }}
+          >
+            <Glyph name="restore" size={14} /> Import from providers
+          </Button>
+          {palettes.length === 0 ? (
+            <p style={{ color: "var(--bf-faint)", fontSize: "0.85rem" }}>
+              No palettes yet — make scenes in the Hue app, then Import.
+            </p>
+          ) : (
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
+                gap: "1rem",
+                alignItems: "start",
+              }}
+            >
+              {palettes.map((p) => (
+                <PaletteCard
+                  key={p.id}
+                  palette={p}
+                  rooms={rooms}
+                  onApply={async (roomId) => {
+                    try {
+                      await applyPalette(p.id, roomId);
+                    } catch (e) {
+                      await dialogs.alert({ title: "Couldn't apply", message: e instanceof Error ? e.message : String(e) });
+                    }
+                  }}
+                  onDelete={() => removePaletteEntry(p)}
+                />
+              ))}
+            </div>
+          )}
+            </>
+          )}
         </>
       )}
 
@@ -273,6 +378,65 @@ function RoomScenesCard({
       >
         + Capture current state
       </Button>
+    </div>
+  );
+}
+
+function PaletteCard({
+  palette,
+  rooms,
+  onApply,
+  onDelete,
+}: {
+  palette: Palette;
+  rooms: Room[];
+  onApply: (roomId: string) => void;
+  onDelete: () => void;
+}) {
+  const [roomId, setRoomId] = useState<string>("");
+  return (
+    <div style={{ ...S.card, gap: "0.6rem" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+        <div style={{ minWidth: 0, flex: 1, fontWeight: 600 }}>{palette.name}</div>
+        <Button
+          variant="ghost"
+          onClick={onDelete}
+          title="Delete palette"
+          style={{ padding: "0 0.55rem", color: "#c77", borderColor: "#5a3636" }}
+        >
+          ×
+        </Button>
+      </div>
+      {/* Colour swatches */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+        {palette.colors.map((c, i) => (
+          <span
+            key={i}
+            title={c.mirek != null ? `${Math.round(1e6 / c.mirek)}K` : undefined}
+            style={{
+              width: 22,
+              height: 22,
+              borderRadius: 6,
+              background: paletteSwatch(c),
+              border: "1px solid rgba(255,255,255,0.12)",
+            }}
+          />
+        ))}
+      </div>
+      {/* Apply to a room */}
+      <div style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
+        <Select
+          value={roomId}
+          onChange={setRoomId}
+          placeholder="Choose room…"
+          options={rooms.map((r) => ({ value: r.id, label: r.name }))}
+          empty="No rooms yet"
+          style={{ flex: 1 }}
+        />
+        <Button variant="ghost" disabled={!roomId} onClick={() => roomId && onApply(roomId)}>
+          Apply
+        </Button>
+      </div>
     </div>
   );
 }

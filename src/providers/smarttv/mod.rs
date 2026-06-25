@@ -81,6 +81,11 @@ pub(crate) trait SmartTvVendor: Send + Sync {
     async fn send_key(&self, key: RemoteKey) -> Result<()>;
     /// Launch an app by its vendor-native id (package / uri / deep link).
     async fn launch_app(&self, app: &str) -> Result<()>;
+    /// Type literal text into the TV's focused field (on-screen keyboard /
+    /// search box). Default: unsupported.
+    async fn send_text(&self, _text: &str) -> Result<()> {
+        anyhow::bail!("this TV does not support text input")
+    }
     /// The TV's full native command catalogue (beyond the canonical keys), if it
     /// exposes one. Default: none.
     async fn commands(&self) -> Result<Vec<RemoteCommandInfo>> {
@@ -323,6 +328,11 @@ impl RemoteProvider for SmartTv {
     async fn launch_app(&self, _device_id: &str, activity: &str) -> Result<()> {
         tracing::debug!(target: "bifrost::smarttv", brand = self.vendor.brand(), activity, "launch app");
         self.vendor.launch_app(activity).await
+    }
+
+    async fn send_text(&self, _device_id: &str, text: &str) -> Result<()> {
+        tracing::debug!(target: "bifrost::smarttv", brand = self.vendor.brand(), len = text.len(), "send text");
+        self.vendor.send_text(text).await
     }
 
     async fn list_commands(&self, _device_id: &str) -> Result<Vec<RemoteCommandInfo>> {

@@ -9,7 +9,7 @@
 //! kelvin). We translate to/from Bifrost's CIE-xy `Color` + mirek: a saturated
 //! bulb maps to an RGB colour, an unsaturated one to a white temperature.
 
-use crate::models::{Color, Light, LightCapabilities, LightState, Provider};
+use crate::models::{Color, Light, LightCapabilities, LightState, Provider, SegmentColor};
 use crate::providers::{LightProvider, ProviderGroup};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -137,6 +137,16 @@ struct LifxLight {
     /// The LIFX group this bulb belongs to (mirrored as a Bifrost Room).
     #[serde(default)]
     group: Option<LifxGroup>,
+    /// Present on multizone strips (Z / Beam): the addressable zones. `count` is
+    /// Bifrost's segment count; the per-zone colours are written over the LAN.
+    #[serde(default)]
+    zones: Option<LifxZones>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LifxZones {
+    #[serde(default)]
+    count: u16,
 }
 
 #[derive(Debug, Deserialize)]
@@ -335,7 +345,9 @@ fn lifx_to_light(l: LifxLight) -> Light {
             color_temperature: has_temp,
             hue_gamut: None,
             effects,
-            segments: None,
+            // Multizone strips report their zone count; per-zone writes go over
+            // the LAN (the cloud HTTP API has no multizone endpoint).
+            segments: l.zones.as_ref().map(|z| z.count).filter(|&n| n > 1),
         },
         last_seen: Utc::now(),
     }
@@ -552,6 +564,18 @@ impl LightProvider for LifxProvider {
         }
         tracing::debug!(target: "bifrost::lifx", bulb = %id, lan_enabled = self.lan.is_some(), "set_state: → cloud");
         self.cloud_set(id, state).await
+    }
+
+    async fn set_segments(&self, id: &str, segments: &[SegmentColor]) -> Result<()> {
+        // Per-zone control is LAN-only: the LIFX public HTTP API has no multizone
+        // endpoint (`/state` addresses the whole strip), so an unreachable strip
+        // can't be driven per-zone — unlike `set_state`, there's no cloud fallback.
+        match &self.lan {
+            Some(lan) => lan.set_segments(id, segments).await,
+            None => bail!(
+                "LIFX per-zone control needs LAN access (the cloud API has no multizone endpoint)"
+            ),
+        }
     }
 
     async fn get_state(&self, id: &str) -> Result<LightState> {
@@ -876,6 +900,31 @@ mod tests {
         assert_eq!(
             lights[0].capabilities.effects,
             vec!["off", "breathe", "pulse"]
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_advertises_multizone_zone_count_as_segments() {
+        let server = MockServer::start().await;
+        let mut strip = light_json("d073d5000001", "Beam", true, 1.0, 3500);
+        strip["product"]["capabilities"]["has_multizone"] = json!(true);
+        strip["zones"] = json!({ "count": 16 });
+        Mock::given(method("GET"))
+            .and(path("/lights/all"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([strip])))
+            .mount(&server)
+            .await;
+        let lights = mock_provider(&server).await.discover().await.unwrap();
+        assert_eq!(lights[0].capabilities.segments, Some(16));
+        // A plain bulb (no `zones`) advertises none.
+        assert!(
+            lifx_to_light(
+                serde_json::from_value(light_json("d073d5000002", "Bulb", true, 1.0, 3500))
+                    .unwrap()
+            )
+            .capabilities
+            .segments
+            .is_none()
         );
     }
 

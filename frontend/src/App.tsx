@@ -376,20 +376,23 @@ function NavTray({
         boxSizing: "border-box",
       }}
     >
-      {/* Brand */}
+      {/* Brand — larger wordmark with the version tucked underneath it. */}
       <div
         style={{
           display: "flex",
-          alignItems: "baseline",
-          gap: "0.5rem",
+          flexDirection: "column",
+          alignItems: "flex-start",
+          gap: "0.05rem",
           padding: "0.25rem 0.6rem 0.9rem",
           overflow: "hidden",
           whiteSpace: "nowrap",
         }}
       >
-        <Brand compact={collapsed} fontSize="1.15rem" />
+        <Brand compact={collapsed} fontSize="1.55rem" />
         {!collapsed && version && (
-          <span style={{ fontSize: "0.7rem", color: color.faint }}>v{version}</span>
+          <span style={{ fontSize: "0.66rem", color: color.faint, letterSpacing: "0.04em" }}>
+            v{version}
+          </span>
         )}
       </div>
 

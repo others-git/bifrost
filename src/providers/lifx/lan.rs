@@ -19,7 +19,7 @@
 //! Deployment note: in Docker this needs host networking for broadcast to reach
 //! the LAN.
 
-use crate::models::{Color, Light, LightCapabilities, LightState, Provider};
+use crate::models::{Color, Light, LightCapabilities, LightState, Provider, SegmentColor};
 use crate::providers::{LightProvider, ProviderGroup};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -43,6 +43,11 @@ const MSG_GET: u16 = 101;
 const MSG_SET_COLOR: u16 = 102;
 const MSG_STATE: u16 = 107;
 const MSG_SET_POWER: u16 = 117;
+// Multizone (linear strip) write.
+const MSG_SET_COLOR_ZONES: u16 = 501;
+// `SetColorZones` apply field: 0 = stage (no repaint), 1 = apply now.
+const ZONE_NO_APPLY: u8 = 0;
+const ZONE_APPLY: u8 = 1;
 
 const HEADER_LEN: usize = 36;
 
@@ -164,6 +169,45 @@ fn set_power_payload(on: bool) -> Vec<u8> {
     p.extend_from_slice(&(if on { 65535u16 } else { 0 }).to_le_bytes());
     p.extend_from_slice(&0u32.to_le_bytes());
     p
+}
+
+/// A `SetColorZones` (501) payload: zone range `[start, end]`, HSBK, duration,
+/// apply flag. Setting `start == end` targets a single zone.
+fn set_color_zones_payload(start: u8, end: u8, hsbk: Hsbk, apply: u8) -> Vec<u8> {
+    let mut p = Vec::with_capacity(15);
+    p.push(start);
+    p.push(end);
+    p.extend_from_slice(&hsbk.to_bytes());
+    p.extend_from_slice(&0u32.to_le_bytes()); // duration 0
+    p.push(apply);
+    p
+}
+
+/// Map one Bifrost `SegmentColor` to HSBK. `rgb` → hue/saturation (full-value);
+/// absent colour leaves white. `brightness` (0–100) scales the value channel,
+/// defaulting to full when unset.
+fn segment_to_hsbk(seg: &SegmentColor) -> Hsbk {
+    let brightness = seg
+        .brightness
+        .map(|b| (f32::from(b) / 100.0 * 65535.0) as u16)
+        .unwrap_or(65535);
+    match seg.rgb {
+        Some(rgb) => {
+            let (hue, sat) = super::rgb_to_hs((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8);
+            Hsbk {
+                hue: (hue / 360.0 * 65535.0) as u16,
+                saturation: (sat.clamp(0.0, 1.0) * 65535.0) as u16,
+                brightness,
+                kelvin: 3500,
+            }
+        }
+        None => Hsbk {
+            hue: 0,
+            saturation: 0,
+            brightness,
+            kelvin: 3500,
+        },
+    }
 }
 
 /// Map a Bifrost `LightState` to the HSBK a `SetColor` carries. Colour wins over
@@ -410,6 +454,40 @@ impl LifxLanProvider {
             }
         }
         Ok(None)
+    }
+
+    /// Set individual zones on a multizone strip. Each [`SegmentColor`] targets
+    /// one zone; all but the final write are staged (`NO_APPLY`) so the strip
+    /// repaints exactly once. LAN-only — no cloud equivalent exists. (The zone
+    /// *count* that gates this in the UI comes from the cloud `zones.count`, like
+    /// LIFX effects/groups; a LAN-only deployment has no multizone metadata.)
+    pub async fn set_segments(&self, device_id: &str, segments: &[SegmentColor]) -> Result<()> {
+        if segments.is_empty() {
+            return Ok(());
+        }
+        let Some(addr) = self.addr_for(device_id).await else {
+            bail!("LIFX device {device_id} not found on the LAN");
+        };
+        let target = mac_bytes(device_id).context("invalid LIFX MAC")?;
+        let sock = self.socket().await?;
+        let _guard = self.exchange.lock().await;
+        let last = segments.len() - 1;
+        for (i, seg) in segments.iter().enumerate() {
+            let idx = seg.segment.min(255) as u8;
+            let apply = if i == last { ZONE_APPLY } else { ZONE_NO_APPLY };
+            let msg = build_message(
+                Some(target),
+                false,
+                false,
+                MSG_SET_COLOR_ZONES,
+                &set_color_zones_payload(idx, idx, segment_to_hsbk(seg), apply),
+                self.next_seq(),
+            );
+            sock.send_to(&msg, addr)
+                .await
+                .context("sending LIFX SetColorZones")?;
+        }
+        Ok(())
     }
 }
 
@@ -660,6 +738,70 @@ mod tests {
         let (_, col) = got.iter().find(|(t, _)| *t == MSG_SET_COLOR).unwrap();
         let sat = u16::from_le_bytes([col[3], col[4]]);
         assert!(sat > 60000, "green should be near-fully saturated: {sat}");
+    }
+
+    #[tokio::test]
+    async fn set_segments_sends_one_setcolorzones_per_zone_applying_last() {
+        clear_addr_cache().await;
+        let mock = spawn_mock_bulb("Beam", true, 0).await;
+        let provider = provider(&mock);
+        provider.scan().await.unwrap();
+        provider
+            .set_segments(
+                MOCK_MAC_HEX,
+                &[
+                    SegmentColor {
+                        segment: 0,
+                        rgb: Some(0xFF0000),
+                        brightness: None,
+                    },
+                    SegmentColor {
+                        segment: 1,
+                        rgb: Some(0x00FF00),
+                        brightness: Some(50),
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let got = mock.received.lock().await;
+        let zones: Vec<&(u16, Vec<u8>)> = got
+            .iter()
+            .filter(|(t, _)| *t == MSG_SET_COLOR_ZONES)
+            .collect();
+        assert_eq!(zones.len(), 2, "one SetColorZones per segment");
+        // Payload: [start, end, hsbk(8), duration(4), apply]. First targets zone 0
+        // and is staged; the last applies so the strip repaints once.
+        assert_eq!(zones[0].1[0], 0, "first zone start index");
+        assert_eq!(zones[0].1[1], 0, "single-zone range");
+        assert_eq!(*zones[0].1.last().unwrap(), ZONE_NO_APPLY);
+        assert_eq!(zones[1].1[0], 1, "second zone index");
+        assert_eq!(*zones[1].1.last().unwrap(), ZONE_APPLY);
+        // Zone 1's brightness (HSBK bytes 4..6 of payload, after start+end) is ~50%.
+        let bri = u16::from_le_bytes([zones[1].1[6], zones[1].1[7]]);
+        assert!((30000..36000).contains(&bri), "≈50% brightness: {bri}");
+    }
+
+    #[tokio::test]
+    async fn set_segments_errors_when_bulb_not_on_lan() {
+        clear_addr_cache().await;
+        let provider = LifxLanProvider::new_for_test(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1),
+            Duration::from_millis(100),
+        );
+        let err = provider
+            .set_segments(
+                MOCK_MAC_HEX,
+                &[SegmentColor {
+                    segment: 0,
+                    rgb: Some(0xFF0000),
+                    brightness: None,
+                }],
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not found on the LAN"));
     }
 
     #[tokio::test]

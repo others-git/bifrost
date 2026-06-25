@@ -102,6 +102,19 @@ pub struct ProviderGroup {
     pub grouped_ref: Option<String>,
 }
 
+/// A colour palette defined inside the provider's own ecosystem (e.g. a Hue
+/// scene's colour set), importable into Bifrost as a reusable [`crate::models::palette::Palette`].
+/// Light-agnostic on purpose — only the colours travel, not the per-light
+/// bindings — so the palette can be distributed across any room.
+#[derive(Debug, Clone)]
+pub struct ProviderPalette {
+    /// The source object's id in the provider's namespace (e.g. Hue scene rid),
+    /// used for idempotent re-import.
+    pub provider_id: String,
+    pub name: String,
+    pub colors: Vec<crate::models::palette::PaletteColor>,
+}
+
 /// Runtime interface every provider must implement.
 #[async_trait]
 pub trait LightProvider: Send + Sync {
@@ -113,6 +126,13 @@ pub trait LightProvider: Send + Sync {
     /// Groups (rooms/zones) defined in the provider's own ecosystem.
     /// Default: none — only providers with a native grouping concept override.
     async fn discover_groups(&self) -> Result<Vec<ProviderGroup>> {
+        Ok(vec![])
+    }
+
+    /// Colour palettes the provider stores (e.g. Hue scenes), importable into
+    /// Bifrost as reusable palettes. Default: none — only providers with a
+    /// stored-scene concept override.
+    async fn discover_palettes(&self) -> Result<Vec<ProviderPalette>> {
         Ok(vec![])
     }
 

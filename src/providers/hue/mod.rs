@@ -9,9 +9,12 @@
 
 pub mod pairing;
 
-use crate::models::{Color, HueGamut, Light, LightCapabilities, LightState, Provider};
-use crate::providers::LightProvider;
-use anyhow::{Context, Result};
+use crate::models::{
+    Color, HueGamut, Light, LightCapabilities, LightState, Provider, SegmentColor,
+    palette::PaletteColor,
+};
+use crate::providers::{LightProvider, ProviderPalette};
+use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use chrono::Utc;
 use reqwest::{Client, header};
@@ -168,6 +171,20 @@ struct HueLightResource {
     /// `effect` field is accepted but silently ignored). Preferred when present.
     #[serde(default)]
     effects_v2: Option<HueEffectsV2>,
+    /// Present only on gradient lightstrips (Signe, Gradient strip/tube): the
+    /// addressable colour points along the strip. `points_capable` is how many
+    /// independent points the strip exposes — Bifrost's segment count.
+    #[serde(default)]
+    gradient: Option<HueGradient>,
+}
+
+/// The `gradient` object on a gradient-capable light. We only need the point
+/// count for the capability; the colours themselves are write-only (segments
+/// aren't reported back into [`LightState`]).
+#[derive(Debug, Deserialize)]
+struct HueGradient {
+    #[serde(default)]
+    points_capable: Option<u16>,
 }
 
 /// Legacy CLIP v2 dynamic effects on a light: `status` is the running effect
@@ -276,6 +293,109 @@ struct HueDeviceResource {
     services: Vec<HueResourceRef>,
 }
 
+// ── Scene resources (imported as Bifrost colour palettes) ───────────────────
+
+#[derive(Debug, Deserialize)]
+struct HueSceneResource {
+    id: String,
+    metadata: HueMetadata,
+    /// The scene's colour palette — the light-agnostic colour set we import.
+    #[serde(default)]
+    palette: Option<HueScenePalette>,
+    /// Per-light target states; the fallback colour source when a scene carries
+    /// no explicit `palette`.
+    #[serde(default)]
+    actions: Vec<HueSceneAction>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HueScenePalette {
+    #[serde(default)]
+    color: Vec<HuePaletteColor>,
+    #[serde(default)]
+    color_temperature: Vec<HuePaletteTemp>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HuePaletteColor {
+    color: HueColor,
+    #[serde(default)]
+    dimming: Option<HueDimming>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HuePaletteTemp {
+    color_temperature: HueColorTemperature,
+    #[serde(default)]
+    dimming: Option<HueDimming>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HueSceneAction {
+    action: HueSceneActionBody,
+}
+
+#[derive(Debug, Deserialize)]
+struct HueSceneActionBody {
+    #[serde(default)]
+    color: Option<HueColor>,
+    #[serde(default)]
+    color_temperature: Option<HueColorTemperature>,
+    #[serde(default)]
+    dimming: Option<HueDimming>,
+}
+
+/// Extract a [`ProviderPalette`] from a Hue scene: prefer the explicit `palette`
+/// colour set, falling back to the per-light `actions` when a scene has none.
+/// Returns `None` for a scene with no usable colours (e.g. a power-only scene).
+fn hue_scene_to_palette(s: HueSceneResource) -> Option<ProviderPalette> {
+    let mut colors = Vec::new();
+    if let Some(pal) = &s.palette {
+        for c in &pal.color {
+            colors.push(PaletteColor {
+                xy: Some([c.color.xy.x, c.color.xy.y]),
+                mirek: None,
+                brightness: c.dimming.as_ref().map(|d| d.brightness),
+            });
+        }
+        for t in &pal.color_temperature {
+            if let Some(mirek) = t.color_temperature.mirek {
+                colors.push(PaletteColor {
+                    xy: None,
+                    mirek: Some(mirek),
+                    brightness: t.dimming.as_ref().map(|d| d.brightness),
+                });
+            }
+        }
+    }
+    if colors.is_empty() {
+        for a in &s.actions {
+            let brightness = a.action.dimming.as_ref().map(|d| d.brightness);
+            if let Some(c) = &a.action.color {
+                colors.push(PaletteColor {
+                    xy: Some([c.xy.x, c.xy.y]),
+                    mirek: None,
+                    brightness,
+                });
+            } else if let Some(mirek) = a.action.color_temperature.as_ref().and_then(|t| t.mirek) {
+                colors.push(PaletteColor {
+                    xy: None,
+                    mirek: Some(mirek),
+                    brightness,
+                });
+            }
+        }
+    }
+    if colors.is_empty() {
+        return None;
+    }
+    Some(ProviderPalette {
+        provider_id: s.id,
+        name: s.metadata.name,
+        colors,
+    })
+}
+
 /// A device's Zigbee radio service — carries its MAC, the basis for the
 /// cross-provider `hw_id`.
 #[derive(Debug, Deserialize)]
@@ -311,6 +431,22 @@ struct HueEffectV2ActionPut {
     effect: String,
 }
 
+/// Body for a gradient (per-segment) write: `{ "gradient": { "points": [...] } }`.
+#[derive(Debug, Serialize)]
+struct HuePutGradient {
+    gradient: HueGradientPut,
+}
+
+#[derive(Debug, Serialize)]
+struct HueGradientPut {
+    points: Vec<HueGradientPointPut>,
+}
+
+#[derive(Debug, Serialize)]
+struct HueGradientPointPut {
+    color: HueColor,
+}
+
 // ── Conversion helpers ──────────────────────────────────────────────────────
 
 fn gamut_from_str(s: &str) -> Option<HueGamut> {
@@ -333,6 +469,12 @@ fn hue_resource_to_light(r: HueLightResource, hw_id: Option<String>) -> Light {
         .and_then(gamut_from_str);
     // A light that reports a color object at all is full-RGB capable.
     let has_color = r.color.is_some();
+    // Gradient strips expose addressable colour points as Bifrost segments.
+    let segments = r
+        .gradient
+        .as_ref()
+        .and_then(|g| g.points_capable)
+        .filter(|&n| n > 0);
     // Dynamic effects: the running one → state, the supported set → capability.
     // Prefer `effects_v2` (what current firmware actually drives); fall back to
     // the legacy `effects` object for older bridges.
@@ -386,9 +528,8 @@ fn hue_resource_to_light(r: HueLightResource, hw_id: Option<String>) -> Light {
             color_temperature: true,
             hue_gamut: gamut,
             effects,
-            // Hue gradient lightstrips expose segments via a separate capability;
-            // not modelled yet (tracked as a follow-up). Plain bulbs have none.
-            segments: None,
+            // Gradient lightstrips report `points_capable`; plain bulbs have none.
+            segments,
         },
         last_seen: Utc::now(),
         hw_id,
@@ -459,6 +600,51 @@ impl LightProvider for HueProvider {
             .context("Hue set_state request failed")?
             .error_for_status()?;
 
+        Ok(())
+    }
+
+    /// Per-segment colour for a gradient strip — written as the light's
+    /// `gradient.points` array. Hue gradient points are positional and carry no
+    /// per-point brightness, so `SegmentColor::brightness` is ignored here; only
+    /// the coloured points are sent, in segment-index order. Hue requires 2–5
+    /// points, so a single-segment write is rejected.
+    async fn set_segments(&self, provider_id: &str, segments: &[SegmentColor]) -> Result<()> {
+        let mut coloured: Vec<&SegmentColor> =
+            segments.iter().filter(|s| s.rgb.is_some()).collect();
+        coloured.sort_by_key(|s| s.segment);
+        if coloured.len() < 2 {
+            bail!("Hue gradient needs at least 2 coloured points");
+        }
+        let points = coloured
+            .iter()
+            .map(|s| {
+                let rgb = s.rgb.unwrap();
+                let c = Color::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8);
+                HueGradientPointPut {
+                    color: HueColor {
+                        xy: HueXy { x: c.x, y: c.y },
+                        gamut_type: None,
+                    },
+                }
+            })
+            .collect();
+        let body = HuePutGradient {
+            gradient: HueGradientPut { points },
+        };
+
+        let wait = reserve_write_slot(&self.bridge_base).await;
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+        let url = self.resource_url(&format!("/light/{provider_id}"));
+        self.client
+            .put(&url)
+            .json(&body)
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .context("Hue set_segments request failed")?
+            .error_for_status()?;
         Ok(())
     }
 
@@ -571,6 +757,28 @@ impl LightProvider for HueProvider {
         }
 
         Ok(groups)
+    }
+
+    /// Bridge-stored scenes, imported as reusable colour palettes — the colour
+    /// set of each scene (its `palette`, or the per-light `actions` as a
+    /// fallback). The per-light bindings are intentionally dropped so the palette
+    /// is reusable across any room.
+    async fn discover_palettes(&self) -> Result<Vec<ProviderPalette>> {
+        let resp: HueListResponse<HueSceneResource> = self
+            .client
+            .get(self.resource_url("/scene"))
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .context("Hue scene request failed")?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(resp
+            .data
+            .into_iter()
+            .filter_map(hue_scene_to_palette)
+            .collect())
     }
 
     /// Native group control: one PUT to the room/zone's grouped_light —
@@ -975,6 +1183,141 @@ mod tests {
         assert_eq!(body["on"]["on"], true);
         assert_eq!(body["dimming"]["brightness"], 50.0);
         assert_eq!(body["color_temperature"]["mirek"], 370);
+    }
+
+    #[tokio::test]
+    async fn discover_palettes_extracts_scene_colour_sets() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/clip/v2/resource/scene"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "id": "scene-1",
+                        "metadata": {"name": "Tropical"},
+                        "palette": {
+                            "color": [
+                                {"color": {"xy": {"x": 0.6, "y": 0.3}}, "dimming": {"brightness": 80.0}},
+                                {"color": {"xy": {"x": 0.2, "y": 0.5}}}
+                            ],
+                            "color_temperature": [
+                                {"color_temperature": {"mirek": 300}, "dimming": {"brightness": 50.0}}
+                            ]
+                        },
+                        "actions": []
+                    },
+                    {
+                        // No palette → falls back to per-light action colours.
+                        "id": "scene-2",
+                        "metadata": {"name": "Reading"},
+                        "actions": [
+                            {"action": {"color": {"xy": {"x": 0.45, "y": 0.41}}, "dimming": {"brightness": 100.0}}},
+                            {"action": {"color_temperature": {"mirek": 250}}}
+                        ]
+                    },
+                    {
+                        // Power-only scene → no colours → dropped.
+                        "id": "scene-3",
+                        "metadata": {"name": "Off"},
+                        "actions": [{"action": {}}]
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let palettes = mock_provider(&server)
+            .await
+            .discover_palettes()
+            .await
+            .unwrap();
+        assert_eq!(palettes.len(), 2, "power-only scene dropped");
+
+        let tropical = &palettes[0];
+        assert_eq!(tropical.name, "Tropical");
+        assert_eq!(tropical.provider_id, "scene-1");
+        assert_eq!(tropical.colors.len(), 3);
+        assert_eq!(tropical.colors[0].xy, Some([0.6, 0.3]));
+        assert_eq!(tropical.colors[0].brightness, Some(80.0));
+        assert_eq!(tropical.colors[2].mirek, Some(300));
+
+        let reading = &palettes[1];
+        assert_eq!(reading.colors.len(), 2, "fell back to action colours");
+        assert_eq!(reading.colors[1].mirek, Some(250));
+    }
+
+    #[tokio::test]
+    async fn discover_advertises_gradient_points_as_segments() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/clip/v2/resource/light"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "id": "strip-1",
+                    "metadata": {"name": "Signe"},
+                    "on": {"on": true},
+                    "color": {"xy": {"x": 0.3, "y": 0.3}, "gamut_type": "C"},
+                    "gradient": {"points_capable": 5, "mode": "interpolated_palette"}
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let lights = mock_provider(&server).await.discover().await.unwrap();
+        assert_eq!(lights[0].capabilities.segments, Some(5));
+    }
+
+    #[tokio::test]
+    async fn set_segments_puts_gradient_points_in_index_order() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/clip/v2/resource/light/strip-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+            .mount(&server)
+            .await;
+
+        // Out-of-order input; only the rgb-bearing points are sent, sorted.
+        let segs = vec![
+            SegmentColor {
+                segment: 2,
+                rgb: Some(0x0000FF),
+                brightness: Some(50),
+            },
+            SegmentColor {
+                segment: 0,
+                rgb: Some(0xFF0000),
+                brightness: None,
+            },
+        ];
+        mock_provider(&server)
+            .await
+            .set_segments("strip-1", &segs)
+            .await
+            .unwrap();
+
+        let received = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
+        let points = body["gradient"]["points"].as_array().unwrap();
+        assert_eq!(points.len(), 2);
+        // First point is segment 0 (red): high x, low-ish y in Hue space.
+        assert!(points[0]["color"]["xy"]["x"].as_f64().unwrap() > 0.5);
+        // Brightness is not carried on gradient points.
+        assert!(points[1]["color"].get("brightness").is_none());
+    }
+
+    #[tokio::test]
+    async fn set_segments_rejects_fewer_than_two_points() {
+        let server = MockServer::start().await;
+        let segs = vec![SegmentColor {
+            segment: 0,
+            rgb: Some(0xFF0000),
+            brightness: None,
+        }];
+        let err = mock_provider(&server)
+            .await
+            .set_segments("strip-1", &segs)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("at least 2"));
     }
 
     #[tokio::test]

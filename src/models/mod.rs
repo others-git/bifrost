@@ -1,6 +1,7 @@
 pub mod dashboard;
 pub mod generic;
 pub mod media;
+pub mod palette;
 pub mod power;
 pub mod remote;
 

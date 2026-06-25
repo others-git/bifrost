@@ -1026,6 +1026,52 @@ export async function removeScene(id: string): Promise<void> {
   await fetch(`/api/scenes/${id}`, { method: "DELETE" });
 }
 
+// ── Colour palettes (imported provider scenes, e.g. Hue scenes) ──────────────
+
+export interface PaletteColor {
+  xy?: [number, number];
+  mirek?: number;
+  brightness?: number;
+}
+
+export interface Palette {
+  id: string;
+  name: string;
+  source: string;
+  colors: PaletteColor[];
+}
+
+export async function getPalettes(): Promise<Palette[]> {
+  const res = await fetch("/api/palettes");
+  if (!res.ok) return [];
+  return res.json();
+}
+
+/** Pull stored provider scenes (Hue scenes) in as reusable palettes. */
+export async function importPalettes(): Promise<{ imported: number }> {
+  const res = await fetch("/api/palettes/import", { method: "POST" });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+  return res.json();
+}
+
+/** Distribute a palette's colours across a room's lights. */
+export async function applyPalette(
+  id: string,
+  roomId: string,
+): Promise<{ applied: number; failed: number }> {
+  const res = await fetch(`/api/palettes/${id}/apply`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ room_id: roomId }),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function removePalette(id: string): Promise<void> {
+  await fetch(`/api/palettes/${id}`, { method: "DELETE" });
+}
+
 // ── Rooms ────────────────────────────────────────────────────────────────────
 // A Room aggregates links to provider-group mirrors plus direct lights;
 // effective membership is the union.

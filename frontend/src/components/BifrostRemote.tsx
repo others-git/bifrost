@@ -122,6 +122,62 @@ export function RemotePad({ press }: { press: (k: RemoteKey) => () => void }) {
   );
 }
 
+/** A text-entry row — types literal text into the TV's focused field (search
+ * boxes, login forms). Enter or the send button submits, then clears. Renders
+ * for any remote whose provider implements text input (Bravia, HA). */
+export function RemoteTextEntry({ send }: { send: (cmd: RemoteCommand) => void }) {
+  const [text, setText] = useState("");
+  const submit = () => {
+    const t = text.trim();
+    if (!t) return;
+    send({ text: { text: t } });
+    setText("");
+  };
+  return (
+    <div style={{ display: "flex", gap: "0.5rem" }}>
+      <input
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") submit();
+        }}
+        placeholder="Type on TV…"
+        aria-label="Send text to TV"
+        style={{
+          flex: 1,
+          minHeight: 44,
+          padding: "0 0.8rem",
+          borderRadius: 11,
+          border: `1px solid ${T.border}`,
+          background: T.surface,
+          color: T.text,
+          fontSize: "0.85rem",
+          outline: "none",
+        }}
+      />
+      <button
+        onClick={submit}
+        disabled={!text.trim()}
+        title="Send text"
+        aria-label="Send text"
+        style={{
+          width: 44,
+          minHeight: 44,
+          borderRadius: 11,
+          border: `1px solid ${alpha(ACCENT, 0.4)}`,
+          background: text.trim() ? alpha(ACCENT, 0.12) : T.surface,
+          color: text.trim() ? ACCENT : T.faint,
+          cursor: text.trim() ? "pointer" : "default",
+          display: "grid",
+          placeItems: "center",
+        }}
+      >
+        <Glyph name="send" size={18} />
+      </button>
+    </div>
+  );
+}
+
 /** The grid layout shared by the favourites strip and the full catalogue. */
 const CMD_GRID: React.CSSProperties = {
   display: "grid",

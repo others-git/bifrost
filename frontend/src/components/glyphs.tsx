@@ -195,6 +195,13 @@ const BODIES: Record<string, JSX.Element> = {
   ),
 
   // ── Smart-remote keys (themed, replacing emoji) ──────────────────────────────
+  send: (
+    // Paper-plane — submit typed text to the TV.
+    <>
+      <path d="M21 4 3 11l6 2.5L21 4Z" />
+      <path d="M21 4 11 20l-2-6.5L21 4Z" />
+    </>
+  ),
   chevron: (
     // A down chevron — the d-pad rotates it for up/left/right.
     <path d="M5 9l7 7 7-7" />
@@ -444,6 +451,7 @@ export const ALL_GLYPH_OPTIONS: { name: string; label: string }[] = [
   { name: "play_pause", label: "Play / pause" },
   { name: "prev", label: "Previous" },
   { name: "next", label: "Next" },
+  { name: "send", label: "Send" },
   { name: "favorite", label: "Favorite" },
   { name: "star", label: "Star" },
   { name: "link", label: "Link" },

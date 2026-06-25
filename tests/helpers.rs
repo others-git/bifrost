@@ -227,6 +227,51 @@ pub async fn test_app_with_two_lights(base_url: &str) -> (Router, String, String
     (build_app(state), "light-a".into(), "light-b".into())
 }
 
+/// Like `test_app_with_two_lights` but also hands back the DB pool, so a test can
+/// seed rows (e.g. a palette) that have no create endpoint.
+/// Returns (app, light_a_id, light_b_id, db).
+#[allow(dead_code)]
+pub async fn test_app_with_two_lights_db(base_url: &str) -> (Router, String, String, SqlitePool) {
+    let db = test_db().await;
+    let hash = hash_password(TEST_PASSWORD);
+    sqlx::query("INSERT INTO config (id, password_hash, setup_complete) VALUES (1, ?, 1)")
+        .bind(&hash)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let registry = test_registry();
+    let state = Arc::new(AppState::new(db.clone(), TEST_SECRET, registry));
+
+    let creds = format!(r#"{{"device_ip":"{base_url}"}}"#);
+    let enc = state.encrypt_credentials(&creds).unwrap();
+    sqlx::query("INSERT INTO providers (id, provider_type, name, credentials) VALUES (?, 'wled', 'Test WLED', ?)")
+        .bind("prov-test-1")
+        .bind(&enc)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    for (id, device, name) in [
+        ("light-a", "main", "Light A"),
+        ("light-b", "second", "Light B"),
+    ] {
+        sqlx::query(
+            "INSERT INTO lights (id, provider_id, device_id, name, capabilities, last_state, last_seen)
+             VALUES (?, 'prov-test-1', ?, ?, '{}', ?, datetime('now'))",
+        )
+        .bind(id)
+        .bind(device)
+        .bind(name)
+        .bind(r#"{"on":true,"brightness":80.0,"color":null,"color_temp_mirek":null}"#)
+        .execute(&db)
+        .await
+        .unwrap();
+    }
+
+    (build_app(state), "light-a".into(), "light-b".into(), db)
+}
+
 /// Test app with a configured password plus one Hue provider whose bridge
 /// URL points at `base_url` (a wiremock server), and one discovered light
 /// with device_id "light-1". Returns the app and the seeded light's ID.

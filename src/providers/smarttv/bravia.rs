@@ -365,6 +365,16 @@ impl SmartTvVendor for BraviaVendor {
             .map(|_| ())
     }
 
+    async fn send_text(&self, text: &str) -> Result<()> {
+        // `appControl.setTextForm` injects literal text into the focused field
+        // (search boxes, login fields). v1.0 takes the string as a positional
+        // param. NOTE: models that demand RSA-encrypted text (older PSK-auth
+        // sets) aren't covered — they'd need `encKey` from `getRemoteControllerInfo`.
+        self.scalar("appControl", "setTextForm", "1.0", json!([text]))
+            .await
+            .map(|_| ())
+    }
+
     async fn commands(&self) -> Result<Vec<RemoteCommandInfo>> {
         // result = [<meta>, [{ "name": "Power", "value": "AAAA…" }, …]] — the TV's
         // full IRCC catalogue. The token we replay is the IRCC code itself.
@@ -632,6 +642,20 @@ mod tests {
             .await;
         let v = BraviaVendor::new_for_test(&tv.uri(), Some("c".into()));
         v.send_command("MYTOKEN").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn send_text_posts_settextform() {
+        let tv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/sony/appControl"))
+            .and(body_string_contains("setTextForm"))
+            .and(body_string_contains("hello world"))
+            .respond_with(ok_result(json!({ "result": [0] })))
+            .mount(&tv)
+            .await;
+        let v = BraviaVendor::new_for_test(&tv.uri(), Some("c".into()));
+        v.send_text("hello world").await.unwrap();
     }
 
     #[tokio::test]
