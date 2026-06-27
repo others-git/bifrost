@@ -10,6 +10,7 @@ import {
   syncProviderGroups,
   pairHueBridge,
   pairSmartTv,
+  pairSmartTvRemote,
   scanForDevices,
   discoverAllDevices,
   type DiscoveredDevice,
@@ -63,6 +64,7 @@ import { useViewport } from "../useViewport";
 import { ACCENT, S } from "../styles";
 import { Button, Switch } from "../components/controls";
 import { speak } from "../tts";
+import { copyText } from "../clipboard";
 
 interface Props {
   onNavigate: (page: "dashboard") => void;
@@ -703,6 +705,13 @@ function ApiKeysSection({ dialogs }: { dialogs: Dialogs }) {
   const [pairing, setPairing] = useState(false);
   // The plaintext of a just-created key, shown once until dismissed.
   const [fresh, setFresh] = useState<{ name: string; key: string } | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  async function copyKey(key: string) {
+    const ok = await copyText(key);
+    setCopied(ok);
+    if (ok) setTimeout(() => setCopied(false), 2000);
+  }
 
   async function load() {
     setKeys(await getApiKeys());
@@ -802,9 +811,9 @@ function ApiKeysSection({ dialogs }: { dialogs: Dialogs }) {
           </code>
           <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
             <Button variant="ghost"
-              onClick={() => navigator.clipboard?.writeText(fresh.key)} style={{ padding: "0.3rem 0.6rem", fontSize: "0.78rem" }}
+              onClick={() => copyKey(fresh.key)} style={{ padding: "0.3rem 0.6rem", fontSize: "0.78rem" }}
             >
-              Copy
+              {copied ? "Copied ✓" : "Copy"}
             </Button>
             <Button variant="ghost"
               onClick={() => setFresh(null)} style={{ padding: "0.3rem 0.6rem", fontSize: "0.78rem" }}
@@ -969,6 +978,34 @@ function ProviderCard({
   const [discovering, setDiscovering] = useState(false);
   const [importing, setImporting] = useState(false);
   const [editingCreds, setEditingCreds] = useState(false);
+  // Android TV Remote pairing (smart-TV providers only): idle → code entry.
+  const [pairStep, setPairStep] = useState<"idle" | "code">("idle");
+  const [pairCode, setPairCode] = useState("");
+  const [pairBusy, setPairBusy] = useState(false);
+  const [pairMsg, setPairMsg] = useState("");
+
+  async function handlePairRemote() {
+    setPairBusy(true);
+    setPairMsg("");
+    try {
+      const code = pairStep === "code" ? pairCode.trim() : undefined;
+      const result = await pairSmartTvRemote(provider.id, code);
+      if ("error" in result) {
+        setPairMsg(result.message || "Pairing failed.");
+      } else if (result.status === "code_displayed") {
+        setPairStep("code");
+        setPairMsg("Enter the code shown on the TV.");
+      } else if (result.status === "paired") {
+        setPairStep("idle");
+        setPairCode("");
+        setPairMsg("Remote paired ✓");
+      }
+    } catch {
+      setPairMsg("Pairing request failed.");
+    } finally {
+      setPairBusy(false);
+    }
+  }
 
   useEffect(() => {
     getProviderStatus(provider.id).then(setStatus);
@@ -1024,6 +1061,15 @@ function ProviderCard({
           >
             {importing ? "…" : "Sync"}
           </Button>
+          {provider.provider_type === "smarttv" && (
+            <Button variant="ghost"
+              onClick={handlePairRemote}
+              disabled={pairBusy}
+              title="Pair the Android TV Remote so D-pad/nav keys work (Android/Google TV Bravias)"
+            >
+              {pairBusy ? "…" : pairStep === "code" ? "Confirm code" : "Pair remote"}
+            </Button>
+          )}
           <Button variant="ghost"
             onClick={() => setEditingCreds((v) => !v)}
             title="Reconfigure this provider's IP and credentials"
@@ -1033,6 +1079,23 @@ function ProviderCard({
           <Button variant="danger" onClick={onRemove}>Remove</Button>
         </div>
       </div>
+      {provider.provider_type === "smarttv" && (pairStep === "code" || pairMsg) && (
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+          {pairStep === "code" && (
+            <input
+              value={pairCode}
+              onChange={(e) => setPairCode(e.target.value)}
+              placeholder="Code on TV (e.g. 1A2B3C)"
+              autoComplete="off"
+              spellCheck={false}
+              style={{ ...S.input, maxWidth: 200, fontFamily: "monospace", letterSpacing: "0.1em" }}
+            />
+          )}
+          {pairMsg && (
+            <span style={{ fontSize: "0.78rem", color: "var(--bf-dim)" }}>{pairMsg}</span>
+          )}
+        </div>
+      )}
       <label
         style={{ display: "flex", alignItems: "flex-start", gap: "0.55rem", cursor: "pointer", color: "#9a9488", fontSize: "0.78rem" }}
       >

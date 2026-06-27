@@ -1676,6 +1676,23 @@ export async function pairSmartTv(host: string, pin?: string): Promise<SmartTvPa
   return res.json();
 }
 
+export type AtvPairResult =
+  | { status: "code_displayed"; message: string }
+  | { status: "paired" }
+  | { error: string; message: string };
+
+/** Android TV Remote pairing for an existing smart-TV provider (the remote-key
+ * transport for Android/Google TV Bravias). Call with no `code` to make the TV
+ * show a 6-digit code, then again with that code to store the client cert. */
+export async function pairSmartTvRemote(providerId: string, code?: string): Promise<AtvPairResult> {
+  const res = await fetch(`/api/providers/${providerId}/smarttv/pair-remote`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ code: code || undefined }),
+  });
+  return res.json();
+}
+
 /**
  * Convert sRGB to CIE xy + Y brightness using the Hue Wide RGB D65 matrix —
  * the same math as the server's `Color::from_rgb`.

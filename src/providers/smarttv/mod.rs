@@ -19,6 +19,7 @@
 //! Nothing else in the framework changes — the two trait impls, the Bifrost
 //! device shapes, and the command routing are all vendor-neutral.
 
+mod atv;
 mod bravia;
 
 use crate::models::media::{
@@ -111,15 +112,32 @@ struct SmartTvCreds {
     /// Vendor auth token (Bravia: the PIN-pairing cookie). Absent before pairing.
     #[serde(default)]
     auth: Option<String>,
+    /// Android TV Remote v2 client certificate (PEM), set once the remote is
+    /// paired. Together with [`atv_key`](Self::atv_key) it's the credential for
+    /// sending remote keys to Android/Google TV Bravias.
+    #[serde(default)]
+    atv_cert: Option<String>,
+    /// Private key (PEM) paired with [`atv_cert`](Self::atv_cert).
+    #[serde(default)]
+    atv_key: Option<String>,
 }
 
 /// Build the vendor adapter named by the stored `brand` (default: Bravia, the
 /// only vendor today). This is the single dispatch point new vendors extend.
 fn build_vendor(creds: &SmartTvCreds) -> Result<Box<dyn SmartTvVendor>> {
+    // A paired ATV Remote identity (cert+key) unlocks native key control.
+    let atv = match (&creds.atv_cert, &creds.atv_key) {
+        (Some(cert_pem), Some(key_pem)) => Some(atv::crypto::Identity {
+            cert_pem: cert_pem.clone(),
+            key_pem: key_pem.clone(),
+        }),
+        _ => None,
+    };
     match creds.brand.as_deref() {
         Some("bravia") | None => Ok(Box::new(bravia::BraviaVendor::new(
             &creds.host,
             creds.auth.clone(),
+            atv,
         )?)),
         Some(other) => Err(anyhow!("unknown smart-TV brand '{other}'")),
     }
@@ -152,6 +170,47 @@ pub async fn pair_begin(host: &str) -> Result<SmartTvPairOutcome> {
 /// Finish pairing with the on-screen PIN; returns the `auth` credential to store.
 pub async fn pair_complete(host: &str, pin: &str) -> Result<String> {
     bravia::pairing::complete(host, pin).await
+}
+
+// ── ATV Remote v2 pairing (for remote keys on Android/Google TVs) ────────────
+//
+// This is a *separate* credential from the ScalarWeb PIN cookie above: it's the
+// self-signed client cert the Android TV Remote protocol authenticates with.
+// Pairing is interactive — the TV shows a code only after the configuration
+// step — so the live TLS session is parked here (keyed by host) between
+// [`atv_pair_begin`] and [`atv_pair_complete`].
+
+type AtvSession = (atv::client::PairingSession, atv::crypto::Identity);
+
+fn atv_pairings() -> &'static std::sync::Mutex<std::collections::HashMap<String, AtvSession>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, AtvSession>>> =
+        std::sync::OnceLock::new();
+    M.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Begin ATV Remote pairing: generate a fresh identity, drive the handshake to
+/// the point where the TV displays its 6-digit code, and park the live session.
+/// Call [`atv_pair_complete`] with the code to finish.
+pub async fn atv_pair_begin(host: &str) -> Result<()> {
+    let identity = atv::crypto::Identity::generate()?;
+    let session = atv::client::PairingSession::begin(host, &identity, "Bifrost").await?;
+    atv_pairings()
+        .lock()
+        .expect("atv pairing map poisoned")
+        .insert(host.to_string(), (session, identity));
+    Ok(())
+}
+
+/// Finish ATV Remote pairing with the on-screen `code`; returns the
+/// `(cert_pem, key_pem)` to persist as the `atv_cert`/`atv_key` credentials.
+pub async fn atv_pair_complete(host: &str, code: &str) -> Result<(String, String)> {
+    let (session, identity) = atv_pairings()
+        .lock()
+        .expect("atv pairing map poisoned")
+        .remove(host)
+        .ok_or_else(|| anyhow!("no pairing in progress for this TV — start pairing again"))?;
+    session.finish(code).await?;
+    Ok((identity.cert_pem, identity.key_pem))
 }
 
 /// The credential fields the add-provider form collects. `host` is pre-filled by
@@ -398,6 +457,22 @@ mod tests {
             host: "192.168.1.40".into(),
             brand: None,
             auth: Some("cookie".into()),
+            atv_cert: None,
+            atv_key: None,
+        })
+        .unwrap();
+        assert_eq!(v.brand(), "Sony Bravia");
+    }
+
+    #[test]
+    fn build_vendor_accepts_a_paired_atv_identity() {
+        let id = atv::crypto::Identity::generate().unwrap();
+        let v = build_vendor(&SmartTvCreds {
+            host: "192.168.1.40".into(),
+            brand: Some("bravia".into()),
+            auth: None,
+            atv_cert: Some(id.cert_pem),
+            atv_key: Some(id.key_pem),
         })
         .unwrap();
         assert_eq!(v.brand(), "Sony Bravia");
@@ -409,6 +484,8 @@ mod tests {
             host: "192.168.1.40".into(),
             brand: Some("nosuchbrand".into()),
             auth: None,
+            atv_cert: None,
+            atv_key: None,
         });
         match result {
             Err(e) => assert!(e.to_string().contains("unknown smart-TV brand")),

@@ -640,6 +640,83 @@ async fn reorder_providers_without_session_returns_401() {
 }
 
 #[tokio::test]
+async fn smarttv_pair_remote_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers/whatever/smarttv/pair-remote")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn smarttv_pair_remote_unknown_provider_returns_404() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .oneshot(helpers::authed_post(
+            "/api/providers/nope/smarttv/pair-remote",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn smarttv_pair_remote_rejects_non_smarttv_provider() {
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    sqlx::query("INSERT INTO providers (id, provider_type, name, credentials) VALUES ('p1', 'wled', 'Strip', 'x')")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .oneshot(helpers::authed_post(
+            "/api/providers/p1/smarttv/pair-remote",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    // Wrong provider type is the caller's mistake, not a server/gateway fault.
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn smarttv_pair_remote_begin_unreachable_returns_502() {
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    // A smart-TV provider whose host points at a closed local port: the begin
+    // phase reaches atv_pair_begin and fails fast (connection refused) → 502.
+    let enc = state
+        .encrypt_credentials(r#"{"host":"127.0.0.1","brand":"bravia"}"#)
+        .unwrap();
+    sqlx::query("INSERT INTO providers (id, provider_type, name, credentials) VALUES ('tv1', 'smarttv', 'BRAVIA', ?)")
+        .bind(&enc)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .oneshot(helpers::authed_post(
+            "/api/providers/tv1/smarttv/pair-remote",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
 async fn logout_clears_session() {
     let app = helpers::test_app_with_password().await;
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;

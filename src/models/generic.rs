@@ -31,21 +31,47 @@ pub struct GenericDevice {
     pub hw_id: Option<String>,
 }
 
-/// HA entity-id prefixes Bifrost surfaces through the generic domain — the
-/// controllable long tail it doesn't natively model. Lights, switches/fans,
-/// media players, and remotes are handled by their own domains and excluded.
-pub const GENERIC_HA_DOMAINS: &[&str] = &[
-    "climate.",
-    "cover.",
-    "lock.",
-    "number.",
-    "input_number.",
-    "select.",
-    "input_select.",
-    "button.",
-    "input_button.",
-    "scene.",
-    "weather.",
+/// HA entity-id domains the generic passthrough does **not** surface — so that
+/// the generic domain stays a true escape hatch: *everything else* (the
+/// controllable long tail) appears automatically, and a new HA device type
+/// (vacuum, valve, humidifier, …) shows up without a code change.
+///
+/// Two exclusion categories: (1) domains Bifrost models **natively** — surfacing
+/// them generically would duplicate the device and fight cross-provider de-dup;
+/// (2) **read-only / infrastructure** entities (the `sensor` flood, presence,
+/// HA-internal plumbing) that aren't controllable devices. An entity that slips
+/// through with no specific mapping still renders a state readout, never blank.
+pub const GENERIC_HA_EXCLUDED_DOMAINS: &[&str] = &[
+    // Native Bifrost domains (handled by their own providers).
+    "light.",
+    "switch.",
+    "fan.",
+    "media_player.",
+    "remote.",
+    // Read-only sensors — the bulk of HA's entity count.
+    "sensor.",
+    "binary_sensor.",
+    // Presence / location / environment infra (not controllable devices).
+    "device_tracker.",
+    "person.",
+    "zone.",
+    "sun.",
+    "geo_location.",
+    // HA-internal plumbing & voice pipeline.
+    "persistent_notification.",
+    "automation.",
+    "script.",
+    "tag.",
+    "stt.",
+    "tts.",
+    "conversation.",
+    "assist_satellite.",
+    "wake_word.",
+    // Streams / one-shot data with no simple control primitive.
+    "camera.",
+    "image.",
+    "event.",
+    "update.",
 ];
 
 /// Map a generic control write (entity `domain` + control `key` + JSON `value`)
@@ -92,6 +118,19 @@ pub fn control_write_to_ha(
         ),
         ("button" | "input_button", "press") => svc(domain, "press", json!({})),
         ("scene", "press") => svc("scene", "turn_on", json!({})),
+        // Vacuum / robot (e.g. a Litter-Robot, which HA models as a `vacuum`):
+        // momentary actions map straight to the vacuum services.
+        ("vacuum", "start") => svc("vacuum", "start", json!({})),
+        ("vacuum", "pause") => svc("vacuum", "pause", json!({})),
+        ("vacuum", "stop") => svc("vacuum", "stop", json!({})),
+        ("vacuum", "return") => svc("vacuum", "return_to_base", json!({})),
+        ("vacuum", "clean_spot") => svc("vacuum", "clean_spot", json!({})),
+        ("vacuum", "locate") => svc("vacuum", "locate", json!({})),
+        ("vacuum", "fan_speed") => svc(
+            "vacuum",
+            "set_fan_speed",
+            json!({ "fan_speed": value.as_str()? }),
+        ),
         _ => None,
     }
 }
@@ -275,6 +314,51 @@ pub fn controls_from_ha(domain: &str, state: &str, attrs: &Value) -> Vec<Control
             }
             c
         }
+        "vacuum" => {
+            // A vacuum/robot (e.g. a Litter-Robot): status readout + the actions
+            // its `supported_features` bitmask advertises, plus battery/mode when
+            // reported. Bits are `VacuumEntityFeature`.
+            let mut c = vec![Control::Readout {
+                key: "state".into(),
+                label: "Status".into(),
+                value: state.to_string(),
+                unit: None,
+            }];
+            let feat = attr_f64(attrs, "supported_features").unwrap_or(0.0) as u64;
+            for (bit, key, label) in [
+                (8192u64, "start", "Start"),
+                (4, "pause", "Pause"),
+                (8, "stop", "Stop"),
+                (16, "return", "Return home"),
+                (1024, "clean_spot", "Clean spot"),
+                (512, "locate", "Locate"),
+            ] {
+                if feat & bit != 0 {
+                    c.push(Control::Button {
+                        key: key.into(),
+                        label: label.into(),
+                    });
+                }
+            }
+            if let Some(b) = attr_f64(attrs, "battery_level") {
+                c.push(Control::Readout {
+                    key: "battery".into(),
+                    label: "Battery".into(),
+                    value: format_num(b),
+                    unit: Some("%".into()),
+                });
+            }
+            let speeds = attr_list(attrs, "fan_speed_list");
+            if !speeds.is_empty() {
+                c.push(Control::Enum {
+                    key: "fan_speed".into(),
+                    label: "Mode".into(),
+                    value: attr_str(attrs, "fan_speed"),
+                    options: speeds,
+                });
+            }
+            c
+        }
         // Unknown domain: surface the raw state as a readout so it's never blank.
         _ => vec![Control::Readout {
             key: "state".into(),
@@ -377,6 +461,69 @@ mod tests {
                 .any(|x| matches!(x, Control::Readout { key, unit, .. }
                 if key == "humidity" && unit.as_deref() == Some("%")))
         );
+    }
+
+    #[test]
+    fn vacuum_yields_status_and_feature_gated_buttons() {
+        // 12296 = START(8192) | STATE(4096) | STOP(8) — the Litter-Robot 4's set.
+        let c = controls_from_ha("vacuum", "docked", &json!({ "supported_features": 12296 }));
+        assert!(
+            matches!(&c[0], Control::Readout { key, value, .. } if key == "state" && value == "docked")
+        );
+        let buttons: Vec<&str> = c
+            .iter()
+            .filter_map(|x| match x {
+                Control::Button { key, .. } => Some(key.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(buttons.contains(&"start") && buttons.contains(&"stop"));
+        // Bits not set → those actions are absent.
+        assert!(!buttons.contains(&"pause") && !buttons.contains(&"return"));
+    }
+
+    #[test]
+    fn vacuum_write_map_targets_vacuum_services() {
+        assert_eq!(
+            control_write_to_ha("vacuum", "start", &json!(null))
+                .unwrap()
+                .1,
+            "start"
+        );
+        assert_eq!(
+            control_write_to_ha("vacuum", "return", &json!(null))
+                .unwrap()
+                .1,
+            "return_to_base"
+        );
+        let (_, s, data) = control_write_to_ha("vacuum", "fan_speed", &json!("max")).unwrap();
+        assert_eq!(s, "set_fan_speed");
+        assert_eq!(data["fan_speed"], "max");
+    }
+
+    #[test]
+    fn denylist_excludes_native_and_sensors_but_not_the_controllable_longtail() {
+        // Native domains + read-only noise are excluded …
+        for excluded in [
+            "light.",
+            "switch.",
+            "media_player.",
+            "sensor.",
+            "binary_sensor.",
+        ] {
+            assert!(
+                GENERIC_HA_EXCLUDED_DOMAINS.contains(&excluded),
+                "{excluded} should be excluded"
+            );
+        }
+        // … but the controllable long tail (incl. types with no specific mapping
+        // yet) is NOT — that's the escape-hatch guarantee.
+        for surfaced in ["vacuum.", "valve.", "humidifier.", "climate.", "lock."] {
+            assert!(
+                !GENERIC_HA_EXCLUDED_DOMAINS.contains(&surfaced),
+                "{surfaced} should be surfaced generically"
+            );
+        }
     }
 
     #[test]

@@ -43,7 +43,7 @@
 //!   basis for grouping a device's entities (the deferred device-registry import).
 
 use crate::models::generic::{
-    Control, GENERIC_HA_DOMAINS, GenericDevice, control_write_to_ha, controls_from_ha,
+    Control, GENERIC_HA_EXCLUDED_DOMAINS, GenericDevice, control_write_to_ha, controls_from_ha,
 };
 use crate::models::media::{
     MediaCapabilities, MediaCommand, MediaDevice, MediaDeviceKind, MediaEvent, MediaState,
@@ -1453,7 +1453,10 @@ impl GenericProvider for HaProvider {
             .await?
             .into_iter()
             .filter(|e| {
-                GENERIC_HA_DOMAINS
+                // Escape-hatch by default: surface every entity except the
+                // natively-handled / read-only domains, and any non-primary
+                // (hidden/disabled/diagnostic) entity.
+                !GENERIC_HA_EXCLUDED_DOMAINS
                     .iter()
                     .any(|p| e.entity_id.starts_with(p))
                     && keep_entity(&reg, &e.entity_id)
@@ -2027,6 +2030,42 @@ mod tests {
             tv.controls
                 .iter()
                 .any(|c| matches!(c, Control::Enum { key, .. } if key == "hvac_mode"))
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_generic_surfaces_longtail_via_denylist() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/states"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                // A Litter-Robot: HA models it as a vacuum (START|STOP|STATE).
+                { "entity_id": "vacuum.litter_robot_4_litter_box", "state": "docked",
+                  "attributes": { "supported_features": 12296, "friendly_name": "Litter-Robot 4" } },
+                // A domain with no specific mapping still surfaces (state readout).
+                { "entity_id": "valve.water_main", "state": "open", "attributes": {} },
+                // Read-only noise stays excluded.
+                { "entity_id": "sensor.cpu_temp", "state": "55", "attributes": {} },
+            ])))
+            .mount(&server)
+            .await;
+
+        let p = HaProvider::new_for_test(server.uri()).unwrap();
+        let devices = GenericProvider::discover(&p).await.unwrap();
+        let ids: Vec<&str> = devices.iter().map(|d| d.device_id.as_str()).collect();
+        assert!(ids.contains(&"vacuum.litter_robot_4_litter_box"));
+        assert!(ids.contains(&"valve.water_main"));
+        assert!(!ids.iter().any(|id| id.starts_with("sensor.")));
+
+        let robot = devices
+            .iter()
+            .find(|d| d.kind == "vacuum")
+            .expect("vacuum surfaced");
+        assert!(
+            robot
+                .controls
+                .iter()
+                .any(|c| matches!(c, Control::Button { key, .. } if key == "start"))
         );
     }
 

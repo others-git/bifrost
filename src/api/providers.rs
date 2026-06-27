@@ -30,6 +30,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{id}/prune", put(set_prune))
         .route("/{id}/discover", post(discover))
         .route("/{id}/sync-groups", post(sync_groups))
+        .route("/{id}/smarttv/pair-remote", post(smarttv_pair_remote))
 }
 
 // ── Network auto-detect ─────────────────────────────────────────────────────
@@ -1034,6 +1035,106 @@ async fn smarttv_pair(_: Session, Json(req): Json<SmartTvPairRequest>) -> impl I
             Json(serde_json::json!({ "error": "tv_unreachable", "message": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct AtvPairRequest {
+    /// The on-screen code to finish pairing. Absent/empty = begin (TV shows it).
+    #[serde(default)]
+    code: Option<String>,
+}
+
+/// Two-phase **Android TV Remote** pairing for an existing smart-TV provider
+/// (the modern remote-key transport for Android/Google TV Bravias). A first call
+/// (no `code`) makes the TV display a 6-digit code; a second call with that code
+/// generates + stores the client certificate in the provider's credentials.
+async fn smarttv_pair_remote(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+    Json(req): Json<AtvPairRequest>,
+) -> impl IntoResponse {
+    use crate::providers::smarttv;
+
+    // Resolve the TV's host from the provider's stored credentials.
+    let row = sqlx::query("SELECT provider_type, credentials FROM providers WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await;
+    let (provider_type, credentials_enc): (String, String) = match row {
+        Ok(Some(r)) => (r.get("provider_type"), r.get("credentials")),
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("db error: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    if provider_type != "smarttv" {
+        return (StatusCode::UNPROCESSABLE_ENTITY, "not a smart-TV provider").into_response();
+    }
+    let mut creds = match state
+        .decrypt_credentials(&credentials_enc)
+        .ok()
+        .and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok())
+        .and_then(|v| v.as_object().cloned())
+    {
+        Some(o) => o,
+        None => {
+            return (StatusCode::UNPROCESSABLE_ENTITY, "credentials unreadable").into_response();
+        }
+    };
+    let host = match creds.get("host").and_then(|v| v.as_str()) {
+        Some(h) if !h.trim().is_empty() => h.to_string(),
+        _ => return (StatusCode::UNPROCESSABLE_ENTITY, "provider has no host").into_response(),
+    };
+
+    match req.code.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        // Phase 2: finish with the code and persist the cert/key into the creds.
+        Some(code) => match smarttv::atv_pair_complete(&host, code).await {
+            Ok((cert_pem, key_pem)) => {
+                creds.insert("atv_cert".into(), cert_pem.into());
+                creds.insert("atv_key".into(), key_pem.into());
+                let creds_json = serde_json::Value::Object(creds).to_string();
+                let encrypted = match state.encrypt_credentials(&creds_json) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::error!("encryption error: {e}");
+                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    }
+                };
+                if let Err(e) = sqlx::query(
+                    "UPDATE providers SET credentials = ?, updated_at = datetime('now') WHERE id = ?",
+                )
+                .bind(&encrypted)
+                .bind(&id)
+                .execute(&state.db)
+                .await
+                {
+                    tracing::error!("db error: {e}");
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
+                Json(serde_json::json!({ "status": "paired" })).into_response()
+            }
+            Err(e) => (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": "pair_failed", "message": e.to_string() })),
+            )
+                .into_response(),
+        },
+        // Phase 1: begin — the TV displays a code.
+        None => match smarttv::atv_pair_begin(&host).await {
+            Ok(()) => Json(serde_json::json!({
+                "status": "code_displayed",
+                "message": "Enter the code shown on the TV screen."
+            }))
+            .into_response(),
+            Err(e) => (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": "tv_unreachable", "message": e.to_string() })),
+            )
+                .into_response(),
+        },
     }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "bifrost"
-version = "0.28.13"
+version = "0.28.14"
 edition = "2024"
 
 [lib]
@@ -69,6 +69,15 @@ hex = "0.4"
 # deterministic hashing for API key lookup (keys are high-entropy)
 sha2 = "0.10"
 futures-util = "0.3"
+
+# Android TV Remote v2 (smart-TV remote keys over TLS): raw TLS sockets with a
+# self-signed RSA client cert. Pinned to the ring crypto provider already in the
+# tree (no aws-lc-rs C dependency, keeps the static musl build clean).
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rsa = { version = "0.9", features = ["sha2"] }
+x509-cert = { version = "0.2", features = ["builder", "pem"] }
+signature = "2"
 # embedded MCP server (Streamable HTTP) — the /mcp surface over the service layer
 rmcp = { version = "1.7.0", features = ["server", "transport-streamable-http-server", "schemars"] }
 schemars = "1" # JSON Schema for MCP tool argument structs

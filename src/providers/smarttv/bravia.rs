@@ -30,6 +30,10 @@ pub(crate) struct BraviaVendor {
     ip: String,
     /// The PIN-pairing `auth` cookie value, replayed as `Cookie: auth=…`.
     auth: Option<String>,
+    /// Android TV Remote v2 identity (self-signed client cert), once the remote
+    /// is paired. When present, key presses go over ATV Remote instead of IRCC —
+    /// required for Android/Google TV Bravias, which no longer expose `/sony/IRCC`.
+    atv: Option<super::atv::crypto::Identity>,
     client: Client,
 }
 
@@ -42,7 +46,11 @@ fn bare_host(base: &str) -> String {
 }
 
 impl BraviaVendor {
-    pub(crate) fn new(host: &str, auth: Option<String>) -> Result<Self> {
+    pub(crate) fn new(
+        host: &str,
+        auth: Option<String>,
+        atv: Option<super::atv::crypto::Identity>,
+    ) -> Result<Self> {
         if host.trim().is_empty() {
             bail!("bravia: empty host");
         }
@@ -52,6 +60,7 @@ impl BraviaVendor {
             ip: bare_host(&base),
             base,
             auth,
+            atv,
             client,
         })
     }
@@ -63,6 +72,7 @@ impl BraviaVendor {
             ip: bare_host(&base),
             base,
             auth,
+            atv: None,
             client: Client::builder().build().unwrap(),
         }
     }
@@ -356,6 +366,13 @@ impl SmartTvVendor for BraviaVendor {
     }
 
     async fn send_key(&self, key: RemoteKey) -> Result<()> {
+        // Android/Google TV Bravias dropped the `/sony/IRCC` SOAP endpoint; once
+        // the ATV Remote is paired, route keys there. IRCC remains the path for
+        // older (pre-Android) Bravias that never paired an ATV identity.
+        if let Some(id) = &self.atv {
+            return super::atv::client::send_key(&self.ip, id, super::atv::android_keycode(key))
+                .await;
+        }
         self.ircc(ircc_code(key)).await
     }
 
