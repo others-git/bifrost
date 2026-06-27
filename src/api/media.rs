@@ -191,10 +191,15 @@ pub(crate) struct MediaDeviceRow {
     /// The receiver input to select when this source becomes active; `None` =
     /// leave the receiver's input alone.
     pub receiver_source: Option<String>,
-    /// M26 composite: the PRIMARY media device id this entity merges into, if it
-    /// is a companion (a complementary view of the same physical device). `None`
-    /// = standalone. A companion is hidden from control; its state/controls merge
-    /// into the primary (unlike `shadowed_by`, which discards them).
+    /// Composite membership: the **logical-device group** this row belongs to.
+    /// Rows sharing a `group_id` are one composite (a TV's several media views,
+    /// its remote, …). `None` = standalone. Cross-domain — `remote_devices` carry
+    /// the same column. Replaces the old directional `companion_of`/`paired_media_id`.
+    pub group_id: Option<String>,
+    /// **Derived** (not stored): the group's representative ("surface") id when
+    /// this row is a *non-surface* member, else `None`. Computed from `group_id`
+    /// via [`group_surfaces`] during read assembly. Kept under the historical name
+    /// so the API/clients still see "this is a hidden companion of the surface".
     pub companion_of: Option<String>,
     /// M24 composite: the paired remote's device id, when this is a TV whose
     /// `media_player` shares hardware with an enabled `remote.*` entity (set by
@@ -226,8 +231,70 @@ fn row_to_device(r: sqlx::sqlite::SqliteRow) -> MediaDeviceRow {
         inherited_room_id: r.try_get("inherited_room_id").ok().flatten(),
         receiver_id: r.get("receiver_id"),
         receiver_source: r.get("receiver_source"),
-        companion_of: r.get("companion_of"),
+        group_id: r.try_get("group_id").ok().flatten(),
+        companion_of: None, // derived later from group_id + surface selection
         remote_id: r.try_get("remote_id").ok().flatten(),
+    }
+}
+
+/// Rank a device kind for surface (group-representative) selection.
+fn kind_rank(kind: &str) -> u8 {
+    match kind {
+        "tv" => 3,
+        "receiver" => 2,
+        "speaker" => 1,
+        _ => 0,
+    }
+}
+
+/// Map each non-singleton group to its **derived surface** — the member that
+/// represents the composite. Highest authority (native over Integration) then
+/// kind (a `tv` over a bare `speaker` view), ties broken on the smallest id so
+/// the choice is stable. No surface is stored, so it can never drift from the
+/// members.
+pub(crate) async fn group_surfaces(state: &AppState) -> std::collections::HashMap<String, String> {
+    let rows = sqlx::query(
+        "SELECT m.id, m.group_id, m.kind, p.provider_type
+         FROM media_devices m JOIN providers p ON m.provider_id = p.id
+         WHERE m.group_id IS NOT NULL",
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| tracing::error!("db error loading group surfaces: {e}"))
+    .unwrap_or_default();
+    // For each group, keep the best (authority, kind_rank, -id) member.
+    let mut best: std::collections::HashMap<String, (u8, u8, String)> =
+        std::collections::HashMap::new();
+    for r in &rows {
+        let group: String = r.get("group_id");
+        let id: String = r.get("id");
+        let kind: String = r.get("kind");
+        let ptype: String = r.get("provider_type");
+        let score = (backing_authority(&state.registry, &ptype), kind_rank(&kind));
+        match best.get(&group) {
+            Some((a, k, cur_id)) if (*a, *k) > score || ((*a, *k) == score && *cur_id <= id) => {}
+            _ => {
+                best.insert(group, (score.0, score.1, id));
+            }
+        }
+    }
+    best.into_iter().map(|(g, (_, _, id))| (g, id)).collect()
+}
+
+/// Set each row's derived `companion_of` (= its group's surface, when the row
+/// isn't itself the surface). A singleton (no `group_id`) is always its own
+/// surface → `companion_of = None`.
+fn derive_companions(
+    rows: &mut [MediaDeviceRow],
+    surfaces: &std::collections::HashMap<String, String>,
+) {
+    for d in rows.iter_mut() {
+        d.companion_of = d
+            .group_id
+            .as_deref()
+            .and_then(|g| surfaces.get(g))
+            .filter(|surface| surface.as_str() != d.id)
+            .cloned();
     }
 }
 
@@ -305,13 +372,19 @@ fn merge_companion_into(primary: &mut MediaDeviceRow, companion: &MediaDeviceRow
 }
 
 /// The companion rows (M26) merged into `primary_id`, if any.
-async fn load_companions(state: &AppState, primary_id: &str) -> Vec<MediaDeviceRow> {
+/// The other members of `id`'s composite group (everything sharing its
+/// `group_id`, excluding `id` itself). Empty for a standalone device.
+async fn load_companions(state: &AppState, id: &str) -> Vec<MediaDeviceRow> {
     sqlx::query(
-        "SELECT id, provider_id, device_id, name, kind, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto, receiver_id, receiver_source, companion_of,
+        "SELECT id, provider_id, device_id, name, kind, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto, receiver_id, receiver_source, group_id,
                 (SELECT room_id FROM room_media_devices WHERE media_device_id = media_devices.id LIMIT 1) AS room_id
-         FROM media_devices WHERE companion_of = ?",
+         FROM media_devices
+         WHERE group_id IS NOT NULL
+           AND group_id = (SELECT group_id FROM media_devices WHERE id = ?)
+           AND id != ?",
     )
-    .bind(primary_id)
+    .bind(id)
+    .bind(id)
     .fetch_all(&state.db)
     .await
     .map_err(|e| tracing::error!("db error loading companions: {e}"))
@@ -425,7 +498,8 @@ fn apply_composite_power(
 /// integration `remote.*` for the same TV — [`backing_authority`]), and its
 /// cached state.
 struct PairedRemote {
-    surface_id: String,
+    /// The composite group this remote belongs to.
+    group_id: String,
     remote_id: String,
     priority: u8,
     state: Option<RemoteState>,
@@ -438,21 +512,19 @@ struct PairedRemote {
 /// or *every* one's signal for the power/reachability OR. Returning all of them —
 /// not an arbitrary `LIMIT 1` — is what keeps a composite from masking a member's
 /// remote capabilities depending on which device was merged into which.
-async fn load_paired_remotes(state: &AppState, surface: Option<&str>) -> Vec<PairedRemote> {
+async fn load_paired_remotes(state: &AppState, group: Option<&str>) -> Vec<PairedRemote> {
     let mut sql = String::from(
-        "SELECT COALESCE(m.companion_of, m.id) AS surface_id, r.id AS remote_id,
-                r.last_state, p.provider_type
+        "SELECT r.group_id, r.id AS remote_id, r.last_state, p.provider_type
          FROM remote_devices r
-         JOIN media_devices m ON r.paired_media_id = m.id
          JOIN providers p ON r.provider_id = p.id
-         WHERE r.enabled = 1",
+         WHERE r.enabled = 1 AND r.group_id IS NOT NULL",
     );
-    if surface.is_some() {
-        sql.push_str(" AND (m.id = ? OR m.companion_of = ?)");
+    if group.is_some() {
+        sql.push_str(" AND r.group_id = ?");
     }
     let mut q = sqlx::query(&sql);
-    if let Some(s) = surface {
-        q = q.bind(s).bind(s);
+    if let Some(g) = group {
+        q = q.bind(g);
     }
     q.fetch_all(&state.db)
         .await
@@ -462,7 +534,7 @@ async fn load_paired_remotes(state: &AppState, surface: Option<&str>) -> Vec<Pai
         .map(|r| {
             let provider_type: String = r.get("provider_type");
             PairedRemote {
-                surface_id: r.get("surface_id"),
+                group_id: r.get("group_id"),
                 remote_id: r.get("remote_id"),
                 priority: backing_authority(&state.registry, &provider_type),
                 state: r
@@ -473,16 +545,15 @@ async fn load_paired_remotes(state: &AppState, surface: Option<&str>) -> Vec<Pai
         .collect()
 }
 
-/// The remote to surface for control, per composite: the **highest-priority** one
-/// wins (a native vendor remote over an HA `remote.*` for the same TV), so the
-/// richer command catalogue (the full IRCC/native key set behind the "Full
-/// remote") is never masked by a leaner integration copy — *irrespective of which
-/// device was merged into which*. Ties break on the smallest id, so the choice is
-/// deterministic.
-fn best_remote_per_surface(paired: &[PairedRemote]) -> std::collections::HashMap<String, String> {
+/// The remote to surface for control, per composite **group**: the
+/// **highest-priority** one wins (a native vendor remote over an HA `remote.*`
+/// for the same TV), so the richer command catalogue (the full key set behind the
+/// "Full remote") is never masked by a leaner integration copy. Ties break on the
+/// smallest id, so the choice is deterministic. Keyed by `group_id`.
+fn best_remote_per_group(paired: &[PairedRemote]) -> std::collections::HashMap<String, String> {
     let mut best: std::collections::HashMap<&str, &PairedRemote> = std::collections::HashMap::new();
     for p in paired {
-        let take = match best.get(p.surface_id.as_str()) {
+        let take = match best.get(p.group_id.as_str()) {
             None => true,
             Some(cur) => {
                 p.priority > cur.priority
@@ -490,7 +561,7 @@ fn best_remote_per_surface(paired: &[PairedRemote]) -> std::collections::HashMap
             }
         };
         if take {
-            best.insert(&p.surface_id, p);
+            best.insert(&p.group_id, p);
         }
     }
     best.into_iter()
@@ -511,7 +582,7 @@ pub(crate) fn build_media_provider(
 
 pub(crate) async fn list_all_devices(state: &AppState) -> Result<Vec<MediaDeviceRow>, ()> {
     let mut devices: Vec<MediaDeviceRow> = sqlx::query(
-        "SELECT id, provider_id, device_id, name, kind, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto, receiver_id, receiver_source, companion_of,
+        "SELECT id, provider_id, device_id, name, kind, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto, receiver_id, receiver_source, group_id,
                 (SELECT room_id FROM room_media_devices WHERE media_device_id = media_devices.id LIMIT 1) AS room_id,
                 (SELECT rl.room_id FROM room_links rl
                    JOIN provider_group_media_devices pga ON pga.provider_group_id = rl.provider_group_id
@@ -525,8 +596,14 @@ pub(crate) async fn list_all_devices(state: &AppState) -> Result<Vec<MediaDevice
     .map(row_to_device)
     .collect();
 
-    // M26: merge each companion's complementary state into its primary, before
-    // the receiver overlay (so a companion's receiver binding shows the receiver's
+    // Resolve each group's derived surface, then mark non-surface members as
+    // companions of it (`companion_of`). The surface is the only row shown as a
+    // control surface; the rest are hidden and merged in.
+    let surfaces = group_surfaces(state).await;
+    derive_companions(&mut devices, &surfaces);
+
+    // Merge each companion's complementary state into its surface, before the
+    // receiver overlay (so a companion's receiver binding shows the receiver's
     // volume on the merged card). Companions stay in the list (marked
     // `companion_of`); control surfaces hide them, the inventory collapses them.
     let companions: Vec<MediaDeviceRow> = devices
@@ -535,11 +612,11 @@ pub(crate) async fn list_all_devices(state: &AppState) -> Result<Vec<MediaDevice
         .cloned()
         .collect();
     for c in &companions {
-        if let Some(primary) = devices
+        if let Some(surface) = devices
             .iter_mut()
             .find(|p| c.companion_of.as_deref() == Some(p.id.as_str()))
         {
-            merge_companion_into(primary, c);
+            merge_companion_into(surface, c);
         }
     }
 
@@ -547,17 +624,17 @@ pub(crate) async fn list_all_devices(state: &AppState) -> Result<Vec<MediaDevice
     // remotes (a native vendor remote *and* an HA copy of the same TV): the richest
     // one is surfaced for control (`remote_id`), while **every** remote's signal
     // feeds the power/reachability OR — so neither is masked by merge ordering.
-    // When a primary's own media_player is unreachable (a standby TV reports
+    // When a surface's own media_player is unreachable (a standby TV reports
     // `unavailable`), the effective device still reads on/reachable if any member
-    // (a companion or a paired remote) is — keeping a cold-but-remote-reachable TV
-    // from showing offline.
+    // (a companion or a paired remote) is.
     let paired = load_paired_remotes(state, None).await;
-    let remote_ids = best_remote_per_surface(&paired);
+    let remote_ids = best_remote_per_group(&paired);
     for d in &mut devices {
         if d.companion_of.is_some() {
             continue; // a companion is hidden, not a surface
         }
-        d.remote_id = remote_ids.get(&d.id).cloned();
+        let group = d.group_id.clone();
+        d.remote_id = group.as_deref().and_then(|g| remote_ids.get(g)).cloned();
         let media_members: Vec<PowerSignal> = companions
             .iter()
             .filter(|c| c.companion_of.as_deref() == Some(d.id.as_str()))
@@ -565,7 +642,7 @@ pub(crate) async fn list_all_devices(state: &AppState) -> Result<Vec<MediaDevice
             .collect();
         let remotes: Vec<PowerSignal> = paired
             .iter()
-            .filter(|p| p.surface_id == d.id)
+            .filter(|p| Some(&p.group_id) == group.as_ref())
             .filter_map(|p| p.state.as_ref().map(PowerSignal::remote))
             .collect();
         apply_composite_power(d, &media_members, &remotes);
@@ -598,7 +675,7 @@ pub(crate) async fn get_device_live(
     let row = sqlx::query(
         "SELECT a.id, a.provider_id, a.device_id, a.name, a.kind, a.capabilities,
                 a.last_state, a.last_seen, a.enabled, a.glyph, a.hw_id, a.shadowed_by, a.shadow_auto,
-                a.receiver_id, a.receiver_source, a.companion_of,
+                a.receiver_id, a.receiver_source, a.group_id,
                 (SELECT room_id FROM room_media_devices WHERE media_device_id = a.id LIMIT 1) AS room_id,
                 (SELECT rl.room_id FROM room_links rl
                    JOIN provider_group_media_devices pga ON pga.provider_group_id = rl.provider_group_id
@@ -653,8 +730,11 @@ pub(crate) async fn get_device_live(
     }
     // Surface the richest paired remote for control, and fold *every* paired
     // remote's signal into the composite power resolution (see `list_all_devices`).
-    let paired = load_paired_remotes(state, Some(&device.id)).await;
-    device.remote_id = best_remote_per_surface(&paired).remove(&device.id);
+    let paired = load_paired_remotes(state, device.group_id.as_deref()).await;
+    device.remote_id = device
+        .group_id
+        .as_deref()
+        .and_then(|g| best_remote_per_group(&paired).remove(g));
     let remotes: Vec<PowerSignal> = paired
         .iter()
         .filter_map(|p| p.state.as_ref().map(PowerSignal::remote))
@@ -769,74 +849,115 @@ pub(crate) enum SetCompanionOutcome {
     Db,
 }
 
-/// M26: merge a media entity into a **primary** as its companion (the link is
-/// stored on the companion as `companion_of`), or unmerge with `primary_id =
-/// None`. Unlike a shadow, the companion's capabilities are routed/overlaid onto
-/// the primary, not discarded. Rejects self-merge, an unknown/companion/shadowed
-/// primary, and merging a device that is itself a primary (no chains).
+/// Merge `id` into `primary_id`'s composite **group** (a flat, cross-domain
+/// `group_id`), or unmerge `id` from its group with `primary_id = None`. Merging
+/// is a **union**: `id`'s whole group folds into the target's group (so merging
+/// two composites combines them — the fix for a device that surfaced as two), and
+/// any remotes that travelled with `id`'s group follow. Unlike a shadow, members
+/// are routed/overlaid, not discarded. Rejects self-merge and an unknown/shadowed
+/// target. There's no "primary" to point at and no chains — the group is flat.
 pub(crate) async fn set_media_companion(
     state: &AppState,
     id: &str,
     primary_id: Option<String>,
 ) -> SetCompanionOutcome {
-    if let Some(pid) = &primary_id {
-        if pid == id {
-            return SetCompanionOutcome::BadRequest("a device cannot be its own companion".into());
-        }
-        match sqlx::query("SELECT companion_of, shadowed_by FROM media_devices WHERE id = ?")
-            .bind(pid)
+    let Some(pid) = primary_id else {
+        // Unmerge: drop `id` out of its group. Any remaining members re-derive a
+        // surface; a left-behind singleton is harmless.
+        return match sqlx::query("UPDATE media_devices SET group_id = NULL WHERE id = ?")
+            .bind(id)
+            .execute(&state.db)
+            .await
+        {
+            Ok(r) if r.rows_affected() > 0 => SetCompanionOutcome::Ok,
+            Ok(_) => SetCompanionOutcome::NotFound,
+            Err(e) => {
+                tracing::error!("db error clearing group: {e}");
+                SetCompanionOutcome::Db
+            }
+        };
+    };
+
+    if pid == id {
+        return SetCompanionOutcome::BadRequest("a device cannot be merged into itself".into());
+    }
+    // The target must exist and not be a hidden duplicate. Its group is the
+    // destination; a standalone target gets a fresh singleton group (its own id).
+    let target_group =
+        match sqlx::query("SELECT group_id, shadowed_by FROM media_devices WHERE id = ?")
+            .bind(&pid)
             .fetch_optional(&state.db)
             .await
         {
             Ok(Some(r)) => {
-                if r.get::<Option<String>, _>("companion_of").is_some() {
-                    return SetCompanionOutcome::BadRequest(
-                        "that device is itself merged into another; pick a standalone primary"
-                            .into(),
-                    );
-                }
                 if r.get::<Option<String>, _>("shadowed_by").is_some() {
                     return SetCompanionOutcome::BadRequest(
                         "that device is a hidden duplicate".into(),
                     );
                 }
+                match r.get::<Option<String>, _>("group_id") {
+                    Some(g) => g,
+                    None => {
+                        if let Err(e) =
+                            sqlx::query("UPDATE media_devices SET group_id = ? WHERE id = ?")
+                                .bind(&pid)
+                                .bind(&pid)
+                                .execute(&state.db)
+                                .await
+                        {
+                            tracing::error!("db error creating group: {e}");
+                            return SetCompanionOutcome::Db;
+                        }
+                        pid.clone()
+                    }
+                }
             }
-            Ok(None) => return SetCompanionOutcome::BadRequest("unknown primary device".into()),
+            Ok(None) => return SetCompanionOutcome::BadRequest("unknown target device".into()),
             Err(e) => {
-                tracing::error!("db error validating companion primary: {e}");
+                tracing::error!("db error validating merge target: {e}");
                 return SetCompanionOutcome::Db;
             }
+        };
+
+    // Fold `id`'s current group (or just `id`) into the target group — media and
+    // any remotes that share that group travel together.
+    let src_group: Option<String> =
+        sqlx::query_scalar::<_, Option<String>>("SELECT group_id FROM media_devices WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| tracing::error!("db error reading source group: {e}"))
+            .ok()
+            .flatten()
+            .flatten();
+
+    let result = if let Some(src) = src_group {
+        if src == target_group {
+            return SetCompanionOutcome::Ok; // already in the same group
         }
-        // The companion must not itself be a primary of other devices (no chains).
-        match sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM media_devices WHERE companion_of = ?",
-        )
-        .bind(id)
-        .fetch_one(&state.db)
-        .await
-        {
-            Ok(n) if n > 0 => {
-                return SetCompanionOutcome::BadRequest(
-                    "this device already has companions merged into it".into(),
-                );
-            }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::error!("db error checking companion chain: {e}");
-                return SetCompanionOutcome::Db;
-            }
-        }
-    }
-    match sqlx::query("UPDATE media_devices SET companion_of = ? WHERE id = ?")
-        .bind(&primary_id)
-        .bind(id)
-        .execute(&state.db)
-        .await
-    {
+        let m = sqlx::query("UPDATE media_devices SET group_id = ? WHERE group_id = ?")
+            .bind(&target_group)
+            .bind(&src)
+            .execute(&state.db)
+            .await;
+        let _ = sqlx::query("UPDATE remote_devices SET group_id = ? WHERE group_id = ?")
+            .bind(&target_group)
+            .bind(&src)
+            .execute(&state.db)
+            .await;
+        m
+    } else {
+        sqlx::query("UPDATE media_devices SET group_id = ? WHERE id = ?")
+            .bind(&target_group)
+            .bind(id)
+            .execute(&state.db)
+            .await
+    };
+    match result {
         Ok(r) if r.rows_affected() > 0 => SetCompanionOutcome::Ok,
         Ok(_) => SetCompanionOutcome::NotFound,
         Err(e) => {
-            tracing::error!("db error setting companion link: {e}");
+            tracing::error!("db error merging group: {e}");
             SetCompanionOutcome::Db
         }
     }
@@ -859,7 +980,11 @@ pub(crate) fn set_companion_status(outcome: SetCompanionOutcome) -> axum::respon
 /// One backing entity of a composite device (M26), for command routing.
 struct Backing {
     id: String,
+    /// Display name (for the dev routing/precedence diagnostic).
+    name: String,
     capabilities: MediaCapabilities,
+    /// The receiver this backing's volume/mute route to (M22 binding), if any.
+    receiver_id: Option<String>,
     /// This backing routes its volume/mute to a receiver (M22 binding).
     receiver_bound: bool,
     /// This backing is the one actively reporting playback.
@@ -906,54 +1031,201 @@ fn backing_authority(registry: &crate::providers::ProviderRegistry, provider_typ
 /// the primary-first order), with two physical-routing overrides that win
 /// regardless of priority: volume follows a receiver binding, and transport
 /// follows the backing actually playing.
+/// Highest-authority backing matching `pred` (ties → earliest, i.e. the
+/// primary `backings[0]`), else the primary. The single arbitration the whole
+/// composite write path (and the routing diagnostic) shares, so they can't drift.
+fn pick_best(backings: &[Backing], pred: impl Fn(&Backing) -> bool) -> &Backing {
+    backings
+        .iter()
+        .filter(|b| pred(b))
+        .fold(None::<&Backing>, |acc, b| match acc {
+            Some(a) if a.priority >= b.priority => Some(a),
+            _ => Some(b),
+        })
+        .unwrap_or(&backings[0])
+}
+
+/// Per-field routing target + a human reason — the canonical decision for each
+/// command field, used by both `route_across_backings` (write) and
+/// `composite_routing` (the dev precedence diagnostic).
+fn route_volume(backings: &[Backing]) -> (&Backing, &'static str) {
+    // A receiver binding owns volume (physical routing); else the backing
+    // actually carrying audio (non-zero volume); else the primary.
+    if let Some(b) = backings.iter().find(|b| b.receiver_bound) {
+        (b, "bound to a receiver")
+    } else if backings.iter().any(|b| b.volume > 0) {
+        (
+            pick_best(backings, |b| b.volume > 0),
+            "carrying audio (volume > 0)",
+        )
+    } else {
+        (&backings[0], "default — primary (no audio source)")
+    }
+}
+
+fn route_transport(backings: &[Backing]) -> (&Backing, &'static str) {
+    if let Some(b) = backings
+        .iter()
+        .find(|b| b.capabilities.transport && b.has_now_playing)
+    {
+        (b, "currently playing")
+    } else {
+        let b = pick_best(backings, |b| b.capabilities.transport);
+        (
+            b,
+            if b.capabilities.transport {
+                "most authoritative transport-capable"
+            } else {
+                "default — primary (none transport-capable)"
+            },
+        )
+    }
+}
+
+fn route_source(backings: &[Backing]) -> (&Backing, &'static str) {
+    let b = pick_best(backings, |b| b.capabilities.sources);
+    (
+        b,
+        if b.capabilities.sources {
+            "most authoritative source-capable"
+        } else {
+            "default — primary (none source-capable)"
+        },
+    )
+}
+
+fn route_power(backings: &[Backing]) -> (&Backing, &'static str) {
+    (pick_best(backings, |_| true), "most authoritative")
+}
+
 fn route_across_backings(cmd: &MediaCommand, backings: &[Backing]) -> Vec<(String, MediaCommand)> {
-    let primary_id = backings[0].id.clone();
-    // The highest-priority backing matching `pred` (ties → earliest, i.e. the
-    // primary), else the primary.
-    let best = |pred: &dyn Fn(&Backing) -> bool| -> String {
-        backings
-            .iter()
-            .filter(|b| pred(b))
-            .fold(None::<&Backing>, |acc, b| match acc {
-                Some(a) if a.priority >= b.priority => Some(a),
-                _ => Some(b),
-            })
-            .map_or_else(|| primary_id.clone(), |b| b.id.clone())
-    };
     let mut parts: std::collections::BTreeMap<String, MediaCommand> =
         std::collections::BTreeMap::new();
     if cmd.volume.is_some() || cmd.mute.is_some() {
-        // A receiver binding owns volume (physical routing); else the backing
-        // actually carrying audio (non-zero volume — a TV view that reads 0 yields
-        // to the merged view that has the real volume); else the primary.
-        let target = backings
-            .iter()
-            .find(|b| b.receiver_bound)
-            .map_or_else(|| best(&|b| b.volume > 0), |b| b.id.clone());
-        let e = parts.entry(target).or_default();
+        let e = parts
+            .entry(route_volume(backings).0.id.clone())
+            .or_default();
         e.volume = cmd.volume;
         e.mute = cmd.mute;
     }
     if cmd.transport.is_some() {
-        // The backing actually playing wins; else the most authoritative
-        // transport-capable one.
-        let target = backings
-            .iter()
-            .find(|b| b.capabilities.transport && b.has_now_playing)
-            .map_or_else(|| best(&|b| b.capabilities.transport), |b| b.id.clone());
-        parts.entry(target).or_default().transport = cmd.transport;
+        parts
+            .entry(route_transport(backings).0.id.clone())
+            .or_default()
+            .transport = cmd.transport;
     }
     if cmd.source.is_some() {
         parts
-            .entry(best(&|b| b.capabilities.sources))
+            .entry(route_source(backings).0.id.clone())
             .or_default()
             .source = cmd.source.clone();
     }
     if cmd.power.is_some() {
-        // Power to the most authoritative backing — a native TV over an HA copy.
-        parts.entry(best(&|_| true)).or_default().power = cmd.power;
+        parts
+            .entry(route_power(backings).0.id.clone())
+            .or_default()
+            .power = cmd.power;
     }
     parts.into_iter().filter(|(_, c)| !c.is_empty()).collect()
+}
+
+/// One row of the composite **precedence** diagnostic: which member device a
+/// control resolves to, and why. Read-only dev tooling.
+#[derive(serde::Serialize)]
+pub struct ControlRoute {
+    pub control: &'static str,
+    pub device_id: String,
+    pub device_name: String,
+    pub reason: String,
+}
+
+/// Compute the per-control precedence map for the composite surfaced at `id`:
+/// for each control, which underlying member wins and why. Mirrors the real
+/// read/write routing (shares `route_*` + the remote/favorites pickers), so it's
+/// an honest window into what actually happens — not a parallel guess.
+pub(crate) async fn composite_routing(state: &AppState, id: &str) -> Vec<ControlRoute> {
+    let backings = load_composite_backings(state, id).await;
+    if backings.is_empty() {
+        return Vec::new();
+    }
+    let row = |control, b: &Backing, reason: String| ControlRoute {
+        control,
+        device_id: b.id.clone(),
+        device_name: b.name.clone(),
+        reason,
+    };
+    let mut out = Vec::new();
+
+    let (b, why) = route_power(&backings);
+    out.push(row("power", b, why.into()));
+
+    let (b, why) = route_volume(&backings);
+    let mut reason = why.to_string();
+    // Volume on a receiver-bound backing physically lands on the receiver.
+    if let Some(recv) = b.receiver_id.as_deref()
+        && let Some(name) = device_name(state, recv).await
+    {
+        reason = format!("{why} → {name}");
+    }
+    out.push(row("volume / mute", b, reason));
+
+    let (b, why) = route_transport(&backings);
+    out.push(row("transport", b, why.into()));
+
+    let (b, why) = route_source(&backings);
+    out.push(row("source / app", b, why.into()));
+
+    if backings.iter().any(|b| b.capabilities.favorites) {
+        let b = pick_best(&backings, |b| b.capabilities.favorites);
+        out.push(row(
+            "favorites",
+            b,
+            "most authoritative favorites-capable".into(),
+        ));
+    }
+
+    // Surfaced remote (highest-authority paired remote across the whole composite).
+    let group: Option<String> =
+        sqlx::query_scalar("SELECT group_id FROM media_devices WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+    let paired = load_paired_remotes(state, group.as_deref()).await;
+    if let Some(rid) = group
+        .as_deref()
+        .and_then(|g| best_remote_per_group(&paired).remove(g))
+    {
+        let name = device_name_remote(state, &rid).await.unwrap_or_default();
+        out.push(ControlRoute {
+            control: "remote keys / apps",
+            device_id: rid,
+            device_name: name,
+            reason: "highest-authority paired remote".into(),
+        });
+    }
+    out
+}
+
+/// A media device's display name, for the routing diagnostic.
+async fn device_name(state: &AppState, id: &str) -> Option<String> {
+    sqlx::query_scalar::<_, String>("SELECT name FROM media_devices WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// A remote device's display name, for the routing diagnostic.
+async fn device_name_remote(state: &AppState, id: &str) -> Option<String> {
+    sqlx::query_scalar::<_, String>("SELECT name FROM remote_devices WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
 }
 
 /// The composite's backings (primary first, then companions), or just `[id]`
@@ -961,10 +1233,12 @@ fn route_across_backings(cmd: &MediaCommand, backings: &[Backing]) -> Vec<(Strin
 /// router needs.
 async fn load_composite_backings(state: &AppState, id: &str) -> Vec<Backing> {
     let rows = sqlx::query(
-        "SELECT m.id, m.capabilities, m.receiver_id, m.last_state, p.provider_type,
+        "SELECT m.id, m.name, m.capabilities, m.receiver_id, m.last_state, p.provider_type,
                 (m.id = ?) AS is_primary
          FROM media_devices m JOIN providers p ON m.provider_id = p.id
-         WHERE m.id = ? OR m.companion_of = ?
+         WHERE m.id = ?
+            OR (m.group_id IS NOT NULL
+                AND m.group_id = (SELECT group_id FROM media_devices WHERE id = ?))
          ORDER BY is_primary DESC, m.name",
     )
     .bind(id)
@@ -981,11 +1255,14 @@ async fn load_composite_backings(state: &AppState, id: &str) -> Vec<Backing> {
                 .and_then(|s| serde_json::from_str(&s).ok());
             let provider_type: String = r.get("provider_type");
             let volume = st.as_ref().map_or(0, |s| s.volume);
+            let receiver_id: Option<String> = r.get("receiver_id");
             Backing {
                 id: r.get("id"),
+                name: r.get("name"),
                 capabilities: serde_json::from_str(&r.get::<String, _>("capabilities"))
                     .unwrap_or_default(),
-                receiver_bound: r.get::<Option<String>, _>("receiver_id").is_some(),
+                receiver_bound: receiver_id.is_some(),
+                receiver_id,
                 has_now_playing: st.is_some_and(|s| s.now_playing.is_some()),
                 volume,
                 priority: backing_authority(&state.registry, &provider_type),
@@ -1068,8 +1345,18 @@ async fn apply_routed(
 /// succeeded. The remote's own handler does the Wake-on-LAN nudge before the
 /// provider `turn_on` (see [`crate::api::remote::apply_remote_command`]).
 async fn wake_paired_remote(state: &AppState, media_id: &str) -> bool {
-    let paired = load_paired_remotes(state, Some(media_id)).await;
-    let Some(rid) = best_remote_per_surface(&paired).remove(media_id) else {
+    let group: Option<String> =
+        sqlx::query_scalar("SELECT group_id FROM media_devices WHERE id = ?")
+            .bind(media_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+    let paired = load_paired_remotes(state, group.as_deref()).await;
+    let Some(rid) = group
+        .as_deref()
+        .and_then(|g| best_remote_per_group(&paired).remove(g))
+    else {
         return false;
     };
     tracing::debug!(target: "bifrost::composite", media = %media_id, remote = %rid, "composite power-on: waking paired remote (WoL + turn_on)");
@@ -1697,11 +1984,13 @@ mod tests {
     ) -> Backing {
         Backing {
             id: id.into(),
+            name: id.into(),
             capabilities: MediaCapabilities {
                 transport,
                 sources,
                 ..Default::default()
             },
+            receiver_id: receiver_bound.then(|| format!("recv-{id}")),
             receiver_bound,
             has_now_playing: now_playing,
             volume: 0,
@@ -1712,7 +2001,9 @@ mod tests {
     fn backing_vol(id: &str, volume: u8) -> Backing {
         Backing {
             id: id.into(),
+            name: id.into(),
             capabilities: MediaCapabilities::default(),
+            receiver_id: None,
             receiver_bound: false,
             has_now_playing: false,
             volume,
@@ -1817,7 +2108,7 @@ mod tests {
 
     fn paired(id: &str, priority: u8) -> PairedRemote {
         PairedRemote {
-            surface_id: "tv".into(),
+            group_id: "grp".into(),
             remote_id: id.into(),
             priority,
             state: None,
@@ -1830,20 +2121,20 @@ mod tests {
         // the full IRCC catalogue) and an HA `remote.*` copy (priority 0). The
         // native one must win whichever device was merged into which — the bug was
         // a `LIMIT 1` that could surface the catalogue-less HA copy.
-        let native_first = best_remote_per_surface(&[paired("native", 1), paired("ha", 0)]);
-        assert_eq!(native_first.get("tv").map(String::as_str), Some("native"));
-        let ha_first = best_remote_per_surface(&[paired("ha", 0), paired("native", 1)]);
-        assert_eq!(ha_first.get("tv").map(String::as_str), Some("native"));
+        let native_first = best_remote_per_group(&[paired("native", 1), paired("ha", 0)]);
+        assert_eq!(native_first.get("grp").map(String::as_str), Some("native"));
+        let ha_first = best_remote_per_group(&[paired("ha", 0), paired("native", 1)]);
+        assert_eq!(ha_first.get("grp").map(String::as_str), Some("native"));
     }
 
     #[test]
     fn equal_priority_remotes_break_ties_deterministically() {
         // Two remotes of the same class → the smallest id, independent of order, so
         // the surfaced remote never flickers with load ordering.
-        let a = best_remote_per_surface(&[paired("zulu", 1), paired("alpha", 1)]);
-        let b = best_remote_per_surface(&[paired("alpha", 1), paired("zulu", 1)]);
-        assert_eq!(a.get("tv").map(String::as_str), Some("alpha"));
-        assert_eq!(b.get("tv").map(String::as_str), Some("alpha"));
+        let a = best_remote_per_group(&[paired("zulu", 1), paired("alpha", 1)]);
+        let b = best_remote_per_group(&[paired("alpha", 1), paired("zulu", 1)]);
+        assert_eq!(a.get("grp").map(String::as_str), Some("alpha"));
+        assert_eq!(b.get("grp").map(String::as_str), Some("alpha"));
     }
 
     #[test]

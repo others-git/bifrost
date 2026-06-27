@@ -383,10 +383,13 @@ impl SmartTvVendor for BraviaVendor {
     }
 
     async fn send_text(&self, text: &str) -> Result<()> {
-        // `appControl.setTextForm` injects literal text into the focused field
-        // (search boxes, login fields). v1.0 takes the string as a positional
-        // param. NOTE: models that demand RSA-encrypted text (older PSK-auth
-        // sets) aren't covered — they'd need `encKey` from `getRemoteControllerInfo`.
+        // Android/Google TV Bravias drop `appControl.setTextForm` (it returns
+        // ScalarWeb error 12, "no such method"), so once the ATV Remote is paired
+        // type via key-event injection over that channel. ScalarWeb setTextForm
+        // stays the path for older pre-Android Bravias that still support it.
+        if let Some(id) = &self.atv {
+            return super::atv::client::send_text(&self.ip, id, text).await;
+        }
         self.scalar("appControl", "setTextForm", "1.0", json!([text]))
             .await
             .map(|_| ())

@@ -14,12 +14,39 @@ import {
 } from "../api";
 import { MediaControls, KIND_LABEL, PowerButton } from "../components/MediaControls";
 import { SelectRow } from "../components/SelectRow";
-import { PageHeader } from "../components/PageHeader";
+import { PageHeader, SectionLabel } from "../components/PageHeader";
 import { Glyph } from "../components/glyphs";
 import { useViewport } from "../useViewport";
-import { T, domain, alpha } from "../theme";
+import { T, domain, color, alpha } from "../theme";
 
 const ACCENT = domain.media; // violet — audio's counterpart to the lamps' glow
+
+// Pinned devices are a per-client convenience (this page is session-only UI, not
+// part of /api/v1 or MCP), so the favourites live in localStorage by device id.
+const PIN_KEY = "bifrost.media.pinned";
+function loadPinned(): Set<string> {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(PIN_KEY) ?? "[]") as string[]);
+  } catch {
+    return new Set();
+  }
+}
+function savePinned(ids: Set<string>) {
+  try {
+    localStorage.setItem(PIN_KEY, JSON.stringify([...ids]));
+  } catch {
+    /* storage full / disabled — pins just won't persist */
+  }
+}
+
+const isPlaying = (d: MediaDevice) => d.state.now_playing?.play_state === "playing";
+
+/** Sort within a section: playing first, then reachable, then by name — so the
+ * devices you're most likely to reach for surface at the top. */
+function bySalience(a: MediaDevice, b: MediaDevice): number {
+  const score = (d: MediaDevice) => (isPlaying(d) ? 2 : 0) + (d.state.reachable === false ? -1 : 0);
+  return score(b) - score(a) || a.name.localeCompare(b.name);
+}
 
 /** Devices to show on the Audio control surface: drop de-dup **shadows** (a
  * duplicate of a native device — e.g. a Sonos also imported via HA) and disabled
@@ -30,7 +57,17 @@ const controllable = (list: MediaDevice[]) =>
 export function MediaPage() {
   const [devices, setDevices] = useState<MediaDevice[]>([]);
   const [loading, setLoading] = useState(true);
+  const [pinned, setPinned] = useState<Set<string>>(loadPinned);
   const { isMobile, isCompact } = useViewport();
+
+  function togglePin(id: string) {
+    setPinned((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(id)) next.add(id);
+      savePinned(next);
+      return next;
+    });
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -111,12 +148,51 @@ export function MediaPage() {
     [reloadDevices],
   );
 
+  const playingCount = devices.filter(isPlaying).length;
+  const status =
+    devices.length > 0
+      ? `${playingCount > 0 ? `${playingCount} playing · ` : ""}${devices.length} device${devices.length !== 1 ? "s" : ""}`
+      : undefined;
+
+  const pinnedDevices = devices.filter((d) => pinned.has(d.id)).sort(bySalience);
+  const restDevices = devices.filter((d) => !pinned.has(d.id)).sort(bySalience);
+
+  const peersOf = (d: MediaDevice) =>
+    devices.filter(
+      (o) =>
+        o.id !== d.id &&
+        o.provider_id === d.provider_id &&
+        o.kind !== "zone" &&
+        o.capabilities.grouping,
+    );
+
+  const grid = (list: MediaDevice[]) => (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))",
+        gap: isMobile ? "0.65rem" : "1rem",
+        alignItems: "start",
+      }}
+    >
+      {list.map((d) => (
+        <MediaDeviceCard
+          key={d.id}
+          device={d}
+          peers={peersOf(d)}
+          pinned={pinned.has(d.id)}
+          onTogglePin={() => togglePin(d.id)}
+          onLocalPatch={patchLocal}
+          onGroupingChanged={onGroupingChanged}
+          compact={isCompact}
+        />
+      ))}
+    </div>
+  );
+
   return (
-    <div style={{ padding: isMobile ? "1rem 0.85rem" : "2rem", maxWidth: 1020, margin: "0 auto", color: T.text }}>
-      <PageHeader
-        title="Media"
-        status={devices.length > 0 ? `${devices.length} device${devices.length !== 1 ? "s" : ""}` : undefined}
-      />
+    <div style={{ padding: isMobile ? "1rem 0.85rem" : "2rem", width: "100%", maxWidth: 1080, margin: "0 auto", color: T.text }}>
+      <PageHeader title="Media" status={status} />
 
       {loading ? (
         <p style={{ color: T.faint }}>Loading…</p>
@@ -125,38 +201,20 @@ export function MediaPage() {
           <p style={{ margin: "0 0 0.6rem", display: "flex", justifyContent: "center", opacity: 0.6 }}>
             <Glyph name="speaker" size={34} />
           </p>
-          <p style={{ margin: "0 0 0.4rem" }}>No audio devices yet.</p>
+          <p style={{ margin: "0 0 0.4rem" }}>No media devices yet.</p>
           <p style={{ margin: 0, fontSize: "0.875rem" }}>
             Add a Sonos or Onkyo provider in Settings, then run Discover.
           </p>
         </div>
+      ) : pinnedDevices.length > 0 ? (
+        <>
+          <SectionLabel style={{ marginBottom: "0.7rem" }}>Pinned</SectionLabel>
+          {grid(pinnedDevices)}
+          <SectionLabel style={{ margin: "1.6rem 0 0.7rem" }}>All devices</SectionLabel>
+          {grid(restDevices)}
+        </>
       ) : (
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: isMobile
-              ? "repeat(2, minmax(0, 1fr))"
-              : "repeat(auto-fill, minmax(320px, 1fr))",
-            gap: isMobile ? "0.6rem" : "1rem",
-          }}
-        >
-          {devices.map((d) => (
-            <MediaDeviceCard
-              key={d.id}
-              device={d}
-              peers={devices.filter(
-                (o) =>
-                  o.id !== d.id &&
-                  o.provider_id === d.provider_id &&
-                  o.kind !== "zone" &&
-                  o.capabilities.grouping,
-              )}
-              onLocalPatch={patchLocal}
-              onGroupingChanged={onGroupingChanged}
-              compact={isCompact}
-            />
-          ))}
-        </div>
+        grid(restDevices)
       )}
     </div>
   );
@@ -165,12 +223,16 @@ export function MediaPage() {
 function MediaDeviceCard({
   device,
   peers,
+  pinned,
+  onTogglePin,
   onLocalPatch,
   onGroupingChanged,
   compact = false,
 }: {
   device: MediaDevice;
   peers: MediaDevice[];
+  pinned: boolean;
+  onTogglePin: () => void;
   onLocalPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
   onGroupingChanged: (providerId: string) => Promise<void>;
   compact?: boolean;
@@ -248,6 +310,26 @@ function MediaDeviceCard({
             {KIND_LABEL[device.kind] ?? device.kind}
           </div>
         </div>
+        <button
+          onClick={onTogglePin}
+          title={pinned ? "Unpin" : "Pin to top"}
+          aria-label={pinned ? "Unpin device" : "Pin device"}
+          aria-pressed={pinned}
+          style={{
+            display: "grid",
+            placeItems: "center",
+            width: 28,
+            height: 28,
+            borderRadius: 7,
+            border: `1px solid ${pinned ? alpha(color.gold, 0.5) : "transparent"}`,
+            background: pinned ? alpha(color.gold, 0.12) : "transparent",
+            color: pinned ? color.gold : T.faint,
+            cursor: "pointer",
+            flexShrink: 0,
+          }}
+        >
+          <Glyph name="star" size={15} />
+        </button>
         {canGroup && (
           <button
             onClick={() => setGroupOpen((v) => !v)}

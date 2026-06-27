@@ -1504,18 +1504,26 @@ async fn resolve_audio_target(
 
 /// The single audio device in a room, if it has exactly one (id, name).
 async fn lone_room_audio(state: &AppState, room_id: &str) -> Option<(String, String)> {
-    let rows = sqlx::query(
-        "SELECT a.id, a.name FROM media_devices a
-         WHERE a.shadowed_by IS NULL AND a.companion_of IS NULL AND a.enabled = 1 AND a.id IN (
+    let surfaces = crate::api::media::group_surfaces(state).await;
+    let rows: Vec<(String, String)> = sqlx::query(
+        "SELECT a.id, a.name, a.group_id FROM media_devices a
+         WHERE a.shadowed_by IS NULL AND a.enabled = 1 AND a.id IN (
              SELECT media_device_id FROM room_media_devices WHERE room_id = ?1
          )",
     )
     .bind(room_id)
     .fetch_all(&state.db)
     .await
-    .unwrap_or_default();
+    .unwrap_or_default()
+    .into_iter()
+    .filter(|r| match r.get::<Option<String>, _>("group_id") {
+        None => true,
+        Some(g) => surfaces.get(&g).map(String::as_str) == Some(r.get::<String, _>("id").as_str()),
+    })
+    .map(|r| (r.get("id"), r.get("name")))
+    .collect();
     match rows.as_slice() {
-        [one] => Some((one.get("id"), one.get("name"))),
+        [one] => Some((one.0.clone(), one.1.clone())),
         _ => None,
     }
 }
@@ -1586,11 +1594,24 @@ async fn power(state: &AppState) -> Vec<Ent> {
     .await
 }
 async fn audio(state: &AppState) -> Vec<Ent> {
-    ents(
-        state,
-        "SELECT id, name FROM media_devices WHERE enabled = 1 AND shadowed_by IS NULL AND companion_of IS NULL ORDER BY name",
+    // Surfaces only — a composite is one named target, not its hidden companions.
+    let surfaces = crate::api::media::group_surfaces(state).await;
+    sqlx::query(
+        "SELECT id, name, group_id FROM media_devices WHERE enabled = 1 AND shadowed_by IS NULL ORDER BY name",
     )
+    .fetch_all(&state.db)
     .await
+    .unwrap_or_default()
+    .into_iter()
+    .filter(|r| match r.get::<Option<String>, _>("group_id") {
+        None => true,
+        Some(g) => surfaces.get(&g).map(String::as_str) == Some(r.get::<String, _>("id").as_str()),
+    })
+    .map(|r| Ent {
+        id: r.get("id"),
+        name: r.get("name"),
+    })
+    .collect()
 }
 async fn scenes(state: &AppState) -> Vec<Ent> {
     ents(state, "SELECT id, name FROM scenes ORDER BY created_at").await

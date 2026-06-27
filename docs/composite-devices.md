@@ -17,27 +17,34 @@ over — when you touch any composite seam, read this first and keep it current.
 
 ## TL;DR
 
-- A composite is **one primary `media_device` row** with up to three kinds of
-  attachment overlaid onto it **server-side**:
-  1. **Companions** — other `media_device` rows for the same physical box,
-     merged lossless-ly via `companion_of`.
-  2. **A paired remote** — a `remote_device` linked via `paired_media_id`,
-     surfaced on the primary as `remote_id`.
-  3. **A bound receiver** — a receiver `media_device` that owns this source's
-     volume/mute, via `receiver_id` / `receiver_source`.
-- The merged result is the **effective device**: the API returns the primary row
-  with companions' state/capabilities folded in, the receiver's volume overlaid,
-  the paired remote's id attached, and power/reachability resolved across the
-  whole set. Clients never assemble a composite themselves.
+- A composite is a **flat group of member rows** sharing one cross-domain
+  `group_id` (on both `media_devices` and `remote_devices`) — **there is no stored
+  primary**. Members can be:
+  1. Several `media_device` rows for the same physical box (a TV's two
+     `media_player`s, …).
+  2. One or more `remote_device`s (D-pad / app launch).
+  3. *(separate relationship)* a **bound receiver** that owns a source's
+     volume/mute, via `receiver_id` / `receiver_source` — a *shared* device
+     (many sources → one receiver), so it's referenced, not a group member.
+- The group's representative — the **surface** — is **derived** at read time
+  (highest authority, then kind, then smallest id), never stored, so it can't
+  drift from the members. The API still exposes a derived `companion_of` on each
+  non-surface member (= the surface's id) for client compatibility.
+- The merged result is the **effective device**: the API returns the surface row
+  with the other members' state/capabilities folded in, the receiver's volume
+  overlaid, the richest paired remote's id attached, and power/reachability
+  resolved across the whole group. Clients never assemble a composite themselves.
 - **Reads merge; writes route.** Each command field (power / volume / transport /
-  source / favorites / cast) goes to the backing that owns it, not blindly to one
+  source / favorites / cast) goes to the member that owns it, not blindly to one
   entity.
-- Resolution is **direction-independent** and **whole-composite**: it considers
-  `device ∪ companions`, so which row is the primary doesn't change what controls
-  surface. Live state is resolved the same way — the **freshest/most-capable
-  member wins**, not "the primary": power is on if any reachable view is,
-  now-playing is the richest view, and the surfaced remote is the native (richest-
-  catalogue) one — so a stale or lean primary can't mask a live sibling.
+- Resolution is **direction-independent** and **whole-group**: it considers every
+  member sharing the `group_id`, so there's no "which row is primary" to get
+  wrong. The **freshest/most-capable member wins**: power is on if any reachable
+  view is, now-playing is the richest view, and the surfaced remote is the native
+  (richest-catalogue) one.
+- **Merging is a union** (`set_media_companion`): merging device A into B folds
+  A's whole group into B's, so combining two composites of the same physical
+  device (e.g. a TV that surfaced under two MACs) is one clean operation.
 
 ---
 
@@ -54,7 +61,7 @@ apps; or a TV plus its receiver plus its remote). Shadowing one would *lose* the
 capability it uniquely carries. A **companion** link instead **merges** the
 secondary into a primary so the **union** of capabilities lives on one surface.
 
-| | `shadowed_by` (de-dup) | `companion_of` (composite) |
+| | `shadowed_by` (de-dup) | `group_id` (composite) |
 |---|---|---|
 | Relationship | same device seen twice | complementary parts of one device |
 | Secondary row | hidden **and discarded** | hidden, **state/caps overlaid onto primary** |
@@ -67,11 +74,13 @@ A row is **never both** shadowed and a companion.
 
 ## The three ingredients
 
-### 1. Companions — `companion_of`
+### 1. Group members — `group_id`
 
-`media_devices.companion_of` holds the id of the **primary** `media_device` this
-row merges into. `NULL` = a standalone surface. The primary carries no marker
-itself; it's a normal row that companions point at.
+`media_devices.group_id` (and `remote_devices.group_id`) holds the composite a
+row belongs to. `NULL` = standalone. There's no stored primary; the
+representative **surface** is derived by [`group_surfaces`] (authority, then kind,
+then smallest id) and each non-surface member gets a derived `companion_of`
+(= the surface id) for client compatibility.
 
 On read, each companion's complementary state is overlaid onto its primary by
 `merge_companion_into` (`src/api/media.rs`), filling only what the primary lacks
@@ -94,26 +103,26 @@ and **unioning** the capability flags:
 
 Companions are **hidden from control** and **collapsed in the inventory**, and
 are **excluded from room membership** (`effective_media_members` filters
-`companion_of IS NULL`, `src/api/rooms.rs`). They remain in the device list,
+collapsed by `group_surfaces`, `src/api/rooms.rs`). They remain in the device list,
 marked, so the Devices page can show/un-merge them.
 
-### 2. Paired remote — `paired_media_id` → `remote_id`
+### 2. Paired remote — `remote_devices.group_id` → `remote_id`
 
-A virtual remote (`remote_devices` — D-pad keys, text, app launch) is **paired**
-to its TV's `media_device` when they share a hardware id.
-`remote_devices.paired_media_id` is set idempotently after discovery by
-`reconcile_remote_pairings`
-(`src/api/remote.rs`): for each remote with an `hw_id`, find a non-shadowed
-`media_device` with the same `hw_id`, preferring `kind = 'tv'`.
+A virtual remote (`remote_devices` — D-pad keys, text, app launch) **joins its
+TV's group** when they share a hardware id: `remote_devices.group_id` is set
+idempotently after discovery by `reconcile_remote_pairings` (`src/api/remote.rs`)
+— for each *unpaired* remote with an `hw_id`, find a non-shadowed `media_device`
+with the same `hw_id` (preferring `kind = 'tv'`), ensure it has a group, and join
+it. `group_id IS NULL`-only means a manual merge is never clobbered by discovery.
 
 On the media read path the **inverse** is surfaced: the effective device carries
 `remote_id` (the paired, enabled remote's id), resolved against the **whole
-composite** — every remote paired to the surface **or any of its companions**
-(`m.id = <surface> OR m.companion_of = <surface>`, via `load_paired_remotes`).
+composite** — every remote sharing the composite's `group_id`, via
+`load_paired_remotes`.
 
 A composite can carry **several** paired remotes for the same TV — e.g. a native
 vendor remote (carrying the full IRCC/native catalogue) *and* an HA `remote.*`
-copy (an empty catalogue). `best_remote_per_surface` surfaces the
+copy (an empty catalogue). `best_remote_per_group` surfaces the
 **highest-authority** one (native over Integration; ties break on the smaller id,
 so the choice is stable), so the richer "Full remote" catalogue is **never masked
 by a leaner integration copy regardless of which device was merged into which**.
@@ -262,19 +271,20 @@ These have no single owner either, so they resolve across the composite:
 
 Keep these true whenever you touch the composite code:
 
-- **Mutual exclusion** — a row is never both `shadowed_by` and `companion_of`.
-- **No chains** — a companion can't itself have companions, and you can't merge
-  into a companion or a shadowed row. Enforced in `set_media_companion`
-  (rejects self-merge, an unknown/companion/shadowed primary, and merging a row
-  that already has companions).
-- **Direction independence** — resolution always considers `device ∪ companions`
-  (`m.id = ? OR m.companion_of = ?`, `COALESCE(companion_of, id)`), so the
-  surfaced controls don't depend on which row was merged into which.
-- **Companions are hidden, not deleted** — excluded from control and room
-  membership (`companion_of IS NULL`), collapsed in the inventory, but still
-  listed (marked) so they can be un-merged.
-- **Overlay order is fixed** — merge companions → resolve power → overlay
-  receiver volume.
+- **Mutual exclusion** — a row is never both `shadowed_by` (de-dup) and a member
+  of a composite `group_id`. Shadowing discards; grouping merges.
+- **Flat groups, no primary** — membership is a single `group_id`; there's no
+  stored primary and no chains to reject. The surface (representative) is derived
+  by [`group_surfaces`], so merging is symmetric and a **union**
+  (`set_media_companion` folds one group into another; rejects only self-merge and
+  a shadowed/unknown target).
+- **Direction independence** — resolution considers every row sharing the
+  `group_id`, so the surfaced controls never depend on how the group was assembled.
+- **Members are hidden, not deleted** — a non-surface member is excluded from
+  control and room membership (collapsed by `group_surfaces` in `rooms`/`voice`),
+  but still listed (with a derived `companion_of`) so it can be un-merged.
+- **Overlay order is fixed** — merge members → resolve power → overlay receiver
+  volume.
 - **One service layer** — composite assembly/routing lives in `api::media`
   service fns; session, `/api/v1`, and MCP all delegate there. Never fork a
   composite control path per surface.
@@ -300,7 +310,10 @@ Keep these true whenever you touch the composite code:
   - **Composite diagnostic (dev mode only)** — `buildComposites` derives a
     read-only view of each composite and its members (Primary / Companion /
     Remote / Volume → receiver) for inspection. It's anchored on whatever media
-    row is the surface, so new composite shapes show up automatically.
+    row is the surface, so new composite shapes show up automatically. Each card
+    also shows a **Control precedence** panel (`CompositeRouting`, fed by
+    `GET /api/dev/media/{id}/routing`): which member device each control resolves
+    to and why — computed from the real routing helpers, so it can't drift.
 
 ---
 
@@ -325,14 +338,17 @@ return/act on the effective device.
 
 | Concern | Location |
 |---|---|
-| Companion column | `media_devices.companion_of` |
+| Composite membership (cross-domain) | `media_devices.group_id`, `remote_devices.group_id` (mig 0049) |
+| Derived surface (representative) | `group_surfaces`, `derive_companions` — `src/api/media.rs` |
 | Receiver binding columns | `media_devices.receiver_id` / `receiver_source` |
-| Remote pairing column | `remote_devices.paired_media_id` |
+| Remote pairing column | `remote_devices.group_id` (shared with the TV's media rows) |
 | Companion state merge | `merge_companion_into`, `now_playing_score` — `src/api/media.rs` |
 | Effective-device assembly | `list_all_devices`, `get_device_live` — `src/api/media.rs` |
 | Power/reachability resolve | `PowerSignal`, `resolve_composite_power`, `apply_composite_power` — `src/api/media.rs` |
-| Surfaced remote (native wins) | `load_paired_remotes`, `best_remote_per_surface` — `src/api/media.rs` |
+| Surfaced remote (native wins) | `load_paired_remotes`, `best_remote_per_group` (keyed by `group_id`) — `src/api/media.rs` |
 | Command routing | `apply_media_command`, `route_across_backings`, `load_composite_backings`, `capable_backing` — `src/api/media.rs` |
+| Per-field routing helpers (shared by write + diagnostic) | `pick_best`, `route_volume`/`route_transport`/`route_source`/`route_power` — `src/api/media.rs` |
+| Precedence diagnostic (which member wins each control + why) | `composite_routing` → `GET /api/dev/media/{id}/routing` (dev-mode) — `src/api/media.rs`, `src/api/dev.rs` |
 | Authority (native wins) | `backing_authority` — `src/api/media.rs` |
 | Power-on remote fan-out | `wake_paired_remote` — `src/api/media.rs` |
 | Cast across backings | `cast_to_device` / `cast_one` — `src/api/media.rs` |
@@ -340,7 +356,7 @@ return/act on the effective device.
 | Remote pairing reconcile | `reconcile_remote_pairings` — `src/api/remote.rs` |
 | Remote command favourites | `set_command_pin`, `overlay_pins`, `remote_command_pins` table — `src/api/remote.rs` |
 | Receiver-link liveness | `onkyo_link_actor` heartbeat (`HEARTBEAT`) — `src/providers/onkyo/mod.rs` |
-| Room exclusion | `effective_media_members` (`companion_of IS NULL`) — `src/api/rooms.rs` |
+| Room exclusion | `effective_media_members` (collapses each group to its surface) — `src/api/rooms.rs` |
 | Frontend merge UI + diagnostic | `MergePicker`, `MergedCompanion`, `buildComposites` — `frontend/src/pages/Devices.tsx` |
 | Frontend full-remote + favourites | `ExpandedRemote`, `CommandButton` — `frontend/src/components/BifrostRemote.tsx` |
 

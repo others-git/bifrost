@@ -43,9 +43,43 @@ pub(crate) fn android_keycode(key: RemoteKey) -> u32 {
     }
 }
 
+/// Android `KeyEvent` keycode for a literal character, for typing into a focused
+/// field by injecting key events (Android TVs expose no ScalarWeb text input).
+/// Covers the search-query character set — letters (lower-cased; search is
+/// case-insensitive), digits, space, and common punctuation. Unmapped characters
+/// return `None` and are skipped.
+pub(crate) fn char_keycode(c: char) -> Option<u32> {
+    let c = c.to_ascii_lowercase();
+    Some(match c {
+        'a'..='z' => 29 + (c as u32 - 'a' as u32), // KEYCODE_A..KEYCODE_Z
+        '0'..='9' => 7 + (c as u32 - '0' as u32),  // KEYCODE_0..KEYCODE_9
+        ' ' => 62,                                 // KEYCODE_SPACE
+        '.' => 56,                                 // KEYCODE_PERIOD
+        ',' => 55,                                 // KEYCODE_COMMA
+        '-' => 69,                                 // KEYCODE_MINUS
+        '\'' => 75,                                // KEYCODE_APOSTROPHE
+        '@' => 77,                                 // KEYCODE_AT
+        '/' => 76,                                 // KEYCODE_SLASH
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn char_keycodes_cover_the_search_charset() {
+        assert_eq!(char_keycode('a'), Some(29)); // KEYCODE_A
+        assert_eq!(char_keycode('z'), Some(54)); // KEYCODE_Z
+        assert_eq!(char_keycode('A'), Some(29)); // upper-cased to 'a' (case-insensitive)
+        assert_eq!(char_keycode('0'), Some(7)); // KEYCODE_0
+        assert_eq!(char_keycode('9'), Some(16)); // KEYCODE_9
+        assert_eq!(char_keycode(' '), Some(62)); // KEYCODE_SPACE
+        assert_eq!(char_keycode('\''), Some(75)); // KEYCODE_APOSTROPHE
+        assert_eq!(char_keycode('é'), None); // unmapped → skipped
+        assert_eq!(char_keycode('#'), None);
+    }
 
     #[test]
     fn keycodes_match_android_constants() {

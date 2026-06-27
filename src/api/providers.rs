@@ -1114,27 +1114,36 @@ async fn smarttv_pair_remote(
                     tracing::error!("db error: {e}");
                     return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                 }
+                tracing::info!(target: "bifrost::smarttv", provider = %id, host = %host, "ATV remote paired");
                 Json(serde_json::json!({ "status": "paired" })).into_response()
             }
-            Err(e) => (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "error": "pair_failed", "message": e.to_string() })),
-            )
-                .into_response(),
+            Err(e) => {
+                tracing::warn!(target: "bifrost::smarttv", host = %host, "ATV pair finish failed: {e:#}");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({ "error": "pair_failed", "message": e.to_string() })),
+                )
+                    .into_response()
+            }
         },
         // Phase 1: begin — the TV displays a code.
-        None => match smarttv::atv_pair_begin(&host).await {
-            Ok(()) => Json(serde_json::json!({
-                "status": "code_displayed",
-                "message": "Enter the code shown on the TV screen."
-            }))
-            .into_response(),
-            Err(e) => (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "error": "tv_unreachable", "message": e.to_string() })),
-            )
+        None => {
+            match smarttv::atv_pair_begin(&host).await {
+                Ok(()) => Json(serde_json::json!({
+                    "status": "code_displayed",
+                    "message": "Enter the code shown on the TV screen."
+                }))
                 .into_response(),
-        },
+                Err(e) => {
+                    tracing::warn!(target: "bifrost::smarttv", host = %host, "ATV pair begin failed: {e:#}");
+                    (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({ "error": "tv_unreachable", "message": e.to_string() })),
+                )
+                    .into_response()
+                }
+            }
+        }
     }
 }
 

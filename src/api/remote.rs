@@ -52,8 +52,9 @@ pub(crate) struct RemoteDeviceRow {
     pub enabled: bool,
     pub glyph: Option<String>,
     pub hw_id: Option<String>,
-    /// The paired TV media device id, if this remote controls a known TV.
-    pub paired_media_id: Option<String>,
+    /// The composite **group** this remote belongs to (shared with its TV's
+    /// media rows), if paired to a known TV. Replaces the old `paired_media_id`.
+    pub group_id: Option<String>,
 }
 
 fn row_to_remote(r: &sqlx::sqlite::SqliteRow) -> RemoteDeviceRow {
@@ -71,12 +72,12 @@ fn row_to_remote(r: &sqlx::sqlite::SqliteRow) -> RemoteDeviceRow {
         enabled: r.get::<i64, _>("enabled") != 0,
         glyph: r.get("glyph"),
         hw_id: r.get("hw_id"),
-        paired_media_id: r.get("paired_media_id"),
+        group_id: r.try_get("group_id").ok().flatten(),
     }
 }
 
 const SELECT_REMOTE: &str = "SELECT id, provider_id, device_id, name, last_state, last_seen, \
-     enabled, glyph, hw_id, paired_media_id FROM remote_devices";
+     enabled, glyph, hw_id, group_id FROM remote_devices";
 
 // ── Provider build / discovery ───────────────────────────────────────────────
 
@@ -136,15 +137,29 @@ pub(crate) async fn discover_remote_devices(
 /// Idempotent; run after discovery. A remote with no hw_id match is left
 /// unpaired. Prefers an media device of TV kind when several share a hw_id.
 pub(crate) async fn reconcile_remote_pairings(state: &AppState) {
+    // 1) Ensure each non-shadowed media device that shares a hw_id with a remote
+    //    has a composite group (a singleton on its own id if it isn't merged into
+    //    one) — so the remote has a group to join.
+    let _ = sqlx::query(
+        "UPDATE media_devices SET group_id = id
+          WHERE group_id IS NULL AND shadowed_by IS NULL AND hw_id IS NOT NULL
+            AND hw_id IN (SELECT hw_id FROM remote_devices WHERE hw_id IS NOT NULL)",
+    )
+    .execute(&state.db)
+    .await;
+
+    // 2) Join each *unpaired* remote (group_id NULL) to its TV's group by hw_id,
+    //    preferring a `tv`-kind media device. `group_id IS NULL` means a manual
+    //    merge is never clobbered by a later discovery.
     let _ = sqlx::query(
         "UPDATE remote_devices
-            SET paired_media_id = (
-                SELECT a.id FROM media_devices a
+            SET group_id = (
+                SELECT a.group_id FROM media_devices a
                  WHERE a.hw_id = remote_devices.hw_id
                    AND a.shadowed_by IS NULL
                  ORDER BY (a.kind = 'tv') DESC
                  LIMIT 1)
-          WHERE hw_id IS NOT NULL",
+          WHERE hw_id IS NOT NULL AND group_id IS NULL",
     )
     .execute(&state.db)
     .await;
@@ -735,7 +750,8 @@ async fn resolve_remote(state: &AppState, query: &str) -> Option<String> {
     // 2) a media device (TV) by id/name → its paired remote; else a substring
     //    match on either the remote's or the TV's name.
     sqlx::query_scalar::<_, String>(
-        "SELECT r.id FROM remote_devices r LEFT JOIN media_devices m ON r.paired_media_id = m.id
+        "SELECT r.id FROM remote_devices r
+           LEFT JOIN media_devices m ON m.group_id = r.group_id AND r.group_id IS NOT NULL
          WHERE r.enabled = 1 AND (m.id = ?1 OR lower(m.name) = lower(?1)
               OR lower(r.name) LIKE '%' || lower(?1) || '%'
               OR lower(m.name) LIKE '%' || lower(?1) || '%') LIMIT 1",
@@ -867,14 +883,18 @@ pub(crate) async fn play_on_response(
 /// The media device (TV) paired to a remote, if any — the surface the content
 /// resolver searches when turning a title into playable content.
 async fn paired_media_id(state: &AppState, remote_id: &str) -> Option<String> {
-    sqlx::query_scalar::<_, Option<String>>(
-        "SELECT paired_media_id FROM remote_devices WHERE id = ?",
+    // A media device (TV preferred) sharing the remote's composite group.
+    sqlx::query_scalar::<_, String>(
+        "SELECT m.id FROM media_devices m
+          WHERE m.group_id IS NOT NULL
+            AND m.group_id = (SELECT group_id FROM remote_devices WHERE id = ?)
+            AND m.shadowed_by IS NULL
+          ORDER BY (m.kind = 'tv') DESC LIMIT 1",
     )
     .bind(remote_id)
     .fetch_optional(&state.db)
     .await
     .ok()
-    .flatten()
     .flatten()
 }
 

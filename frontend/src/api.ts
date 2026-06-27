@@ -387,6 +387,21 @@ export async function getDeviceRaw(providerId: string, deviceId: string): Promis
   return res.json();
 }
 
+/** One control's resolved precedence within a composite (dev-mode diagnostic). */
+export interface ControlRoute {
+  control: string;
+  device_id: string;
+  device_name: string;
+  reason: string;
+}
+
+/** Dev-mode only: which member device wins each control for a composite, + why. */
+export async function getCompositeRouting(id: string): Promise<ControlRoute[]> {
+  const res = await fetch(`/api/dev/media/${id}/routing`);
+  if (!res.ok) return [];
+  return res.json();
+}
+
 export interface DevProvider {
   id: string;
   name: string;
@@ -687,8 +702,8 @@ export interface RemoteDevice {
   enabled: boolean;
   glyph: string | null;
   hw_id: string | null;
-  /** The paired TV audio device id, if this remote controls a known TV. */
-  paired_media_id: string | null;
+  /** The composite group this remote belongs to (shared with its TV), if paired. */
+  group_id: string | null;
 }
 
 /** The canonical keys a remote understands (snake_case, mirrors the backend). */

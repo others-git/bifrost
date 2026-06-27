@@ -15,6 +15,8 @@ import {
   getRemoteDevices,
   getSettings,
   getDeviceRaw,
+  getCompositeRouting,
+  type ControlRoute,
   discoverAllDevices,
   type FoundDevice,
   type DeviceRaw,
@@ -1107,15 +1109,43 @@ const SECTIONS: { domain: Domain; title: string }[] = [
   { domain: "power", title: "Power" },
 ];
 
+/** Precedence panel: which member device each control resolves to, + why.
+ * Fetched live from the dev routing endpoint so it mirrors real read/write
+ * routing (never a client-side guess). */
+function CompositeRouting({ id }: { id: string }) {
+  const [routes, setRoutes] = useState<ControlRoute[] | null>(null);
+  useEffect(() => {
+    getCompositeRouting(id).then(setRoutes);
+  }, [id]);
+  if (!routes || routes.length === 0) return null;
+  return (
+    <div style={{ marginTop: "0.55rem", borderTop: `1px solid ${T.cardBorder}`, paddingTop: "0.5rem" }}>
+      <div style={{ color: T.faint, fontSize: "0.66rem", letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: "0.35rem" }}>
+        Control precedence
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+        {routes.map((r) => (
+          <div key={r.control} style={{ display: "flex", gap: "0.5rem", fontSize: "0.76rem", lineHeight: 1.3 }}>
+            <span style={{ minWidth: 120, flexShrink: 0, color: T.dim }}>{r.control}</span>
+            <span style={{ color: ACCENT }}>{r.device_name || r.device_id.slice(0, 8)}</span>
+            <span style={{ color: T.faint }}>· {r.reason}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /** One member of a composite (its role within the aggregate + a short detail). */
 interface CompositeMember {
   role: string;
   name: string;
   detail: string;
 }
-/** A "composite" device — a single control surface that aggregates more than one
- * underlying entity (a TV + its paired remote, a primary + merged companions, a
- * source whose volume routes to a receiver). Surfaced read-only in dev mode. */
+/** A "composite" device — a single control surface that aggregates the members
+ * of one logical-device **group** (a TV + its paired remote, several merged
+ * `media_player` views of one box). A receiver binding is NOT a composite — it's
+ * a separate shared-receiver abstraction. Surfaced read-only in dev mode. */
 interface CompositeView {
   id: string;
   name: string;
@@ -1145,20 +1175,17 @@ function buildComposites(
   const out: CompositeView[] = [];
   for (const a of media) {
     if (a.shadowed_by || a.companion_of) continue; // a hidden/merged entity isn't a surface
+    // A composite is defined purely by its group: merged companions + a paired
+    // remote. A receiver binding is a *separate* abstraction (a shared receiver
+    // owning volume, many sources → one receiver) — NOT composite membership, so
+    // it never makes a lone device a composite. (Where volume actually routes,
+    // incl. to a receiver, is shown in the Control-precedence panel below.)
     const members: CompositeMember[] = [];
     // Pairing is resolved server-side onto the effective device (`remote_id`).
     const remote = a.remote_id ? remotes.find((r) => r.id === a.remote_id) : undefined;
     if (remote) members.push({ role: "Remote", name: remote.name, detail: "D-pad · keys · app launch" });
     for (const it of items) {
       if (it.companionOf === a.id) members.push({ role: "Companion", name: it.name, detail: it.typeLabel });
-    }
-    if (a.receiver_id) {
-      const rcv = media.find((m) => m.id === a.receiver_id);
-      members.push({
-        role: "Volume → receiver",
-        name: rcv?.name ?? "receiver",
-        detail: a.receiver_source ? `input ${a.receiver_source}` : "",
-      });
     }
     if (members.length === 0) continue;
     out.push({
@@ -1571,6 +1598,7 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
                     </div>
                   ))}
                 </div>
+                <CompositeRouting id={c.id} />
               </div>
             ))}
           </div>

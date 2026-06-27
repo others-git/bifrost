@@ -323,12 +323,16 @@ pub(crate) async fn effective_media_members(
     state: &AppState,
     room_id: &str,
 ) -> Vec<RoomMediaMember> {
+    // A composite must appear once — as its derived surface, not its hidden
+    // companions. `group_surfaces` collapses each group the same way the device
+    // list does, so this can't drift from the control surface.
+    let surfaces = crate::api::media::group_surfaces(state).await;
     sqlx::query(
-        "SELECT d.id AS media_device_id, COALESCE(rad.volume_offset, 0) AS volume_offset
+        "SELECT d.id AS media_device_id, d.group_id, COALESCE(rad.volume_offset, 0) AS volume_offset
          FROM media_devices d
          LEFT JOIN room_media_devices rad
            ON rad.room_id = ?1 AND rad.media_device_id = d.id
-         WHERE d.enabled = 1 AND d.shadowed_by IS NULL AND d.companion_of IS NULL AND d.id IN (
+         WHERE d.enabled = 1 AND d.shadowed_by IS NULL AND d.id IN (
              SELECT media_device_id FROM room_media_devices WHERE room_id = ?1
              UNION
              SELECT pga.media_device_id
@@ -343,6 +347,13 @@ pub(crate) async fn effective_media_members(
     .await
     .unwrap_or_default()
     .into_iter()
+    .filter(|r| {
+        // Keep singletons and each group's surface; drop hidden companions.
+        match r.get::<Option<String>, _>("group_id") {
+            None => true,
+            Some(g) => surfaces.get(&g).map(String::as_str) == Some(r.get::<String, _>("media_device_id").as_str()),
+        }
+    })
     .map(|r| RoomMediaMember {
         media_device_id: r.get("media_device_id"),
         volume_offset: r.get("volume_offset"),

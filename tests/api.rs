@@ -4929,22 +4929,31 @@ async fn audio_companion_link_crud_and_validation() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
-    // The link is recorded on the companion.
+    // The two now form one composite group. Resolution is direction-independent:
+    // exactly one is the derived surface, the other its (hidden) companion
+    // pointing at it — we don't care which way the surface fell.
     let resp = app
         .clone()
         .oneshot(helpers::authed_get("/api/media/devices", &cookie))
         .await
         .unwrap();
     let list = helpers::response_json(resp).await;
-    let comp = list
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|d| d["id"] == companion)
-        .unwrap();
-    assert_eq!(comp["companion_of"], primary);
+    let get = |id: &str| {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let (comp, prim) = (get(&companion), get(&primary));
+    let grouped = (comp["companion_of"] == serde_json::json!(primary)
+        && prim["companion_of"].is_null())
+        || (prim["companion_of"] == serde_json::json!(companion) && comp["companion_of"].is_null());
+    assert!(grouped, "merged devices should form one composite group");
 
-    // No chains: merging into a device that is itself a companion is rejected.
+    // Merging again the other way is idempotent (already one group), not an error
+    // — the flat group model has no directional "chain" to reject.
     let resp = app
         .clone()
         .oneshot(helpers::authed_json(
@@ -4955,7 +4964,7 @@ async fn audio_companion_link_crud_and_validation() {
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
     // Unmerge.
     let resp = app
@@ -7425,16 +7434,16 @@ async fn media_device_exposes_paired_remote_id() {
     // Seed a TV media device and an enabled remote paired to it — the linkage the
     // hw_id reconciler establishes for an Android TV's media_player + remote.
     sqlx::query(
-        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, hw_id)
-         VALUES ('tv1', ?, 'media_player.bedroom_tv', 'Bedroom TV', 'tv', '{}', '{\"power\":true,\"volume\":0,\"mute\":false}', 'mac:aa')",
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, hw_id, group_id)
+         VALUES ('tv1', ?, 'media_player.bedroom_tv', 'Bedroom TV', 'tv', '{}', '{\"power\":true,\"volume\":0,\"mute\":false}', 'mac:aa', 'g1')",
     )
     .bind(&prov_id)
     .execute(&db)
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO remote_devices (id, provider_id, device_id, name, enabled, hw_id, paired_media_id)
-         VALUES ('rem1', ?, 'remote.bedroom_tv', 'Bedroom TV', 1, 'mac:aa', 'tv1')",
+        "INSERT INTO remote_devices (id, provider_id, device_id, name, enabled, hw_id, group_id)
+         VALUES ('rem1', ?, 'remote.bedroom_tv', 'Bedroom TV', 1, 'mac:aa', 'g1')",
     )
     .bind(&prov_id)
     .execute(&db)
@@ -7442,16 +7451,16 @@ async fn media_device_exposes_paired_remote_id() {
     .unwrap();
     // A standalone speaker (no remote) and a disabled remote both read as null.
     sqlx::query(
-        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, hw_id)
-         VALUES ('spk1', ?, 'media_player.kitchen', 'Kitchen', 'speaker', '{}', '{\"power\":false,\"volume\":0,\"mute\":false}', 'mac:bb')",
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, hw_id, group_id)
+         VALUES ('spk1', ?, 'media_player.kitchen', 'Kitchen', 'speaker', '{}', '{\"power\":false,\"volume\":0,\"mute\":false}', 'mac:bb', 'g2')",
     )
     .bind(&prov_id)
     .execute(&db)
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO remote_devices (id, provider_id, device_id, name, enabled, hw_id, paired_media_id)
-         VALUES ('rem2', ?, 'remote.kitchen', 'Kitchen', 0, 'mac:bb', 'spk1')",
+        "INSERT INTO remote_devices (id, provider_id, device_id, name, enabled, hw_id, group_id)
+         VALUES ('rem2', ?, 'remote.kitchen', 'Kitchen', 0, 'mac:bb', 'g2')",
     )
     .bind(&prov_id)
     .execute(&db)
@@ -7488,16 +7497,16 @@ async fn standby_tv_reads_on_and_reachable_via_paired_remote() {
     // The TV's media_player reads unavailable (reachable:false, power:false) — the
     // standby case — but its paired remote reports the box on + reachable.
     sqlx::query(
-        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state)
-         VALUES ('tv1', ?, 'media_player.bedroom_tv', 'Bedroom TV', 'tv', '{}', '{\"power\":false,\"volume\":0,\"mute\":false,\"reachable\":false}')",
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, group_id)
+         VALUES ('tv1', ?, 'media_player.bedroom_tv', 'Bedroom TV', 'tv', '{}', '{\"power\":false,\"volume\":0,\"mute\":false,\"reachable\":false}', 'g1')",
     )
     .bind(&prov_id)
     .execute(&db)
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO remote_devices (id, provider_id, device_id, name, enabled, paired_media_id, last_state)
-         VALUES ('rem1', ?, 'remote.bedroom_tv', 'Bedroom TV', 1, 'tv1', '{\"on\":true,\"reachable\":true}')",
+        "INSERT INTO remote_devices (id, provider_id, device_id, name, enabled, group_id, last_state)
+         VALUES ('rem1', ?, 'remote.bedroom_tv', 'Bedroom TV', 1, 'g1', '{\"on\":true,\"reachable\":true}')",
     )
     .bind(&prov_id)
     .execute(&db)
@@ -7531,24 +7540,24 @@ async fn remote_surfaces_on_the_primary_when_paired_to_a_companion() {
     // belongs to the composite, so it must surface on the primary regardless of
     // which row it's literally paired to.
     sqlx::query(
-        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state)
-         VALUES ('tvP', ?, 'media_player.tv', 'BRAVIA', 'tv', '{}', '{\"power\":true,\"volume\":0,\"mute\":false}')",
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, group_id)
+         VALUES ('tvP', ?, 'media_player.tv', 'BRAVIA', 'tv', '{}', '{\"power\":true,\"volume\":0,\"mute\":false}', 'g')",
     )
     .bind(&prov_id)
     .execute(&db)
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, companion_of)
-         VALUES ('tvC', ?, 'bravia.tv', 'BRAVIA', 'tv', '{}', '{\"power\":true,\"volume\":0,\"mute\":false}', 'tvP')",
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, group_id)
+         VALUES ('tvC', ?, 'bravia.tv', 'BRAVIA', 'speaker', '{}', '{\"power\":true,\"volume\":0,\"mute\":false}', 'g')",
     )
     .bind(&prov_id)
     .execute(&db)
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO remote_devices (id, provider_id, device_id, name, enabled, paired_media_id)
-         VALUES ('rem', ?, 'remote.tv', 'BRAVIA', 1, 'tvC')",
+        "INSERT INTO remote_devices (id, provider_id, device_id, name, enabled, group_id)
+         VALUES ('rem', ?, 'remote.tv', 'BRAVIA', 1, 'g')",
     )
     .bind(&prov_id)
     .execute(&db)
@@ -7567,6 +7576,69 @@ async fn remote_surfaces_on_the_primary_when_paired_to_a_companion() {
         .find(|d| d["id"] == "tvP")
         .expect("primary in list");
     assert_eq!(primary["remote_id"], "rem");
+}
+
+#[tokio::test]
+async fn dev_composite_routing_reports_control_precedence() {
+    let ha = ha_remote_mock().await;
+    let (app, prov_id, db) = helpers::test_app_with_ha_db(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // A TV primary + a merged companion + a paired remote — the canonical composite.
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, group_id)
+         VALUES ('tvP', ?, 'media_player.tv', 'BRAVIA', 'tv', '{\"transport\":true,\"sources\":true}', '{\"power\":true,\"volume\":0,\"mute\":false}', 'g')",
+    )
+    .bind(&prov_id).execute(&db).await.unwrap();
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, group_id)
+         VALUES ('tvC', ?, 'bravia.tv', 'Living Room TV', 'speaker', '{\"transport\":true}', '{\"power\":true,\"volume\":40,\"mute\":false}', 'g')",
+    )
+    .bind(&prov_id).execute(&db).await.unwrap();
+    sqlx::query(
+        "INSERT INTO remote_devices (id, provider_id, device_id, name, enabled, group_id)
+         VALUES ('rem', ?, 'remote.tv', 'BRAVIA', 1, 'g')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE config SET dev_mode = 1 WHERE id = 1")
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/dev/media/tvP/routing", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let routes = helpers::response_json(resp).await;
+    let routes = routes.as_array().unwrap();
+    let by = |c: &str| {
+        routes
+            .iter()
+            .find(|r| r["control"] == c)
+            .unwrap_or_else(|| panic!("no route {c}"))
+    };
+    // Volume routes to the companion that actually carries audio (volume 40).
+    assert_eq!(by("volume / mute")["device_id"], "tvC");
+    // The paired remote surfaces, named.
+    assert_eq!(by("remote keys / apps")["device_id"], "rem");
+}
+
+#[tokio::test]
+async fn dev_composite_routing_404_when_dev_mode_off() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .oneshot(helpers::authed_get(
+            "/api/dev/media/whatever/routing",
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -7832,16 +7904,16 @@ async fn media_power_on_also_wakes_paired_remote() {
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
 
     sqlx::query(
-        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state)
-         VALUES ('tv1', ?, 'media_player.bedroom_tv', 'Bedroom TV', 'tv', '{\"sources\":true}', '{\"power\":false,\"volume\":0,\"mute\":false}')",
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, group_id)
+         VALUES ('tv1', ?, 'media_player.bedroom_tv', 'Bedroom TV', 'tv', '{\"sources\":true}', '{\"power\":false,\"volume\":0,\"mute\":false}', 'g1')",
     )
     .bind(&prov_id)
     .execute(&db)
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO remote_devices (id, provider_id, device_id, name, enabled, paired_media_id)
-         VALUES ('rem1', ?, 'remote.bedroom_tv', 'Bedroom TV', 1, 'tv1')",
+        "INSERT INTO remote_devices (id, provider_id, device_id, name, enabled, group_id)
+         VALUES ('rem1', ?, 'remote.bedroom_tv', 'Bedroom TV', 1, 'g1')",
     )
     .bind(&prov_id)
     .execute(&db)

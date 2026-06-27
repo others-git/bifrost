@@ -35,6 +35,22 @@ pub fn router() -> Router<Arc<AppState>> {
             "/devices/{provider_id}/{device_id}/raw",
             get(device_raw_handler),
         )
+        .route("/media/{id}/routing", get(media_routing_handler))
+}
+
+/// Composite **precedence** diagnostic: for the media device `id`, which
+/// underlying member wins each control (power / volume / transport / source /
+/// favorites / remote) and why. Surfaces exactly what the read/write routing
+/// does, so a confusing composite can be debugged at a glance.
+async fn media_routing_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    if let Err(code) = guard(&state, &headers).await {
+        return code.into_response();
+    }
+    Json(crate::api::media::composite_routing(&state, &id).await).into_response()
 }
 
 /// Whether developer mode is on (`config.dev_mode`).
