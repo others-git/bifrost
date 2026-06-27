@@ -8,7 +8,14 @@
 //! - `/ZoneGroupTopology/Control` — household topology (player UUIDs, IPs, names)
 //! - `/MediaRenderer/RenderingControl/Control` — Get/SetVolume, Get/SetMute
 //! - `/MediaRenderer/AVTransport/Control` — Play/Pause/Stop/Next/Previous,
-//!   GetTransportInfo (play state), GetPositionInfo (track DIDL metadata)
+//!   GetTransportInfo (play state), GetPositionInfo (track DIDL metadata),
+//!   SetAVTransportURI (favorites + line-in/TV input switching)
+//!
+//! Players with a physical input — a line-in jack (amps/ports/Fives) or a TV
+//! input (soundbars) — expose it as a selectable `source`; switching to one
+//! points the transport at a special URI (`x-rincon-stream:` / `x-sonos-htastream:`),
+//! the same mechanism a favorite uses. Capability is read from each player's
+//! `device_description.xml` (an `AudioIn` service ⇒ line-in; a soundbar model ⇒ TV).
 //!
 //! Sonos players have no power state; Bifrost maps `power` to "is playing"
 //! (`power: false` pauses, `power: true` plays) — the same convention voice
@@ -116,6 +123,16 @@ struct Group {
 /// Device-id prefix for group zone devices (`group:RINCON_…` = coordinator).
 const GROUP_PREFIX: &str = "group:";
 
+/// Per-household cache of known player base URLs (keyed by the configured seed
+/// URL), so [`SonosProvider::topology`] can fall back to a *different* player
+/// when the seed is offline — every player answers `GetZoneGroupState` the same.
+/// The most-recently-answering URL is kept first.
+fn topology_cache() -> &'static std::sync::Mutex<HashMap<String, Vec<String>>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Vec<String>>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 /// A Sonos player UUID is `RINCON_<mac><suffix>` — the 12-hex MAC follows the
 /// `RINCON_` prefix. Extract it as the normalized cross-provider `hw_id` so a
 /// player also imported via HA de-dups. `None` if the uuid isn't this shape.
@@ -209,6 +226,69 @@ fn favorite_is_container(uri: &str) -> bool {
         || uri.starts_with("file:")
 }
 
+// ── Physical inputs (line-in / TV) ──────────────────────────────────────────
+
+/// A selectable physical input on a Sonos player: the analog line-in jack
+/// (amps/ports/Fives) or the TV input (soundbars). Selecting one points the
+/// player's transport at a special URI, exactly like playing a favorite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SonosInput {
+    LineIn,
+    Tv,
+}
+
+impl SonosInput {
+    /// User-facing label — also the `source` value echoed back in state and the
+    /// token accepted on a `source` command (matched case-insensitively).
+    fn label(self) -> &'static str {
+        match self {
+            SonosInput::LineIn => "Line-In",
+            SonosInput::Tv => "TV",
+        }
+    }
+
+    /// The transport URI that switches a group to this input. `uuid` is the
+    /// **owning** player's UUID (the input is physically on that player); for a
+    /// group the URI is set on the coordinator but still references the owner.
+    fn uri(self, uuid: &str) -> String {
+        match self {
+            SonosInput::LineIn => format!("x-rincon-stream:{uuid}"),
+            SonosInput::Tv => format!("x-sonos-htastream:{uuid}:spdif"),
+        }
+    }
+
+    /// Recognise the active input from a current transport URI (for read-back).
+    fn from_uri(uri: &str) -> Option<Self> {
+        if uri.starts_with("x-rincon-stream:") {
+            Some(SonosInput::LineIn)
+        } else if uri.starts_with("x-sonos-htastream:") {
+            Some(SonosInput::Tv)
+        } else {
+            None
+        }
+    }
+}
+
+/// Derive a player's physical inputs from its `device_description.xml`: an
+/// `AudioIn` service in the service list ⇒ a line-in jack; a known soundbar
+/// `modelName` ⇒ a TV input. Both signals come from the one description.
+fn parse_inputs(device_description: &str) -> Vec<SonosInput> {
+    let mut inputs = Vec::new();
+    if device_description.contains(":service:AudioIn:") {
+        inputs.push(SonosInput::LineIn);
+    }
+    let model = xml_tag(device_description, "modelName")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if ["playbar", "playbase", "beam", "arc", "ray"]
+        .iter()
+        .any(|m| model.contains(m))
+    {
+        inputs.push(SonosInput::Tv);
+    }
+    inputs
+}
+
 // ── Provider ────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -216,6 +296,13 @@ pub struct SonosProvider {
     client: Client,
     /// Seed player base URL (`http://<ip>:1400`); topology fans out from here.
     seed_url: String,
+    /// Prefix for this provider's keys in the process-global caches (topology
+    /// fallback URLs, per-player inputs). Empty in production, so the separate
+    /// provider instances rebuilt per request for the *same* Sonos system share
+    /// one cache (keyed by seed/base URL). Tests set a unique value per instance
+    /// so the shared statics can't leak between tests when mock-server ports are
+    /// recycled across the run.
+    cache_ns: String,
 }
 
 /// Heartbeat poll interval behind the push channel — keeps state honest (and the
@@ -237,7 +324,13 @@ impl SonosProvider {
         Ok(Self {
             client,
             seed_url: seed_url.into(),
+            cache_ns: String::new(),
         })
+    }
+
+    /// Namespaced key into the global caches (see [`SonosProvider::cache_ns`]).
+    fn cache_key(&self, url: &str) -> String {
+        format!("{}{url}", self.cache_ns)
     }
 
     pub fn new(host: impl AsRef<str>) -> Result<Self> {
@@ -256,7 +349,16 @@ impl SonosProvider {
 
     #[cfg(test)]
     pub fn new_for_test(base_url: impl Into<String>) -> Result<Self> {
-        Self::new_with_base(base_url)
+        // A unique cache namespace per instance fully isolates the process-global
+        // caches between (possibly parallel) tests, even when mock-server ports
+        // are recycled across the run.
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let mut p = Self::new_with_base(base_url)?;
+        p.cache_ns = format!(
+            "test{}:",
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        Ok(p)
     }
 
     async fn soap(&self, base_url: &str, call: SoapCall<'_>) -> Result<String> {
@@ -280,12 +382,54 @@ impl SonosProvider {
         Ok(body)
     }
 
-    /// Fetch the household topology from the seed player. Invisible members
-    /// (bridges, bonded surrounds) are skipped.
+    /// Fetch the household topology. Any player answers `GetZoneGroupState`
+    /// identically, so a single offline player — *including the configured seed*
+    /// — must not make the whole household uncontrollable. We try the seed first,
+    /// then every other player we've seen before (cached, most-recently-answered
+    /// first), and only fail if none respond. Invisible members (bridges, bonded
+    /// surrounds) are skipped.
     async fn topology(&self) -> Result<(Vec<Player>, Vec<Group>)> {
+        let key = self.cache_key(&self.seed_url);
+        let mut candidates: Vec<String> = topology_cache()
+            .lock()
+            .expect("sonos topology cache poisoned")
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        if !candidates.contains(&self.seed_url) {
+            candidates.push(self.seed_url.clone());
+        }
+
+        let mut last_err: Option<anyhow::Error> = None;
+        for url in &candidates {
+            match self.fetch_topology(url).await {
+                Ok((players, groups)) => {
+                    // Remember every player URL for next time, the one that just
+                    // answered first so a dead seed is skipped on the next call.
+                    let mut urls = vec![url.clone()];
+                    urls.extend(
+                        players
+                            .iter()
+                            .map(|p| p.base_url.clone())
+                            .filter(|u| u != url),
+                    );
+                    topology_cache()
+                        .lock()
+                        .expect("sonos topology cache poisoned")
+                        .insert(key.clone(), urls);
+                    return Ok((players, groups));
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow!("Sonos topology unavailable")))
+    }
+
+    /// One `GetZoneGroupState` against a specific player URL.
+    async fn fetch_topology(&self, base_url: &str) -> Result<(Vec<Player>, Vec<Group>)> {
         let body = self
             .soap(
-                &self.seed_url,
+                base_url,
                 SoapCall {
                     path: "/ZoneGroupTopology/Control",
                     service: TOPOLOGY,
@@ -446,12 +590,21 @@ impl SonosProvider {
             play_state,
         });
 
+        // Physical inputs belong to `player`; the *active* one is read from the
+        // (group) transport URI on the coordinator.
+        let inputs = self.inputs_for(&player.base_url).await;
+        let source_list: Vec<String> = inputs.iter().map(|i| i.label().to_string()).collect();
+        let track_uri = xml_tag(&position_body, "TrackURI").unwrap_or_default();
+        let source = SonosInput::from_uri(&track_uri)
+            .filter(|i| inputs.contains(i))
+            .map(|i| i.label().to_string());
+
         Ok(MediaState {
             power: play_state == Some(PlayState::Playing),
             volume: volume.min(100),
             mute,
-            source: None,
-            source_list: Vec::new(),
+            source,
+            source_list,
             now_playing,
             reachable: Some(true),
             group_coordinator: None, // set by discover from the topology
@@ -464,6 +617,35 @@ impl SonosProvider {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
         })
+    }
+
+    /// A player's physical inputs (line-in / TV), fetched from its
+    /// `device_description.xml` and memoised by `base_url`. Hardware inputs never
+    /// change, so caching keeps `read_state` (a hot poll path) from re-fetching
+    /// the description each cycle. A failed fetch isn't cached, so it retries.
+    async fn inputs_for(&self, base_url: &str) -> Vec<SonosInput> {
+        static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Vec<SonosInput>>>> =
+            std::sync::OnceLock::new();
+        let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+        let key = self.cache_key(base_url);
+        if let Some(inputs) = cache.lock().expect("sonos input cache poisoned").get(&key) {
+            return inputs.clone();
+        }
+        let body = match self
+            .client
+            .get(format!("{base_url}/xml/device_description.xml"))
+            .send()
+            .await
+        {
+            Ok(resp) => resp.text().await.unwrap_or_default(),
+            Err(_) => return Vec::new(),
+        };
+        let inputs = parse_inputs(&body);
+        cache
+            .lock()
+            .expect("sonos input cache poisoned")
+            .insert(key, inputs.clone());
+        inputs
     }
 
     async fn transport(&self, player: &Player, action: &str) -> Result<()> {
@@ -489,13 +671,20 @@ impl SonosProvider {
         .await
     }
 
-    /// Browse the household Favorites container (`FV:2`) on the seed player and
-    /// return the unescaped DIDL-Lite result. Favorites are household-wide, so
-    /// any player answers the same list.
+    /// Browse the household Favorites container (`FV:2`) and return the
+    /// unescaped DIDL-Lite result. Favorites are household-wide, so any player
+    /// answers the same list — prefer the last player that answered topology
+    /// over the raw seed, so an offline seed doesn't break favorites either.
     async fn browse_favorites(&self) -> Result<String> {
+        let url = topology_cache()
+            .lock()
+            .expect("sonos topology cache poisoned")
+            .get(&self.cache_key(&self.seed_url))
+            .and_then(|urls| urls.first().cloned())
+            .unwrap_or_else(|| self.seed_url.clone());
         let body = self
             .soap(
-                &self.seed_url,
+                &url,
                 SoapCall {
                     path: "/MediaServer/ContentDirectory/Control",
                     service: CONTENT_DIRECTORY,
@@ -635,7 +824,8 @@ impl MediaProvider for SonosProvider {
                 name: p.name.clone(),
                 kind: MediaDeviceKind::Speaker,
                 capabilities: MediaCapabilities {
-                    sources: false,
+                    // Line-in / TV input, if this player has one (from read_state).
+                    sources: !state.source_list.is_empty(),
                     transport: true,
                     now_playing: true,
                     favorites: true,
@@ -656,14 +846,46 @@ impl MediaProvider for SonosProvider {
     }
 
     async fn set_state(&self, device_id: &str, cmd: &MediaCommand) -> Result<()> {
-        if cmd.source.is_some() {
-            return Err(anyhow!(
-                "Sonos source selection is not supported; control playback from a Sonos app, then use transport commands"
-            ));
-        }
         let group = device_id.starts_with(GROUP_PREFIX);
         // Volume/mute act on the player; transport acts on the group coordinator.
         let (player, coordinator) = self.resolve(device_id).await?;
+
+        // Switch to a physical input (line-in / TV): point the group transport
+        // at the input URI, then play — the same SetAVTransportURI mechanism as
+        // a favorite. The URI references the owning player even on a group.
+        if let Some(source) = &cmd.source {
+            let inputs = self.inputs_for(&player.base_url).await;
+            let input = inputs
+                .iter()
+                .copied()
+                .find(|i| i.label().eq_ignore_ascii_case(source))
+                .ok_or_else(|| {
+                    let available = inputs
+                        .iter()
+                        .map(|i| i.label())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    anyhow!(
+                        "Sonos source '{source}' is not available on this player (available: {})",
+                        if available.is_empty() {
+                            "none"
+                        } else {
+                            &available
+                        }
+                    )
+                })?;
+            self.av(
+                &coordinator,
+                "SetAVTransportURI",
+                format!(
+                    "<InstanceID>0</InstanceID><CurrentURI>{}</CurrentURI>\
+                     <CurrentURIMetaData></CurrentURIMetaData>",
+                    input.uri(&player.uuid)
+                ),
+            )
+            .await?;
+            self.transport(&coordinator, "Play").await?;
+        }
 
         if let Some(volume) = cmd.volume {
             let (path, service, action, args) = if group {
@@ -1782,21 +2004,117 @@ mod tests {
         .unwrap();
     }
 
+    /// A device description advertising a line-in jack (AudioIn service).
+    fn device_description(model: &str, with_audio_in: bool) -> String {
+        let audio_in = if with_audio_in {
+            r#"<service><serviceType>urn:schemas-upnp-org:service:AudioIn:1</serviceType><controlURL>/MediaRenderer/AudioIn/Control</controlURL></service>"#
+        } else {
+            ""
+        };
+        format!(
+            r#"<root><device><modelName>{model}</modelName><serviceList>{audio_in}</serviceList></device></root>"#
+        )
+    }
+
+    async fn mount_device_description(server: &MockServer, body: String) {
+        Mock::given(method("GET"))
+            .and(path("/xml/device_description.xml"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(server)
+            .await;
+    }
+
+    #[test]
+    fn parse_inputs_detects_line_in_from_audio_in_service() {
+        assert_eq!(
+            parse_inputs(&device_description("Sonos Five", true)),
+            vec![SonosInput::LineIn]
+        );
+    }
+
+    #[test]
+    fn parse_inputs_detects_tv_from_soundbar_model() {
+        assert_eq!(
+            parse_inputs(&device_description("Sonos Beam", false)),
+            vec![SonosInput::Tv]
+        );
+    }
+
+    #[test]
+    fn parse_inputs_none_for_plain_speaker() {
+        assert!(parse_inputs(&device_description("Sonos One", false)).is_empty());
+    }
+
+    #[test]
+    fn sonos_input_uris_reference_the_owning_player() {
+        assert_eq!(
+            SonosInput::LineIn.uri("RINCON_LIVING"),
+            "x-rincon-stream:RINCON_LIVING"
+        );
+        assert_eq!(
+            SonosInput::Tv.uri("RINCON_LIVING"),
+            "x-sonos-htastream:RINCON_LIVING:spdif"
+        );
+        assert_eq!(
+            SonosInput::from_uri("x-rincon-stream:RINCON_X"),
+            Some(SonosInput::LineIn)
+        );
+        assert_eq!(SonosInput::from_uri("x-rincon:RINCON_X"), None);
+    }
+
     #[tokio::test]
-    async fn set_state_rejects_source_selection() {
+    async fn set_state_switches_to_line_in() {
         let server = MockServer::start().await;
+        mount_topology(&server).await;
+        mount_device_description(&server, device_description("Sonos Five", true)).await;
+        mount_av_action(&server, "SetAVTransportURI", Some(1)).await;
+        mount_av_action(&server, "Play", Some(1)).await;
+
+        let p = SonosProvider::new_for_test(server.uri()).unwrap();
+        p.set_state(
+            "RINCON_LIVING",
+            &MediaCommand {
+                source: Some("line-in".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let set_uri = requests
+            .iter()
+            .find(|r| {
+                r.headers
+                    .get("SOAPACTION")
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| v.contains("SetAVTransportURI"))
+            })
+            .expect("SetAVTransportURI was sent");
+        let body = std::str::from_utf8(&set_uri.body).unwrap();
+        assert!(
+            body.contains("x-rincon-stream:RINCON_LIVING"),
+            "expected line-in URI in SetAVTransportURI body, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_state_rejects_unknown_source() {
+        let server = MockServer::start().await;
+        mount_topology(&server).await;
+        mount_device_description(&server, device_description("Sonos One", false)).await;
         let p = SonosProvider::new_for_test(server.uri()).unwrap();
         let err = p
             .set_state(
                 "RINCON_LIVING",
                 &MediaCommand {
-                    source: Some("spotify".into()),
+                    source: Some("line-in".into()),
                     ..Default::default()
                 },
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("not supported"));
+        assert!(err.to_string().contains("not available"), "{err}");
     }
 
     #[tokio::test]
@@ -1814,6 +2132,38 @@ mod tests {
 
         let p = SonosProvider::new_for_test(server.uri()).unwrap();
         assert!(p.discover().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn topology_falls_back_to_another_player_when_seed_is_down() {
+        // A live player that answers topology, and a seed pointed at an
+        // unresolvable host — mimicking the configured seed going dark. The
+        // `.invalid` TLD never resolves (RFC 6761), so the seed fetch fails fast.
+        let live = MockServer::start().await;
+        mount_topology(&live).await;
+        let dead_seed = "http://sonos-dead-seed.invalid:1400".to_string();
+        let p = SonosProvider::new_for_test(&dead_seed).unwrap();
+
+        // Cache mirrors a household first seen via the (now-dead) seed: seed
+        // first, the live player second — exactly the state after the seed dies.
+        let key = p.cache_key(&dead_seed);
+        topology_cache()
+            .lock()
+            .unwrap()
+            .insert(key.clone(), vec![dead_seed.clone(), live.uri()]);
+
+        let (players, _) = p.topology().await.unwrap();
+        assert!(
+            players.iter().any(|pl| pl.uuid == "RINCON_LIVING"),
+            "topology should have come from the live fallback player"
+        );
+
+        // The live player is now remembered first, so the dead seed is skipped.
+        let cached = topology_cache().lock().unwrap().get(&key).cloned();
+        assert_eq!(
+            cached.unwrap().first().map(String::as_str),
+            Some(live.uri().as_str())
+        );
     }
 
     // ── Favorites ────────────────────────────────────────────────────────────

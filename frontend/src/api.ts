@@ -488,12 +488,14 @@ export async function getLights(): Promise<Light[] | "unauthorized"> {
   return res.json();
 }
 
-export async function setLightState(id: string, state: LightState): Promise<void> {
-  await fetch(`/api/lights/${id}`, {
+export async function setLightState(id: string, state: LightState): Promise<string | null> {
+  const res = await fetch(`/api/lights/${id}`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(state),
   });
+  if (res.ok) return null;
+  return (await res.text()) || `HTTP ${res.status}`;
 }
 
 /** Set per-segment colours on a strip (write-only; not reflected in light state). */

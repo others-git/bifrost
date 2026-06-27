@@ -215,9 +215,9 @@ provider-native synced playback group (see below).
 Source names: receiver inputs (`net`, `tv`, `bd`, `cbl`, `bluetooth`, …), raw
 Onkyo SLI hex (`"2B"`), or a streaming service (`spotify`, `tunein`, `deezer`,
 `tidal`, `airplay`, `internet-radio`) — service names switch the receiver to
-NET and select the service in one call. Sonos does not accept `source` (start
-playback from a Sonos app, then control transport here); on Sonos, `power`
-maps to play/pause.
+NET and select the service in one call. On Sonos, `source` switches to a
+physical input — `Line-In` (amps/ports/Fives) or `TV` (soundbars) — when the
+player has one (advertised in `source_list`); `power` maps to play/pause.
 
 Responses: `204` success, `404` unknown device, `422` invalid command (e.g.
 unknown source — message in body), `502` device unreachable.

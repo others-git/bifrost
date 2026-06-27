@@ -769,14 +769,19 @@ export function RoomControlButton({
 
   function togglePower() {
     const next = !anyOn;
+    // Each optimistic flip reverts if its device rejects the write (offline).
     for (const l of tLights) {
-      onLightUpdate(l.id, { ...(l.last_state ?? { on: false }), on: next });
-      setLightState(l.id, { on: next }); // power only — preserves each light's mode
+      onLightUpdate(l.id, { ...(l.last_state ?? { on: false }), on: next }); // power only — preserves each light's mode
+      setLightState(l.id, { on: next }).then((err) => {
+        if (err) onLightUpdate(l.id, { ...(l.last_state ?? { on: false }), on: !next });
+      });
     }
     for (const d of tPower) onPowerToggle(d.id, next);
     for (const d of tAudio) {
       onMediaPatch(d.id, { power: next });
-      setMediaState(d.id, { power: next });
+      setMediaState(d.id, { power: next }).then((err) => {
+        if (err) onMediaPatch(d.id, { power: !next });
+      });
     }
   }
 
@@ -1089,7 +1094,9 @@ function LightButton({
     // Power is independent: send only `{ on }` so a flip never re-asserts a
     // colour/effect (the backend preserves the running mode). UI keeps the look.
     onLightUpdate(light.id, { ...(light.last_state ?? { on: false }), on: next });
-    await setLightState(light.id, { on: next });
+    const err = await setLightState(light.id, { on: next });
+    // Revert the optimistic flip if the write failed (e.g. light unreachable).
+    if (err) onLightUpdate(light.id, { ...(light.last_state ?? { on: false }), on: isOn });
     onChanged();
   }
 
@@ -1189,7 +1196,10 @@ function MediaButton({
   function togglePower() {
     const next = !device.state.power;
     onMediaPatch(device.id, { power: next });
-    setMediaState(device.id, { power: next });
+    // Revert the optimistic flip if the device didn't accept it (e.g. offline).
+    setMediaState(device.id, { power: next }).then((err) => {
+      if (err) onMediaPatch(device.id, { power: !next });
+    });
   }
   return (
     <>

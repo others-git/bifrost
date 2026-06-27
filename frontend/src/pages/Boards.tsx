@@ -1180,12 +1180,17 @@ function DeviceTile({
   const glyph = (dev as { glyph?: string | null }).glyph ?? (light ? "bulb" : powerDev ? "power" : "speaker");
 
   function togglePower() {
+    // Each optimistic flip reverts if the device rejects the write (offline).
     if (light) {
-      onLightUpdate(light.id, { ...(light.last_state ?? { on: false }), on: !on });
-      setLightState(light.id, { on: !on }); // power only — preserves the light's mode
+      onLightUpdate(light.id, { ...(light.last_state ?? { on: false }), on: !on }); // power only — preserves the light's mode
+      setLightState(light.id, { on: !on }).then((err) => {
+        if (err) onLightUpdate(light.id, { ...(light.last_state ?? { on: false }), on });
+      });
     } else if (mediaDev) {
       onMediaPatch(mediaDev.id, { power: !on });
-      setMediaState(mediaDev.id, { power: !on });
+      setMediaState(mediaDev.id, { power: !on }).then((err) => {
+        if (err) onMediaPatch(mediaDev.id, { power: on });
+      });
     } else if (powerDev) {
       onPowerToggle(powerDev.id, !on);
     }
@@ -1421,13 +1426,18 @@ function GroupWidget({
 
   function togglePower() {
     const next = !anyOn;
+    // Each optimistic flip reverts if its device rejects the write (offline).
     for (const l of tLights) {
-      onLightUpdate(l.id, { ...(l.last_state ?? { on: false }), on: next });
-      setLightState(l.id, { on: next }); // power only — preserves each light's mode
+      onLightUpdate(l.id, { ...(l.last_state ?? { on: false }), on: next }); // power only — preserves each light's mode
+      setLightState(l.id, { on: next }).then((err) => {
+        if (err) onLightUpdate(l.id, { ...(l.last_state ?? { on: false }), on: !next });
+      });
     }
     for (const m of tMedia) {
       onMediaPatch(m.id, { power: next });
-      setMediaState(m.id, { power: next });
+      setMediaState(m.id, { power: next }).then((err) => {
+        if (err) onMediaPatch(m.id, { power: !next });
+      });
     }
     for (const p of tPower) onPowerToggle(p.id, next);
   }
