@@ -539,8 +539,11 @@ export function BoardsPage() {
             ) : null;
           }
           const m = media.find((x) => x.id === cfg.id);
+          // A source bound to a receiver routes volume/mute to it — surface that
+          // overlay (its name + receiver power) like the Dashboard fly-out does.
+          const receiverName = m?.receiver_id ? media.find((x) => x.id === m.receiver_id)?.name : undefined;
           return m ? (
-            <DeviceControl domain="media" device={m} anchor={flyout.anchor} onLocalPatch={onMediaPatch} onClose={onClose} />
+            <DeviceControl domain="media" device={m} anchor={flyout.anchor} onLocalPatch={onMediaPatch} onClose={onClose} receiverName={receiverName} />
           ) : null;
         })()}
 
