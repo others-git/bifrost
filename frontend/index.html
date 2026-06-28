@@ -2,7 +2,13 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Lock pinch-to-zoom: a stray two-finger pinch on a wall tablet (or phone)
+         scales the whole app-like UI and leaves it offset/clipped — never wanted
+         for a control surface. `user-scalable=no`/`maximum-scale=1` stop the pinch
+         gesture (honoured by the Android WebView kiosk + Chrome); the body's
+         `touch-action: manipulation` kills double-tap-to-zoom; the small guard
+         below catches iOS Safari, which ignores `user-scalable=no`. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>Bifrost</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/icon-192.png" />
@@ -17,6 +23,9 @@
       *, *::before, *::after { box-sizing: border-box; }
       body {
         margin: 0;
+        /* No double-tap-to-zoom (and no 300ms tap delay); pinch-zoom is locked by
+           the viewport meta + the gesture guard below. */
+        touch-action: manipulation;
         font-family: "Inter Variable", system-ui, sans-serif;
         /* Slightly heavier than the usual 400 — easier on aging eyes at the
            small sizes used throughout the UI. */
@@ -221,6 +230,15 @@
   </head>
   <body>
     <div id="root"></div>
+    <!-- iOS Safari ignores `user-scalable=no`, so block its pinch-zoom gestures
+         explicitly (Android WebView/Chrome honour the viewport meta). These fire
+         only for multi-finger zoom, so single-tap/click handling is untouched.
+         Passive:false so preventDefault actually takes. -->
+    <script>
+      ["gesturestart", "gesturechange", "gestureend"].forEach((evt) =>
+        document.addEventListener(evt, (e) => e.preventDefault(), { passive: false }),
+      );
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
