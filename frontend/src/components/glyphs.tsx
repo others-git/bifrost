@@ -482,7 +482,10 @@ export const CONTROL_GLYPH_OPTIONS: { name: string; label: string }[] = [
 /// Render any glyph by name. Unknown names fall back to the generic glyph.
 export function Glyph({ name, size = 22 }: { name: string; size?: number | string }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" {...base}>
+    // `display:block` removes the inline-baseline descender space an inline <svg>
+    // otherwise carries, which would push the glyph visually high in any centered
+    // (grid/flex) container — keeps every glyph truly centred in its niche.
+    <svg width={size} height={size} viewBox="0 0 24 24" {...base} style={{ display: "block" }}>
       {BODIES[name] ?? BODIES.generic}
     </svg>
   );
