@@ -4833,6 +4833,9 @@ async fn audio_receiver_binding_crud_and_validation() {
     let dev = helpers::response_json(resp).await;
     assert_eq!(dev["receiver_id"], receiver);
     assert_eq!(dev["receiver_source"], "Game");
+    // The read resolves the bound receiver's name so the "Volume → <receiver>"
+    // overlay renders from the device alone, with no per-surface id lookup.
+    assert_eq!(dev["receiver_name"], "Onkyo receiver (127.0.0.1)");
 
     // Chaining is rejected: the receiver can't itself be bound to a bound device.
     let resp = app

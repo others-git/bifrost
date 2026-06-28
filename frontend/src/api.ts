@@ -600,6 +600,10 @@ export interface MediaDevice {
   receiver_id?: string | null;
   /** The receiver input to select when this source becomes active; null = none. */
   receiver_source?: string | null;
+  /** The bound receiver's display name, resolved server-side wherever the receiver
+   * volume/mute overlay runs — so the "Volume → <receiver>" overlay renders from
+   * the device directly, with no per-surface receiver_id lookup. null = unbound. */
+  receiver_name?: string | null;
   /** M24 composite: the paired remote's id when this TV's media_player shares
    * hardware with an enabled remote — resolved server-side so the unified TV
    * control renders without a separate remote lookup. null = no paired remote. */

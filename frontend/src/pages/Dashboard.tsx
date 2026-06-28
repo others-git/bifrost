@@ -310,11 +310,6 @@ function RoomGrid({
     (providerName.get(a[0]) ?? "").localeCompare(providerName.get(b[0]) ?? ""),
   );
 
-  // Resolve a bound source's receiver name (the receiver may be collapsed out of
-  // the room's member list, but still lives in the global device map).
-  const receiverNameFor = (d: MediaDevice) =>
-    d.receiver_id ? mediaById.get(d.receiver_id)?.name : undefined;
-
   const common = {
     scenes,
     dialogs,
@@ -326,7 +321,6 @@ function RoomGrid({
     onMediaSetEnabled,
     onPowerSetEnabled,
     onChanged,
-    receiverNameFor,
   };
 
   return (
@@ -416,7 +410,6 @@ function RoomBox({
   onMediaSetEnabled,
   onPowerSetEnabled,
   onChanged,
-  receiverNameFor,
 }: {
   index?: number;
   name: string;
@@ -435,7 +428,6 @@ function RoomBox({
   onMediaSetEnabled: (id: string, enabled: boolean) => void;
   onPowerSetEnabled: (id: string, enabled: boolean) => void;
   onChanged: () => void;
-  receiverNameFor?: (d: MediaDevice) => string | undefined;
 }) {
   const { isCompact } = useViewport();
   const tuneRef = useRef<HTMLDivElement>(null);
@@ -674,7 +666,6 @@ function RoomBox({
               device={entry.coordinator}
               onMediaPatch={onMediaPatch}
               onSetEnabled={onMediaSetEnabled}
-              receiverName={receiverNameFor?.(entry.coordinator)}
             />
           ),
         )}
@@ -1177,7 +1168,6 @@ function MediaButton({
   groupMembers,
   onMediaPatch,
   onSetEnabled,
-  receiverName,
 }: {
   device: MediaDevice;
   /** When set (≥2), this button represents a live sync group coordinated by
@@ -1185,8 +1175,6 @@ function MediaButton({
   groupMembers?: MediaDevice[];
   onMediaPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
   onSetEnabled: (id: string, enabled: boolean) => void;
-  /** M22: name of the receiver this source's volume routes to, if bound. */
-  receiverName?: string;
 }) {
   const ref = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
@@ -1223,7 +1211,6 @@ function MediaButton({
           onLocalPatch={onMediaPatch}
           onSetEnabled={(en) => { onSetEnabled(device.id, en); if (!en) setOpen(false); }}
           onClose={() => setOpen(false)}
-          receiverName={receiverName}
         />
       )}
     </>

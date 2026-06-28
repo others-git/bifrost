@@ -60,16 +60,12 @@ export function MediaControls({
   device,
   onLocalPatch,
   compact = false,
-  receiverName,
   hideTransport = false,
 }: {
   device: MediaDevice;
   onLocalPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
   /** Tighter spacing + smaller transport buttons, for cramped cards (phones). */
   compact?: boolean;
-  /** When this source is bound to a receiver (M22), the receiver's name — shown
-   * by the volume row, since volume/mute control the receiver, not this device. */
-  receiverName?: string;
   /** Hide the big transport buttons (the AIO TV "Watch" tab has them on the
    * Remote tab instead). */
   hideTransport?: boolean;
@@ -79,6 +75,9 @@ export function MediaControls({
   const offline = s.reachable === false;
   const np = s.now_playing;
   const cap = device.capabilities;
+  // A source bound to a receiver routes volume/mute to it; the name is resolved
+  // server-side on the device read, so the overlay needs no per-surface lookup.
+  const receiverName = device.receiver_name ?? undefined;
 
   const [favOpen, setFavOpen] = useState(false);
   const [favs, setFavs] = useState<MediaFavorite[] | null>(null);
@@ -296,7 +295,6 @@ export function MediaEditor({
   onLocalPatch,
   onSetEnabled,
   onClose,
-  receiverName,
 }: {
   device: MediaDevice;
   anchor: HTMLElement | { x: number; y: number };
@@ -304,8 +302,6 @@ export function MediaEditor({
   /** Enable/disable the device. Disabling drops it from room control. */
   onSetEnabled?: (enabled: boolean) => void;
   onClose: () => void;
-  /** M22: name of the receiver this source's volume routes to, if bound. */
-  receiverName?: string;
 }) {
   const cap = device.capabilities;
   const offline = device.state.reachable === false;
@@ -343,11 +339,11 @@ export function MediaEditor({
         onClose={onClose}
       />
       {pairedRemoteId ? (
-        <TvAio device={device} remoteId={pairedRemoteId} onLocalPatch={onLocalPatch} receiverName={receiverName} />
+        <TvAio device={device} remoteId={pairedRemoteId} onLocalPatch={onLocalPatch} />
       ) : offline ? (
         <div style={{ fontSize: "0.8rem", color: "#c66" }}>Device offline.</div>
       ) : (
-        <MediaControls device={device} onLocalPatch={onLocalPatch} receiverName={receiverName} />
+        <MediaControls device={device} onLocalPatch={onLocalPatch} />
       )}
       {onSetEnabled && (
         <DisableRow
@@ -370,12 +366,10 @@ function TvAio({
   device,
   remoteId,
   onLocalPatch,
-  receiverName,
 }: {
   device: MediaDevice;
   remoteId: string;
   onLocalPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
-  receiverName?: string;
 }) {
   const remote = useRemote(remoteId);
   const [tab, setTab] = useState<"remote" | "apps">("remote");
@@ -396,7 +390,7 @@ function TvAio({
         <div style={{ display: "flex", flexDirection: "column", gap: "0.9rem" }}>
           {/* What's on + volume sit above the keypad — the old "Watch" tab, folded in. */}
           <TvNowPlaying device={device} />
-          <FancyVolume device={device} onLocalPatch={onLocalPatch} receiverName={receiverName} />
+          <FancyVolume device={device} onLocalPatch={onLocalPatch} />
           <RemotePad press={remote.press} />
           <RemoteTextEntry send={remote.send} />
           <ExpandedRemote remoteId={remoteId} send={remote.send} />
@@ -446,13 +440,12 @@ function TvNowPlaying({ device }: { device: MediaDevice }) {
 function FancyVolume({
   device,
   onLocalPatch,
-  receiverName,
 }: {
   device: MediaDevice;
   onLocalPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
-  receiverName?: string;
 }) {
   const st = device.state;
+  const receiverName = device.receiver_name ?? undefined;
   const volume = st.volume ?? 0;
   const muted = st.mute ?? false;
   const trackRef = useRef<HTMLDivElement>(null);

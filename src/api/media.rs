@@ -191,6 +191,11 @@ pub(crate) struct MediaDeviceRow {
     /// The receiver input to select when this source becomes active; `None` =
     /// leave the receiver's input alone.
     pub receiver_source: Option<String>,
+    /// **Derived** (not stored): the bound receiver's display name, resolved during
+    /// read assembly wherever the receiver volume/mute overlay runs. Lets a client
+    /// surface "Volume → <receiver>" straight from the device, instead of every
+    /// surface re-looking-up `receiver_id` in the device list. `None` = unbound.
+    pub receiver_name: Option<String>,
     /// Composite membership: the **logical-device group** this row belongs to.
     /// Rows sharing a `group_id` are one composite (a TV's several media views,
     /// its remote, …). `None` = standalone. Cross-domain — `remote_devices` carry
@@ -231,6 +236,7 @@ fn row_to_device(r: sqlx::sqlite::SqliteRow) -> MediaDeviceRow {
         inherited_room_id: r.try_get("inherited_room_id").ok().flatten(),
         receiver_id: r.get("receiver_id"),
         receiver_source: r.get("receiver_source"),
+        receiver_name: None, // derived later from receiver_id during the overlay
         group_id: r.try_get("group_id").ok().flatten(),
         companion_of: None, // derived later from group_id + surface selection
         remote_id: r.try_get("remote_id").ok().flatten(),
@@ -651,16 +657,17 @@ pub(crate) async fn list_all_devices(state: &AppState) -> Result<Vec<MediaDevice
     // A bound source shows its receiver's volume/mute (the receiver owns volume),
     // mirroring `get_device_live`. The receiver is in this same list, so overlay
     // from it — no extra query.
-    let vol_mute: std::collections::HashMap<String, (u8, bool)> = devices
+    let vol_mute: std::collections::HashMap<String, (u8, bool, String)> = devices
         .iter()
-        .map(|d| (d.id.clone(), (d.state.volume, d.state.mute)))
+        .map(|d| (d.id.clone(), (d.state.volume, d.state.mute, d.name.clone())))
         .collect();
     for d in &mut devices {
         if let Some(rid) = &d.receiver_id
-            && let Some((volume, mute)) = vol_mute.get(rid)
+            && let Some((volume, mute, name)) = vol_mute.get(rid)
         {
             d.state.volume = *volume;
             d.state.mute = *mute;
+            d.receiver_name = Some(name.clone());
         }
     }
     Ok(devices)
@@ -751,17 +758,20 @@ pub(crate) async fn get_device_live(
     // good cached volume with 0. The push manager keeps last_state current.
     if let Some(rid) = &device.receiver_id
         && let Ok(Some(r)) = sqlx::query(
-            "SELECT last_state FROM media_devices WHERE id = ? AND enabled = 1 AND shadowed_by IS NULL",
+            "SELECT name, last_state FROM media_devices WHERE id = ? AND enabled = 1 AND shadowed_by IS NULL",
         )
         .bind(rid)
         .fetch_optional(&state.db)
         .await
-        && let Some(rstate) = r
+    {
+        device.receiver_name = Some(r.get("name"));
+        if let Some(rstate) = r
             .get::<Option<String>, _>("last_state")
             .and_then(|s| serde_json::from_str::<MediaState>(&s).ok())
-    {
-        device.state.volume = rstate.volume;
-        device.state.mute = rstate.mute;
+        {
+            device.state.volume = rstate.volume;
+            device.state.mute = rstate.mute;
+        }
     }
     Ok(Some(device))
 }

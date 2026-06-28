@@ -116,7 +116,6 @@ export type DeviceControlProps =
       device: MediaDevice;
       onLocalPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
       onSetEnabled?: (enabled: boolean) => void;
-      receiverName?: string;
     }
   | {
       domain: "power";
@@ -143,7 +142,6 @@ export function DeviceControl(props: DeviceControlProps & { anchor: Anchor; onCl
         onLocalPatch={props.onLocalPatch}
         onSetEnabled={props.onSetEnabled}
         onClose={props.onClose}
-        receiverName={props.receiverName}
       />
     );
   }
