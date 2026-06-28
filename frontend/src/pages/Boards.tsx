@@ -1890,13 +1890,21 @@ function WidgetEditorModal({
       : { kind: "power", glyph: "power", label: "", targets: [], scene_id: null },
   );
 
+  // Only offer devices that can actually be controlled: skip disabled devices and
+  // de-dup/composite "merged-in" copies — a shadowed duplicate or a media companion
+  // is hidden from control everywhere else, so it must not be pickable here either.
+  // (The widget renderers still receive the full lists so a widget can resolve any
+  // device it already references.)
+  const selLights = lights.filter((l) => l.enabled !== false && !l.shadowed_by);
+  const selMedia = media.filter((m) => m.enabled !== false && !m.shadowed_by && !m.companion_of);
+  const selPower = power.filter((p) => p.enabled !== false && !p.shadowed_by);
   const devicesFor = (d: string): { id: string; name: string }[] =>
-    d === "light" ? lights : d === "power" ? power : media;
+    d === "light" ? selLights : d === "power" ? selPower : selMedia;
 
   function save() {
     const nm = name.trim() || undefined;
     if (type === "device" || type === "now_playing") {
-      const list = type === "now_playing" ? media : devicesFor(domain);
+      const list = type === "now_playing" ? selMedia : devicesFor(domain);
       const id = deviceId || list[0]?.id;
       if (!id) return;
       onSave({
@@ -1964,7 +1972,7 @@ function WidgetEditorModal({
             <Select
               value={deviceId}
               onChange={setDeviceId}
-              options={deviceSelectOptions((type === "now_playing" ? media : devicesFor(domain)) as RoomedDevice[], rooms)}
+              options={deviceSelectOptions((type === "now_playing" ? selMedia : devicesFor(domain)) as RoomedDevice[], rooms)}
               placeholder="Choose a device"
             />
           </Field>
@@ -1995,12 +2003,12 @@ function WidgetEditorModal({
             <div style={{ maxHeight: 240, overflowY: "auto", display: "flex", flexDirection: "column", gap: "0.1rem" }}>
               {groupByRoom(
                 (groupDomain === "light"
-                  ? lights
+                  ? selLights
                   : groupDomain === "media"
-                    ? media
+                    ? selMedia
                     : groupDomain === "power"
-                      ? power
-                      : [...lights, ...media, ...power]) as RoomedDevice[],
+                      ? selPower
+                      : [...selLights, ...selMedia, ...selPower]) as RoomedDevice[],
                 rooms,
               )
                 .map(({ room, devices }) => ({
@@ -2186,16 +2194,21 @@ function ControlEditor({
   scenes: Scene[];
 }) {
   const kind = control.kind;
+  // Only target controllable devices: skip disabled and de-dup/composite "merged-in"
+  // copies (a shadowed duplicate or a media companion), hidden from control elsewhere.
+  const selLights = lights.filter((l) => l.enabled !== false && !l.shadowed_by);
+  const selMedia = media.filter((m) => m.enabled !== false && !m.shadowed_by && !m.companion_of);
+  const selPower = power.filter((p) => p.enabled !== false && !p.shadowed_by);
   // Which domains a kind can target.
   const pool: { domain: "light" | "media" | "power"; list: { id: string; name: string }[] }[] =
     kind === "brightness"
-      ? [{ domain: "light", list: lights }]
+      ? [{ domain: "light", list: selLights }]
       : kind === "volume"
-        ? [{ domain: "media", list: media }]
+        ? [{ domain: "media", list: selMedia }]
         : [
-            { domain: "light", list: lights },
-            { domain: "media", list: media },
-            { domain: "power", list: power },
+            { domain: "light", list: selLights },
+            { domain: "media", list: selMedia },
+            { domain: "power", list: selPower },
           ];
   const has = (domain: string, id: string) => control.targets.some((t) => t.domain === domain && t.id === id);
   const toggleTarget = (domain: "light" | "media" | "power", id: string) =>
