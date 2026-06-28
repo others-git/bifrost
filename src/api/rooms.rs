@@ -156,6 +156,10 @@ const ROOM_LIGHT_MEMBER_BODY: &str = "
         FROM room_links rl
         JOIN provider_group_lights pgl ON pgl.provider_group_id = rl.provider_group_id
         WHERE rl.room_id = ?1
+        -- A direct assignment (Devices page) is authoritative: once a light has a
+        -- direct room, its provider-group inheritance is suppressed everywhere, so
+        -- it appears only in the room it was assigned to (no cross-room duplicate).
+        AND pgl.light_id NOT IN (SELECT light_id FROM room_lights)
     )
     ORDER BY l.name";
 
@@ -215,6 +219,9 @@ pub(crate) async fn effective_power_member_ids(state: &AppState, room_id: &str) 
                JOIN provider_group_power_devices pgp
                  ON pgp.provider_group_id = rl.provider_group_id
                WHERE rl.room_id = ?1
+               -- A direct assignment is authoritative: a directly-assigned device
+               -- drops its provider-group inheritance everywhere (no duplicate).
+               AND pgp.power_device_id NOT IN (SELECT power_device_id FROM room_power_devices)
            )
          ORDER BY pd.name",
     )
@@ -339,6 +346,11 @@ pub(crate) async fn effective_media_members(
              FROM room_links rl
              JOIN provider_group_media_devices pga ON pga.provider_group_id = rl.provider_group_id
              WHERE rl.room_id = ?1
+             -- A direct assignment (Devices page) is authoritative: a device with a
+             -- direct room drops its provider-group inheritance everywhere, so a
+             -- Sonos speaker moved to another room no longer dupes into its synced
+             -- group's room.
+             AND pga.media_device_id NOT IN (SELECT media_device_id FROM room_media_devices)
          )
          ORDER BY d.name",
     )

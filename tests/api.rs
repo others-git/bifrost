@@ -3088,6 +3088,85 @@ async fn light_reports_inherited_room_from_a_synced_group_link() {
 }
 
 #[tokio::test]
+async fn direct_room_assignment_overrides_provider_group_inheritance() {
+    // A device synced into a room via its provider-group link, then directly
+    // assigned to another room (Devices page), must appear ONLY in the assigned
+    // room — the direct assignment de-registers it from the inherited room, so it
+    // never duplicates across both.
+    let bridge = hue_bridge_with_room("Living Room").await;
+    let (app, light_id) = helpers::test_app_with_hue_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    app.clone()
+        .oneshot(helpers::authed_post(
+            "/api/providers/prov-hue-1/sync-groups",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+
+    // A second, empty room to move the light into.
+    let gym = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_json(
+                "POST",
+                "/api/rooms",
+                &cookie,
+                r#"{"name":"Gym","light_ids":[]}"#,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let gym_id = gym["id"].as_str().unwrap().to_string();
+
+    // Move the light to the Gym from the device side.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/lights/{light_id}/room"),
+            &cookie,
+            &format!(r#"{{"room_id":"{gym_id}"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let rooms = helpers::response_json(
+        app.oneshot(helpers::authed_get("/api/rooms", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let by_name = |name: &str| -> Vec<String> {
+        rooms
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == name)
+            .map(|r| {
+                r["light_ids"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    assert!(
+        by_name("Gym").contains(&light_id),
+        "light is in the assigned room"
+    );
+    assert!(
+        !by_name("Living Room").contains(&light_id),
+        "direct assignment suppresses the inherited-room membership (no duplicate)"
+    );
+}
+
+#[tokio::test]
 async fn sync_rename_follows_while_room_keeps_inherited_name() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, ResponseTemplate};
