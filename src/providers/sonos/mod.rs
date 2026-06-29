@@ -874,13 +874,23 @@ impl MediaProvider for SonosProvider {
                         }
                     )
                 })?;
+            let uri = input.uri(&player.uuid);
+            tracing::debug!(
+                target: "bifrost::sonos",
+                device_id,
+                source = %source,
+                matched = input.label(),
+                %uri,
+                coordinator = %coordinator.uuid,
+                coordinator_url = %coordinator.base_url,
+                "switching Sonos to physical input (SetAVTransportURI + Play)"
+            );
             self.av(
                 &coordinator,
                 "SetAVTransportURI",
                 format!(
-                    "<InstanceID>0</InstanceID><CurrentURI>{}</CurrentURI>\
-                     <CurrentURIMetaData></CurrentURIMetaData>",
-                    input.uri(&player.uuid)
+                    "<InstanceID>0</InstanceID><CurrentURI>{uri}</CurrentURI>\
+                     <CurrentURIMetaData></CurrentURIMetaData>"
                 ),
             )
             .await?;

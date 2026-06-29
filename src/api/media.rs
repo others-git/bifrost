@@ -1444,7 +1444,17 @@ async fn apply_to_device(state: &AppState, id: &str, cmd: &MediaCommand) -> SetM
 
     let row = match row {
         Ok(Some(r)) => r,
-        Ok(None) => return SetMediaOutcome::NotFound,
+        // No controllable row for this id — a disabled/shadowed/unknown device. This
+        // is a silent 404 to the client, so log it: a command quietly going nowhere
+        // (e.g. a UI targeting a de-dup-shadowed copy) is otherwise invisible.
+        Ok(None) => {
+            tracing::debug!(
+                target: "bifrost::media",
+                device = %id,
+                "media command dropped: no enabled, non-shadowed device with this id"
+            );
+            return SetMediaOutcome::NotFound;
+        }
         Err(e) => {
             tracing::error!("db error: {e}");
             return SetMediaOutcome::Db;
