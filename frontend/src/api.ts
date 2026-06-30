@@ -503,6 +503,13 @@ export async function getLights(): Promise<Light[] | "unauthorized"> {
   return res.json();
 }
 
+/** Live read — round-trips to the device and refreshes the cache. */
+export async function getLight(id: string): Promise<Light | null> {
+  const res = await fetch(`/api/lights/${id}`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
 export async function setLightState(id: string, state: LightState): Promise<string | null> {
   const res = await fetch(`/api/lights/${id}`, {
     method: "PUT",

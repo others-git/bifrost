@@ -6,12 +6,13 @@
 // `{ light }`-shaped control (deriving the wheels + owning the commit), so the
 // light↔state math no longer lives copy-pasted in every page.
 
-import { useRef, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import {
   rgbToHex,
   xyToRgb,
   setLightState,
   setLightSegments,
+  getMediaDevice,
   type Light,
   type LightState,
   type MediaDevice,
@@ -127,6 +128,26 @@ export type DeviceControlProps =
 /** The single per-device control entry point: render the editor for whatever
  * domain the device belongs to. */
 export function DeviceControl(props: DeviceControlProps & { anchor: Anchor; onClose: () => void }) {
+  // Immediately pull a fresh live read the moment a media control opens, so its
+  // display info (now-playing, volume, source, reachability) is current right away
+  // — poll/GENA-push providers (Sonos especially) otherwise serve the last cached
+  // read. The single-device media GET round-trips to the device server-side, then
+  // we patch local state. Lights are push-live (Hue SSE) and a live read could
+  // clobber a cached effect a provider doesn't report; power is on/off (push-live)
+  // — neither needs a refresh here.
+  const refreshMediaId = props.domain === "media" ? props.device.id : null;
+  const patchMedia = props.domain === "media" ? props.onLocalPatch : null;
+  useEffect(() => {
+    if (!refreshMediaId || !patchMedia) return;
+    let alive = true;
+    getMediaDevice(refreshMediaId).then((d) => {
+      if (alive && d) patchMedia(d.id, d.state);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [refreshMediaId, patchMedia]);
+
   if (props.domain === "light") {
     return (
       <LightFlyout light={props.light} anchor={props.anchor} onLocalPatch={props.onLocalPatch} onClose={props.onClose}>

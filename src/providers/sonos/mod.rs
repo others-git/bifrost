@@ -77,6 +77,15 @@ fn xml_unescape(s: &str) -> String {
         .replace("&amp;", "&") // last, so &amp;lt; doesn't double-decode
 }
 
+/// A DIDL field's text, with its XML entities decoded. The field contents inside
+/// an (already-unescaped) DIDL document are themselves still escaped — a title
+/// "Midnight & Angel" arrives as `<dc:title>Midnight &amp; Angel</dc:title>` — so
+/// the raw `xml_tag` value must be unescaped a second time, or `&amp;`/`&apos;`
+/// leak into the now-playing strings shown in the UI.
+fn xml_tag_text(body: &str, tag: &str) -> Option<String> {
+    xml_tag(body, tag).map(|v| xml_unescape(&v))
+}
+
 // ── SOAP plumbing ───────────────────────────────────────────────────────────
 
 struct SoapCall<'a> {
@@ -579,9 +588,9 @@ impl SonosProvider {
             .await
             .unwrap_or_default();
         let didl = xml_unescape(&xml_tag(&position_body, "TrackMetaData").unwrap_or_default());
-        let title = xml_tag(&didl, "dc:title");
-        let artist = xml_tag(&didl, "dc:creator");
-        let album = xml_tag(&didl, "upnp:album");
+        let title = xml_tag_text(&didl, "dc:title");
+        let artist = xml_tag_text(&didl, "dc:creator");
+        let album = xml_tag_text(&didl, "upnp:album");
 
         let now_playing = (title.is_some() || play_state.is_some()).then_some(NowPlaying {
             title,
@@ -1458,9 +1467,9 @@ fn parse_avtransport_lastchange(event: &str) -> (Option<PlayState>, Option<NowPl
     let didl = lastchange_val(event, "CurrentTrackMetaData")
         .map(|v| xml_unescape(&v))
         .unwrap_or_default();
-    let title = xml_tag(&didl, "dc:title");
-    let artist = xml_tag(&didl, "dc:creator");
-    let album = xml_tag(&didl, "upnp:album");
+    let title = xml_tag_text(&didl, "dc:title");
+    let artist = xml_tag_text(&didl, "dc:creator");
+    let album = xml_tag_text(&didl, "upnp:album");
     let now_playing = (title.is_some() || play.is_some()).then_some(NowPlaying {
         title,
         artist,
@@ -2366,7 +2375,10 @@ mod tests {
 
     #[test]
     fn parses_avtransport_lastchange_state_and_track() {
-        let didl = "&lt;DIDL-Lite&gt;&lt;item&gt;&lt;dc:title&gt;Song&lt;/dc:title&gt;\
+        // The title's `&` is double-escaped on the wire (`&amp;amp;`): the DIDL is
+        // XML-escaped inside the event, and the field text is itself escaped — so it
+        // must be decoded twice or `&amp;` leaks into the now-playing string.
+        let didl = "&lt;DIDL-Lite&gt;&lt;item&gt;&lt;dc:title&gt;Midnight &amp;amp; Angel&lt;/dc:title&gt;\
                     &lt;dc:creator&gt;Artist&lt;/dc:creator&gt;&lt;/item&gt;&lt;/DIDL-Lite&gt;";
         let ev = format!(
             r#"<Event><InstanceID val="0"><TransportState val="PLAYING"/><CurrentTrackMetaData val="{didl}"/></InstanceID></Event>"#
@@ -2374,7 +2386,7 @@ mod tests {
         let (play, np) = parse_avtransport_lastchange(&ev);
         assert_eq!(play, Some(PlayState::Playing));
         let np = np.unwrap();
-        assert_eq!(np.title.as_deref(), Some("Song"));
+        assert_eq!(np.title.as_deref(), Some("Midnight & Angel"));
         assert_eq!(np.artist.as_deref(), Some("Artist"));
         assert_eq!(np.play_state, Some(PlayState::Playing));
     }
