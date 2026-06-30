@@ -491,6 +491,27 @@ impl SonosProvider {
         Ok((player, coordinator))
     }
 
+    /// Every player in the sync group `uuid` belongs to, including `uuid` itself
+    /// (and just `uuid` when it's standalone). Used to locate the member that
+    /// physically owns a named input — a line-in/TV jack lives on one specific
+    /// player, but a `source` command may arrive on any member (the Control page
+    /// collapses a group onto its coordinator), so the owner must be found across
+    /// the whole group rather than assumed to be the targeted player.
+    async fn group_members(&self, uuid: &str) -> Vec<Player> {
+        let Ok((players, groups)) = self.topology().await else {
+            return Vec::new();
+        };
+        let member_uuids: Vec<&str> = groups
+            .iter()
+            .find(|g| g.member_uuids.iter().any(|m| m == uuid))
+            .map(|g| g.member_uuids.iter().map(String::as_str).collect())
+            .unwrap_or_else(|| vec![uuid]);
+        players
+            .into_iter()
+            .filter(|p| member_uuids.contains(&p.uuid.as_str()))
+            .collect()
+    }
+
     /// Read volume + mute, per player (RenderingControl) or for a whole group
     /// (GroupRenderingControl on the coordinator).
     async fn read_volume_mute(&self, player: &Player, group: bool) -> Result<(u8, bool)> {
@@ -863,32 +884,51 @@ impl MediaProvider for SonosProvider {
         // at the input URI, then play — the same SetAVTransportURI mechanism as
         // a favorite. The URI references the owning player even on a group.
         if let Some(source) = &cmd.source {
-            let inputs = self.inputs_for(&player.base_url).await;
-            let input = inputs
-                .iter()
-                .copied()
-                .find(|i| i.label().eq_ignore_ascii_case(source))
-                .ok_or_else(|| {
-                    let available = inputs
-                        .iter()
-                        .map(|i| i.label())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    anyhow!(
-                        "Sonos source '{source}' is not available on this player (available: {})",
-                        if available.is_empty() {
-                            "none"
-                        } else {
-                            &available
+            // A physical input lives on one specific player, but the command may
+            // arrive on any member of the sync group (the Control page collapses a
+            // group onto its coordinator). Find the member that actually owns the
+            // named input so the switch lands regardless of which id we were given;
+            // the URI then references that owner even though it's set on the group
+            // coordinator's transport.
+            let members = self.group_members(&player.uuid).await;
+            let mut owner_input = None;
+            for member in &members {
+                let inputs = self.inputs_for(&member.base_url).await;
+                if let Some(input) = inputs
+                    .iter()
+                    .copied()
+                    .find(|i| i.label().eq_ignore_ascii_case(source))
+                {
+                    owner_input = Some((member.clone(), input));
+                    break;
+                }
+            }
+            let (owner, input) = match owner_input {
+                Some(found) => found,
+                None => {
+                    let mut available = Vec::new();
+                    for member in &members {
+                        for input in self.inputs_for(&member.base_url).await {
+                            available.push(input.label());
                         }
-                    )
-                })?;
-            let uri = input.uri(&player.uuid);
+                    }
+                    return Err(anyhow!(
+                        "Sonos source '{source}' is not available in this group (available: {})",
+                        if available.is_empty() {
+                            "none".to_string()
+                        } else {
+                            available.join(", ")
+                        }
+                    ));
+                }
+            };
+            let uri = input.uri(&owner.uuid);
             tracing::debug!(
                 target: "bifrost::sonos",
                 device_id,
                 source = %source,
                 matched = input.label(),
+                owner = %owner.uuid,
                 %uri,
                 coordinator = %coordinator.uuid,
                 coordinator_url = %coordinator.base_url,
@@ -2114,6 +2154,75 @@ mod tests {
         assert!(
             body.contains("x-rincon-stream:RINCON_LIVING"),
             "expected line-in URI in SetAVTransportURI body, got: {body}"
+        );
+    }
+
+    /// The Control page collapses a sync group onto its coordinator, so a
+    /// `source` command can arrive on the coordinator even though the line-in jack
+    /// physically lives on a *different* group member. The switch must still land:
+    /// find the member that owns the input, reference it in the URI, and set it on
+    /// the coordinator's transport.
+    #[tokio::test]
+    async fn set_state_line_in_resolves_input_owner_across_group() {
+        let coord = MockServer::start().await; // RINCON_LIVING — no line-in jack
+        let owner = MockServer::start().await; // RINCON_KITCHEN — owns the jack
+
+        // A two-member group coordinated by LIVING; members point at the two
+        // distinct base URLs so their device descriptions differ.
+        let raw = format!(
+            r#"<ZoneGroups><ZoneGroup Coordinator="RINCON_LIVING" ID="RINCON_LIVING:1"><ZoneGroupMember UUID="RINCON_LIVING" Location="{coord}/xml/device_description.xml" ZoneName="Living Room"/><ZoneGroupMember UUID="RINCON_KITCHEN" Location="{owner}/xml/device_description.xml" ZoneName="Kitchen"/></ZoneGroup></ZoneGroups>"#,
+            coord = coord.uri(),
+            owner = owner.uri(),
+        );
+        let escaped = raw
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;");
+        let topology = soap_ok(
+            "GetZoneGroupState",
+            "ZoneGroupTopology",
+            &format!("<ZoneGroupState>{escaped}</ZoneGroupState>"),
+        );
+        Mock::given(method("POST"))
+            .and(path("/ZoneGroupTopology/Control"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(topology))
+            .mount(&coord)
+            .await;
+
+        // Coordinator advertises no input; the member owns the line-in jack.
+        mount_device_description(&coord, device_description("Sonos One", false)).await;
+        mount_device_description(&owner, device_description("Sonos Five", true)).await;
+        // Transport commands land on the coordinator.
+        mount_av_action(&coord, "SetAVTransportURI", Some(1)).await;
+        mount_av_action(&coord, "Play", Some(1)).await;
+
+        let p = SonosProvider::new_for_test(coord.uri()).unwrap();
+        // Target the coordinator — what the collapsed Control-page entry sends.
+        p.set_state(
+            "RINCON_LIVING",
+            &MediaCommand {
+                source: Some("line-in".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let requests = coord.received_requests().await.unwrap();
+        let set_uri = requests
+            .iter()
+            .find(|r| {
+                r.headers
+                    .get("SOAPACTION")
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| v.contains("SetAVTransportURI"))
+            })
+            .expect("SetAVTransportURI sent to the coordinator");
+        let body = std::str::from_utf8(&set_uri.body).unwrap();
+        assert!(
+            body.contains("x-rincon-stream:RINCON_KITCHEN"),
+            "expected the URI to reference the input-owning member, got: {body}"
         );
     }
 
