@@ -4,6 +4,7 @@ pub mod media;
 pub mod palette;
 pub mod power;
 pub mod remote;
+pub mod sensor;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

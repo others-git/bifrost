@@ -51,11 +51,12 @@ use crate::models::media::{
 };
 use crate::models::power::{PowerDevice, PowerKind, PowerState};
 use crate::models::remote::{RemoteDevice, RemoteKey, RemoteState};
+use crate::models::sensor::{SensorDevice, SensorKind, SensorReading, SensorState};
 use crate::models::{Color, Light, LightCapabilities, LightState, Provider};
 use crate::providers::{
     CredentialField, FieldKind, GenericProvider, GenericProviderFactory, LightProvider,
     MediaProvider, MediaProviderFactory, PowerProvider, PowerProviderFactory, ProviderFactory,
-    ProviderGroup, RemoteProvider, RemoteProviderFactory,
+    ProviderGroup, RemoteProvider, RemoteProviderFactory, SensorProvider, SensorProviderFactory,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
@@ -76,6 +77,10 @@ const REMOTE_PREFIX: &str = "remote.";
 /// HA entity domains that map onto Bifrost's strictly-on/off `PowerDevice`.
 /// `homeassistant.turn_on`/`turn_off` works uniformly across all of them.
 const POWER_PREFIXES: &[&str] = &["switch.", "fan.", "input_boolean."];
+/// HA entity domains that can carry a Bifrost `SensorDevice`. Unlike power, the
+/// `sensor.` domain is a flood, so [`sensor_kind`] is an **allowlist** by
+/// `device_class` — only environmental/presence classes are surfaced.
+const SENSOR_PREFIXES: &[&str] = &["binary_sensor.", "sensor."];
 
 // `MediaPlayerEntityFeature` bits we care about (see ha_media_player_entity.md).
 const FEAT_PREVIOUS_TRACK: u64 = 16;
@@ -814,6 +819,69 @@ fn entity_to_power(e: HaEntity, hw_id: Option<String>) -> PowerDevice {
     }
 }
 
+// ── Sensor mapping ─────────────────────────────────────────────────────────────
+
+/// Classify a `binary_sensor`/`sensor` entity into a Bifrost [`SensorKind`], or
+/// `None` to skip it. This is a deliberate **allowlist** by `device_class` — the
+/// `sensor.` domain is HA's biggest flood (diagnostics, uptime, signal, …), so
+/// only the environmental/presence classes Bifrost models are surfaced. Widen it
+/// by adding an arm, not by loosening the filter.
+fn sensor_kind(entity_id: &str, attrs: &Value) -> Option<SensorKind> {
+    let dc = attr_str(attrs, "device_class");
+    if entity_id.starts_with("binary_sensor.") {
+        match dc.as_deref() {
+            Some("motion") => Some(SensorKind::Motion),
+            Some("occupancy" | "presence") => Some(SensorKind::Occupancy),
+            Some("door" | "window" | "opening" | "garage_door") => Some(SensorKind::Contact),
+            _ => None,
+        }
+    } else if entity_id.starts_with("sensor.") {
+        match dc.as_deref() {
+            Some("illuminance") => Some(SensorKind::Illuminance),
+            Some("temperature") => Some(SensorKind::Temperature),
+            Some("humidity") => Some(SensorKind::Humidity),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+/// Parse an HA entity's `state` into a [`SensorState`] for the given kind.
+/// Boolean kinds read `on`/`off`; numeric kinds parse the state as a float.
+/// `unavailable`/`unknown`/unparseable → no reading (reachability preserved).
+fn parse_sensor_state(e: &HaEntity, kind: SensorKind) -> SensorState {
+    let reachable = Some(e.state != "unavailable");
+    if e.state == "unavailable" || e.state == "unknown" {
+        return SensorState {
+            reading: None,
+            reachable,
+        };
+    }
+    let reading = match kind {
+        SensorKind::Motion | SensorKind::Occupancy | SensorKind::Contact => {
+            Some(SensorReading::Bool(e.state == "on"))
+        }
+        _ => e.state.parse::<f64>().ok().map(SensorReading::Number),
+    };
+    SensorState { reading, reachable }
+}
+
+/// Map one modeled sensor entity to a [`SensorDevice`], or `None` to skip it.
+fn entity_to_sensor(e: HaEntity, hw_id: Option<String>) -> Option<SensorDevice> {
+    let kind = sensor_kind(&e.entity_id, &e.attributes)?;
+    let unit = attr_str(&e.attributes, "unit_of_measurement");
+    Some(SensorDevice {
+        id: Uuid::new_v4(),
+        kind,
+        name: friendly_name(&e.entity_id, &e.attributes),
+        provider_id: e.entity_id.clone(),
+        state: parse_sensor_state(&e, kind),
+        unit,
+        hw_id,
+    })
+}
+
 // ── LightProvider impl ────────────────────────────────────────────────────────
 
 #[async_trait]
@@ -1044,6 +1112,45 @@ impl PowerProvider for HaProvider {
     }
 }
 
+// ── SensorProvider impl ────────────────────────────────────────────────────────
+
+#[async_trait]
+impl SensorProvider for HaProvider {
+    fn name(&self) -> &str {
+        "homeassistant"
+    }
+
+    async fn discover(&self) -> Result<Vec<SensorDevice>> {
+        let reg = self.entity_registry().await;
+        let hw = self.entity_hw_ids().await;
+        Ok(self
+            .get_states()
+            .await?
+            .into_iter()
+            .filter(|e| {
+                SENSOR_PREFIXES.iter().any(|p| e.entity_id.starts_with(p))
+                    && keep_entity(&reg, &e.entity_id)
+            })
+            .filter_map(|e| {
+                let hw_id = hw.get(&e.entity_id).cloned();
+                entity_to_sensor(e, hw_id)
+            })
+            .collect())
+    }
+
+    async fn get_state(&self, device_id: &str) -> Result<SensorState> {
+        let entity = self.get_entity(device_id).await?;
+        // Recompute the kind so a boolean vs numeric read is parsed correctly.
+        let kind =
+            sensor_kind(&entity.entity_id, &entity.attributes).unwrap_or(SensorKind::Generic);
+        Ok(parse_sensor_state(&entity, kind))
+    }
+
+    async fn discover_groups(&self) -> Result<Vec<ProviderGroup>> {
+        self.discover_groups_for(SENSOR_PREFIXES).await
+    }
+}
+
 // ── WebSocket push (state_changed) ──────────────────────────────────────────
 
 /// One pushed state change off the HA `state_changed` subscription, already
@@ -1060,6 +1167,10 @@ pub enum HaPushEvent {
     Power {
         device_id: String,
         state: PowerState,
+    },
+    Sensor {
+        device_id: String,
+        state: SensorState,
     },
 }
 
@@ -1083,7 +1194,12 @@ fn classify_push(e: HaEntity) -> Option<HaPushEvent> {
             state: parse_power_state(&e),
         })
     } else {
-        None
+        // Only modeled sensor classes (see `sensor_kind`) push; the rest of the
+        // binary_sensor/sensor flood is ignored, matching discovery.
+        sensor_kind(&id, &e.attributes).map(|kind| HaPushEvent::Sensor {
+            state: parse_sensor_state(&e, kind),
+            device_id: id,
+        })
     }
 }
 
@@ -1411,6 +1527,27 @@ impl PowerProviderFactory for HaPowerFactory {
         "Home Assistant"
     }
     fn build(&self, credentials_json: &str) -> Result<Box<dyn PowerProvider>> {
+        Ok(Box::new(HaProvider::from_credentials(credentials_json)?))
+    }
+    fn credentials_schema(&self) -> &'static [CredentialField] {
+        HA_CREDENTIALS
+    }
+}
+
+/// Sensor side of the HA adapter (`binary_sensor.*` / `sensor.*`, allowlisted to
+/// motion/occupancy/contact/illuminance/temperature/humidity — see
+/// [`sensor_kind`]). Registered with `register_sensor(...)` alongside the other
+/// HA factories; readings stay live over the shared `HaPushManager` WebSocket.
+pub struct HaSensorFactory;
+
+impl SensorProviderFactory for HaSensorFactory {
+    fn provider_type(&self) -> &'static str {
+        "ha"
+    }
+    fn display_name(&self) -> &'static str {
+        "Home Assistant"
+    }
+    fn build(&self, credentials_json: &str) -> Result<Box<dyn SensorProvider>> {
         Ok(Box::new(HaProvider::from_credentials(credentials_json)?))
     }
     fn credentials_schema(&self) -> &'static [CredentialField] {
@@ -2213,6 +2350,11 @@ mod tests {
                 .build(r#"{"base_url":"http://ha.local:8123","token":"abc"}"#)
                 .is_ok()
         );
+        assert!(
+            HaSensorFactory
+                .build(r#"{"base_url":"http://ha.local:8123","token":"abc"}"#)
+                .is_ok()
+        );
         // `.err()` drops the Ok value (a `Box<dyn MediaProvider>`, which isn't
         // `Debug`) so the error can be unwrapped.
         let err = HaMediaFactory
@@ -2348,13 +2490,127 @@ mod tests {
             Some(HaPushEvent::Power { state, .. }) if state.on
         ));
 
-        // A sensor is not a Bifrost device domain — dropped.
+        // A classless sensor isn't a modeled kind (see `sensor_kind`) — dropped.
         let sensor = HaEntity {
             entity_id: "sensor.temp".into(),
             state: "21".into(),
             attributes: json!({}),
         };
         assert!(classify_push(sensor).is_none());
+
+        // But a device_class'd temperature sensor and a motion binary_sensor route
+        // onto the sensor pipeline.
+        let temp = HaEntity {
+            entity_id: "sensor.hall_temp".into(),
+            state: "21.5".into(),
+            attributes: json!({ "device_class": "temperature", "unit_of_measurement": "°C" }),
+        };
+        assert!(matches!(
+            classify_push(temp),
+            Some(HaPushEvent::Sensor { device_id, state })
+                if device_id == "sensor.hall_temp" && state.reading == Some(SensorReading::Number(21.5))
+        ));
+
+        let motion = HaEntity {
+            entity_id: "binary_sensor.hall_motion".into(),
+            state: "on".into(),
+            attributes: json!({ "device_class": "motion" }),
+        };
+        assert!(matches!(
+            classify_push(motion),
+            Some(HaPushEvent::Sensor { state, .. }) if state.is_detecting()
+        ));
+    }
+
+    fn sensor_entities() -> Value {
+        json!([
+            { "entity_id": "binary_sensor.hall_motion", "state": "on",
+              "attributes": { "friendly_name": "Hall Motion", "device_class": "motion" } },
+            { "entity_id": "binary_sensor.front_door", "state": "off",
+              "attributes": { "friendly_name": "Front Door", "device_class": "door" } },
+            { "entity_id": "sensor.hall_lux", "state": "480",
+              "attributes": { "friendly_name": "Hall Lux", "device_class": "illuminance",
+                              "unit_of_measurement": "lx" } },
+            { "entity_id": "sensor.hall_temp", "state": "21.5",
+              "attributes": { "friendly_name": "Hall Temp", "device_class": "temperature",
+                              "unit_of_measurement": "°C" } },
+            // The binary_sensor/sensor flood we don't model — must be dropped.
+            { "entity_id": "binary_sensor.update_available", "state": "off",
+              "attributes": { "device_class": "update" } },
+            { "entity_id": "sensor.wifi_signal", "state": "-52",
+              "attributes": { "device_class": "signal_strength", "unit_of_measurement": "dBm" } },
+            { "entity_id": "sensor.no_class", "state": "hello", "attributes": {} },
+            light_entity(),
+        ])
+    }
+
+    #[tokio::test]
+    async fn discover_sensor_allowlists_presence_and_environmental_classes() {
+        let server = MockServer::start().await;
+        mount_states(&server, sensor_entities()).await;
+
+        let p = HaProvider::new_for_test(server.uri()).unwrap();
+        let devices = SensorProvider::discover(&p).await.unwrap();
+
+        // Four modeled sensors map through; the flood + light are dropped.
+        assert_eq!(devices.len(), 4, "got: {devices:?}");
+        let by_id = |id: &str| {
+            devices
+                .iter()
+                .find(|d| d.provider_id == id)
+                .unwrap_or_else(|| panic!("missing {id}"))
+        };
+        let motion = by_id("binary_sensor.hall_motion");
+        assert_eq!(motion.kind, SensorKind::Motion);
+        assert!(motion.state.is_detecting());
+        assert_eq!(by_id("binary_sensor.front_door").kind, SensorKind::Contact);
+        let lux = by_id("sensor.hall_lux");
+        assert_eq!(lux.kind, SensorKind::Illuminance);
+        assert_eq!(lux.unit.as_deref(), Some("lx"));
+        assert_eq!(lux.state.reading, Some(SensorReading::Number(480.0)));
+        assert_eq!(by_id("sensor.hall_temp").kind, SensorKind::Temperature);
+    }
+
+    #[test]
+    fn sensor_kind_is_a_device_class_allowlist() {
+        let mk = |id: &str, dc: &str| sensor_kind(id, &json!({ "device_class": dc }));
+        assert_eq!(mk("binary_sensor.x", "motion"), Some(SensorKind::Motion));
+        assert_eq!(
+            mk("binary_sensor.x", "occupancy"),
+            Some(SensorKind::Occupancy)
+        );
+        assert_eq!(
+            mk("binary_sensor.x", "presence"),
+            Some(SensorKind::Occupancy)
+        );
+        assert_eq!(mk("binary_sensor.x", "window"), Some(SensorKind::Contact));
+        assert_eq!(mk("sensor.x", "illuminance"), Some(SensorKind::Illuminance));
+        assert_eq!(mk("sensor.x", "humidity"), Some(SensorKind::Humidity));
+        // Not modeled → skipped.
+        assert_eq!(mk("binary_sensor.x", "update"), None);
+        assert_eq!(mk("sensor.x", "signal_strength"), None);
+        assert_eq!(sensor_kind("sensor.x", &json!({})), None);
+        assert_eq!(sensor_kind("light.x", &json!({})), None);
+    }
+
+    #[test]
+    fn parse_sensor_state_handles_unavailable_and_bad_numbers() {
+        let ent = |state: &str| HaEntity {
+            entity_id: "sensor.x".into(),
+            state: state.into(),
+            attributes: json!({}),
+        };
+        // Unavailable → no reading, unreachable.
+        let s = parse_sensor_state(&ent("unavailable"), SensorKind::Temperature);
+        assert_eq!(s.reading, None);
+        assert_eq!(s.reachable, Some(false));
+        // A non-numeric reading for a numeric kind → no reading, still reachable.
+        let s = parse_sensor_state(&ent("hello"), SensorKind::Illuminance);
+        assert_eq!(s.reading, None);
+        assert_eq!(s.reachable, Some(true));
+        // Boolean kind maps on/off.
+        assert!(parse_sensor_state(&ent("on"), SensorKind::Motion).is_detecting());
+        assert!(!parse_sensor_state(&ent("off"), SensorKind::Motion).is_detecting());
     }
 
     /// A mock HA WebSocket for the push path: greets, accepts auth, acks the

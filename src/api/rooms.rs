@@ -234,6 +234,56 @@ pub(crate) async fn effective_power_member_ids(state: &AppState, room_id: &str) 
     .collect()
 }
 
+/// Occupancy of a room from its **presence** sensors (motion / occupancy). The
+/// provider-agnostic room property that presence-driven behaviour reads:
+/// - `None` — the room has no presence sensors, so occupancy is unknown here.
+/// - `Some(true)` — at least one presence member is currently detecting.
+/// - `Some(false)` — it has presence members but none are detecting.
+///
+/// Non-presence sensors (contact/lux/temp/humidity) and disabled/shadowed members
+/// are ignored, so this is safe to read from any surface (kiosk scheduler today).
+pub(crate) async fn room_occupancy(state: &AppState, room_id: &str) -> Option<bool> {
+    use crate::models::sensor::SensorState;
+    let rows = sqlx::query(
+        "SELECT sd.kind AS kind, sd.last_state AS last_state
+         FROM sensor_devices sd
+         JOIN providers p ON p.id = sd.provider_id
+         WHERE p.enabled = 1 AND sd.enabled = 1 AND sd.shadowed_by IS NULL
+           AND sd.id IN (
+               SELECT sensor_device_id FROM room_sensor_devices WHERE room_id = ?1
+               UNION
+               SELECT pgs.sensor_device_id
+               FROM room_links rl
+               JOIN provider_group_sensor_devices pgs
+                 ON pgs.provider_group_id = rl.provider_group_id
+               WHERE rl.room_id = ?1
+               AND pgs.sensor_device_id NOT IN (SELECT sensor_device_id FROM room_sensor_devices)
+           )",
+    )
+    .bind(room_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let mut any_presence = false;
+    let mut detecting = false;
+    for r in rows {
+        let kind = crate::api::sensors::parse_kind(&r.get::<String, _>("kind"));
+        if !kind.is_presence() {
+            continue;
+        }
+        any_presence = true;
+        let st: SensorState = r
+            .get::<Option<String>, _>("last_state")
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        if st.is_detecting() {
+            detecting = true;
+        }
+    }
+    any_presence.then_some(detecting)
+}
+
 /// Assign a device to (at most) one room from the *device* side — the knob the
 /// Devices page uses, the counterpart to the room-centric membership setters.
 /// Clears the device's existing direct membership in `member_table`, then adds
@@ -1418,5 +1468,113 @@ async fn apply_scene(
             Json(serde_json::json!({ "applied": applied, "failed": failed })).into_response()
         }
         None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod occupancy_tests {
+    use super::*;
+    use crate::AppState;
+    use crate::providers::default_registry;
+    use sqlx::SqlitePool;
+    use sqlx::sqlite::SqliteConnectOptions;
+    use std::str::FromStr;
+    use std::sync::Arc;
+
+    async fn test_state() -> Arc<AppState> {
+        let opts = SqliteConnectOptions::from_str(":memory:")
+            .unwrap()
+            .foreign_keys(true);
+        let db = SqlitePool::connect_with(opts).await.unwrap();
+        sqlx::migrate!("./migrations").run(&db).await.unwrap();
+        Arc::new(AppState::new(
+            db,
+            "test-secret-key-32-bytes-exactly",
+            default_registry(),
+        ))
+    }
+
+    async fn seed_provider(state: &AppState) {
+        sqlx::query("INSERT INTO providers (id, provider_type, name, credentials) VALUES ('p','ha','HA','x')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+    }
+
+    async fn seed_room(state: &AppState) {
+        sqlx::query("INSERT INTO rooms (id, name) VALUES ('r','Living Room')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+    }
+
+    /// Insert a sensor and directly assign it to room `r`.
+    async fn seed_sensor(state: &AppState, id: &str, kind: &str, last_state: &str) {
+        sqlx::query(
+            "INSERT INTO sensor_devices (id, provider_id, device_id, name, kind, last_state)
+             VALUES (?, 'p', ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(id)
+        .bind(kind)
+        .bind(last_state)
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO room_sensor_devices (room_id, sensor_device_id) VALUES ('r', ?)")
+            .bind(id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn none_when_room_has_no_presence_sensors() {
+        let state = test_state().await;
+        seed_provider(&state).await;
+        seed_room(&state).await;
+        // A non-presence sensor (illuminance) doesn't establish occupancy.
+        seed_sensor(
+            &state,
+            "lux",
+            "illuminance",
+            r#"{"reading":{"number":500}}"#,
+        )
+        .await;
+        assert_eq!(room_occupancy(&state, "r").await, None);
+    }
+
+    #[tokio::test]
+    async fn true_when_any_presence_member_is_detecting() {
+        let state = test_state().await;
+        seed_provider(&state).await;
+        seed_room(&state).await;
+        seed_sensor(&state, "m1", "motion", r#"{"reading":{"bool":false}}"#).await;
+        seed_sensor(&state, "m2", "occupancy", r#"{"reading":{"bool":true}}"#).await;
+        assert_eq!(room_occupancy(&state, "r").await, Some(true));
+    }
+
+    #[tokio::test]
+    async fn false_when_presence_members_all_clear() {
+        let state = test_state().await;
+        seed_provider(&state).await;
+        seed_room(&state).await;
+        seed_sensor(&state, "m1", "motion", r#"{"reading":{"bool":false}}"#).await;
+        assert_eq!(room_occupancy(&state, "r").await, Some(false));
+    }
+
+    #[tokio::test]
+    async fn disabled_presence_sensor_is_excluded() {
+        let state = test_state().await;
+        seed_provider(&state).await;
+        seed_room(&state).await;
+        seed_sensor(&state, "m1", "motion", r#"{"reading":{"bool":true}}"#).await;
+        sqlx::query("UPDATE sensor_devices SET enabled = 0 WHERE id = 'm1'")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        // The only presence member is disabled → room has no live presence input.
+        assert_eq!(room_occupancy(&state, "r").await, None);
     }
 }

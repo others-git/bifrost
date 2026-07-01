@@ -5,7 +5,7 @@
 // device may also pin an override glyph by name (e.g. a switch that drives an
 // LED strip can show the led_strip glyph); see `Glyph` and `GLYPH_OPTIONS`.
 
-import type { MediaDevice, PowerKind } from "../api";
+import type { MediaDevice, PowerKind, SensorDevice } from "../api";
 import { ACCENT, alpha, T } from "../theme";
 
 const base = {
@@ -372,6 +372,49 @@ const BODIES: Record<string, JSX.Element> = {
       <path d="M4 15.5h16M6 19h12" />
     </>
   ),
+  // ── Sensor icons (read-only inputs) ──────────────────────────────────────────
+  motion: (
+    // A walking figure — a motion detector's presence signal.
+    <>
+      <circle cx="13" cy="4.5" r="1.6" />
+      <path d="M13 8l-2.5 3 2 2 .5 5" />
+      <path d="M10.5 11l-3 1M13 13l3 1.5M8 21l2.5-4" />
+    </>
+  ),
+  occupancy: (
+    // A person inside radiating arcs — an occupancy / presence sensor.
+    <>
+      <circle cx="12" cy="9" r="2.2" />
+      <path d="M8.5 15.5a3.5 3.5 0 0 1 7 0" />
+      <path d="M5.5 5.5a9 9 0 0 1 13 0M7.8 8a5.7 5.7 0 0 1 8.4 0" />
+    </>
+  ),
+  contact: (
+    // A door ajar — a contact (door/window) sensor.
+    <>
+      <path d="M5 20h11V4L9 6v14" />
+      <path d="M5 20h14" />
+      <circle cx="11" cy="12" r="0.7" fill="currentColor" stroke="none" />
+    </>
+  ),
+  illuminance: (
+    // A sun-and-gauge — an ambient light (lux) sensor.
+    <>
+      <circle cx="12" cy="11" r="3.2" />
+      <path d="M12 4.5v1.6M12 15.9v1.6M4.8 11h1.6M17.6 11h1.6M6.9 5.9l1.1 1.1M16 15l1.1 1.1M6.9 16.1 8 15M16 7l1.1-1.1" />
+    </>
+  ),
+  temperature: (
+    // A thermometer bulb — a temperature sensor.
+    <>
+      <path d="M12 4a2 2 0 0 0-2 2v7.5a3.5 3.5 0 1 0 4 0V6a2 2 0 0 0-2-2Z" />
+      <path d="M12 9v5.2" />
+    </>
+  ),
+  humidity: (
+    // A droplet — a humidity sensor.
+    <path d="M12 3.5c3 3.7 5 6.4 5 9a5 5 0 0 1-10 0c0-2.6 2-5.3 5-9Z" />
+  ),
 };
 
 // HA weather conditions → a small icon set. Keeps the Boards weather widget
@@ -438,6 +481,13 @@ export const ALL_GLYPH_OPTIONS: { name: string; label: string }[] = [
   { name: "room", label: "Room" },
   { name: "home", label: "Home" },
   { name: "generic", label: "Generic" },
+  // Sensors
+  { name: "motion", label: "Motion" },
+  { name: "occupancy", label: "Occupancy" },
+  { name: "contact", label: "Contact" },
+  { name: "illuminance", label: "Light level" },
+  { name: "temperature", label: "Temperature" },
+  { name: "humidity", label: "Humidity" },
   // Actions / control
   { name: "power", label: "Power" },
   { name: "brightness", label: "Brightness" },
@@ -517,6 +567,13 @@ export function mediaKindGlyph(kind: MediaDevice["kind"]): string {
     default:
       return "speaker";
   }
+}
+
+/// The default glyph name for a sensor of the given kind — the kind name doubles
+/// as the glyph name for every modeled kind, with `generic` as the fallback.
+export function sensorKindGlyph(kind: SensorDevice["kind"]): string {
+  const known = ["motion", "occupancy", "contact", "illuminance", "temperature", "humidity"];
+  return known.includes(kind) ? kind : "generic";
 }
 
 export function LightGlyph({ size = 22 }: { size?: number }) {

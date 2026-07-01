@@ -179,6 +179,9 @@ pub async fn run() -> Result<()> {
 
     start_managers(&state).await;
 
+    // Enforce kiosk scheduled quiet hours (display power saving) in the background.
+    tokio::spawn(api::kiosks::run_scheduler(Arc::clone(&state)));
+
     let app = build_app(Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
     tracing::info!("bifrost listening on http://{}", cfg.bind_addr);

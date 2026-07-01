@@ -18,8 +18,8 @@ use axum::http::StatusCode;
 use sqlx::Row;
 use std::collections::HashMap;
 
-/// The three device-domain tables that carry `hw_id` / `shadowed_by`.
-const TABLES: [&str; 3] = ["lights", "media_devices", "power_devices"];
+/// The device-domain tables that carry `hw_id` / `shadowed_by`.
+const TABLES: [&str; 4] = ["lights", "media_devices", "power_devices", "sensor_devices"];
 
 /// Recompute automatic shadows across every device domain. Cheap and
 /// idempotent — run it after any discovery or provider change.

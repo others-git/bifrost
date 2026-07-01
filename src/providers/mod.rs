@@ -17,6 +17,7 @@ use crate::models::generic::{Control, GenericDevice};
 use crate::models::media::{MediaCommand, MediaDevice, MediaEvent, MediaFavorite, MediaState};
 use crate::models::power::{PowerDevice, PowerState};
 use crate::models::remote::{RemoteCommandInfo, RemoteDevice, RemoteKey, RemoteState};
+use crate::models::sensor::{SensorDevice, SensorState};
 use crate::models::{Light, LightState};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -330,6 +331,40 @@ pub trait PowerProviderFactory: Send + Sync {
     fn credentials_schema(&self) -> &'static [CredentialField];
 }
 
+/// Runtime interface for **sensor devices** — read-only inputs (motion,
+/// occupancy, contact, illuminance, temperature, humidity, …). The leanest
+/// provider trait: there is no write, because a sensor has no controllable
+/// surface. A `provider_type` registers this **in addition to** its other
+/// domains (Hue surfaces its motion sensors alongside its lights; HA surfaces
+/// `binary_sensor`/`sensor` alongside everything else).
+#[async_trait]
+pub trait SensorProvider: Send + Sync {
+    fn name(&self) -> &str;
+    async fn discover(&self) -> Result<Vec<SensorDevice>>;
+    async fn get_state(&self, device_id: &str) -> Result<SensorState>;
+
+    /// Provider-native groups (rooms/areas) containing sensors, mirrored and
+    /// wrapped by Bifrost Rooms — the sensor analog of
+    /// `PowerProvider::discover_groups`. `member_device_ids` hold sensor device
+    /// ids (matching `SensorDevice::provider_id`). Default: none.
+    async fn discover_groups(&self) -> Result<Vec<ProviderGroup>> {
+        Ok(vec![])
+    }
+}
+
+/// Factory for one sensor provider type (see [`PowerProviderFactory`] for the
+/// multi-domain registration pattern). Sensors are read via the provider's
+/// existing push channel (Hue SSE / HA WebSocket) or polled; there is no
+/// separate connection-mode enum.
+pub trait SensorProviderFactory: Send + Sync {
+    fn provider_type(&self) -> &'static str;
+    fn display_name(&self) -> &'static str {
+        self.provider_type()
+    }
+    fn build(&self, credentials_json: &str) -> Result<Box<dyn SensorProvider>>;
+    fn credentials_schema(&self) -> &'static [CredentialField];
+}
+
 /// A virtual remote control for a TV / streamer. Like `PowerProvider`, a
 /// `provider_type` may register this **in addition to** its other domains (HA
 /// serves lights + power + media + remote from one row). Providers map Bifrost's
@@ -492,6 +527,7 @@ pub struct ProviderRegistry {
     factories: HashMap<&'static str, Box<dyn ProviderFactory>>,
     media_factories: HashMap<&'static str, Box<dyn MediaProviderFactory>>,
     power_factories: HashMap<&'static str, Box<dyn PowerProviderFactory>>,
+    sensor_factories: HashMap<&'static str, Box<dyn SensorProviderFactory>>,
     remote_factories: HashMap<&'static str, Box<dyn RemoteProviderFactory>>,
     generic_factories: HashMap<&'static str, Box<dyn GenericProviderFactory>>,
 }
@@ -502,6 +538,7 @@ impl ProviderRegistry {
             factories: HashMap::new(),
             media_factories: HashMap::new(),
             power_factories: HashMap::new(),
+            sensor_factories: HashMap::new(),
             remote_factories: HashMap::new(),
             generic_factories: HashMap::new(),
         }
@@ -540,6 +577,30 @@ impl ProviderRegistry {
     /// Returns true if `provider_type` serves the power domain.
     pub fn is_known_power(&self, provider_type: &str) -> bool {
         self.power_factories.contains_key(provider_type)
+    }
+
+    /// Register the sensor domain for a provider type (multi-domain, like
+    /// `register_power`).
+    pub fn register_sensor<F: SensorProviderFactory + 'static>(&mut self, factory: F) {
+        self.sensor_factories
+            .insert(factory.provider_type(), Box::new(factory));
+    }
+
+    /// Build a live sensor provider from a type string + decrypted credentials JSON.
+    pub fn build_sensor(
+        &self,
+        provider_type: &str,
+        credentials_json: &str,
+    ) -> Result<Box<dyn SensorProvider>> {
+        self.sensor_factories
+            .get(provider_type)
+            .ok_or_else(|| anyhow!("unknown sensor provider type: {provider_type}"))?
+            .build(credentials_json)
+    }
+
+    /// Returns true if `provider_type` serves the sensor domain.
+    pub fn is_known_sensor(&self, provider_type: &str) -> bool {
+        self.sensor_factories.contains_key(provider_type)
     }
 
     /// Register the remote domain for a provider type (multi-domain, like
@@ -764,6 +825,7 @@ pub fn default_registry() -> ProviderRegistry {
     // menu); re-add a `register(...)` line to bring one back. `wled` is still
     // registered in test fixtures as the generic mockable light provider.
     r.register(hue::HueProviderFactory);
+    r.register_sensor(hue::HueSensorFactory);
     r.register(govee::GoveeProviderFactory);
     r.register(lifx::LifxProviderFactory);
     // Home Assistant serves multiple device domains from one provider row:
@@ -773,6 +835,7 @@ pub fn default_registry() -> ProviderRegistry {
     r.register(ha::HaLightFactory);
     r.register_power(ha::HaPowerFactory);
     r.register_media(ha::HaMediaFactory);
+    r.register_sensor(ha::HaSensorFactory);
     r.register_remote(ha::HaRemoteFactory);
     // The generic "passthrough" surface for HA's controllable long tail (climate,
     // cover, lock, number, select, button, …) — one mapping, many device types.

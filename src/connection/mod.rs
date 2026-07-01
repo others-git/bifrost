@@ -6,6 +6,7 @@
 
 use crate::models::media::MediaEvent;
 use crate::models::power::PowerState;
+use crate::models::sensor::SensorState;
 use crate::models::{LightCapabilities, LightState, LightStatePatch};
 use crate::providers::ha::{HaProvider, HaPushEvent};
 use crate::providers::hue::HueProvider;
@@ -79,10 +80,21 @@ pub struct PowerEvent {
     pub state: PowerState,
 }
 
+/// A sensor-device reading update broadcast on the event pipeline. Like power, a
+/// full snapshot (a sensor has a single reading), not a patch. Emitted by the HA
+/// push manager (WebSocket) and the Hue SSE manager (motion events).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SensorEvent {
+    pub device_id: String,
+    pub state: SensorState,
+}
+
 pub struct HueConnectionManager {
     provider: Arc<HueProvider>,
     pub state: Arc<RwLock<ConnectionState>>,
     pub events: broadcast::Sender<LightEvent>,
+    /// Motion / light_level / temperature updates parsed off the same SSE stream.
+    pub sensor_events: broadcast::Sender<SensorEvent>,
 }
 
 impl HueConnectionManager {
@@ -92,6 +104,7 @@ impl HueConnectionManager {
             provider: Arc::new(provider),
             state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
             events: tx,
+            sensor_events: broadcast::channel(256).0,
         };
         (mgr, rx)
     }
@@ -212,6 +225,13 @@ impl HueConnectionManager {
                 let Some(id) = item.get("id").and_then(|v| v.as_str()) else {
                     continue;
                 };
+                // Motion / light_level / temperature updates → sensor pipeline.
+                if let Some((device_id, state)) =
+                    crate::providers::hue::parse_sensor_from_event(item)
+                {
+                    let _ = self.sensor_events.send(SensorEvent { device_id, state });
+                    continue;
+                }
                 let patch = crate::providers::hue::parse_patch_from_event(item);
                 if patch.is_empty() {
                     continue; // unrelated resource update (scene, geofence, …)
@@ -494,6 +514,7 @@ pub struct HaPushManager {
     pub light_events: broadcast::Sender<LightEvent>,
     pub media_events: broadcast::Sender<MediaEvent>,
     pub power_events: broadcast::Sender<PowerEvent>,
+    pub sensor_events: broadcast::Sender<SensorEvent>,
 }
 
 impl HaPushManager {
@@ -504,6 +525,7 @@ impl HaPushManager {
             light_events: broadcast::channel(256).0,
             media_events: broadcast::channel(256).0,
             power_events: broadcast::channel(256).0,
+            sensor_events: broadcast::channel(256).0,
         }
     }
 
@@ -562,6 +584,38 @@ impl HaPushManager {
             HaPushEvent::Power { device_id, state } => {
                 let _ = self.power_events.send(PowerEvent { device_id, state });
             }
+            HaPushEvent::Sensor { device_id, state } => {
+                let _ = self.sensor_events.send(SensorEvent { device_id, state });
+            }
+        }
+    }
+}
+
+/// Writes pushed sensor events to `sensor_devices.last_state`. Full snapshots
+/// (a sensor has a single reading), so this replaces rather than merges.
+async fn sensor_db_writer_task(
+    mut rx: broadcast::Receiver<SensorEvent>,
+    provider_row_id: String,
+    db: SqlitePool,
+) {
+    loop {
+        match rx.recv().await {
+            Ok(event) => {
+                let state_json = serde_json::to_string(&event.state).unwrap_or_default();
+                let _ = sqlx::query(
+                    "UPDATE sensor_devices SET last_state = ?, last_seen = datetime('now')
+                     WHERE provider_id = ? AND device_id = ?",
+                )
+                .bind(&state_json)
+                .bind(&provider_row_id)
+                .bind(&event.device_id)
+                .execute(&db)
+                .await;
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                warn!("sensor event db writer lagged by {n} events");
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
         }
     }
 }
@@ -606,6 +660,8 @@ struct ConnectionEntry {
     media_events: Option<broadcast::Sender<MediaEvent>>,
     /// Present only for the HA multi-domain push manager.
     power_events: Option<broadcast::Sender<PowerEvent>>,
+    /// Present for the HA WebSocket and Hue SSE managers (sensor readings).
+    sensor_events: Option<broadcast::Sender<SensorEvent>>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -635,8 +691,14 @@ impl ConnectionRegistry {
         let mgr = Arc::new(mgr);
         let state = Arc::clone(&mgr.state);
         let events = mgr.events.clone();
+        let sensor_events = mgr.sensor_events.clone();
         let sse_task = tokio::spawn(Arc::clone(&mgr).run());
-        let db_task = tokio::spawn(db_writer_task(rx, db));
+        let db_task = tokio::spawn(db_writer_task(rx, db.clone()));
+        let sensor_db = tokio::spawn(sensor_db_writer_task(
+            sensor_events.subscribe(),
+            provider_id.clone(),
+            db,
+        ));
         self.entries.insert(
             provider_id,
             ConnectionEntry {
@@ -644,7 +706,8 @@ impl ConnectionRegistry {
                 events,
                 media_events: None,
                 power_events: None,
-                tasks: vec![sse_task, db_task],
+                sensor_events: Some(sensor_events),
+                tasks: vec![sse_task, db_task, sensor_db],
             },
         );
     }
@@ -670,6 +733,7 @@ impl ConnectionRegistry {
                 events,
                 media_events: None,
                 power_events: None,
+                sensor_events: None,
                 tasks: vec![poll_task, db_task],
             },
         );
@@ -698,6 +762,7 @@ impl ConnectionRegistry {
                 events,
                 media_events: Some(media_events),
                 power_events: None,
+                sensor_events: None,
                 tasks: vec![push_task, db_task],
             },
         );
@@ -712,6 +777,7 @@ impl ConnectionRegistry {
         let events = mgr.light_events.clone();
         let media_events = mgr.media_events.clone();
         let power_events = mgr.power_events.clone();
+        let sensor_events = mgr.sensor_events.clone();
 
         let push_task = tokio::spawn(Arc::clone(&mgr).run());
         let light_db = tokio::spawn(db_writer_task(events.subscribe(), db.clone()));
@@ -723,6 +789,11 @@ impl ConnectionRegistry {
         let power_db = tokio::spawn(power_db_writer_task(
             power_events.subscribe(),
             provider_id.clone(),
+            db.clone(),
+        ));
+        let sensor_db = tokio::spawn(sensor_db_writer_task(
+            sensor_events.subscribe(),
+            provider_id.clone(),
             db,
         ));
         self.entries.insert(
@@ -732,7 +803,8 @@ impl ConnectionRegistry {
                 events,
                 media_events: Some(media_events),
                 power_events: Some(power_events),
-                tasks: vec![push_task, light_db, media_db, power_db],
+                sensor_events: Some(sensor_events),
+                tasks: vec![push_task, light_db, media_db, power_db, sensor_db],
             },
         );
     }
@@ -777,6 +849,20 @@ impl ConnectionRegistry {
             .iter()
             .filter_map(|(id, e)| {
                 e.power_events
+                    .as_ref()
+                    .map(|tx| (id.clone(), tx.subscribe()))
+            })
+            .collect()
+    }
+
+    /// Subscribe to every sensor push channel, tagged with its provider row id
+    /// (so SSE consumers can match `sensor_devices` rows). Emitted by the HA and
+    /// Hue push managers. Used by the SSE endpoint.
+    pub fn subscribe_all_sensor(&self) -> Vec<(String, broadcast::Receiver<SensorEvent>)> {
+        self.entries
+            .iter()
+            .filter_map(|(id, e)| {
+                e.sensor_events
                     .as_ref()
                     .map(|tx| (id.clone(), tx.subscribe()))
             })

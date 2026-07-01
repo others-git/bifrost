@@ -36,6 +36,8 @@ import {
   kioskDeauth,
   setKioskRoom,
   setKioskBoard,
+  setKioskSchedule,
+  setKioskPresence,
   getDashboards,
   forgetKiosk,
   getKioskUpdateConfig,
@@ -63,6 +65,7 @@ import { Select } from "../components/Select";
 import { useViewport } from "../useViewport";
 import { ACCENT, S } from "../styles";
 import { Button, Switch } from "../components/controls";
+import { Glyph } from "../components/glyphs";
 import { speak } from "../tts";
 import { copyText } from "../clipboard";
 
@@ -1855,6 +1858,203 @@ function cmpVersion(a: string, b: string): number {
   return 0;
 }
 
+/** Per-kiosk scheduled quiet hours (display power saving): a toggle plus the
+ * sleep/wake times, in the hub's local clock. Enabling defaults to 23:00 → 07:00
+ * when unset; editing a time commits on blur. The scheduler emits the same
+ * sleep/wake commands a human would, so a manual wake mid-window is respected
+ * until the next boundary. */
+function KioskSchedule({
+  k,
+  dialogs,
+  onSaved,
+}: {
+  k: Kiosk;
+  dialogs: Dialogs;
+  onSaved: () => void;
+}) {
+  const [enabled, setEnabled] = useState(k.schedule_enabled);
+  const [sleep, setSleep] = useState(k.sleep_at ?? "23:00");
+  const [wake, setWake] = useState(k.wake_at ?? "07:00");
+  const [busy, setBusy] = useState(false);
+
+  // Re-sync when the parent reloads the kiosk list (another edit, a check-in).
+  useEffect(() => {
+    setEnabled(k.schedule_enabled);
+    setSleep(k.sleep_at ?? "23:00");
+    setWake(k.wake_at ?? "07:00");
+  }, [k.schedule_enabled, k.sleep_at, k.wake_at]);
+
+  async function save(next: { enabled: boolean; sleep_at: string; wake_at: string }) {
+    if (next.enabled && next.sleep_at === next.wake_at) {
+      await dialogs.alert({ title: "Invalid schedule", message: "Sleep and wake times must differ." });
+      return;
+    }
+    setBusy(true);
+    try {
+      await setKioskSchedule(k.id, next);
+      onSaved();
+    } catch (e) {
+      await dialogs.alert({
+        title: "Couldn't save schedule",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const timeInput = {
+    background: "var(--bf-panel, #1a1320)",
+    color: enabled ? "var(--bf-text, #eee)" : "var(--bf-faint)",
+    border: "1px solid var(--bf-hairline, #333)",
+    borderRadius: 6,
+    padding: "0.25rem 0.4rem",
+    fontSize: "0.78rem",
+    colorScheme: "dark" as const,
+  };
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "0.5rem",
+        flexWrap: "wrap",
+        fontSize: "0.78rem",
+        color: "var(--bf-faint)",
+        borderTop: "1px solid var(--bf-hairline, #2a2233)",
+        paddingTop: "0.5rem",
+      }}
+    >
+      <span style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem", color: "var(--bf-dim)" }}>
+        <Glyph name="wx_moon" size={15} /> Sleep schedule
+      </span>
+      <Switch
+        on={enabled}
+        disabled={busy}
+        onChange={(v) => {
+          setEnabled(v);
+          save({ enabled: v, sleep_at: sleep, wake_at: wake });
+        }}
+      />
+      <span style={{ opacity: enabled ? 1 : 0.55, display: "inline-flex", alignItems: "center", gap: "0.35rem" }}>
+        off at
+        <input
+          type="time"
+          value={sleep}
+          disabled={busy}
+          onChange={(e) => setSleep(e.target.value)}
+          onBlur={() => save({ enabled, sleep_at: sleep, wake_at: wake })}
+          style={timeInput}
+        />
+        on at
+        <input
+          type="time"
+          value={wake}
+          disabled={busy}
+          onChange={(e) => setWake(e.target.value)}
+          onBlur={() => save({ enabled, sleep_at: sleep, wake_at: wake })}
+          style={timeInput}
+        />
+      </span>
+      <span style={{ opacity: 0.7 }}>hub local time</span>
+    </div>
+  );
+}
+
+/** Per-kiosk presence-driven display (power saving): blank the screen while the
+ * kiosk's assigned Room is unoccupied, wake on motion. Uses the room's presence
+ * sensors (Hue motion / HA), so it needs a room with sensors; the no-motion grace
+ * is editable in minutes. Quiet hours still wins overnight. */
+function KioskPresence({
+  k,
+  dialogs,
+  onSaved,
+}: {
+  k: Kiosk;
+  dialogs: Dialogs;
+  onSaved: () => void;
+}) {
+  const [enabled, setEnabled] = useState(k.presence_enabled);
+  const [mins, setMins] = useState(Math.round((k.presence_timeout_secs ?? 600) / 60));
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setEnabled(k.presence_enabled);
+    setMins(Math.round((k.presence_timeout_secs ?? 600) / 60));
+  }, [k.presence_enabled, k.presence_timeout_secs]);
+
+  async function save(next: { enabled: boolean; timeout_secs?: number }) {
+    setBusy(true);
+    try {
+      await setKioskPresence(k.id, next);
+      onSaved();
+    } catch (e) {
+      await dialogs.alert({
+        title: "Couldn't save presence",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const numInput = {
+    background: "var(--bf-panel, #1a1320)",
+    color: enabled ? "var(--bf-text, #eee)" : "var(--bf-faint)",
+    border: "1px solid var(--bf-hairline, #333)",
+    borderRadius: 6,
+    padding: "0.25rem 0.4rem",
+    fontSize: "0.78rem",
+    width: "3.2rem",
+  };
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "0.5rem",
+        flexWrap: "wrap",
+        fontSize: "0.78rem",
+        color: "var(--bf-faint)",
+        paddingTop: "0.4rem",
+      }}
+    >
+      <span style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem", color: "var(--bf-dim)" }}>
+        <Glyph name="motion" size={15} /> Presence blanking
+      </span>
+      <Switch
+        on={enabled}
+        disabled={busy}
+        onChange={(v) => {
+          setEnabled(v);
+          save({ enabled: v });
+        }}
+      />
+      <span style={{ opacity: enabled ? 1 : 0.55, display: "inline-flex", alignItems: "center", gap: "0.35rem" }}>
+        sleep after
+        <input
+          type="number"
+          min={1}
+          max={60}
+          value={mins}
+          disabled={busy}
+          onChange={(e) => setMins(Math.max(1, Number(e.target.value) || 1))}
+          onBlur={() => save({ enabled, timeout_secs: mins * 60 })}
+          style={numInput}
+        />
+        min of no motion
+      </span>
+      {enabled && !k.room_id && (
+        <span style={{ color: "var(--bf-rose, #e57)" }}>
+          needs a room with motion sensors — assign one at left
+        </span>
+      )}
+    </div>
+  );
+}
+
 function KiosksSection({
   dialogs,
   latest,
@@ -1948,8 +2148,9 @@ function KiosksSection({
       <SectionLabel style={{ marginBottom: "0.4rem" }}>Kiosks</SectionLabel>
       <p style={{ margin: "0 0 1rem", color: "var(--bf-faint)", fontSize: "0.85rem" }}>
         Wall-tablet companion apps that check in here. Put one to sleep, lock it (sign out of the
-        dashboard), or de-authorize it (revoke its key). Pair a new one above via{" "}
-        <strong>Pair a device</strong>.
+        dashboard), or de-authorize it (revoke its key). Set a <strong>sleep schedule</strong> to
+        blank the display overnight (power saving) — a manual wake still holds until morning. Pair a
+        new one above via <strong>Pair a device</strong>.
       </p>
       <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
         {kiosks.length === 0 && (
@@ -2082,6 +2283,8 @@ function KiosksSection({
                 ))
               )}
             </div>
+            <KioskSchedule k={k} dialogs={dialogs} onSaved={load} />
+            <KioskPresence k={k} dialogs={dialogs} onSaved={load} />
           </div>
         ))}
       </div>

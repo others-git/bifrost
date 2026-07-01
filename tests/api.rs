@@ -3962,6 +3962,116 @@ async fn kiosk_checkin_stores_battery_telemetry() {
 }
 
 #[tokio::test]
+async fn kiosk_schedule_set_reflected_and_validated() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "Bedroom tablet").await;
+
+    // Register the kiosk via a check-in.
+    app.clone()
+        .oneshot(bearer_json("POST", "/api/kiosks/checkin", &key, "{}"))
+        .await
+        .unwrap();
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let kiosk = &list.as_array().unwrap()[0];
+    // No schedule by default.
+    assert_eq!(kiosk["schedule_enabled"], false);
+    assert!(kiosk["sleep_at"].is_null());
+    let kiosk_id = kiosk["id"].as_str().unwrap().to_string();
+
+    // An enabled schedule needs distinct valid HH:MM times — reject bad input.
+    for bad in [
+        r#"{"enabled":true,"sleep_at":"23:00","wake_at":"25:00"}"#, // hour out of range
+        r#"{"enabled":true,"sleep_at":"07:00","wake_at":"07:00"}"#, // equal endpoints
+        r#"{"enabled":true,"sleep_at":null,"wake_at":"07:00"}"#,    // missing time
+    ] {
+        let r = app
+            .clone()
+            .oneshot(helpers::authed_json(
+                "PUT",
+                &format!("/api/kiosks/{kiosk_id}/schedule"),
+                &cookie,
+                bad,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "rejected: {bad}"
+        );
+    }
+
+    // A valid schedule is stored and normalized (zero-padded).
+    let r = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/kiosks/{kiosk_id}/schedule"),
+            &cookie,
+            r#"{"enabled":true,"sleep_at":"23:0","wake_at":"7:30"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let kiosk = &list.as_array().unwrap()[0];
+    assert_eq!(kiosk["schedule_enabled"], true);
+    assert_eq!(kiosk["sleep_at"], "23:00");
+    assert_eq!(kiosk["wake_at"], "07:30");
+
+    // Disabling keeps the times (so toggling off doesn't lose them).
+    let r = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/kiosks/{kiosk_id}/schedule"),
+            &cookie,
+            r#"{"enabled":false,"sleep_at":"23:00","wake_at":"07:30"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let kiosk = &list.as_array().unwrap()[0];
+    assert_eq!(kiosk["schedule_enabled"], false);
+    assert_eq!(kiosk["sleep_at"], "23:00");
+}
+
+#[tokio::test]
+async fn kiosk_schedule_requires_session() {
+    let app = helpers::test_app_with_password().await;
+    let r = app
+        .oneshot(anon_json(
+            "PUT",
+            "/api/kiosks/x/schedule",
+            r#"{"enabled":false}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn kiosk_stream_requires_api_key() {
     let app = helpers::test_app_with_password().await;
     let resp = app
@@ -7352,6 +7462,34 @@ async fn power_devices_without_session_returns_401() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn sensor_devices_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sensors/devices")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn sensor_devices_list_is_empty_by_default() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let list = helpers::response_json(
+        app.oneshot(helpers::authed_get("/api/sensors/devices", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(list.as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]

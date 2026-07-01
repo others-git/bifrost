@@ -875,6 +875,100 @@ export async function setPowerState(id: string, on: boolean): Promise<string | n
   return (await res.text()) || `HTTP ${res.status}`;
 }
 
+// ── Sensors (read-only: motion / occupancy / contact / lux / temp / humidity) ─
+
+export type SensorKind =
+  | "motion"
+  | "occupancy"
+  | "contact"
+  | "illuminance"
+  | "temperature"
+  | "humidity"
+  | "generic";
+
+/** One sensor reading — a boolean (motion/contact) or a number (lux/temp/%). */
+export type SensorReading = { bool: boolean } | { number: number };
+
+export interface SensorState {
+  reading?: SensorReading;
+  reachable?: boolean;
+}
+
+/** A read-only sensor. Has no controllable surface — only a reading. Rooms
+ * aggregate the presence kinds (motion/occupancy) into occupancy. */
+export interface SensorDevice {
+  id: string;
+  provider_id: string;
+  device_id: string;
+  name: string;
+  kind: SensorKind;
+  state: SensorState;
+  /** Display unit for a numeric reading (°C, lx, %); null for booleans. */
+  unit?: string | null;
+  last_seen?: string;
+  enabled?: boolean;
+  glyph?: string | null;
+  hw_id?: string | null;
+  shadowed_by?: string | null;
+  shadow_auto?: boolean;
+  room_id?: string | null;
+  inherited_room_id?: string | null;
+}
+
+export async function getSensors(): Promise<SensorDevice[]> {
+  const res = await fetch("/api/sensors/devices");
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function setSensorEnabled(id: string, enabled: boolean): Promise<void> {
+  await fetch(`/api/sensors/devices/${id}/enabled`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+}
+export async function setSensorGlyph(id: string, glyph: string | null): Promise<void> {
+  await fetch(`/api/sensors/devices/${id}/glyph`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ glyph }),
+  });
+}
+export async function setSensorName(id: string, name: string | null): Promise<void> {
+  await fetch(`/api/sensors/devices/${id}/name`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+}
+export async function setSensorShadow(id: string, shadowed_by: string | null): Promise<void> {
+  await fetch(`/api/sensors/devices/${id}/shadow`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ shadowed_by }),
+  });
+}
+export async function setSensorRoom(id: string, room_id: string | null): Promise<void> {
+  await fetch(`/api/sensors/devices/${id}/room`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ room_id }),
+  });
+}
+
+/** Human-readable one-line reading for a sensor (e.g. "Detected", "480 lx"). */
+export function sensorReadingText(s: SensorDevice): string {
+  const r = s.state.reading;
+  if (r == null) return s.state.reachable === false ? "Unreachable" : "—";
+  if ("bool" in r) {
+    if (s.kind === "contact") return r.bool ? "Open" : "Closed";
+    return r.bool ? "Detected" : "Clear";
+  }
+  const n = Number.isInteger(r.number) ? r.number : Math.round(r.number * 10) / 10;
+  return s.unit ? `${n} ${s.unit}` : `${n}`;
+}
+
 /** Re-run a provider's device discovery (lights or audio). */
 /** Discover a provider's devices. `prune` omitted → uses the provider's stored
  * flag; `true`/`false` forces it for this run (removes / keeps stale devices). */
@@ -1399,6 +1493,15 @@ export interface Kiosk {
   room_id: string | null;
   /** Board this kiosk auto-launches full-screen on load, or null. */
   default_board_id: string | null;
+  /** Scheduled quiet hours (display power saving): when enabled, the display
+   * sleeps at `sleep_at` and wakes at `wake_at` (server-local "HH:MM"). */
+  schedule_enabled: boolean;
+  sleep_at: string | null;
+  wake_at: string | null;
+  /** Presence-driven display: blank while the kiosk's assigned Room is
+   * unoccupied, wake on motion. `presence_timeout_secs` is the no-motion grace. */
+  presence_enabled: boolean;
+  presence_timeout_secs: number;
   /** Battery / power telemetry from the last check-in (null on older apps). */
   battery_level: number | null;
   battery_charging: boolean | null;
@@ -1445,6 +1548,36 @@ export async function setKioskBoard(id: string, board_id: string | null): Promis
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ board_id }),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+}
+
+/** Set the kiosk's scheduled quiet hours (display power saving). When enabled,
+ * both times must be a distinct, valid "HH:MM" (server-local); the server
+ * normalizes and stores them. Throws with the server message on rejection. */
+export async function setKioskSchedule(
+  id: string,
+  schedule: { enabled: boolean; sleep_at: string | null; wake_at: string | null },
+): Promise<void> {
+  const res = await fetch(`/api/kiosks/${id}/schedule`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(schedule),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+}
+
+/** Set the kiosk's presence-driven display blanking (power saving). Uses the
+ * kiosk's assigned Room's occupancy sensors. `timeout_secs` (the no-motion grace)
+ * is clamped server-side to [30, 3600]; omit it to leave the current grace. */
+export async function setKioskPresence(
+  id: string,
+  presence: { enabled: boolean; timeout_secs?: number },
+): Promise<void> {
+  const res = await fetch(`/api/kiosks/${id}/presence`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(presence),
   });
   if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
 }

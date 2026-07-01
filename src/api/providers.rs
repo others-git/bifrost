@@ -1318,6 +1318,21 @@ async fn discover(
         }
     }
 
+    // Sensor domain (motion/occupancy/contact/lux/temp/humidity — Hue + HA).
+    if state.registry.is_known_sensor(&provider_type) {
+        match crate::api::sensors::discover_sensor_devices(
+            &state,
+            &id,
+            &provider_type,
+            &credentials_enc,
+        )
+        .await
+        {
+            Ok(n) => discovered += n,
+            Err(status) => return status.into_response(),
+        }
+    }
+
     // Remote domain (TV / streamer remotes — HA Android TV today).
     if state.registry.is_known_remote(&provider_type) {
         match crate::api::remote::discover_remote_devices(
@@ -1345,6 +1360,9 @@ async fn discover(
         }
         if state.registry.is_known_media(&provider_type) {
             pruned += prune_stale(&state, &id, "media_devices", &prune_before).await;
+        }
+        if state.registry.is_known_sensor(&provider_type) {
+            pruned += prune_stale(&state, &id, "sensor_devices", &prune_before).await;
         }
         if state.registry.is_known_remote(&provider_type) {
             pruned += prune_stale(&state, &id, "remote_devices", &prune_before).await;

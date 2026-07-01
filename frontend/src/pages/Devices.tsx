@@ -10,6 +10,7 @@ import {
   getLights,
   getMediaDevices,
   getPowerDevices,
+  getSensors,
   getRooms,
   getProviders,
   getRemoteDevices,
@@ -36,6 +37,13 @@ import {
   setLightRoom,
   setMediaRoom,
   setPowerRoom,
+  setSensorEnabled,
+  setSensorGlyph,
+  setSensorName,
+  setSensorShadow,
+  setSensorRoom,
+  sensorReadingText,
+  type SensorDevice,
   setMediaReceiver,
   setMediaCompanion,
   setProviderOrder,
@@ -47,7 +55,7 @@ import {
   type Provider,
   type RemoteDevice,
 } from "../api";
-import { Glyph, GlyphGrid, GLYPH_OPTIONS, powerKindGlyph, mediaKindGlyph } from "../components/glyphs";
+import { Glyph, GlyphGrid, GLYPH_OPTIONS, powerKindGlyph, mediaKindGlyph, sensorKindGlyph } from "../components/glyphs";
 import { PageHeader, SectionLabel } from "../components/PageHeader";
 import { Switch, Segmented } from "../components/controls";
 import { GenericDevicesSection } from "../components/GenericDevices";
@@ -57,7 +65,7 @@ import { AnchoredPanel } from "../components/AnchoredPanel";
 import { useViewport } from "../useViewport";
 import { T, ACCENT, alpha } from "../theme";
 
-type Domain = "light" | "media" | "power";
+type Domain = "light" | "media" | "power" | "sensor";
 
 // One normalized row per device, so the inventory renders uniformly no matter
 // which domain a device came from. `glyph` is the override (null = none),
@@ -102,6 +110,9 @@ interface Item {
   transport?: string | null;
   /** The device's network address, when the provider reports one. */
   ip?: string | null;
+  /** Sensor only: the human-readable current reading (e.g. "Detected", "480 lx"),
+   * shown as the status line in place of on/off. */
+  readingText?: string | null;
 }
 
 const POWER_KIND_LABEL: Record<PowerKind, string> = {
@@ -110,6 +121,16 @@ const POWER_KIND_LABEL: Record<PowerKind, string> = {
   fan: "Fan",
   toggle: "Toggle",
   generic: "Device",
+};
+
+const SENSOR_KIND_LABEL: Record<SensorDevice["kind"], string> = {
+  motion: "Motion",
+  occupancy: "Occupancy",
+  contact: "Contact",
+  illuminance: "Light level",
+  temperature: "Temperature",
+  humidity: "Humidity",
+  generic: "Sensor",
 };
 
 const AUDIO_KIND_LABEL: Record<MediaDevice["kind"], string> = {
@@ -189,30 +210,63 @@ function powerItem(p: PowerDevice): Item {
   };
 }
 
+function sensorItem(s: SensorDevice): Item {
+  const detecting =
+    (s.kind === "motion" || s.kind === "occupancy") &&
+    !!s.state.reading &&
+    "bool" in s.state.reading &&
+    s.state.reading.bool;
+  return {
+    domain: "sensor",
+    id: s.id,
+    name: s.name,
+    deviceId: s.device_id,
+    providerId: s.provider_id,
+    typeLabel: SENSOR_KIND_LABEL[s.kind] ?? "Sensor",
+    enabled: s.enabled !== false,
+    glyph: s.glyph ?? null,
+    defaultGlyph: sensorKindGlyph(s.kind),
+    // A detecting presence sensor lights its niche; other kinds never read "on".
+    on: detecting,
+    offline: s.state.reachable === false,
+    shadowedBy: s.shadowed_by ?? null,
+    shadowAuto: s.shadow_auto === true,
+    companionOf: null,
+    roomId: s.room_id ?? null,
+    inheritedRoomId: s.inherited_room_id ?? null,
+    readingText: sensorReadingText(s),
+  };
+}
+
 const SET_ENABLED: Record<Domain, (id: string, enabled: boolean) => Promise<void>> = {
   light: setLightEnabled,
   media: setMediaEnabled,
   power: setPowerEnabled,
+  sensor: setSensorEnabled,
 };
 const SET_GLYPH: Record<Domain, (id: string, glyph: string | null) => Promise<void>> = {
   light: setLightGlyph,
   media: setMediaGlyph,
   power: setPowerGlyph,
+  sensor: setSensorGlyph,
 };
 const SET_NAME: Record<Domain, (id: string, name: string | null) => Promise<void>> = {
   light: setLightName,
   media: setMediaName,
   power: setPowerName,
+  sensor: setSensorName,
 };
 const SET_SHADOW: Record<Domain, (id: string, shadowedBy: string | null) => Promise<void>> = {
   light: setLightShadow,
   media: setMediaShadow,
   power: setPowerShadow,
+  sensor: setSensorShadow,
 };
 const SET_ROOM: Record<Domain, (id: string, roomId: string | null) => Promise<void>> = {
   light: setLightRoom,
   media: setMediaRoom,
   power: setPowerRoom,
+  sensor: setSensorRoom,
 };
 
 function Toggle({
@@ -701,9 +755,11 @@ function DeviceCard({
     ? "Disabled"
     : offline
       ? "Offline — unreachable"
-      : on
-        ? "On"
-        : "Off";
+      : item.readingText != null
+        ? item.readingText // sensors show their reading, not on/off
+        : on
+          ? "On"
+          : "Off";
   return (
     <div
       style={{
@@ -1107,6 +1163,7 @@ const SECTIONS: { domain: Domain; title: string }[] = [
   { domain: "light", title: "Lights" },
   { domain: "media", title: "Media" },
   { domain: "power", title: "Power" },
+  { domain: "sensor", title: "Sensors" },
 ];
 
 /** Precedence panel: which member device each control resolves to, + why.
@@ -1230,17 +1287,24 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
   const { isMobile } = useViewport();
 
   const refresh = useCallback(async () => {
-    const [lights, audio, power, roomList, providerList, remoteList, settings] = await Promise.all([
-      getLights(),
-      getMediaDevices(),
-      getPowerDevices(),
-      getRooms(),
-      getProviders(),
-      getRemoteDevices(),
-      getSettings(),
-    ]);
+    const [lights, audio, power, sensors, roomList, providerList, remoteList, settings] =
+      await Promise.all([
+        getLights(),
+        getMediaDevices(),
+        getPowerDevices(),
+        getSensors(),
+        getRooms(),
+        getProviders(),
+        getRemoteDevices(),
+        getSettings(),
+      ]);
     const lightItems = lights === "unauthorized" ? [] : lights.map(lightItem);
-    setItems([...lightItems, ...audio.map(mediaItem), ...power.map(powerItem)]);
+    setItems([
+      ...lightItems,
+      ...audio.map(mediaItem),
+      ...power.map(powerItem),
+      ...sensors.map(sensorItem),
+    ]);
     setMediaDevices(audio);
     setRooms(roomList);
     setProviders(providerList);

@@ -9,11 +9,12 @@
 
 pub mod pairing;
 
+use crate::models::sensor::{SensorDevice, SensorKind, SensorReading, SensorState};
 use crate::models::{
     Color, HueGamut, Light, LightCapabilities, LightState, Provider, SegmentColor,
     palette::PaletteColor,
 };
-use crate::providers::{LightProvider, ProviderPalette};
+use crate::providers::{LightProvider, ProviderPalette, SensorProvider};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use chrono::Utc;
@@ -223,8 +224,9 @@ struct HueEffectsV2Action {
     effect_values: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 struct HueMetadata {
+    #[serde(default)]
     name: String,
 }
 
@@ -289,6 +291,8 @@ impl HueGroupResource {
 #[derive(Debug, Deserialize)]
 struct HueDeviceResource {
     id: String,
+    #[serde(default)]
+    metadata: HueMetadata,
     #[serde(default)]
     services: Vec<HueResourceRef>,
 }
@@ -918,10 +922,371 @@ impl HueProvider {
     }
 }
 
+// ── Sensor resources (motion / light_level / temperature) ───────────────────────
+
+/// A Hue motion service. Newer firmware nests the reading under
+/// `motion.motion_report.motion`; older firmware uses `motion.motion` — both are
+/// tolerated.
+#[derive(Debug, Deserialize)]
+struct HueMotionResource {
+    id: String,
+    owner: HueResourceRef,
+    #[serde(default)]
+    motion: HueMotionField,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct HueMotionField {
+    #[serde(default)]
+    motion: Option<bool>,
+    #[serde(default)]
+    motion_report: Option<HueMotionReport>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HueMotionReport {
+    motion: bool,
+}
+
+impl HueMotionField {
+    fn detected(&self) -> Option<bool> {
+        self.motion_report
+            .as_ref()
+            .map(|r| r.motion)
+            .or(self.motion)
+    }
+}
+
+/// A Hue light-level service. The raw `light_level` is `10000·log10(lux)+1`.
+#[derive(Debug, Deserialize)]
+struct HueLightLevelResource {
+    id: String,
+    owner: HueResourceRef,
+    #[serde(default)]
+    light: HueLightLevelField,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct HueLightLevelField {
+    #[serde(default)]
+    light_level: Option<u32>,
+    #[serde(default)]
+    light_level_report: Option<HueLightLevelReport>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HueLightLevelReport {
+    light_level: u32,
+}
+
+impl HueLightLevelField {
+    fn raw(&self) -> Option<u32> {
+        self.light_level_report
+            .as_ref()
+            .map(|r| r.light_level)
+            .or(self.light_level)
+    }
+}
+
+/// Convert Hue's log-encoded `light_level` to lux (rounded).
+fn hue_light_level_to_lux(raw: u32) -> f64 {
+    (10f64.powf((raw as f64 - 1.0) / 10000.0)).round()
+}
+
+/// A Hue temperature service (°C).
+#[derive(Debug, Deserialize)]
+struct HueTemperatureResource {
+    id: String,
+    owner: HueResourceRef,
+    #[serde(default)]
+    temperature: HueTemperatureField,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct HueTemperatureField {
+    #[serde(default)]
+    temperature: Option<f64>,
+    #[serde(default)]
+    temperature_report: Option<HueTemperatureReport>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HueTemperatureReport {
+    temperature: f64,
+}
+
+impl HueTemperatureField {
+    fn celsius(&self) -> Option<f64> {
+        self.temperature_report
+            .as_ref()
+            .map(|r| r.temperature)
+            .or(self.temperature)
+    }
+}
+
+/// Parse one Hue SSE event item into a sensor reading, keyed by its service rid.
+/// Returns `None` for non-sensor resources (lights, scenes, …). Used by the SSE
+/// connection manager to push motion/lux/temperature updates live.
+pub fn parse_sensor_from_event(item: &serde_json::Value) -> Option<(String, SensorState)> {
+    let id = item.get("id")?.as_str()?.to_string();
+    match item.get("type")?.as_str()? {
+        "motion" => {
+            let f: HueMotionField = serde_json::from_value(item.get("motion")?.clone()).ok()?;
+            Some((id, boolean_state(f.detected()?)))
+        }
+        "light_level" => {
+            let f: HueLightLevelField = serde_json::from_value(item.get("light")?.clone()).ok()?;
+            Some((id, number_state(hue_light_level_to_lux(f.raw()?))))
+        }
+        "temperature" => {
+            let f: HueTemperatureField =
+                serde_json::from_value(item.get("temperature")?.clone()).ok()?;
+            Some((id, number_state(f.celsius()?)))
+        }
+        _ => None,
+    }
+}
+
+fn boolean_state(on: bool) -> SensorState {
+    SensorState {
+        reading: Some(SensorReading::Bool(on)),
+        reachable: Some(true),
+    }
+}
+
+fn number_state(value: f64) -> SensorState {
+    SensorState {
+        reading: Some(SensorReading::Number(value)),
+        reachable: Some(true),
+    }
+}
+
+impl HueProvider {
+    async fn list_resource<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<Vec<T>> {
+        let resp: HueListResponse<T> = self
+            .client
+            .get(self.resource_url(path))
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .with_context(|| format!("Hue {path} request failed"))?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(resp.data)
+    }
+
+    /// device rid → (friendly name, hardware id) for sensor owners, so each
+    /// motion/lux/temperature service can be named and de-dup'd by its owning
+    /// device's Zigbee MAC. Best-effort: any failure yields an empty map.
+    async fn sensor_owner_meta(
+        &self,
+    ) -> std::collections::HashMap<String, (String, Option<String>)> {
+        use std::collections::HashMap;
+        let devices = self
+            .list_resource::<HueDeviceResource>("/device")
+            .await
+            .unwrap_or_default();
+        let zigbee = self
+            .list_resource::<HueZigbeeResource>("/zigbee_connectivity")
+            .await
+            .unwrap_or_default();
+        let zb_mac: HashMap<String, String> = zigbee
+            .into_iter()
+            .filter_map(|z| {
+                let mac = z.mac_address?;
+                crate::providers::mac_hw_id(&mac).map(|hw| (z.id, hw))
+            })
+            .collect();
+        devices
+            .into_iter()
+            .map(|d| {
+                let hw = d
+                    .services
+                    .iter()
+                    .find(|s| s.rtype == "zigbee_connectivity")
+                    .and_then(|s| zb_mac.get(&s.rid))
+                    .cloned();
+                (d.id, (d.metadata.name, hw))
+            })
+            .collect()
+    }
+}
+
+#[async_trait]
+impl SensorProvider for HueProvider {
+    fn name(&self) -> &str {
+        "hue"
+    }
+
+    async fn discover(&self) -> Result<Vec<SensorDevice>> {
+        let owners = self.sensor_owner_meta().await;
+        let name_of = |owner: &str, suffix: &str| {
+            let base = owners
+                .get(owner)
+                .map(|(n, _)| n.clone())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| "Hue sensor".to_string());
+            format!("{base} {suffix}")
+        };
+        let hw_of = |owner: &str| owners.get(owner).and_then(|(_, hw)| hw.clone());
+
+        let mut out = Vec::new();
+        for m in self
+            .list_resource::<HueMotionResource>("/motion")
+            .await
+            .unwrap_or_default()
+        {
+            out.push(SensorDevice {
+                id: Uuid::new_v4(),
+                name: name_of(&m.owner.rid, "motion"),
+                kind: SensorKind::Motion,
+                state: m.motion.detected().map(boolean_state).unwrap_or_default(),
+                unit: None,
+                hw_id: hw_of(&m.owner.rid),
+                provider_id: m.id,
+            });
+        }
+        for l in self
+            .list_resource::<HueLightLevelResource>("/light_level")
+            .await
+            .unwrap_or_default()
+        {
+            out.push(SensorDevice {
+                id: Uuid::new_v4(),
+                name: name_of(&l.owner.rid, "light level"),
+                kind: SensorKind::Illuminance,
+                state: l
+                    .light
+                    .raw()
+                    .map(|r| number_state(hue_light_level_to_lux(r)))
+                    .unwrap_or_default(),
+                unit: Some("lx".into()),
+                hw_id: hw_of(&l.owner.rid),
+                provider_id: l.id,
+            });
+        }
+        for t in self
+            .list_resource::<HueTemperatureResource>("/temperature")
+            .await
+            .unwrap_or_default()
+        {
+            out.push(SensorDevice {
+                id: Uuid::new_v4(),
+                name: name_of(&t.owner.rid, "temperature"),
+                kind: SensorKind::Temperature,
+                state: t
+                    .temperature
+                    .celsius()
+                    .map(number_state)
+                    .unwrap_or_default(),
+                unit: Some("°C".into()),
+                hw_id: hw_of(&t.owner.rid),
+                provider_id: t.id,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn get_state(&self, device_id: &str) -> Result<SensorState> {
+        // The service rid alone doesn't say which sensor type it is, so try each
+        // endpoint (the live read is a fallback; SSE is the live path).
+        if let Some(m) = self
+            .list_resource::<HueMotionResource>(&format!("/motion/{device_id}"))
+            .await
+            .ok()
+            .and_then(|mut v| v.pop())
+        {
+            return Ok(m.motion.detected().map(boolean_state).unwrap_or_default());
+        }
+        if let Some(l) = self
+            .list_resource::<HueLightLevelResource>(&format!("/light_level/{device_id}"))
+            .await
+            .ok()
+            .and_then(|mut v| v.pop())
+        {
+            return Ok(l
+                .light
+                .raw()
+                .map(|r| number_state(hue_light_level_to_lux(r)))
+                .unwrap_or_default());
+        }
+        let mut v = self
+            .list_resource::<HueTemperatureResource>(&format!("/temperature/{device_id}"))
+            .await?;
+        let t = v.pop().context("Hue sensor not found")?;
+        Ok(t.temperature
+            .celsius()
+            .map(number_state)
+            .unwrap_or_default())
+    }
+
+    /// Hue rooms/zones containing this sensor's owner device — reuses the light
+    /// group mapping (a room's children are devices), so a motion sensor placed
+    /// in a Hue room mirrors into the linked Bifrost Room.
+    async fn discover_groups(&self) -> Result<Vec<crate::providers::ProviderGroup>> {
+        self.sensor_groups().await
+    }
+}
+
+impl HueProvider {
+    /// Provider groups (Hue rooms) mapped to their **sensor** service members —
+    /// the sensor analog of the light `discover_groups`. A Hue room's children
+    /// are devices; we surface each device's motion/light_level/temperature
+    /// service rids as the group's members.
+    async fn sensor_groups(&self) -> Result<Vec<crate::providers::ProviderGroup>> {
+        use crate::providers::ProviderGroup;
+        use std::collections::HashMap;
+
+        let rooms = self.list_resource::<HueGroupResource>("/room").await?;
+        let devices = self
+            .list_resource::<HueDeviceResource>("/device")
+            .await
+            .unwrap_or_default();
+
+        // device rid → its sensor service rids.
+        let device_sensors: HashMap<String, Vec<String>> = devices
+            .into_iter()
+            .map(|d| {
+                let sensors = d
+                    .services
+                    .into_iter()
+                    .filter(|s| {
+                        matches!(s.rtype.as_str(), "motion" | "light_level" | "temperature")
+                    })
+                    .map(|s| s.rid)
+                    .collect();
+                (d.id, sensors)
+            })
+            .collect();
+
+        let mut groups = Vec::new();
+        for room in rooms {
+            let members: Vec<String> = room
+                .children
+                .iter()
+                .filter(|c| c.rtype == "device")
+                .filter_map(|c| device_sensors.get(&c.rid))
+                .flatten()
+                .cloned()
+                .collect();
+            if !members.is_empty() {
+                groups.push(ProviderGroup {
+                    provider_group_id: room.id.clone(),
+                    name: room.metadata.name.clone(),
+                    member_device_ids: members,
+                    grouped_ref: None,
+                });
+            }
+        }
+        Ok(groups)
+    }
+}
+
 // ── Factory ─────────────────────────────────────────────────────────────────
 
 use crate::providers::discovery::{DeviceDiscovery, SsdpDiscovery};
-use crate::providers::{CredentialField, FieldKind, ProviderFactory};
+use crate::providers::{CredentialField, FieldKind, ProviderFactory, SensorProviderFactory};
 
 pub struct HueProviderFactory;
 
@@ -981,6 +1346,27 @@ impl ProviderFactory for HueProviderFactory {
                 ),
             },
         ]
+    }
+}
+
+/// Sensor side of the Hue provider (motion / light_level / temperature). Shares
+/// the `"hue"` type key with `HueProviderFactory` — the same bridge row serves
+/// both lights and sensors, with sensor updates arriving over the bridge's
+/// existing SSE stream. Registered with `register_sensor(...)`.
+pub struct HueSensorFactory;
+
+impl SensorProviderFactory for HueSensorFactory {
+    fn provider_type(&self) -> &'static str {
+        "hue"
+    }
+    fn display_name(&self) -> &'static str {
+        "Philips Hue"
+    }
+    fn build(&self, credentials_json: &str) -> Result<Box<dyn SensorProvider>> {
+        Ok(Box::new(HueProvider::from_credentials(credentials_json)?))
+    }
+    fn credentials_schema(&self) -> &'static [CredentialField] {
+        HueProviderFactory.credentials_schema()
     }
 }
 
@@ -1067,7 +1453,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let lights = mock_provider(&server).await.discover().await.unwrap();
+        let lights = LightProvider::discover(&mock_provider(&server).await)
+            .await
+            .unwrap();
 
         assert_eq!(lights.len(), 1);
         assert_eq!(lights[0].name, "Bedroom");
@@ -1115,7 +1503,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let lights = mock_provider(&server).await.discover().await.unwrap();
+        let lights = LightProvider::discover(&mock_provider(&server).await)
+            .await
+            .unwrap();
         assert_eq!(lights[0].hw_id.as_deref(), Some("mac:001788010b123456"));
     }
 
@@ -1132,7 +1522,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let lights = mock_provider(&server).await.discover().await.unwrap();
+        let lights = LightProvider::discover(&mock_provider(&server).await)
+            .await
+            .unwrap();
         assert_eq!(lights.len(), 1);
         assert!(lights[0].hw_id.is_none());
     }
@@ -1147,7 +1539,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let lights = mock_provider(&server).await.discover().await.unwrap();
+        let lights = LightProvider::discover(&mock_provider(&server).await)
+            .await
+            .unwrap();
         assert!(lights.is_empty());
     }
 
@@ -1262,7 +1656,9 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let lights = mock_provider(&server).await.discover().await.unwrap();
+        let lights = LightProvider::discover(&mock_provider(&server).await)
+            .await
+            .unwrap();
         assert_eq!(lights[0].capabilities.segments, Some(5));
     }
 
@@ -1340,7 +1736,9 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let lights = mock_provider(&server).await.discover().await.unwrap();
+        let lights = LightProvider::discover(&mock_provider(&server).await)
+            .await
+            .unwrap();
         // effects_v2 wins over the legacy object for both active + capability.
         assert_eq!(lights[0].state.effect.as_deref(), Some("candle"));
         assert_eq!(
@@ -1364,7 +1762,9 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let lights = mock_provider(&server).await.discover().await.unwrap();
+        let lights = LightProvider::discover(&mock_provider(&server).await)
+            .await
+            .unwrap();
         assert_eq!(lights[0].state.effect.as_deref(), Some("candle"));
         assert_eq!(
             lights[0].capabilities.effects,
@@ -1458,11 +1858,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let state = mock_provider(&server)
-            .await
-            .get_state("xyz-789")
-            .await
-            .unwrap();
+        let p = mock_provider(&server).await;
+        let state = LightProvider::get_state(&p, "xyz-789").await.unwrap();
         assert!(!state.on);
         assert_eq!(state.brightness, Some(10.0));
     }
@@ -1477,7 +1874,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        assert!(mock_provider(&server).await.discover().await.is_err());
+        assert!(
+            LightProvider::discover(&mock_provider(&server).await)
+                .await
+                .is_err()
+        );
     }
 
     async fn mount_group_mocks(server: &MockServer) {
@@ -1527,11 +1928,8 @@ mod tests {
         let server = MockServer::start().await;
         mount_group_mocks(&server).await;
 
-        let groups = mock_provider(&server)
-            .await
-            .discover_groups()
-            .await
-            .unwrap();
+        let p = mock_provider(&server).await;
+        let groups = LightProvider::discover_groups(&p).await.unwrap();
 
         let room = groups.iter().find(|g| g.name == "Living Room").unwrap();
         assert_eq!(room.member_device_ids, vec!["light-1", "light-2"]);
@@ -1572,11 +1970,8 @@ mod tests {
         let server = MockServer::start().await;
         mount_group_mocks(&server).await;
 
-        let groups = mock_provider(&server)
-            .await
-            .discover_groups()
-            .await
-            .unwrap();
+        let p = mock_provider(&server).await;
+        let groups = LightProvider::discover_groups(&p).await.unwrap();
 
         let zone = groups.iter().find(|g| g.name == "Downstairs").unwrap();
         assert_eq!(zone.member_device_ids, vec!["light-1"]);
@@ -1603,11 +1998,8 @@ mod tests {
                 .await;
         }
 
-        let groups = mock_provider(&server)
-            .await
-            .discover_groups()
-            .await
-            .unwrap();
+        let p = mock_provider(&server).await;
+        let groups = LightProvider::discover_groups(&p).await.unwrap();
         assert!(groups.is_empty());
     }
 
@@ -1666,11 +2058,137 @@ mod tests {
             .mount(&server)
             .await;
 
-        let lights = mock_provider(&server).await.discover().await.unwrap();
+        let lights = LightProvider::discover(&mock_provider(&server).await)
+            .await
+            .unwrap();
         assert!(
             lights[0].capabilities.color_rgb,
             "color picker capability missing"
         );
         assert_eq!(lights[0].capabilities.hue_gamut, Some(HueGamut::C));
+    }
+
+    #[test]
+    fn light_level_converts_to_lux() {
+        // raw = 10000·log10(lux)+1 → lux = 10^((raw-1)/10000).
+        assert_eq!(hue_light_level_to_lux(1), 1.0); // raw 1 → 1 lx
+        assert_eq!(hue_light_level_to_lux(20001), 100.0); // raw 20001 → 100 lx
+    }
+
+    #[test]
+    fn parse_sensor_event_handles_each_service_shape() {
+        // Motion via the newer motion_report shape.
+        let (id, st) = parse_sensor_from_event(&serde_json::json!({
+            "id": "m1", "type": "motion",
+            "motion": { "motion_report": { "motion": true } }
+        }))
+        .unwrap();
+        assert_eq!(id, "m1");
+        assert!(st.is_detecting());
+
+        // Light level → lux number.
+        let (_, st) = parse_sensor_from_event(&serde_json::json!({
+            "id": "l1", "type": "light_level",
+            "light": { "light_level": 20001 }
+        }))
+        .unwrap();
+        assert_eq!(st.reading, Some(SensorReading::Number(100.0)));
+
+        // Temperature via the legacy flat shape.
+        let (_, st) = parse_sensor_from_event(&serde_json::json!({
+            "id": "t1", "type": "temperature",
+            "temperature": { "temperature": 21.5 }
+        }))
+        .unwrap();
+        assert_eq!(st.reading, Some(SensorReading::Number(21.5)));
+
+        // A light resource is not a sensor event.
+        assert!(
+            parse_sensor_from_event(&serde_json::json!({ "id": "x", "type": "light" })).is_none()
+        );
+    }
+
+    async fn mount_json(server: &MockServer, p: &str, body: serde_json::Value) {
+        Mock::given(method("GET"))
+            .and(path(p))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn discover_sensors_maps_services_with_owner_names_and_hw_id() {
+        let server = MockServer::start().await;
+        mount_json(
+            &server,
+            "/clip/v2/resource/motion",
+            serde_json::json!({ "data": [
+                { "id": "svc-motion", "type": "motion", "owner": {"rid": "dev-1", "rtype": "device"},
+                  "motion": { "motion": true } }
+            ]}),
+        )
+        .await;
+        mount_json(
+            &server,
+            "/clip/v2/resource/light_level",
+            serde_json::json!({ "data": [
+                { "id": "svc-lux", "type": "light_level", "owner": {"rid": "dev-1", "rtype": "device"},
+                  "light": { "light_level": 20001 } }
+            ]}),
+        )
+        .await;
+        mount_json(
+            &server,
+            "/clip/v2/resource/temperature",
+            serde_json::json!({ "data": [
+                { "id": "svc-temp", "type": "temperature", "owner": {"rid": "dev-1", "rtype": "device"},
+                  "temperature": { "temperature": 21.5 } }
+            ]}),
+        )
+        .await;
+        mount_json(
+            &server,
+            "/clip/v2/resource/device",
+            serde_json::json!({ "data": [
+                { "id": "dev-1", "metadata": {"name": "Hallway"},
+                  "services": [ {"rid": "zb-1", "rtype": "zigbee_connectivity"},
+                                {"rid": "svc-motion", "rtype": "motion"} ] }
+            ]}),
+        )
+        .await;
+        mount_json(
+            &server,
+            "/clip/v2/resource/zigbee_connectivity",
+            serde_json::json!({ "data": [ { "id": "zb-1", "mac_address": "00:17:88:01:AB:CD:EF:01" } ]}),
+        )
+        .await;
+
+        let sensors = SensorProvider::discover(&mock_provider(&server).await)
+            .await
+            .unwrap();
+        assert_eq!(sensors.len(), 3);
+        let motion = sensors
+            .iter()
+            .find(|s| s.provider_id == "svc-motion")
+            .unwrap();
+        assert_eq!(motion.kind, SensorKind::Motion);
+        assert_eq!(motion.name, "Hallway motion");
+        assert!(motion.state.is_detecting());
+        // The owner device's Zigbee MAC becomes the de-dup hw_id (shared by all
+        // three services — dedup never shadows a native under a native).
+        assert!(motion.hw_id.as_deref().unwrap().starts_with("mac:"));
+        let lux = sensors.iter().find(|s| s.provider_id == "svc-lux").unwrap();
+        assert_eq!(lux.kind, SensorKind::Illuminance);
+        assert_eq!(lux.unit.as_deref(), Some("lx"));
+        assert_eq!(lux.state.reading, Some(SensorReading::Number(100.0)));
+    }
+
+    #[test]
+    fn sensor_factory_builds() {
+        assert!(
+            HueSensorFactory
+                .build(r#"{"bridge_ip":"192.168.1.2","app_key":"k"}"#)
+                .is_ok()
+        );
     }
 }

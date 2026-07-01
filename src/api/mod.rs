@@ -19,6 +19,7 @@ pub mod providers;
 pub mod remote;
 pub mod rooms;
 pub mod scenes;
+pub mod sensors;
 pub mod settings;
 pub mod setup;
 pub mod v1;
@@ -182,6 +183,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .nest("/providers", providers::router())
         .nest("/remote", remote::router())
         .nest("/rooms", rooms::router())
+        .nest("/sensors", sensors::router())
         .nest("/scenes", scenes::router())
         .nest("/settings", settings::router())
         .nest("/setup", setup::router())
