@@ -176,6 +176,11 @@ export function Select<T extends string>({
   const list = (
     <div
       ref={listRef}
+      // Marks this portaled menu so a Flyout it's opened within doesn't treat a
+      // click on an option as an outside-click and dismiss itself before the
+      // option's onClick fires (the menu is portaled to <body>, outside the
+      // Flyout's panel). See Flyout's pointerdown dismiss guard.
+      data-bf-menu=""
       style={
         isCompact
           ? // Above any modal (z 100) it's opened from — it's portaled to <body>.

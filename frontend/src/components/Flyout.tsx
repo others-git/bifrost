@@ -68,6 +68,12 @@ export function Flyout({
       if (closeGuard?.()) return;
       const target = e.target as Node;
       if (panelRef.current?.contains(target)) return;
+      // A Select (or other popover) opened from inside the fly-out portals its
+      // menu to <body>, so an option lives outside panelRef. Without this, a
+      // pointerdown on an option would read as an outside-click and close the
+      // fly-out before the option's onClick fires — the selection is lost and the
+      // fly-out vanishes. Treat any portaled menu as "inside".
+      if (target instanceof Element && target.closest("[data-bf-menu]")) return;
       // Clicks on the trigger are handled by the trigger itself (so it can toggle
       // the fly-out closed); don't also self-close here.
       if (anchor instanceof HTMLElement && anchor.contains(target)) return;
