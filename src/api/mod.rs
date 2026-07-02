@@ -26,7 +26,13 @@ pub mod v1;
 pub mod voice;
 
 use crate::AppState;
-use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::get,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::sync::Arc;
@@ -136,6 +142,90 @@ pub(crate) async fn set_device_name(
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
+}
+
+/// The shared **device-inventory routes** every domain exposes for its rows:
+/// enable/disable and glyph override (all domains), plus rename, manual
+/// duplicate-shadow, and direct room assignment for the domains that support
+/// them. One definition keeps the domains' inventory behaviour identical — a
+/// domain router merges this instead of hand-writing the handlers.
+///
+/// `prefix` is the domain's path prefix for a single device (`""` for lights,
+/// whose routes live at `/{id}/…`; `"/devices"` for the device-table domains).
+/// `table` / `link_table` / `link_fk` are fixed per-domain identifiers, so the
+/// formatted SQL inside the shared service fns is injection-free.
+pub(crate) fn inventory_router(
+    prefix: &str,
+    table: &'static str,
+    link_table: &'static str,
+    link_fk: &'static str,
+) -> Router<Arc<AppState>> {
+    use axum::routing::put;
+    basic_inventory_router(prefix, table)
+        .route(
+            &format!("{prefix}/{{id}}/name"),
+            put(
+                move |State(state): State<Arc<AppState>>,
+                      _: auth::Session,
+                      Path(id): Path<String>,
+                      Json(req): Json<SetNameRequest>| async move {
+                    set_device_name(&state, table, &id, clean_name(req.name)).await
+                },
+            ),
+        )
+        .route(
+            &format!("{prefix}/{{id}}/shadow"),
+            put(
+                move |State(state): State<Arc<AppState>>,
+                      _: auth::Session,
+                      Path(id): Path<String>,
+                      Json(req): Json<SetShadowRequest>| async move {
+                    dedup::set_device_shadow(&state, table, &id, req.shadowed_by).await
+                },
+            ),
+        )
+        .route(
+            &format!("{prefix}/{{id}}/room"),
+            put(
+                move |State(state): State<Arc<AppState>>,
+                      _: auth::Session,
+                      Path(id): Path<String>,
+                      Json(req): Json<SetRoomRequest>| async move {
+                    rooms::set_device_room(&state, table, link_table, link_fk, &id, req.room_id)
+                        .await
+                },
+            ),
+        )
+}
+
+/// The inventory subset every domain has — enable/disable + glyph override.
+/// Merged directly by domains without room membership or shadowing (remotes);
+/// [`inventory_router`] builds on it for the rest.
+pub(crate) fn basic_inventory_router(prefix: &str, table: &'static str) -> Router<Arc<AppState>> {
+    use axum::routing::put;
+    Router::new()
+        .route(
+            &format!("{prefix}/{{id}}/enabled"),
+            put(
+                move |State(state): State<Arc<AppState>>,
+                      _: auth::Session,
+                      Path(id): Path<String>,
+                      Json(req): Json<SetEnabledRequest>| async move {
+                    set_device_enabled(&state, table, &id, req.enabled).await
+                },
+            ),
+        )
+        .route(
+            &format!("{prefix}/{{id}}/glyph"),
+            put(
+                move |State(state): State<Arc<AppState>>,
+                      _: auth::Session,
+                      Path(id): Path<String>,
+                      Json(req): Json<SetGlyphRequest>| async move {
+                    set_device_glyph(&state, table, &id, req.glyph).await
+                },
+            ),
+        )
 }
 
 /// Flip a device row's `enabled` flag. A disabled device is still tracked and

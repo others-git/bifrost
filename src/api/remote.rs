@@ -35,8 +35,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/devices/{id}/commands/pin", put(pin_command_handler))
         .route("/devices/{id}/apps", get(list_apps_handler))
         .route("/devices/{id}/apps/pin", put(pin_app_handler))
-        .route("/devices/{id}/enabled", put(set_enabled_handler))
-        .route("/devices/{id}/glyph", put(set_glyph_handler))
+        .merge(crate::api::basic_inventory_router(
+            "/devices",
+            "remote_devices",
+        ))
 }
 
 // ── Wire shape ───────────────────────────────────────────────────────────────
@@ -627,28 +629,6 @@ async fn pin_app_handler(
     Json(req): Json<PinAppRequest>,
 ) -> impl IntoResponse {
     set_app_pin(&state, &id, &req.package, req.pinned)
-        .await
-        .into_response()
-}
-
-async fn set_enabled_handler(
-    State(state): State<Arc<AppState>>,
-    _: Session,
-    Path(id): Path<String>,
-    Json(req): Json<crate::api::SetEnabledRequest>,
-) -> impl IntoResponse {
-    crate::api::set_device_enabled(&state, "remote_devices", &id, req.enabled)
-        .await
-        .into_response()
-}
-
-async fn set_glyph_handler(
-    State(state): State<Arc<AppState>>,
-    _: Session,
-    Path(id): Path<String>,
-    Json(req): Json<crate::api::SetGlyphRequest>,
-) -> impl IntoResponse {
-    crate::api::set_device_glyph(&state, "remote_devices", &id, req.glyph)
         .await
         .into_response()
 }

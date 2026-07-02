@@ -1,10 +1,12 @@
 # Bifrost Public API (`/api/v1`)
 
 A key-authenticated REST API for external applications (automation scripts,
-assistants, etc.). A valid key grants full access to lights, rooms, and scenes —
-there is no RBAC. The floor plan and provider management are not exposed; use the
-web UI for those. The same key also unlocks the embedded **MCP** server at
-[`/mcp`](#mcp-endpoint-mcp) for natural-language control.
+assistants, etc.). A valid key grants full access to every device domain —
+lights, rooms (including scenes), media, power, remotes, and read-only sensors —
+there is no RBAC. Session-only UI config (floor plan, boards, provider
+management) is not exposed; use the web UI for those. The same key also unlocks
+the embedded **MCP** server at [`/mcp`](#mcp-endpoint-mcp) for natural-language
+control.
 
 ## Authentication
 
@@ -379,7 +381,7 @@ glyph) and is one of `switch | outlet | fan | toggle | generic`.
 ```json
 {
   "id": "5d2f…",
-  "provider_id": "switch.porch",  // provider-native id (e.g. HA entity_id)
+  "device_id": "switch.porch",  // provider-native id (e.g. HA entity_id)
   "name": "Porch",
   "kind": "switch",
   "state": { "on": true, "reachable": true }
@@ -403,7 +405,7 @@ today). State is `on` plus the foreground app (`current_app`, a package id).
 ```json
 {
   "id": "9a1b…",
-  "provider_id": "remote.bedroom_tv",  // provider-native id (e.g. HA entity_id)
+  "device_id": "remote.bedroom_tv",  // provider-native id (e.g. HA entity_id)
   "name": "Bedroom TV",
   "state": { "on": true, "current_app": "com.netflix.ninja", "reachable": true }
 }
@@ -432,13 +434,44 @@ Canonical keys: `up`, `down`, `left`, `right`, `select`, `back`, `home`, `menu`,
 `POST …/command` responds `204` on success, `404` unknown remote, `502` if it
 could not be reached.
 
+### Sensors (read-only)
+
+Motion, occupancy, contact, illuminance, temperature, and humidity inputs,
+surfaced by Philips Hue (motion accessories) and Home Assistant. Sensors are
+**read-only** — there is no set-state route. `kind` is one of
+`motion | occupancy | contact | illuminance | temperature | humidity | generic`;
+`state.reading` is a self-describing tagged value — `{"bool": true}` for
+motion/occupancy/contact, `{"number": 21.5}` for illuminance/temperature/humidity
+— and `unit` (°C, lx, %) is present when the provider reports one. Presence kinds
+(`motion`/`occupancy`) also feed each Room's occupancy aggregation server-side.
+
+```json
+{
+  "id": "c4e8…",
+  "device_id": "binary_sensor.hallway_motion",
+  "name": "Hallway motion",
+  "kind": "motion",
+  "unit": null,
+  "state": { "reading": { "bool": true }, "reachable": true }
+}
+```
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/sensors/devices` | All sensors (cached state) |
+| `GET` | `/api/v1/sensors/devices/{id}` | One sensor — live read, refreshes the cache |
+
+Live freshness normally arrives on the provider's push channel (Hue SSE / Home
+Assistant WebSocket), so the cached list is current in practice; the single-device
+read forces a poll for providers without push.
+
 ## Status codes
 
 | Code | Meaning |
 |---|---|
 | `200` / `201` / `204` | Success (body / created / no body) |
 | `401` | Missing or revoked API key |
-| `404` | Unknown light, room, or scene |
+| `404` | Unknown device, room, or scene |
 | `422` | Validation failure (message in body) |
 | `502` | Provider unreachable (device offline, bridge down) |
 
@@ -480,17 +513,33 @@ this view on the kiosk itself.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| `POST` | `/api/kiosks/checkin` | **kiosk key** | Heartbeat: `{ name?, app_version?, screen_on? }` → `{ command }` (queued command, consumed) |
-| `GET` | `/api/kiosks` | session | List kiosks: `[{ id, name, app_version, screen_on, last_seen, online, pending_command, authorized }]` |
-| `POST` | `/api/kiosks/{id}/command` | session | Queue `{ command }` — one of `sleep`, `wake`, `lock` |
+| `POST` | `/api/kiosks/checkin` | **kiosk key** | Heartbeat: `{ name?, app_version?, screen_on?, battery/power telemetry… }` → `{ command, room, default_board_id }` (queued command, consumed; `room` is the assigned Room's name — the app's voice context) |
+| `GET` | `/api/kiosks/self` | **kiosk cookie** | The kiosk's own record (`{ id, name, default_board_id }`) — how a kiosk-served Boards page resolves its auto-launch board |
+| `GET` | `/api/kiosks/stream` | **kiosk key** | Live SSE command channel — controller commands are pushed here instantly; the queued copy is the offline fallback |
+| `GET` | `/api/kiosks` | session | List kiosks: check-in status, assignments, schedule/presence config, battery telemetry |
+| `POST` | `/api/kiosks/{id}/command` | session | Queue `{ command }` — one of `sleep`, `wake`, `lock`, `update` |
+| `PUT` | `/api/kiosks/{id}/room` | session | Assign the kiosk to a Room (`{ room_id }`, null clears) — its voice context and presence source |
+| `PUT` | `/api/kiosks/{id}/board` | session | Set the board to auto-launch full-screen (`{ board_id }`, null clears) |
+| `PUT` | `/api/kiosks/{id}/schedule` | session | Scheduled quiet hours: `{ enabled, sleep_at, wake_at }` (server-local `"HH:MM"`; both required and distinct when enabled) |
+| `PUT` | `/api/kiosks/{id}/presence` | session | Presence-driven blanking: `{ enabled, timeout_secs? }` (no-motion grace, clamped 30–3600 s) |
 | `POST` | `/api/kiosks/{id}/deauth` | session | Revoke the kiosk's key (it must re-enroll) |
 | `DELETE` | `/api/kiosks/{id}` | session | Forget a kiosk record |
 
-**Command semantics** (the app performs these on check-in):
+The OTA update relay lives under `/api/kiosks/update` (session triggers/inspects
+the hub-side APK cache; key-auth `manifest`/`apk` routes feed the kiosk over the
+LAN).
+
+**Command semantics** (the app performs these on push or check-in):
 - `sleep` / `wake` — turn the display off / on.
 - `lock` — force sign-out of the Bifrost WebView session (re-enter password).
+- `update` — pull the hub-cached APK and self-install.
 - **de-auth** is *not* a queued command — it revokes the key immediately, so the
   app's next call gets `401` and it re-enrolls via a fresh QR scan.
+
+**Display power saving** is server-driven: a background scheduler issues the same
+`sleep`/`wake` commands from each kiosk's quiet-hours schedule and, by day, from
+its assigned Room's occupancy (presence sensors) — a manual wake holds until the
+next boundary. Configure both per kiosk in **Settings → Clients**.
 
 **Companion-app contract:** check in every ~30–60s with the paired key; act on a
 returned `command` (and clear nothing — the server consumes it); treat a `401`

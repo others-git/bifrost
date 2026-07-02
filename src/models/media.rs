@@ -114,6 +114,12 @@ pub struct NowPlaying {
     pub album: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub play_state: Option<PlayState>,
+    /// Album/artwork image URL when the provider exposes one (HA
+    /// `entity_picture`, Sonos DIDL `albumArtURI`). Absolute — resolved against
+    /// the provider/device base URL by the provider — so the browser can load it
+    /// directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artwork_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

@@ -4,8 +4,8 @@ Devices are added through **providers** (Settings → Add Provider). Each provid
 discovers its devices automatically. IP-addressable providers offer a **Scan
 network** button that finds devices on the LAN and fills in the address; cloud
 providers take an account token instead. A single provider can serve more than
-one device domain — Home Assistant alone surfaces lights, media, power, **and**
-remotes.
+one device domain — Home Assistant alone surfaces lights, media, power, remotes,
+**and** sensors.
 
 The table below is the **full set of supported devices** and how each connects.
 
@@ -13,13 +13,13 @@ The table below is the **full set of supported devices** and how each connects.
 
 | Provider | Category | Devices | Transport | Live updates | Credentials |
 |---|---|---|---|---|---|
-| Philips Hue | Light | Lights | LAN (CLIP v2) | SSE push | Bridge IP + link-button app key |
+| Philips Hue | Light | Lights + motion accessories (motion/light/temperature sensors) | LAN (CLIP v2) | SSE push | Bridge IP + link-button app key |
 | Govee | Light | Lights | Cloud API + LAN (UDP) | Poll (≈2 min) | API key and/or LAN interface |
 | LIFX | Light | Lights | Cloud API + LAN (UDP) | Poll (≈2 min) | Account token and/or LAN interface |
 | Onkyo / Integra | Media | Receivers + zones | LAN (eISCP) | Push | Receiver IP |
 | Sonos | Media | Speakers | LAN (UPnP) | Push (events + poll) | Any player's IP |
 | Smart TV | Media + Remote | TVs (Sony Bravia) | LAN (vendor HTTP API) | Poll | Auto-discovered IP + PIN pairing |
-| Home Assistant | Integration | Lights · media · power · remotes | REST + WebSocket | WebSocket push | Base URL + long-lived token |
+| Home Assistant | Integration | Lights · media · power · remotes · sensors · everything else (generic) | REST + WebSocket | WebSocket push | Base URL + long-lived token |
 
 ---
 
@@ -27,7 +27,7 @@ The table below is the **full set of supported devices** and how each connects.
 
 - **Category** Light · **Transport** LAN, CLIP v2 over HTTPS to the bridge · **Live** Server-Sent Events push (changes appear instantly).
 - **Setup** Enter the bridge IP — or use **Scan network** (Bifrost finds the bridge via SSDP) — then press the bridge's physical **link button** when prompted to mint an application key.
-- **Capabilities** RGB color, color temperature, brightness, and **dynamic effects** (the bridge's CLIP v2 effects — candle, fire, sparkle, prism, …). Hue **rooms and zones** import as Bifrost Rooms, driven with native one-call group control.
+- **Capabilities** RGB color, color temperature, brightness, and **dynamic effects** (the bridge's CLIP v2 effects — candle, fire, sparkle, prism, …). Hue **rooms and zones** import as Bifrost Rooms, driven with native one-call group control. Hue **motion accessories** import as sensors — motion, light level, and temperature ride the same SSE stream, and a Hue room's sensors land in the linked Bifrost Room (feeding its occupancy).
 
 Hue's ~10 req/s rate limit is handled with a per-bridge write pacer, so room-wide
 fan-outs don't drop commands.
@@ -117,14 +117,16 @@ there's nothing to copy off a website. The TV and your Bifrost host must be on t
 ## Home Assistant
 
 The **high-class integration**: one connection surfaces *any* Home Assistant
-integration as Bifrost devices across **four domains from a single provider** —
-lights, audio (media players: TVs and speakers), power (switches, plugs, fans,
-helpers), and **remotes** (Android TV / streamers). HA **Areas import as Bifrost
-Rooms**.
+integration as Bifrost devices across **five domains from a single provider** —
+lights, media (media players: TVs and speakers), power (switches, plugs, fans,
+helpers), **remotes** (Android TV / streamers), and **sensors** (motion,
+occupancy, contact, light level, temperature, humidity). HA **Areas import as
+Bifrost Rooms**.
 
 - **Category** Integration · **Transport** HA REST + a persistent WebSocket · **Live** WebSocket push — every domain stays live on one connection.
 - **Setup** HA base URL (e.g. `http://homeassistant.local:8123`) + a **Long-Lived Access Token** (HA → Profile → Security → Long-Lived Access Tokens → Create Token).
-- **Capabilities** lights pass through color / temperature / brightness and the entity's effect list; media players expose power / volume / mute / source / transport / now-playing and join-unjoin grouping; switches, plugs, and fans are on/off; remotes send keys, text, and app launches. Named-content requests ("play Bob's Burgers on the bedroom TV") fall back to HA Assist.
+- **Capabilities** lights pass through color / temperature / brightness and the entity's effect list; media players expose power / volume / mute / source / transport / now-playing and join-unjoin grouping; switches, plugs, and fans are on/off; remotes send keys, text, and app launches; sensors are read-only readings (presence kinds feed room occupancy). Named-content requests ("play Bob's Burgers on the bedroom TV") fall back to HA Assist.
+- **Everything else** — HA device types Bifrost doesn't natively model (climate, covers, locks, helpers, vacuums, …) still surface as generic **"Other devices"** on the Devices page, with controls derived live from the entity's state. A new HA device type appears there with no Bifrost change.
 
 ### De-duplication
 

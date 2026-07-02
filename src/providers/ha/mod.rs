@@ -648,7 +648,10 @@ fn entity_to_light(e: HaEntity, hw_id: Option<String>) -> Light {
 
 // ── Media mapping ─────────────────────────────────────────────────────────────
 
-fn parse_media_state(e: &HaEntity) -> MediaState {
+/// `base_url` is the HA instance root — `entity_picture` artwork is a
+/// HA-relative path (`/api/media_player_proxy/…`) that must be absolutized so
+/// the browser can load it straight from HA.
+fn parse_media_state(e: &HaEntity, base_url: &str) -> MediaState {
     let attrs = &e.attributes;
     let reachable = e.state != "unavailable";
     let power = !matches!(e.state.as_str(), "off" | "unavailable" | "standby");
@@ -667,12 +670,25 @@ fn parse_media_state(e: &HaEntity) -> MediaState {
     let title = attr_str(attrs, "media_title");
     let artist = attr_str(attrs, "media_artist");
     let album = attr_str(attrs, "media_album_name");
+    let artwork_url = attr_str(attrs, "entity_picture").map(|p| {
+        if p.starts_with("http://") || p.starts_with("https://") {
+            p
+        } else {
+            format!(
+                "{}{}{}",
+                base_url,
+                if p.starts_with('/') { "" } else { "/" },
+                p
+            )
+        }
+    });
     let now_playing = if title.is_some() || artist.is_some() || album.is_some() {
         Some(NowPlaying {
             title,
             artist,
             album,
             play_state,
+            artwork_url,
         })
     } else {
         None
@@ -725,8 +741,8 @@ fn media_kind(attrs: &Value) -> MediaDeviceKind {
     MediaDeviceKind::Speaker
 }
 
-fn entity_to_media(e: HaEntity, hw_id: Option<String>) -> MediaDevice {
-    let state = parse_media_state(&e);
+fn entity_to_media(e: HaEntity, hw_id: Option<String>, base_url: &str) -> MediaDevice {
+    let state = parse_media_state(&e, base_url);
     let capabilities = media_capabilities(&e.attributes);
     let kind = media_kind(&e.attributes);
     MediaDevice {
@@ -956,13 +972,16 @@ impl MediaProvider for HaProvider {
             .filter(|e| e.entity_id.starts_with(MEDIA_PREFIX) && keep_entity(&reg, &e.entity_id))
             .map(|e| {
                 let hw_id = hw.get(&e.entity_id).cloned();
-                entity_to_media(e, hw_id)
+                entity_to_media(e, hw_id, &self.base_url)
             })
             .collect())
     }
 
     async fn get_state(&self, device_id: &str) -> Result<MediaState> {
-        Ok(parse_media_state(&self.get_entity(device_id).await?))
+        Ok(parse_media_state(
+            &self.get_entity(device_id).await?,
+            &self.base_url,
+        ))
     }
 
     async fn set_state(&self, device_id: &str, cmd: &MediaCommand) -> Result<()> {
@@ -1176,7 +1195,7 @@ pub enum HaPushEvent {
 
 /// Map one HA entity (the `new_state` of a `state_changed` event) to its domain
 /// event, or `None` for entity domains Bifrost doesn't track.
-fn classify_push(e: HaEntity) -> Option<HaPushEvent> {
+fn classify_push(e: HaEntity, base_url: &str) -> Option<HaPushEvent> {
     let id = e.entity_id.clone();
     if id.starts_with(LIGHT_PREFIX) {
         Some(HaPushEvent::Light {
@@ -1186,7 +1205,7 @@ fn classify_push(e: HaEntity) -> Option<HaPushEvent> {
     } else if id.starts_with(MEDIA_PREFIX) {
         Some(HaPushEvent::Media(MediaEvent {
             device_id: id,
-            state: parse_media_state(&e),
+            state: parse_media_state(&e, base_url),
         }))
     } else if POWER_PREFIXES.iter().any(|p| id.starts_with(p)) {
         Some(HaPushEvent::Power {
@@ -1263,6 +1282,7 @@ impl HaProvider {
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel::<HaPushEvent>(128);
+        let base_url = self.base_url.clone();
         tokio::spawn(async move {
             loop {
                 let v = match ws.next().await {
@@ -1286,7 +1306,7 @@ impl HaProvider {
                 let Ok(entity) = serde_json::from_value::<HaEntity>(new_state.clone()) else {
                     continue;
                 };
-                if let Some(event) = classify_push(entity)
+                if let Some(event) = classify_push(entity, &base_url)
                     && tx.send(event).await.is_err()
                 {
                     return; // consumer dropped
@@ -1707,6 +1727,7 @@ mod tests {
                 "source_list": ["Spotify", "Hulu", "Netflix"],
                 "media_title": "Test Track",
                 "media_artist": "Tester",
+                "entity_picture": "/api/media_player_proxy/media_player.office?token=abc",
                 "device_class": "speaker",
                 "supported_features": FEAT_PLAY | FEAT_GROUPING | FEAT_SELECT_SOURCE
             }
@@ -1873,6 +1894,18 @@ mod tests {
         assert_eq!(
             d.state.now_playing.as_ref().unwrap().title.as_deref(),
             Some("Test Track")
+        );
+        // HA's `entity_picture` is instance-relative; it must come back absolute
+        // (joined to the provider base URL) so the browser can load it directly.
+        assert_eq!(
+            d.state.now_playing.as_ref().unwrap().artwork_url.as_deref(),
+            Some(
+                format!(
+                    "{}/api/media_player_proxy/media_player.office?token=abc",
+                    server.uri()
+                )
+                .as_str()
+            )
         );
     }
 
@@ -2463,7 +2496,7 @@ mod tests {
             attributes: json!({ "brightness": 255 }),
         };
         assert!(matches!(
-            classify_push(light),
+            classify_push(light, "http://ha.local:8123"),
             Some(HaPushEvent::Light { device_id, .. }) if device_id == "light.kitchen"
         ));
 
@@ -2472,7 +2505,7 @@ mod tests {
             state: "playing".into(),
             attributes: json!({ "volume_level": 0.5 }),
         };
-        match classify_push(media) {
+        match classify_push(media, "http://ha.local:8123") {
             Some(HaPushEvent::Media(ev)) => {
                 assert_eq!(ev.device_id, "media_player.tv");
                 assert_eq!(ev.state.volume, 50);
@@ -2486,7 +2519,7 @@ mod tests {
             attributes: json!({}),
         };
         assert!(matches!(
-            classify_push(fan),
+            classify_push(fan, "http://ha.local:8123"),
             Some(HaPushEvent::Power { state, .. }) if state.on
         ));
 
@@ -2496,7 +2529,7 @@ mod tests {
             state: "21".into(),
             attributes: json!({}),
         };
-        assert!(classify_push(sensor).is_none());
+        assert!(classify_push(sensor, "http://ha.local:8123").is_none());
 
         // But a device_class'd temperature sensor and a motion binary_sensor route
         // onto the sensor pipeline.
@@ -2506,7 +2539,7 @@ mod tests {
             attributes: json!({ "device_class": "temperature", "unit_of_measurement": "°C" }),
         };
         assert!(matches!(
-            classify_push(temp),
+            classify_push(temp, "http://ha.local:8123"),
             Some(HaPushEvent::Sensor { device_id, state })
                 if device_id == "sensor.hall_temp" && state.reading == Some(SensorReading::Number(21.5))
         ));
@@ -2517,7 +2550,7 @@ mod tests {
             attributes: json!({ "device_class": "motion" }),
         };
         assert!(matches!(
-            classify_push(motion),
+            classify_push(motion, "http://ha.local:8123"),
             Some(HaPushEvent::Sensor { state, .. }) if state.is_detecting()
         ));
     }

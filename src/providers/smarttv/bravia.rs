@@ -231,6 +231,7 @@ impl BraviaVendor {
             artist: None,
             album: None,
             play_state: Some(PlayState::Playing),
+            artwork_url: None,
         });
         Ok((source, now))
     }

@@ -24,6 +24,7 @@ import {
   setLightState,
   setMediaState,
   setPowerState,
+  setRoomState,
   updateDashboard,
   type Dashboard,
   type GenericDevice,
@@ -45,7 +46,7 @@ import {
   lightSupports,
   lightWrite,
 } from "../components/lightControl";
-import { MediaEditor, fanMediaCommand } from "../components/MediaControls";
+import { AlbumArt, MediaEditor, fanMediaCommand } from "../components/MediaControls";
 import { InlineSlider } from "../components/InlineSlider";
 import { RoomControlButton, GlyphButton, RestoreHomeButton } from "./Dashboard";
 import { CornerFiligree } from "../components/ornament";
@@ -105,7 +106,7 @@ const GAP = 8;
 // Fixed row height only for the phone fallback's stacked, view-only list.
 const ROW_H = 42;
 
-type WidgetType = "device" | "button" | "group" | "now_playing" | "scene" | "control" | "sensor" | "weather" | "clock" | "label" | "exit";
+type WidgetType = "room" | "device" | "button" | "group" | "now_playing" | "scene" | "control" | "sensor" | "weather" | "clock" | "label" | "exit";
 
 // The kiosk-exit control is a special built-in widget: present on every board,
 // movable (positioned in edit mode) but not user-addable or removable. It renders
@@ -229,15 +230,49 @@ export function BoardsPage() {
   const board = boards.find((b) => b.id === activeId) ?? null;
   const widgets = board?.widgets ?? [];
 
+  // Edit-mode undo: every layout mutation pushes the pre-mutation layout, so a
+  // stray drag / remove / reconfigure is one Undo (or Ctrl+Z) away. Session-local,
+  // per board — cleared on board switch and when leaving edit mode.
+  const undoStack = useRef<Widget[][]>([]);
+  const [canUndo, setCanUndo] = useState(false);
+  useEffect(() => {
+    undoStack.current = [];
+    setCanUndo(false);
+  }, [activeId, edit]);
+
   // Persist the current board's widget layout (debounced by the caller's edits).
   const saveWidgets = useCallback(
-    async (next: Widget[]) => {
+    async (next: Widget[], opts?: { recordUndo?: boolean }) => {
       if (!board) return;
+      if (opts?.recordUndo !== false) {
+        undoStack.current.push(board.widgets ?? []);
+        if (undoStack.current.length > 50) undoStack.current.shift();
+        setCanUndo(true);
+      }
       setBoards((bs) => bs.map((b) => (b.id === board.id ? { ...b, widgets: next } : b)));
       await updateDashboard(board.id, { widgets: next });
     },
     [board],
   );
+
+  const undoEdit = useCallback(() => {
+    const prev = undoStack.current.pop();
+    setCanUndo(undoStack.current.length > 0);
+    if (prev) saveWidgets(prev, { recordUndo: false });
+  }, [saveWidgets]);
+
+  // Ctrl/Cmd+Z while editing (redo is out of scope — Undo is the safety net).
+  useEffect(() => {
+    if (!edit) return;
+    const h = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        undoEdit();
+      }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [edit, undoEdit]);
 
   function patchWidget(id: string, next: Widget) {
     if (!board) return;
@@ -263,6 +298,15 @@ export function BoardsPage() {
     if (!board) return;
     saveWidgets(widgets.filter((w) => w.id !== id));
   }
+  // Clone a widget (same config, new id), nudged a cell so the copy is visible.
+  function duplicateWidget(w: Widget) {
+    if (!board) return;
+    const { cols, rows } = aspectGrid(board.aspect);
+    saveWidgets([
+      ...widgets,
+      { ...w, id: newId(), x: Math.min(cols - w.w, w.x + 1), y: Math.min(rows - w.h, w.y + 1), config: { ...((w.config as Record<string, unknown>) ?? {}) } },
+    ]);
+  }
   function addWidget(w: Widget) {
     if (!board) return;
     saveWidgets([...widgets, w]);
@@ -272,9 +316,11 @@ export function BoardsPage() {
   function newBoard() {
     setCreating(true);
   }
-  async function createBoard(name: string, aspect: string) {
+  async function createBoard(name: string, aspect: string, seedRoomId?: string) {
     setCreating(false);
     const b = await createDashboard(name.trim(), aspect);
+    const seedRoom = rooms.find((r) => r.id === seedRoomId);
+    if (seedRoom) await updateDashboard(b.id, { widgets: seedRoomWidgets(seedRoom, aspect) });
     await reloadBoards();
     setActiveId(b.id);
     setEdit(true);
@@ -355,6 +401,7 @@ export function BoardsPage() {
     ) : (
     <WidgetContent
       w={w}
+      rooms={rooms}
       lights={lights}
       media={media}
       power={power}
@@ -410,9 +457,14 @@ export function BoardsPage() {
         {board && !isMobile && (
           <div style={{ marginLeft: "auto", display: "flex", gap: "0.4rem" }}>
             {edit && (
-              <Button variant="ghost" onClick={() => setAdding(true)}>
-                + Widget
-              </Button>
+              <>
+                <Button variant="ghost" onClick={() => setAdding(true)}>
+                  + Widget
+                </Button>
+                <Button variant="ghost" disabled={!canUndo} onClick={undoEdit} title="Undo the last layout change (Ctrl+Z)">
+                  Undo
+                </Button>
+              </>
             )}
             {!edit && widgets.length > 0 && (
               <Button variant="ghost" onClick={() => setKiosk(true)} title="Full-screen wall display">
@@ -466,6 +518,7 @@ export function BoardsPage() {
             onChange={patchWidget}
             onChangeMany={patchManyWidgets}
             onConfigure={(w) => setConfiguring(w)}
+            onDuplicate={duplicateWidget}
             onRemove={removeWidget}
             renderWidget={renderWidget}
           />
@@ -506,7 +559,7 @@ export function BoardsPage() {
 
       {/* New board: name + aspect ratio */}
       {creating && (
-        <BoardModal title="New board" confirmLabel="Create" onClose={() => setCreating(false)} onSubmit={createBoard} />
+        <BoardModal title="New board" confirmLabel="Create" rooms={rooms} onClose={() => setCreating(false)} onSubmit={createBoard} />
       )}
       {editingBoard && board && (
         <BoardModal
@@ -557,6 +610,7 @@ export function BoardsPage() {
             onChange={() => {}}
             onChangeMany={() => {}}
             onConfigure={() => {}}
+            onDuplicate={() => {}}
             onRemove={() => {}}
             renderWidget={renderWidget}
           />
@@ -630,6 +684,43 @@ function aspectGrid(aspect: string): { ar: number; cols: number; rows: number } 
   return { ar, cols, rows };
 }
 
+/** Starter layout for a board seeded from a Room: the room card up top, the
+ * room's lights as one group, each speaker/TV as a now-playing tile, and each
+ * switch/plug as a device tile — shelf-flowed onto the aspect grid. Anything
+ * that no longer fits is dropped rather than stacked off the (non-scrolling)
+ * canvas; the user can add it by hand. */
+function seedRoomWidgets(room: Room, aspect: string): Widget[] {
+  const { cols, rows } = aspectGrid(aspect);
+  const specs: { type: WidgetType; config: Widget["config"]; w: number; h: number }[] = [
+    { type: "room", config: { room_id: room.id }, w: 16, h: 6 },
+  ];
+  if (room.light_ids.length > 0)
+    specs.push({ type: "group", config: { domain: "light", ids: room.light_ids }, w: 16, h: 8 });
+  for (const m of room.media_devices)
+    specs.push({ type: "now_playing", config: { domain: "media", id: m.media_device_id }, w: 16, h: 8 });
+  for (const id of room.power_device_ids)
+    specs.push({ type: "device", config: { domain: "power", id }, w: 8, h: 8 });
+
+  const out: Widget[] = [];
+  let x = 0;
+  let y = 0;
+  let shelf = 0;
+  for (const spec of specs) {
+    const w = Math.min(spec.w, cols);
+    const h = Math.min(spec.h, rows);
+    if (x + w > cols) {
+      x = 0;
+      y += shelf + 1;
+      shelf = 0;
+    }
+    if (y + h > rows) break;
+    out.push({ id: newId(), type: spec.type, x, y, w, h, config: spec.config });
+    x += w + 1;
+    shelf = Math.max(shelf, h);
+  }
+  return out;
+}
+
 function BoardGrid({
   widgets,
   aspect,
@@ -637,6 +728,7 @@ function BoardGrid({
   onChange,
   onChangeMany,
   onConfigure,
+  onDuplicate,
   onRemove,
   renderWidget,
 }: {
@@ -646,6 +738,7 @@ function BoardGrid({
   onChange: (id: string, next: Widget) => void;
   onChangeMany: (updated: Widget[]) => void;
   onConfigure: (w: Widget) => void;
+  onDuplicate: (w: Widget) => void;
   onRemove: (id: string) => void;
   renderWidget: (w: Widget) => React.ReactNode;
 }) {
@@ -810,6 +903,7 @@ function BoardGrid({
             onSingleStart={() => selected.size > 0 && setSelected(new Set())}
             onChange={(next) => onChange(w.id, next)}
             onConfigure={() => onConfigure(w)}
+            onDuplicate={() => onDuplicate(w)}
             onRemove={() => onRemove(w.id)}
           >
             {renderWidget(w)}
@@ -851,6 +945,7 @@ function WidgetBox({
   onSingleStart,
   onChange,
   onConfigure,
+  onDuplicate,
   onRemove,
   children,
 }: {
@@ -873,6 +968,7 @@ function WidgetBox({
   onSingleStart?: () => void;
   onChange: (next: Widget) => void;
   onConfigure: () => void;
+  onDuplicate: () => void;
   onRemove: () => void;
   children: React.ReactNode;
 }) {
@@ -971,6 +1067,9 @@ function WidgetBox({
           {/* The built-in exit control has no config and can't be removed. */}
           {w.type !== "exit" && (
             <>
+              <button onClick={onDuplicate} onPointerDown={(e) => e.stopPropagation()} title="Duplicate" style={CORNER_BTN(4, 52)}>
+                <Glyph name="copy" size={13} />
+              </button>
               <button onClick={onConfigure} onPointerDown={(e) => e.stopPropagation()} title="Configure" style={CORNER_BTN(4, 28)}>
                 <Glyph name="gear" size={13} />
               </button>
@@ -1003,6 +1102,7 @@ function WidgetBox({
 
 function WidgetContent({
   w,
+  rooms,
   lights,
   media,
   power,
@@ -1016,6 +1116,7 @@ function WidgetContent({
   onOpenFlyout,
 }: {
   w: Widget;
+  rooms: Room[];
   lights: Light[];
   media: MediaDevice[];
   power: PowerDevice[];
@@ -1032,6 +1133,23 @@ function WidgetContent({
 
   if (w.type === "sensor") return <SensorWidget cfg={cfg} generic={generic} />;
   if (w.type === "weather") return <WeatherWidget cfg={cfg} generic={generic} />;
+
+  if (w.type === "room") {
+    return (
+      <RoomWidget
+        cfg={cfg as { room_id?: string; name?: string }}
+        rooms={rooms}
+        lights={lights}
+        media={media}
+        power={power}
+        edit={edit}
+        onLightUpdate={onLightUpdate}
+        onMediaPatch={onMediaPatch}
+        onPowerToggle={onPowerToggle}
+        onChanged={onChanged}
+      />
+    );
+  }
 
   if (w.type === "group" || w.type === "button") {
     return (
@@ -1279,9 +1397,12 @@ function DeviceTile({
         </GlyphButton>
       </div>
       {np?.title && (
-        <div style={{ position: "relative", minWidth: 0 }}>
-          <div style={{ ...ELLIPSIS, fontSize: "0.78rem", color: T.text }}>{np.title}</div>
-          {np.artist && <div style={{ ...ELLIPSIS, fontSize: "0.7rem", color: T.dim }}>{np.artist}</div>}
+        <div style={{ position: "relative", minWidth: 0, display: "flex", alignItems: "center", gap: "0.5rem" }}>
+          <AlbumArt url={np.artwork_url} size={38} />
+          <div style={{ minWidth: 0 }}>
+            <div style={{ ...ELLIPSIS, fontSize: "0.78rem", color: T.text }}>{np.title}</div>
+            {np.artist && <div style={{ ...ELLIPSIS, fontSize: "0.7rem", color: T.dim }}>{np.artist}</div>}
+          </div>
         </div>
       )}
       <div style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
@@ -1642,6 +1763,189 @@ function GroupWidget({
   );
 }
 
+/** A Room widget — the Control page's room card in board form, sourced from the
+ * same live Room record: lit dot + name, the room's configured quick-control
+ * buttons, and a room power toggle that drives the shared room-state PUT (server
+ * fan-out — pure power touches lights, switches, and speakers alike). Tapping
+ * the header opens the shared LightEditor cascaded over the room's lights. */
+function RoomWidget({
+  cfg,
+  rooms,
+  lights,
+  media,
+  power,
+  edit,
+  onLightUpdate,
+  onMediaPatch,
+  onPowerToggle,
+  onChanged,
+}: {
+  cfg: { room_id?: string; name?: string };
+  rooms: Room[];
+  lights: Light[];
+  media: MediaDevice[];
+  power: PowerDevice[];
+  edit: boolean;
+  onLightUpdate: (id: string, st: LightState) => void;
+  onMediaPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
+  onPowerToggle: (id: string, next: boolean) => void;
+  onChanged: () => void;
+}) {
+  const headerRef = useRef<HTMLButtonElement>(null);
+  const [open, setOpen] = useState(false);
+  const commitTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const room = rooms.find((r) => r.id === cfg.room_id);
+  if (!room) return <div style={{ ...CENTER, color: T.faint, fontSize: "0.75rem" }}>Room removed</div>;
+  // Captured by the handlers below — `function` declarations hoist, so TS won't
+  // carry the `!room` narrowing into them.
+  const roomIdSafe = room.id;
+
+  const rLights = lights.filter((l) => room.light_ids.includes(l.id));
+  const rMedia = media.filter((m) => room.media_devices.some((d) => d.media_device_id === m.id));
+  const rPower = power.filter((p) => room.power_device_ids.includes(p.id));
+  const total = rLights.length + rMedia.length + rPower.length;
+  const anyLightOn = rLights.some((l) => l.last_state?.on);
+  const anyOn = anyLightOn || rPower.some((p) => p.state.on) || rMedia.some((m) => m.state.power);
+
+  const lit = rLights.filter((l) => l.last_state?.on);
+  const litHexes = lit.length ? lit.map(lightHex) : anyOn ? [T.accent] : undefined;
+  const dotColor = litHexes?.[0] ?? T.accent;
+  const agg = aggregateLightState(rLights);
+  const tunable =
+    rLights.some((l) => l.capabilities.color_rgb || l.capabilities.color_temperature || l.capabilities.dimmable) ||
+    agg.effects.length > 0;
+
+  const counts = [
+    rLights.length && `${rLights.length} light${rLights.length !== 1 ? "s" : ""}`,
+    rPower.length && `${rPower.length} switch${rPower.length !== 1 ? "es" : ""}`,
+    rMedia.length && `${rMedia.length} speaker${rMedia.length !== 1 ? "s" : ""}`,
+  ].filter(Boolean);
+
+  // Room power is the ONE shared control plane: optimistic flips locally, then a
+  // single room-state PUT — the server fans out to every member domain (with the
+  // pure-power rule and per-room audio offsets), same as the Control page.
+  function toggleAll() {
+    const next = !anyOn;
+    for (const l of rLights) onLightUpdate(l.id, { ...(l.last_state ?? { on: false }), on: next });
+    for (const p of rPower) onPowerToggle(p.id, next);
+    for (const m of rMedia) onMediaPatch(m.id, { power: next });
+    setRoomState(roomIdSafe, { on: next }).then(() => onChanged());
+  }
+
+  // Header-editor cascade — identical to the Control page's room header: send
+  // only the moved dimension, room-wide via one PUT (effects fan per capable
+  // light, which a uniform room PUT can't express).
+  function cascade(change: LightControlChange) {
+    if (change.field === "effect") {
+      const ids = rLights.filter((l) => lightSupports(change, l.capabilities)).map((l) => l.id);
+      for (const l of rLights) {
+        if (ids.includes(l.id)) onLightUpdate(l.id, lightOptimistic(l.last_state, change));
+      }
+      clearTimeout(commitTimer.current);
+      commitTimer.current = setTimeout(() => {
+        for (const id of ids) setLightState(id, lightWrite(change));
+      }, 200);
+      return;
+    }
+    for (const l of rLights) {
+      const opt = lightSupports(change, l.capabilities)
+        ? lightOptimistic(l.last_state, change)
+        : { ...(l.last_state ?? { on: true }), on: true };
+      onLightUpdate(l.id, opt);
+    }
+    const patch = lightWrite(change);
+    clearTimeout(commitTimer.current);
+    commitTimer.current = setTimeout(() => { setRoomState(roomIdSafe, patch); }, 200);
+  }
+
+  return (
+    <div
+      style={{
+        ...widgetPlateMulti(litHexes ?? [T.accent], anyOn),
+        display: "flex",
+        flexDirection: "column",
+        padding: "0.5rem 0.6rem",
+        gap: "0.35rem",
+      }}
+    >
+      <CornerFiligree colors={litHexes} />
+      <div style={{ position: "relative", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+        <span
+          aria-hidden
+          style={{
+            width: 14,
+            height: 14,
+            flexShrink: 0,
+            borderRadius: "50%",
+            border: "1px solid rgba(255,255,255,0.22)",
+            background: anyLightOn ? `radial-gradient(circle at 35% 30%, #ffffff44, transparent 45%), ${dotColor}` : "#3a372e",
+            boxShadow: anyLightOn ? `0 0 10px -2px ${dotColor}` : "none",
+          }}
+        />
+        <button
+          ref={headerRef}
+          disabled={edit || !tunable}
+          onClick={() => setOpen((v) => !v)}
+          title={tunable ? "Set the whole room's color and brightness" : undefined}
+          style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "flex-start", border: "none", background: "none", padding: 0, cursor: edit || !tunable ? "default" : "pointer", textAlign: "left" }}
+        >
+          <span style={{ ...labelType, fontSize: "0.78rem", color: "#d8cfba", ...ELLIPSIS, maxWidth: "100%" }}>
+            {cfg.name || room.name}
+          </span>
+          <span style={{ fontSize: "0.66rem", color: T.faint, ...ELLIPSIS, maxWidth: "100%" }}>{counts.join(" · ")}</span>
+        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", flexShrink: 0 }}>
+          {room.controls.map((c) => (
+            <RoomControlButton
+              key={c.id ?? `${c.kind}-${c.glyph}`}
+              control={c}
+              lights={rLights}
+              power={rPower}
+              audio={rMedia}
+              onLightUpdate={onLightUpdate}
+              onPowerToggle={onPowerToggle}
+              onMediaPatch={onMediaPatch}
+              onChanged={onChanged}
+              size={32}
+            />
+          ))}
+          {total > 0 && (
+            <GlyphButton on={anyOn} accent={T.accent} title={anyOn ? "Turn room off" : "Turn room on"} active={false} buttonRef={null} onClick={toggleAll} size={32}>
+              <Glyph name="power" size={15} />
+            </GlyphButton>
+          )}
+        </div>
+      </div>
+      <div style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <span
+          onClick={() => { if (tunable && !edit) setOpen(true); }}
+          style={{ fontSize: "0.78rem", color: anyOn ? dotColor : T.faint, cursor: tunable && !edit ? "pointer" : "default" }}
+        >
+          {total === 0 ? "No devices" : anyOn ? "On" : "Off"}
+        </span>
+      </div>
+      {open && headerRef.current && (
+        <LightEditor
+          anchor={headerRef.current}
+          title={cfg.name || room.name}
+          initialHex={agg.hex}
+          initialBrightness={agg.brightness}
+          initialMirek={agg.mirek}
+          showColor={rLights.some((l) => l.capabilities.color_rgb)}
+          showWhite={rLights.some((l) => l.capabilities.color_temperature)}
+          showBrightness={rLights.some((l) => l.capabilities.dimmable)}
+          effects={agg.effects.length > 0 ? agg.effects : undefined}
+          initialEffect={agg.commonEffect}
+          on={anyLightOn}
+          onToggle={toggleAll}
+          onChange={cascade}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
+
 /** A sensor readout tile — a live value (temperature, humidity, …) from a generic
  * device's control. `cfg.provider_id`/`cfg.device_id`/`cfg.key`. */
 function SensorWidget({ cfg, generic }: { cfg: Record<string, unknown>; generic: GenericDevice[] }) {
@@ -1716,6 +2020,7 @@ function BoardModal({
   confirmLabel,
   initialName = "",
   initialAspect = "16:9",
+  rooms,
   onClose,
   onSubmit,
   onDelete,
@@ -1724,8 +2029,10 @@ function BoardModal({
   confirmLabel: string;
   initialName?: string;
   initialAspect?: string;
+  /** When present (creating), offer to seed the layout from a room's devices. */
+  rooms?: Room[];
   onClose: () => void;
-  onSubmit: (name: string, aspect: string) => void;
+  onSubmit: (name: string, aspect: string, seedRoomId?: string) => void;
   /** When present (editing an existing board), a left-aligned "Delete board"
    * action lives here instead of the edit toolbar, so a stray click can't nuke
    * the board — deleting is now Edit → Edit board → Delete → confirm. */
@@ -1733,11 +2040,12 @@ function BoardModal({
 }) {
   const [name, setName] = useState(initialName);
   const [aspect, setAspect] = useState(initialAspect);
+  const [seedRoom, setSeedRoom] = useState("");
   const isPreset = ASPECT_PRESETS.includes(aspect);
 
   function submit() {
     if (!name.trim()) return;
-    onSubmit(name, aspect.trim() || "16:9");
+    onSubmit(name, aspect.trim() || "16:9", seedRoom || undefined);
   }
 
   return (
@@ -1774,6 +2082,21 @@ function BoardModal({
           Galaxy A9 is 18.5:9). Changing it rescales the existing widgets.
         </div>
       </Field>
+      {rooms && rooms.length > 0 && (
+        <Field label="Start from">
+          <Select
+            value={seedRoom}
+            onChange={setSeedRoom}
+            options={[
+              { value: "", label: "Empty board" },
+              ...rooms.filter((r) => r.enabled).map((r) => ({ value: r.id, label: `Room · ${r.name}` })),
+            ]}
+          />
+          <div style={{ fontSize: "0.66rem", color: T.dim, marginTop: "0.4rem" }}>
+            Seeds the board with the room's card, lights, speakers, and switches — rearrange freely after.
+          </div>
+        </Field>
+      )}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.5rem", marginTop: "1rem" }}>
         {onDelete ? (
           <Button variant="ghost" onClick={onDelete} style={{ color: "#c77", borderColor: "#5a3636" }}>
@@ -1855,6 +2178,9 @@ function WidgetEditorModal({
   // A custom display name overriding the widget's default caption (any type).
   const [name, setName] = useState<string>((cfg.name as string) ?? "");
 
+  // room
+  const [roomId, setRoomId] = useState<string>((cfg.room_id as string) ?? "");
+
   // device / now_playing
   const [domain, setDomain] = useState<string>((cfg.domain as string) ?? "light");
   const [deviceId, setDeviceId] = useState<string>((cfg.id as string) ?? "");
@@ -1903,7 +2229,11 @@ function WidgetEditorModal({
 
   function save() {
     const nm = name.trim() || undefined;
-    if (type === "device" || type === "now_playing") {
+    if (type === "room") {
+      const id = roomId || rooms.find((r) => r.enabled)?.id;
+      if (!id) return;
+      onSave({ type, config: { room_id: id, name: nm }, w: 16, h: 6 });
+    } else if (type === "device" || type === "now_playing") {
       const list = type === "now_playing" ? selMedia : devicesFor(domain);
       const id = deviceId || list[0]?.id;
       if (!id) return;
@@ -1948,7 +2278,7 @@ function WidgetEditorModal({
       {!existing && (
         <Field label="Type">
           <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem" }}>
-            {(["device", "button", "group", "now_playing", "scene", "control", "sensor", "weather", "clock", "label"] as WidgetType[]).map((t) => (
+            {(["room", "device", "button", "group", "now_playing", "scene", "control", "sensor", "weather", "clock", "label"] as WidgetType[]).map((t) => (
               <button key={t} onClick={() => setType(t)} style={{ ...CHIP, ...(type === t ? CHIP_ON : {}) }}>
                 {WIDGET_LABELS[t]}
               </button>
@@ -1960,6 +2290,17 @@ function WidgetEditorModal({
       <Field label="Name (optional)">
         <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Custom widget name" style={INPUT} />
       </Field>
+
+      {type === "room" && (
+        <Field label="Room">
+          <Select
+            value={roomId}
+            onChange={setRoomId}
+            options={rooms.filter((r) => r.enabled).map((r) => ({ value: r.id, label: r.name }))}
+            placeholder="Choose a room"
+          />
+        </Field>
+      )}
 
       {(type === "device" || type === "now_playing") && (
         <>
@@ -2294,6 +2635,7 @@ function EmptyState({ onCreate, text, cta = "+ Create board" }: { onCreate: () =
 }
 
 const WIDGET_LABELS: Record<WidgetType, string> = {
+  room: "Room",
   device: "Device tile",
   group: "Device group",
   now_playing: "Now playing",

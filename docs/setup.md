@@ -161,7 +161,7 @@ For your own scripts, automations, or assistant clients:
    curl -H "Authorization: Bearer $BIFROST_KEY" http://<host>:3000/api/v1/lights
    ```
 
-The same key unlocks `/api/v1` (lights, rooms, scenes, audio, power, remotes), the
+The same key unlocks `/api/v1` (lights, rooms, scenes, media, power, remotes, sensors), the
 `/api/voice/*` endpoints, and the embedded MCP server at `/mcp`. Keys are managed
 only with a browser session — a leaked key can't mint more keys. Full reference:
 **[Public API](api.md)**.

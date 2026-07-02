@@ -127,17 +127,20 @@ export function MediaControls({
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: compact ? "0.55rem" : "0.85rem" }}>
       {/* Now playing */}
-      <div style={{ minHeight: compact ? "1.5rem" : "2.4rem" }}>
+      <div style={{ minHeight: compact ? "1.5rem" : "2.4rem", display: "flex", alignItems: "center", gap: "0.6rem" }}>
         {trackTitle ? (
           <>
-            <div style={{ fontSize: "0.92rem", color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {trackTitle}
-            </div>
-            {trackSub && (
-              <div style={{ fontSize: "0.78rem", color: T.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {trackSub}
+            <AlbumArt url={np?.artwork_url} size={compact ? 30 : 40} />
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: "0.92rem", color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {trackTitle}
               </div>
-            )}
+              {trackSub && (
+                <div style={{ fontSize: "0.78rem", color: T.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {trackSub}
+                </div>
+              )}
+            </div>
           </>
         ) : (
           <div style={{ fontSize: "0.85rem", color: T.dim }}>{idleLine}</div>
@@ -407,6 +410,25 @@ function TvAio({
   );
 }
 
+/** Album/artwork thumbnail for a now-playing line — rounded, sized to the row,
+ * and self-removing when the URL is missing or fails to load (LAN art servers
+ * come and go), so surfaces can render it unconditionally. Shared by every
+ * now-playing render (fly-outs, Media page, board widgets). */
+export function AlbumArt({ url, size }: { url?: string; size: number }) {
+  const [failed, setFailed] = useState(false);
+  // Retry after a failure when the track (URL) changes.
+  useEffect(() => setFailed(false), [url]);
+  if (!url || failed) return null;
+  return (
+    <img
+      src={url}
+      alt=""
+      onError={() => setFailed(true)}
+      style={{ width: size, height: size, borderRadius: 6, objectFit: "cover", flexShrink: 0, background: alpha(T.text, 0.06) }}
+    />
+  );
+}
+
 /** A compact "what's on the TV" line — the now-playing title (with a secondary
  * line) or the current source / home screen. Sits at the top of the Remote tab. */
 function TvNowPlaying({ device }: { device: MediaDevice }) {
@@ -417,9 +439,13 @@ function TvNowPlaying({ device }: { device: MediaDevice }) {
   const primary = title || (source ? `Source · ${source}` : "Home screen");
   return (
     <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", minWidth: 0, padding: "0.1rem" }}>
-      <span style={{ display: "grid", placeItems: "center", color: color.violet, flexShrink: 0 }}>
-        <Glyph name="tv" size={16} />
-      </span>
+      {np?.artwork_url && title ? (
+        <AlbumArt url={np.artwork_url} size={28} />
+      ) : (
+        <span style={{ display: "grid", placeItems: "center", color: color.violet, flexShrink: 0 }}>
+          <Glyph name="tv" size={16} />
+        </span>
+      )}
       <div style={{ minWidth: 0 }}>
         <div style={{ fontSize: "0.9rem", color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {primary}

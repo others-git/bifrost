@@ -7493,6 +7493,43 @@ async fn sensor_devices_list_is_empty_by_default() {
 }
 
 #[tokio::test]
+async fn v1_sensors_without_key_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/sensors/devices")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn v1_sensors_list_with_key_returns_ok() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "k").await;
+    let resp = app
+        .clone()
+        .oneshot(bearer_get("/api/v1/sensors/devices", &key))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let list = helpers::response_json(resp).await;
+    assert_eq!(list.as_array().unwrap().len(), 0);
+
+    // Unknown sensor id → 404 (not a 500 / empty body).
+    let resp = app
+        .oneshot(bearer_get("/api/v1/sensors/devices/nope", &key))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn v1_power_without_key_returns_401() {
     let app = helpers::test_app_with_password().await;
     let resp = app

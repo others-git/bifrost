@@ -612,12 +612,17 @@ impl SonosProvider {
         let title = xml_tag_text(&didl, "dc:title");
         let artist = xml_tag_text(&didl, "dc:creator");
         let album = xml_tag_text(&didl, "upnp:album");
+        let artwork_url = absolutize_art(
+            xml_tag_text(&didl, "upnp:albumArtURI"),
+            &coordinator.base_url,
+        );
 
         let now_playing = (title.is_some() || play_state.is_some()).then_some(NowPlaying {
             title,
             artist,
             album,
             play_state,
+            artwork_url,
         });
 
         // Physical inputs belong to `player`; the *active* one is read from the
@@ -1256,15 +1261,22 @@ impl PushCtx {
                 let Some(ev) = extract_property(body, "LastChange") else {
                     return;
                 };
-                let (play, now_playing) = parse_avtransport_lastchange(&ev);
+                let (play, mut now_playing) = parse_avtransport_lastchange(&ev);
                 let next = {
                     let mut c = self.cache.lock().await;
                     let st = c.entry(uuid.to_string()).or_default();
                     if let Some(p) = play {
                         st.power = p == PlayState::Playing;
                     }
-                    if now_playing.is_some() {
-                        st.now_playing = now_playing;
+                    if let Some(mut np) = now_playing.take() {
+                        // The event's albumArtURI is usually relative; resolve it
+                        // against the player's cached IP (dropped if unknown —
+                        // a relative URL would 404 against the Bifrost origin).
+                        np.artwork_url = match (&st.ip, np.artwork_url.take()) {
+                            (Some(ip), art) => absolutize_art(art, &format!("http://{ip}:1400")),
+                            (None, art) => art.filter(|u| u.starts_with("http")),
+                        };
+                        st.now_playing = Some(np);
                     }
                     st.reachable = Some(true);
                     st.clone()
@@ -1510,13 +1522,29 @@ fn parse_avtransport_lastchange(event: &str) -> (Option<PlayState>, Option<NowPl
     let title = xml_tag_text(&didl, "dc:title");
     let artist = xml_tag_text(&didl, "dc:creator");
     let album = xml_tag_text(&didl, "upnp:album");
+    // Left as reported (usually a relative `/getaa?…` path) — the GENA apply
+    // path absolutizes it against the player's cached IP.
+    let artwork_url = xml_tag_text(&didl, "upnp:albumArtURI");
     let now_playing = (title.is_some() || play.is_some()).then_some(NowPlaying {
         title,
         artist,
         album,
         play_state: play,
+        artwork_url,
     });
     (play, now_playing)
+}
+
+/// Absolutize a DIDL `albumArtURI` against a player's base URL
+/// (`http://<ip>:1400`) — Sonos usually reports a relative `/getaa?…` path,
+/// but streaming services sometimes hand back a full URL.
+fn absolutize_art(uri: Option<String>, base_url: &str) -> Option<String> {
+    let uri = uri.filter(|u| !u.is_empty())?;
+    if uri.starts_with("http://") || uri.starts_with("https://") {
+        return Some(uri);
+    }
+    let sep = if uri.starts_with('/') { "" } else { "/" };
+    Some(format!("{base_url}{sep}{uri}"))
 }
 
 // ── Factory ─────────────────────────────────────────────────────────────────
@@ -2488,7 +2516,8 @@ mod tests {
         // XML-escaped inside the event, and the field text is itself escaped — so it
         // must be decoded twice or `&amp;` leaks into the now-playing string.
         let didl = "&lt;DIDL-Lite&gt;&lt;item&gt;&lt;dc:title&gt;Midnight &amp;amp; Angel&lt;/dc:title&gt;\
-                    &lt;dc:creator&gt;Artist&lt;/dc:creator&gt;&lt;/item&gt;&lt;/DIDL-Lite&gt;";
+                    &lt;dc:creator&gt;Artist&lt;/dc:creator&gt;\
+                    &lt;upnp:albumArtURI&gt;/getaa?s=1&amp;amp;u=track&lt;/upnp:albumArtURI&gt;&lt;/item&gt;&lt;/DIDL-Lite&gt;";
         let ev = format!(
             r#"<Event><InstanceID val="0"><TransportState val="PLAYING"/><CurrentTrackMetaData val="{didl}"/></InstanceID></Event>"#
         );
@@ -2498,6 +2527,28 @@ mod tests {
         assert_eq!(np.title.as_deref(), Some("Midnight & Angel"));
         assert_eq!(np.artist.as_deref(), Some("Artist"));
         assert_eq!(np.play_state, Some(PlayState::Playing));
+        // Kept relative here (double-unescaped like the other fields); the GENA
+        // apply path absolutizes it against the player's cached IP.
+        assert_eq!(np.artwork_url.as_deref(), Some("/getaa?s=1&u=track"));
+    }
+
+    #[test]
+    fn absolutize_art_joins_relative_and_keeps_absolute() {
+        let base = "http://192.168.1.50:1400";
+        assert_eq!(
+            absolutize_art(Some("/getaa?s=1&u=x".into()), base).as_deref(),
+            Some("http://192.168.1.50:1400/getaa?s=1&u=x")
+        );
+        assert_eq!(
+            absolutize_art(Some("getaa?u=x".into()), base).as_deref(),
+            Some("http://192.168.1.50:1400/getaa?u=x")
+        );
+        assert_eq!(
+            absolutize_art(Some("https://cdn.example/art.jpg".into()), base).as_deref(),
+            Some("https://cdn.example/art.jpg")
+        );
+        assert_eq!(absolutize_art(Some(String::new()), base), None);
+        assert_eq!(absolutize_art(None, base), None);
     }
 
     #[test]

@@ -4,16 +4,24 @@
 //! A kiosk is identified by the `bfr_` API key it carries (minted via QR
 //! enrollment). It **checks in** on a heartbeat ([`checkin`], key-authenticated)
 //! reporting its label / app version / screen state; the server records
-//! `last_seen` and returns any **queued command** (`sleep` | `wake` | `lock`),
-//! which the app performs and which is then consumed.
+//! `last_seen` and returns any **queued command** (`sleep` | `wake` | `lock` |
+//! `update`), which the app performs and which is then consumed. Commands are
+//! also pushed instantly over the kiosk's live SSE channel ([`stream`]); the
+//! queued copy is the offline fallback.
 //!
-//! Management endpoints ([`list`], [`command`], [`deauth`], [`forget`]) are
-//! **session-authenticated** — driven from a mobile/desktop browser, not the
-//! kiosk itself. Command semantics:
+//! Management endpoints ([`list`], [`command`], [`deauth`], [`forget`], and the
+//! per-kiosk assignment/config setters) are **session-authenticated** — driven
+//! from a mobile/desktop browser, not the kiosk itself. Command semantics:
 //! - `sleep` / `wake` — turn the display off/on.
 //! - `lock` — force sign-out of the Bifrost WebView session (re-enter password).
+//! - `update` — pull the hub-cached APK and self-install ([`crate::api::kiosk_update`]).
 //! - **de-auth** — revoke the kiosk's API key (a separate endpoint, not a queued
 //!   command): the app's next call 401s and it re-enrolls via a fresh QR scan.
+//!
+//! Display power saving is server-driven: [`run_scheduler`] issues the same
+//! `sleep`/`wake` commands from each kiosk's quiet-hours schedule
+//! (`PUT …/schedule`) and its assigned Room's presence (`PUT …/presence`,
+//! occupancy from `rooms::room_occupancy`).
 
 use crate::AppState;
 use crate::api::apikeys::require_api_key;

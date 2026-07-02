@@ -31,14 +31,15 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/devices/{id}/favorites/play", post(play_favorite_handler))
         .route("/devices/{id}/group", post(group_handler))
         .route("/devices/{id}/ungroup", post(ungroup_handler))
-        .route("/devices/{id}/enabled", put(set_enabled_handler))
-        .route("/devices/{id}/glyph", put(set_glyph_handler))
-        .route("/devices/{id}/name", put(set_name_handler))
-        .route("/devices/{id}/shadow", put(set_shadow_handler))
-        .route("/devices/{id}/room", put(set_room_handler))
         .route("/devices/{id}/receiver", put(set_receiver_handler))
         .route("/devices/{id}/companion", put(set_companion_handler))
         .route("/play-on", post(play_on_handler))
+        .merge(crate::api::inventory_router(
+            "/devices",
+            "media_devices",
+            "room_media_devices",
+            "media_device_id",
+        ))
 }
 
 /// `POST /api/media/play-on` — natural-language TV control ("play Bob's Burgers
@@ -70,73 +71,6 @@ async fn set_companion_handler(
     Json(req): Json<crate::api::SetCompanionRequest>,
 ) -> impl IntoResponse {
     set_companion_status(set_media_companion(&state, &id, req.primary_id).await)
-}
-
-async fn set_enabled_handler(
-    State(state): State<Arc<AppState>>,
-    _: Session,
-    Path(id): Path<String>,
-    Json(req): Json<crate::api::SetEnabledRequest>,
-) -> impl IntoResponse {
-    crate::api::set_device_enabled(&state, "media_devices", &id, req.enabled)
-        .await
-        .into_response()
-}
-
-async fn set_glyph_handler(
-    State(state): State<Arc<AppState>>,
-    _: Session,
-    Path(id): Path<String>,
-    Json(req): Json<crate::api::SetGlyphRequest>,
-) -> impl IntoResponse {
-    crate::api::set_device_glyph(&state, "media_devices", &id, req.glyph)
-        .await
-        .into_response()
-}
-
-async fn set_name_handler(
-    State(state): State<Arc<AppState>>,
-    _: Session,
-    Path(id): Path<String>,
-    Json(req): Json<crate::api::SetNameRequest>,
-) -> impl IntoResponse {
-    crate::api::set_device_name(
-        &state,
-        "media_devices",
-        &id,
-        crate::api::clean_name(req.name),
-    )
-    .await
-    .into_response()
-}
-
-async fn set_shadow_handler(
-    State(state): State<Arc<AppState>>,
-    _: Session,
-    Path(id): Path<String>,
-    Json(req): Json<crate::api::SetShadowRequest>,
-) -> impl IntoResponse {
-    crate::api::dedup::set_device_shadow(&state, "media_devices", &id, req.shadowed_by)
-        .await
-        .into_response()
-}
-
-async fn set_room_handler(
-    State(state): State<Arc<AppState>>,
-    _: Session,
-    Path(id): Path<String>,
-    Json(req): Json<crate::api::SetRoomRequest>,
-) -> impl IntoResponse {
-    crate::api::rooms::set_device_room(
-        &state,
-        "media_devices",
-        "room_media_devices",
-        "media_device_id",
-        &id,
-        req.room_id,
-    )
-    .await
-    .into_response()
 }
 
 /// Body for "group this speaker with a coordinator" — the Bifrost device id of

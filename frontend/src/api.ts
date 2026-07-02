@@ -536,6 +536,8 @@ export interface NowPlaying {
   artist?: string;
   album?: string;
   play_state?: "playing" | "paused" | "stopped";
+  /** Absolute artwork/album image URL (HA entity_picture, Sonos album art). */
+  artwork_url?: string;
 }
 
 export interface MediaState {

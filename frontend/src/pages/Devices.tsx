@@ -55,7 +55,7 @@ import {
   type Provider,
   type RemoteDevice,
 } from "../api";
-import { Glyph, GlyphGrid, GLYPH_OPTIONS, powerKindGlyph, mediaKindGlyph, sensorKindGlyph } from "../components/glyphs";
+import { Glyph, GlyphGrid, ALL_GLYPH_OPTIONS, powerKindGlyph, mediaKindGlyph, sensorKindGlyph } from "../components/glyphs";
 import { PageHeader, SectionLabel } from "../components/PageHeader";
 import { Switch, Segmented } from "../components/controls";
 import { GenericDevicesSection } from "../components/GenericDevices";
@@ -298,7 +298,7 @@ function GlyphPicker({
   return (
     <AnchoredPanel anchor={anchor} isCompact={isCompact} onClose={onClose}>
       <GlyphGrid
-        options={GLYPH_OPTIONS}
+        options={ALL_GLYPH_OPTIONS}
         value={current}
         onPick={onPick}
         size={isCompact ? 44 : 36}

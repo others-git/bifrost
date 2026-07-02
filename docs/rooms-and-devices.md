@@ -10,9 +10,10 @@ merging). Live control lives on the **Dashboard** and **Floor Plan**;
 ## Rooms
 
 A **room** is Bifrost's core grouping. It can hold **any mix of device types** —
-lights, speakers/receivers, and power devices (switches, plugs, fans) — and is the
-high-level control surface: turning a room on/off fans out to every member, a
-brightness change touches its lights, and volume/mute fan out to its speakers.
+lights, speakers/receivers, power devices (switches, plugs, fans), and sensors —
+and is the high-level control surface: turning a room on/off fans out to every
+member, a brightness change touches its lights, and volume/mute fan out to its
+speakers.
 
 Room **configuration** (membership, links, audio calibration, quick buttons,
 enable/disable, merge) is on the **Rooms page**. Live control (on/off, colour,
@@ -50,6 +51,15 @@ of members: **power** (toggle), **volume** or **brightness** (open the shared
 editor scoped to those members), or **scene** (apply a saved scene). Add them on
 the Rooms page.
 
+### Occupancy (presence sensors)
+
+A room with **motion or occupancy sensors** among its members gets a live,
+provider-agnostic **occupancy** state — a Hue motion accessory and a Home
+Assistant `binary_sensor` are interchangeable presence inputs. Presence-driven
+behaviour reads this room-level state rather than any one sensor; the first
+consumer is the wall tablet's display power saving (blank while the room is
+empty, wake on motion — see [Kiosk control](api.md#kiosk-control-apikiosks)).
+
 ### Enable / disable & merge
 
 - **Disable** a room to hide it from control without deleting its setup.
@@ -73,9 +83,12 @@ scenes from its control fly-out. (See also the [`/scenes` API](api.md#scenes).)
 ## Devices
 
 The **Devices page** is the full inventory — every device of every domain,
-regardless of room. It's a **configuration** surface, not a control one: enable or
-disable a device, pin a glyph, assign it to a room, and resolve the special cases
-below.
+regardless of room: lights, media, power, remotes, **sensors** (read-only
+readings — motion, contact, light level, temperature, humidity), and an **"Other
+devices"** section for anything Home Assistant exposes that Bifrost doesn't
+natively model (climate, covers, locks, …), with controls derived live from the
+entity. It's a **configuration** surface, not a control one: enable or disable a
+device, pin a glyph, assign it to a room, and resolve the special cases below.
 
 ### Glyph override
 

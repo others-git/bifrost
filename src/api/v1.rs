@@ -2,14 +2,16 @@
 //!
 //! Authenticated with a Bearer API key (`Authorization: Bearer <key>`) rather
 //! than the session cookie the UI uses. There is no RBAC — a valid key has full
-//! access. The surface mirrors what the UI can do for **lights** and **rooms**
-//! (including scenes); the floor plan and provider internals are not exposed.
+//! access. The surface mirrors what the UI can do for the device domains —
+//! **lights**, **rooms** (including scenes), **media**, **power**, **remotes**,
+//! and read-only **sensors**; session-only UI config (floor plan, boards,
+//! provider internals) is not exposed.
 //!
 //! Handlers are thin: they authenticate, then delegate to the same service
 //! functions the session API uses, so behaviour can't drift between the two.
 
 use crate::AppState;
-use crate::api::apikeys::require_api_key;
+use crate::api::apikeys::RequireApiKey;
 use crate::api::lights::{
     SegmentsRequest, apply_light_segments, apply_light_state, get_light_by_id, list_all_lights,
     set_light_status,
@@ -30,12 +32,13 @@ use crate::api::scenes::{
     SceneCaptureError, apply_scene_entries, capture_scene, delete_scene as delete_scene_svc,
     list_all_scenes,
 };
+use crate::api::sensors::{get_sensor_device_live, list_all_sensor_devices};
 use crate::models::LightState;
 use crate::models::remote::RemoteCommand;
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::IntoResponse,
     routing::{get, post, put},
 };
@@ -73,22 +76,13 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/remote/devices", get(list_remote))
         .route("/remote/devices/{id}", get(get_remote))
         .route("/remote/devices/{id}/command", post(remote_command))
-}
-
-/// Shared 401 guard. Returns `Err(401)` when the Bearer key is missing/invalid.
-async fn auth(state: &Arc<AppState>, headers: &HeaderMap) -> Result<(), StatusCode> {
-    match require_api_key(state, headers).await {
-        Some(_) => Ok(()),
-        None => Err(StatusCode::UNAUTHORIZED),
-    }
+        .route("/sensors/devices", get(list_sensors))
+        .route("/sensors/devices/{id}", get(get_sensor))
 }
 
 // ── Lights ───────────────────────────────────────────────────────────────────
 
-async fn list_lights(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
+async fn list_lights(State(state): State<Arc<AppState>>, _: RequireApiKey) -> impl IntoResponse {
     match list_all_lights(&state).await {
         Ok(lights) => Json(lights).into_response(),
         Err(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -97,12 +91,9 @@ async fn list_lights(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
 
 async fn get_light(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: RequireApiKey,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
     match get_light_by_id(&state, &id).await {
         Ok(Some(light)) => Json(light).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
@@ -112,46 +103,34 @@ async fn get_light(
 
 async fn set_light_state(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: RequireApiKey,
     Path(id): Path<String>,
     Json(new_state): Json<LightState>,
 ) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
     set_light_status(apply_light_state(&state, &id, &new_state).await).into_response()
 }
 
 async fn set_light_segments(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: RequireApiKey,
     Path(id): Path<String>,
     Json(req): Json<SegmentsRequest>,
 ) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
     set_light_status(apply_light_segments(&state, &id, &req.segments).await).into_response()
 }
 
 // ── Rooms ────────────────────────────────────────────────────────────────────
 
-async fn list_rooms(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
+async fn list_rooms(State(state): State<Arc<AppState>>, _: RequireApiKey) -> impl IntoResponse {
     Json(list_public_rooms(&state).await).into_response()
 }
 
 async fn set_room_state(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: RequireApiKey,
     Path(id): Path<String>,
     Json(new_state): Json<LightState>,
 ) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
     let members = effective_members(&state, &id).await;
     let (applied, failed) = apply_room_state(&state, &id, &new_state, members).await;
     if applied == 0 && failed == 0 {
@@ -162,10 +141,7 @@ async fn set_room_state(
 
 // ── Scenes (full-state snapshots: whole-home or room-scoped) ─────────────────
 
-async fn list_scenes(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
+async fn list_scenes(State(state): State<Arc<AppState>>, _: RequireApiKey) -> impl IntoResponse {
     match list_all_scenes(&state).await {
         Ok(scenes) => Json(scenes).into_response(),
         Err(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -182,12 +158,9 @@ struct CreateSceneRequest {
 
 async fn create_scene(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: RequireApiKey,
     Json(req): Json<CreateSceneRequest>,
 ) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
     match capture_scene(&state, &req.name, req.room_id.as_deref()).await {
         Ok(c) => (
             StatusCode::CREATED,
@@ -206,24 +179,18 @@ async fn create_scene(
 
 async fn remove_scene(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: RequireApiKey,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
     delete_scene_svc(&state, &id).await;
     StatusCode::NO_CONTENT.into_response()
 }
 
 async fn activate_scene(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: RequireApiKey,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
     match apply_scene_entries(&state, &id, None).await {
         Some((applied, failed)) => {
             Json(serde_json::json!({ "applied": applied, "failed": failed })).into_response()
@@ -234,10 +201,7 @@ async fn activate_scene(
 
 // ── Media devices ─────────────────────────────────────────────────────────────
 
-async fn list_media(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
+async fn list_media(State(state): State<Arc<AppState>>, _: RequireApiKey) -> impl IntoResponse {
     match list_all_devices(&state).await {
         Ok(devices) => Json(devices).into_response(),
         Err(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -246,12 +210,9 @@ async fn list_media(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
 
 async fn get_media(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: RequireApiKey,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
     match get_device_live(&state, &id).await {
         Ok(Some(device)) => Json(device).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
@@ -261,36 +222,27 @@ async fn get_media(
 
 async fn set_media(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: RequireApiKey,
     Path(id): Path<String>,
     Json(cmd): Json<crate::models::media::MediaCommand>,
 ) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
     set_media_status(apply_media_command(&state, &id, &cmd).await)
 }
 
 async fn cast_media(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: RequireApiKey,
     Path(id): Path<String>,
     Json(req): Json<CastRequest>,
 ) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
     set_media_status(cast_to_device(&state, &id, &req.content_id, &req.content_type).await)
 }
 
 async fn play_on(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: RequireApiKey,
     Json(req): Json<crate::api::remote::PlayOnInput>,
 ) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
     crate::api::remote::play_on_response(&state, &req.device, &req.query)
         .await
         .into_response()
@@ -298,80 +250,59 @@ async fn play_on(
 
 async fn list_media_favorites(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: RequireApiKey,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
     favorites_response(list_device_favorites(&state, &id).await)
 }
 
 async fn play_media_favorite(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: RequireApiKey,
     Path(id): Path<String>,
     Json(req): Json<PlayFavoriteRequest>,
 ) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
     play_favorite_response(play_device_favorite(&state, &id, &req.favorite_id).await)
 }
 
 async fn group_media(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: RequireApiKey,
     Path(id): Path<String>,
     Json(req): Json<GroupRequest>,
 ) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
     group_response(group_devices(&state, &id, &req.coordinator_id).await)
 }
 
 async fn ungroup_media(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: RequireApiKey,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
     group_response(ungroup_device(&state, &id).await)
 }
 
 async fn set_receiver_media(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: RequireApiKey,
     Path(id): Path<String>,
     Json(req): Json<crate::api::SetReceiverRequest>,
 ) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
     set_receiver_status(set_media_receiver(&state, &id, req.receiver_id, req.receiver_source).await)
 }
 
 async fn set_companion_media(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: RequireApiKey,
     Path(id): Path<String>,
     Json(req): Json<crate::api::SetCompanionRequest>,
 ) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
     set_companion_status(set_media_companion(&state, &id, req.primary_id).await)
 }
 
 // ── Power devices ──────────────────────────────────────────────────────────────
 
-async fn list_power(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
+async fn list_power(State(state): State<Arc<AppState>>, _: RequireApiKey) -> impl IntoResponse {
     match list_all_power_devices(&state).await {
         Ok(devices) => Json(devices).into_response(),
         Err(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -380,12 +311,9 @@ async fn list_power(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
 
 async fn get_power(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: RequireApiKey,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
     match get_power_device_live(&state, &id).await {
         Ok(Some(device)) => Json(device).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
@@ -395,31 +323,22 @@ async fn get_power(
 
 async fn set_power(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: RequireApiKey,
     Path(id): Path<String>,
     Json(cmd): Json<PowerCommand>,
 ) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
     set_power_status(apply_power_state(&state, &id, cmd.on).await).into_response()
 }
 
-async fn list_remote(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
+async fn list_remote(State(state): State<Arc<AppState>>, _: RequireApiKey) -> impl IntoResponse {
     Json(list_remotes(&state).await).into_response()
 }
 
 async fn get_remote(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: RequireApiKey,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
     match read_remote_state(&state, &id).await {
         Some(s) => Json(s).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
@@ -428,12 +347,30 @@ async fn get_remote(
 
 async fn remote_command(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: RequireApiKey,
     Path(id): Path<String>,
     Json(cmd): Json<RemoteCommand>,
 ) -> impl IntoResponse {
-    if let Err(s) = auth(&state, &headers).await {
-        return s.into_response();
-    }
     remote_status(apply_remote_command(&state, &id, &cmd).await).into_response()
+}
+
+// ── Sensors (read-only) ──────────────────────────────────────────────────────
+
+async fn list_sensors(State(state): State<Arc<AppState>>, _: RequireApiKey) -> impl IntoResponse {
+    match list_all_sensor_devices(&state).await {
+        Ok(devices) => Json(devices).into_response(),
+        Err(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn get_sensor(
+    State(state): State<Arc<AppState>>,
+    _: RequireApiKey,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match get_sensor_device_live(&state, &id).await {
+        Ok(Some(device)) => Json(device).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }

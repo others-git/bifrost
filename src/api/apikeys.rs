@@ -107,6 +107,27 @@ pub async fn require_api_key(state: &Arc<AppState>, headers: &HeaderMap) -> Opti
     validate_key(state, &extract_bearer(headers)?).await
 }
 
+/// Extractor form of [`require_api_key`] — rejects the request with `401` unless
+/// it carries a valid `bfr_` Bearer key. The Bearer-key twin of
+/// [`crate::api::auth::Session`]: a `/api/v1` handler declares `_: RequireApiKey`
+/// instead of hand-writing the guard.
+pub struct RequireApiKey;
+
+impl axum::extract::FromRequestParts<Arc<AppState>> for RequireApiKey {
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        if require_api_key(state, &parts.headers).await.is_some() {
+            Ok(RequireApiKey)
+        } else {
+            Err(StatusCode::UNAUTHORIZED)
+        }
+    }
+}
+
 // ── Management handlers (session-authenticated) ──────────────────────────────
 
 #[derive(Serialize)]

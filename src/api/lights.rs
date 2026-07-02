@@ -16,12 +16,13 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(list_lights))
         .route("/{id}", get(get_light).put(set_light_state))
-        .route("/{id}/enabled", axum::routing::put(set_light_enabled))
-        .route("/{id}/glyph", axum::routing::put(set_light_glyph))
-        .route("/{id}/name", axum::routing::put(set_light_name))
-        .route("/{id}/shadow", axum::routing::put(set_light_shadow))
-        .route("/{id}/room", axum::routing::put(set_light_room))
         .route("/{id}/segments", axum::routing::put(set_light_segments))
+        .merge(crate::api::inventory_router(
+            "",
+            "lights",
+            "room_lights",
+            "light_id",
+        ))
 }
 
 /// Body for a per-segment colour write: `{ "segments": [{"segment":0,"rgb":16711680}, …] }`.
@@ -337,68 +338,6 @@ async fn set_light_segments(
     Json(req): Json<SegmentsRequest>,
 ) -> impl IntoResponse {
     set_light_status(apply_light_segments(&state, &id, &req.segments).await).into_response()
-}
-
-async fn set_light_enabled(
-    State(state): State<Arc<AppState>>,
-    _: Session,
-    Path(id): Path<String>,
-    Json(req): Json<crate::api::SetEnabledRequest>,
-) -> impl IntoResponse {
-    crate::api::set_device_enabled(&state, "lights", &id, req.enabled)
-        .await
-        .into_response()
-}
-
-async fn set_light_glyph(
-    State(state): State<Arc<AppState>>,
-    _: Session,
-    Path(id): Path<String>,
-    Json(req): Json<crate::api::SetGlyphRequest>,
-) -> impl IntoResponse {
-    crate::api::set_device_glyph(&state, "lights", &id, req.glyph)
-        .await
-        .into_response()
-}
-
-async fn set_light_name(
-    State(state): State<Arc<AppState>>,
-    _: Session,
-    Path(id): Path<String>,
-    Json(req): Json<crate::api::SetNameRequest>,
-) -> impl IntoResponse {
-    crate::api::set_device_name(&state, "lights", &id, crate::api::clean_name(req.name))
-        .await
-        .into_response()
-}
-
-async fn set_light_shadow(
-    State(state): State<Arc<AppState>>,
-    _: Session,
-    Path(id): Path<String>,
-    Json(req): Json<crate::api::SetShadowRequest>,
-) -> impl IntoResponse {
-    crate::api::dedup::set_device_shadow(&state, "lights", &id, req.shadowed_by)
-        .await
-        .into_response()
-}
-
-async fn set_light_room(
-    State(state): State<Arc<AppState>>,
-    _: Session,
-    Path(id): Path<String>,
-    Json(req): Json<crate::api::SetRoomRequest>,
-) -> impl IntoResponse {
-    crate::api::rooms::set_device_room(
-        &state,
-        "lights",
-        "room_lights",
-        "light_id",
-        &id,
-        req.room_id,
-    )
-    .await
-    .into_response()
 }
 
 /// Decrypt credentials and construct a provider via the registry.

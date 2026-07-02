@@ -18,7 +18,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, put},
+    routing::get,
 };
 use serde::Serialize;
 use sqlx::Row;
@@ -28,11 +28,12 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/devices", get(list_devices_handler))
         .route("/devices/{id}", get(get_device_handler))
-        .route("/devices/{id}/enabled", put(set_enabled_handler))
-        .route("/devices/{id}/glyph", put(set_glyph_handler))
-        .route("/devices/{id}/name", put(set_name_handler))
-        .route("/devices/{id}/shadow", put(set_shadow_handler))
-        .route("/devices/{id}/room", put(set_room_handler))
+        .merge(crate::api::inventory_router(
+            "/devices",
+            "sensor_devices",
+            "room_sensor_devices",
+            "sensor_device_id",
+        ))
 }
 
 // ── Wire shape ───────────────────────────────────────────────────────────────
@@ -279,71 +280,4 @@ async fn get_device_handler(
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
-}
-
-async fn set_enabled_handler(
-    State(state): State<Arc<AppState>>,
-    _: Session,
-    Path(id): Path<String>,
-    Json(req): Json<crate::api::SetEnabledRequest>,
-) -> impl IntoResponse {
-    crate::api::set_device_enabled(&state, "sensor_devices", &id, req.enabled)
-        .await
-        .into_response()
-}
-
-async fn set_glyph_handler(
-    State(state): State<Arc<AppState>>,
-    _: Session,
-    Path(id): Path<String>,
-    Json(req): Json<crate::api::SetGlyphRequest>,
-) -> impl IntoResponse {
-    crate::api::set_device_glyph(&state, "sensor_devices", &id, req.glyph)
-        .await
-        .into_response()
-}
-
-async fn set_name_handler(
-    State(state): State<Arc<AppState>>,
-    _: Session,
-    Path(id): Path<String>,
-    Json(req): Json<crate::api::SetNameRequest>,
-) -> impl IntoResponse {
-    crate::api::set_device_name(
-        &state,
-        "sensor_devices",
-        &id,
-        crate::api::clean_name(req.name),
-    )
-    .await
-    .into_response()
-}
-
-async fn set_shadow_handler(
-    State(state): State<Arc<AppState>>,
-    _: Session,
-    Path(id): Path<String>,
-    Json(req): Json<crate::api::SetShadowRequest>,
-) -> impl IntoResponse {
-    crate::api::dedup::set_device_shadow(&state, "sensor_devices", &id, req.shadowed_by)
-        .await
-        .into_response()
-}
-
-async fn set_room_handler(
-    State(state): State<Arc<AppState>>,
-    _: Session,
-    Path(id): Path<String>,
-    Json(req): Json<crate::api::SetRoomRequest>,
-) -> impl IntoResponse {
-    crate::api::rooms::set_device_room(
-        &state,
-        "sensor_devices",
-        "room_sensor_devices",
-        "sensor_device_id",
-        &id,
-        req.room_id,
-    )
-    .await
-    .into_response()
 }

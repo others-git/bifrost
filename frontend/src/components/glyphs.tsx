@@ -3,7 +3,7 @@
 // glyph — a bulb for lights, a speaker for audio, and a per-kind glyph for power
 // devices — so a device reads at a glance without its (often long) name. A
 // device may also pin an override glyph by name (e.g. a switch that drives an
-// LED strip can show the led_strip glyph); see `Glyph` and `GLYPH_OPTIONS`.
+// LED strip can show the led_strip glyph); see `Glyph` and `ALL_GLYPH_OPTIONS`.
 
 import type { MediaDevice, PowerKind, SensorDevice } from "../api";
 import { ACCENT, alpha, T } from "../theme";
@@ -184,6 +184,13 @@ const BODIES: Record<string, JSX.Element> = {
     <>
       <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
       <path d="M3 3v5h5" />
+    </>
+  ),
+  copy: (
+    // Two offset sheets — duplicate.
+    <>
+      <rect x="9" y="9" width="11" height="11" rx="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
     </>
   ),
   gear: (
@@ -496,6 +503,7 @@ export const ALL_GLYPH_OPTIONS: { name: string; label: string }[] = [
   { name: "mute", label: "Mute" },
   { name: "scene", label: "Scene" },
   { name: "restore", label: "Restore" },
+  { name: "copy", label: "Copy" },
   { name: "play", label: "Play" },
   { name: "pause", label: "Pause" },
   { name: "play_pause", label: "Play / pause" },
@@ -515,9 +523,6 @@ export const ALL_GLYPH_OPTIONS: { name: string; label: string }[] = [
   { name: "wx_storm", label: "Storm" },
   { name: "wx_fog", label: "Fog" },
 ];
-
-/// Device glyph-override picker — the full palette.
-export const GLYPH_OPTIONS = ALL_GLYPH_OPTIONS;
 
 /// Room/board control & button glyph picker — the full palette, with the four
 /// control-meaningful glyphs hoisted to the front so a button reads as its action.

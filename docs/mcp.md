@@ -70,6 +70,7 @@ All tools below are served natively from `src/api/mcp.rs`.
 
 | Tool | Maps to | When |
 |---|---|---|
+| `list_sensors` / room occupancy | `list_all_sensor_devices` + `rooms::room_occupancy` | Read-only sensor readings and "is anyone in the living room?" — the sensor domain is on `/api/v1` but not yet surfaced as MCP tools. |
 | `list_media_devices` | `list_all_devices` | If a standalone audio list is wanted beyond `get_home_state`. |
 | Tier-2 music search/play | a future music-service API | After the Spotify OAuth + Connect music-service work lands. |
 | Audio-in-scenes awareness | scene snapshot incl. audio source/volume | After audio is captured in scenes. |

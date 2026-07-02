@@ -655,6 +655,7 @@ impl MediaProvider for OnkyoProvider {
                 artist: meta(nets.get("NAT")),
                 album: meta(nets.get("NAL")),
                 play_state: nets.get("NST").and_then(|d| parse_play_state(d)),
+                artwork_url: None,
             };
             (np.title.is_some() || np.play_state.is_some()).then_some(np)
         } else {
