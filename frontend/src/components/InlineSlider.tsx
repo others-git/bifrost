@@ -52,11 +52,15 @@ export function InlineSlider({
         borderRadius: tall ? radius.frame : radius.pill,
         background: "rgba(0,0,0,0.35)",
         border: `1px solid ${T.hairline}`,
+        boxShadow: "inset 0 1px 5px rgba(0,0,0,0.45)",
         cursor: "pointer",
         touchAction: "none",
         overflow: "hidden",
       }}
     >
+      {/* The column reads like mercury: a translucent accent wash for the body
+          (never a solid slab, even at 100%) with a bright glowing meniscus at
+          its leading edge carrying the colour. */}
       <div
         style={{
           position: "absolute",
@@ -64,11 +68,26 @@ export function InlineSlider({
           top: 0,
           bottom: 0,
           width: `${value}%`,
-          background: `linear-gradient(90deg, ${alpha(accent, 0.45)}, ${accent})`,
-          boxShadow: `inset 0 0 12px -2px ${accent}`,
+          background: `linear-gradient(90deg, ${alpha(accent, 0.16)}, ${alpha(accent, 0.5)})`,
+          boxShadow: `inset 0 0 14px -5px ${accent}`,
           transition: "width 0.08s",
         }}
       />
+      {value > 0 && (
+        <div
+          aria-hidden
+          style={{
+            position: "absolute",
+            top: 0,
+            bottom: 0,
+            left: `calc(${value}% - 2px)`,
+            width: 2,
+            background: accent,
+            boxShadow: `0 0 8px ${accent}`,
+            transition: "left 0.08s",
+          }}
+        />
+      )}
       <span
         style={{
           position: "absolute",

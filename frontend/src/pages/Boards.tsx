@@ -24,7 +24,6 @@ import {
   setLightState,
   setMediaState,
   setPowerState,
-  setRoomState,
   updateDashboard,
   type Dashboard,
   type GenericDevice,
@@ -48,28 +47,43 @@ import {
 } from "../components/lightControl";
 import { AlbumArt, MediaEditor, fanMediaCommand } from "../components/MediaControls";
 import { InlineSlider } from "../components/InlineSlider";
-import { RoomControlButton, GlyphButton, RestoreHomeButton } from "./Dashboard";
+import { RestoreHomeButton } from "./Dashboard";
+import { GlyphButton, RoomCard, RoomControlButton, litHexes, roomMembers } from "../components/RoomCard";
 import { CornerFiligree } from "../components/ornament";
 import { Button, Segmented } from "../components/controls";
-import { Modal, useDialogs } from "../components/dialogs";
+import { Modal, useDialogs, type Dialogs } from "../components/dialogs";
 import { Select } from "../components/Select";
 import { CONTROL_GLYPH_OPTIONS, Glyph, GlyphGrid, weatherGlyph, weatherLabel } from "../components/glyphs";
 import { PageHeader } from "../components/PageHeader";
 import { useViewport } from "../useViewport";
 import { S } from "../styles";
-import { alpha, color, glow, labelType, nicheStyle, radius, T } from "../theme";
+import { alpha, color, glow, labelType, radius, T } from "../theme";
 
 /** The full-cell "lit niche" plate every Boards widget wears — the same recessed,
- * device-lit surface as the Control room cards' `GlyphButton`s (shared
- * `nicheStyle`), but rectangular and angular (`radius.frame`), never a rounded card. */
+ * device-lit surface as the Control room cards' `GlyphButton`s — but retuned for
+ * plate scale: at widget size the buttons' border strength reads as a neon
+ * rectangle that fights the corner filigree, so the frame stays a whisper
+ * (hairline + faint accent) and the accent lives in the top-light, the outer
+ * bloom, and the filigree. Angular (`radius.frame`), never a rounded card. */
 const widgetPlate = (accent: string, on: boolean): React.CSSProperties => ({
   position: "relative",
   width: "100%",
   height: "100%",
   borderRadius: radius.frame,
   overflow: "hidden",
-  ...nicheStyle(accent, on),
+  color: on ? accent : color.dim,
+  background: on
+    ? `radial-gradient(120% 95% at 50% 0%, ${alpha(accent, 0.13)}, transparent 60%), ${color.surface}`
+    : color.surfaceOff,
+  border: `1px solid ${on ? alpha(accent, 0.22) : color.hairline}`,
+  boxShadow: on
+    ? `${glow(accent, 26)}, inset 0 0 26px -16px ${accent}`
+    : "inset 0 1px 0 rgba(236,230,240,0.04), inset 0 0 18px -13px #000",
 });
+
+/** Content inset for widget plates — clears the corner filigree so a header's
+ * dot/name never crowds the engraved frame. */
+const PLATE_PAD = "0.7rem 0.85rem";
 
 /** A group widget's plate: like `widgetPlate`, but a **device box tracks its one
  * light's colour** while a **group box blends ALL its lit members' colours into a
@@ -79,8 +93,8 @@ const widgetPlateMulti = (accents: string[], on: boolean): React.CSSProperties =
   if (!on || accents.length <= 1) {
     return widgetPlate(accents[0] ?? T.accent, on);
   }
-  const border = `linear-gradient(120deg, ${accents.map((c) => alpha(c, 0.55)).join(", ")})`;
-  const tint = `linear-gradient(120deg, ${accents.map((c) => alpha(c, 0.17)).join(", ")})`;
+  const border = `linear-gradient(120deg, ${accents.map((c) => alpha(c, 0.3)).join(", ")})`;
+  const tint = `linear-gradient(120deg, ${accents.map((c) => alpha(c, 0.11)).join(", ")})`;
   return {
     position: "relative",
     width: "100%",
@@ -93,7 +107,7 @@ const widgetPlateMulti = (accents: string[], on: boolean): React.CSSProperties =
     // through the 1px transparent border (border-box).
     border: "1px solid transparent",
     background: `${tint} padding-box, ${color.surface} padding-box, ${border} border-box`,
-    boxShadow: `${glow(accents[0], 22)}, ${glow(accents[accents.length - 1], 22)}, inset 0 0 16px -9px ${accents[0]}`,
+    boxShadow: `${glow(accents[0], 26)}, ${glow(accents[accents.length - 1], 26)}, inset 0 0 26px -16px ${accents[0]}`,
   };
 };
 
@@ -407,6 +421,7 @@ export function BoardsPage() {
       power={power}
       scenes={scenes}
       generic={generic}
+      dialogs={dialogs}
       edit={edit}
       onLightUpdate={onLightUpdate}
       onMediaPatch={onMediaPatch}
@@ -1108,6 +1123,7 @@ function WidgetContent({
   power,
   scenes,
   generic,
+  dialogs,
   edit,
   onLightUpdate,
   onMediaPatch,
@@ -1122,6 +1138,7 @@ function WidgetContent({
   power: PowerDevice[];
   scenes: Scene[];
   generic: GenericDevice[];
+  dialogs: Dialogs;
   edit: boolean;
   onLightUpdate: (id: string, st: LightState) => void;
   onMediaPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
@@ -1142,6 +1159,8 @@ function WidgetContent({
         lights={lights}
         media={media}
         power={power}
+        scenes={scenes}
+        dialogs={dialogs}
         edit={edit}
         onLightUpdate={onLightUpdate}
         onMediaPatch={onMediaPatch}
@@ -1218,6 +1237,7 @@ function WidgetContent({
           alignItems: "center",
           justifyContent: "center",
           gap: "0.45rem",
+          padding: PLATE_PAD,
           cursor: edit ? "default" : "pointer",
         }}
       >
@@ -1346,7 +1366,7 @@ function DeviceTile({
           alignItems: "center",
           justifyContent: "center",
           gap: "0.5rem",
-          padding: "0.6rem",
+          padding: PLATE_PAD,
           opacity: reachable ? 1 : 0.45,
         }}
       >
@@ -1376,7 +1396,7 @@ function DeviceTile({
         ...widgetPlate(accent, on),
         display: "flex",
         flexDirection: "column",
-        padding: "0.5rem 0.6rem",
+        padding: PLATE_PAD,
         gap: "0.4rem",
         opacity: reachable ? 1 : 0.45,
       }}
@@ -1467,7 +1487,7 @@ function ClockWidget({ cfg }: { cfg: Record<string, unknown> }) {
   const time = now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: !h24 });
   const date = now.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
   return (
-    <div style={{ ...widgetPlate(color.gold, false), display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "0.15rem" }}>
+    <div style={{ ...widgetPlate(color.gold, false), display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "0.15rem", padding: PLATE_PAD }}>
       <CornerFiligree />
       <div style={{ fontSize: `clamp(1rem, ${26 * scale}cqmin, ${5 * scale}rem)`, fontWeight: 600, color: T.text, fontVariantNumeric: "tabular-nums", letterSpacing: "0.02em", lineHeight: 1.05 }}>{time}</div>
       <div style={{ fontSize: `clamp(0.65rem, ${8 * scale}cqmin, ${1.4 * scale}rem)`, color: T.dim }}>{date}</div>
@@ -1701,8 +1721,8 @@ function GroupWidget({
         ...widgetPlateMulti(litHexes ?? [accent], anyOn),
         display: "flex",
         flexDirection: "column",
-        padding: "0.5rem 0.6rem",
-        gap: "0.35rem",
+        padding: PLATE_PAD,
+        gap: "0.4rem",
       }}
     >
       <CornerFiligree colors={litHexes} />
@@ -1763,17 +1783,18 @@ function GroupWidget({
   );
 }
 
-/** A Room widget — the Control page's room card in board form, sourced from the
- * same live Room record: lit dot + name, the room's configured quick-control
- * buttons, and a room power toggle that drives the shared room-state PUT (server
- * fan-out — pure power touches lights, switches, and speakers alike). Tapping
- * the header opens the shared LightEditor cascaded over the room's lights. */
+/** A Room widget — the Control page's room card on a board plate. The plate
+ * (glowing in the lit lights' colours) is the frame; everything inside is the
+ * one shared `RoomCard` in its dense `widget` form, over the same shared
+ * membership rules (`roomMembers`). */
 function RoomWidget({
   cfg,
   rooms,
   lights,
   media,
   power,
+  scenes,
+  dialogs,
   edit,
   onLightUpdate,
   onMediaPatch,
@@ -1785,166 +1806,57 @@ function RoomWidget({
   lights: Light[];
   media: MediaDevice[];
   power: PowerDevice[];
+  scenes: Scene[];
+  dialogs: Dialogs;
   edit: boolean;
   onLightUpdate: (id: string, st: LightState) => void;
   onMediaPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
   onPowerToggle: (id: string, next: boolean) => void;
   onChanged: () => void;
 }) {
-  const headerRef = useRef<HTMLButtonElement>(null);
-  const [open, setOpen] = useState(false);
-  const commitTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const room = rooms.find((r) => r.id === cfg.room_id);
   if (!room) return <div style={{ ...CENTER, color: T.faint, fontSize: "0.75rem" }}>Room removed</div>;
-  // Captured by the handlers below — `function` declarations hoist, so TS won't
-  // carry the `!room` narrowing into them.
-  const roomIdSafe = room.id;
 
-  const rLights = lights.filter((l) => room.light_ids.includes(l.id));
-  const rMedia = media.filter((m) => room.media_devices.some((d) => d.media_device_id === m.id));
-  const rPower = power.filter((p) => room.power_device_ids.includes(p.id));
-  const total = rLights.length + rMedia.length + rPower.length;
-  const anyLightOn = rLights.some((l) => l.last_state?.on);
-  const anyOn = anyLightOn || rPower.some((p) => p.state.on) || rMedia.some((m) => m.state.power);
-
-  const lit = rLights.filter((l) => l.last_state?.on);
-  const litHexes = lit.length ? lit.map(lightHex) : anyOn ? [T.accent] : undefined;
-  const dotColor = litHexes?.[0] ?? T.accent;
-  const agg = aggregateLightState(rLights);
-  const tunable =
-    rLights.some((l) => l.capabilities.color_rgb || l.capabilities.color_temperature || l.capabilities.dimmable) ||
-    agg.effects.length > 0;
-
-  const counts = [
-    rLights.length && `${rLights.length} light${rLights.length !== 1 ? "s" : ""}`,
-    rPower.length && `${rPower.length} switch${rPower.length !== 1 ? "es" : ""}`,
-    rMedia.length && `${rMedia.length} speaker${rMedia.length !== 1 ? "s" : ""}`,
-  ].filter(Boolean);
-
-  // Room power is the ONE shared control plane: optimistic flips locally, then a
-  // single room-state PUT — the server fans out to every member domain (with the
-  // pure-power rule and per-room audio offsets), same as the Control page.
-  function toggleAll() {
-    const next = !anyOn;
-    for (const l of rLights) onLightUpdate(l.id, { ...(l.last_state ?? { on: false }), on: next });
-    for (const p of rPower) onPowerToggle(p.id, next);
-    for (const m of rMedia) onMediaPatch(m.id, { power: next });
-    setRoomState(roomIdSafe, { on: next }).then(() => onChanged());
-  }
-
-  // Header-editor cascade — identical to the Control page's room header: send
-  // only the moved dimension, room-wide via one PUT (effects fan per capable
-  // light, which a uniform room PUT can't express).
-  function cascade(change: LightControlChange) {
-    if (change.field === "effect") {
-      const ids = rLights.filter((l) => lightSupports(change, l.capabilities)).map((l) => l.id);
-      for (const l of rLights) {
-        if (ids.includes(l.id)) onLightUpdate(l.id, lightOptimistic(l.last_state, change));
-      }
-      clearTimeout(commitTimer.current);
-      commitTimer.current = setTimeout(() => {
-        for (const id of ids) setLightState(id, lightWrite(change));
-      }, 200);
-      return;
-    }
-    for (const l of rLights) {
-      const opt = lightSupports(change, l.capabilities)
-        ? lightOptimistic(l.last_state, change)
-        : { ...(l.last_state ?? { on: true }), on: true };
-      onLightUpdate(l.id, opt);
-    }
-    const patch = lightWrite(change);
-    clearTimeout(commitTimer.current);
-    commitTimer.current = setTimeout(() => { setRoomState(roomIdSafe, patch); }, 200);
-  }
+  const members = roomMembers(room, lights, power, media);
+  const anyOn =
+    members.lights.some((l) => l.last_state?.on) ||
+    members.power.some((d) => d.state.on) ||
+    members.audio.some((d) => d.state.power);
+  const hexes = litHexes(members.lights);
+  const plateHexes = hexes.length ? hexes : anyOn ? [T.accent] : undefined;
 
   return (
     <div
       style={{
-        ...widgetPlateMulti(litHexes ?? [T.accent], anyOn),
+        ...widgetPlateMulti(plateHexes ?? [T.accent], anyOn),
         display: "flex",
         flexDirection: "column",
-        padding: "0.5rem 0.6rem",
-        gap: "0.35rem",
+        padding: PLATE_PAD,
+        gap: "0.4rem",
       }}
     >
-      <CornerFiligree colors={litHexes} />
-      <div style={{ position: "relative", display: "flex", alignItems: "center", gap: "0.5rem" }}>
-        <span
-          aria-hidden
-          style={{
-            width: 14,
-            height: 14,
-            flexShrink: 0,
-            borderRadius: "50%",
-            border: "1px solid rgba(255,255,255,0.22)",
-            background: anyLightOn ? `radial-gradient(circle at 35% 30%, #ffffff44, transparent 45%), ${dotColor}` : "#3a372e",
-            boxShadow: anyLightOn ? `0 0 10px -2px ${dotColor}` : "none",
-          }}
-        />
-        <button
-          ref={headerRef}
-          disabled={edit || !tunable}
-          onClick={() => setOpen((v) => !v)}
-          title={tunable ? "Set the whole room's color and brightness" : undefined}
-          style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "flex-start", border: "none", background: "none", padding: 0, cursor: edit || !tunable ? "default" : "pointer", textAlign: "left" }}
-        >
-          <span style={{ ...labelType, fontSize: "0.78rem", color: "#d8cfba", ...ELLIPSIS, maxWidth: "100%" }}>
-            {cfg.name || room.name}
-          </span>
-          <span style={{ fontSize: "0.66rem", color: T.faint, ...ELLIPSIS, maxWidth: "100%" }}>{counts.join(" · ")}</span>
-        </button>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", flexShrink: 0 }}>
-          {room.controls.map((c) => (
-            <RoomControlButton
-              key={c.id ?? `${c.kind}-${c.glyph}`}
-              control={c}
-              lights={rLights}
-              power={rPower}
-              audio={rMedia}
-              onLightUpdate={onLightUpdate}
-              onPowerToggle={onPowerToggle}
-              onMediaPatch={onMediaPatch}
-              onChanged={onChanged}
-              size={32}
-            />
-          ))}
-          {total > 0 && (
-            <GlyphButton on={anyOn} accent={T.accent} title={anyOn ? "Turn room off" : "Turn room on"} active={false} buttonRef={null} onClick={toggleAll} size={32}>
-              <Glyph name="power" size={15} />
-            </GlyphButton>
-          )}
-        </div>
-      </div>
-      <div style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <span
-          onClick={() => { if (tunable && !edit) setOpen(true); }}
-          style={{ fontSize: "0.78rem", color: anyOn ? dotColor : T.faint, cursor: tunable && !edit ? "pointer" : "default" }}
-        >
-          {total === 0 ? "No devices" : anyOn ? "On" : "Off"}
-        </span>
-      </div>
-      {open && headerRef.current && (
-        <LightEditor
-          anchor={headerRef.current}
-          title={cfg.name || room.name}
-          initialHex={agg.hex}
-          initialBrightness={agg.brightness}
-          initialMirek={agg.mirek}
-          showColor={rLights.some((l) => l.capabilities.color_rgb)}
-          showWhite={rLights.some((l) => l.capabilities.color_temperature)}
-          showBrightness={rLights.some((l) => l.capabilities.dimmable)}
-          effects={agg.effects.length > 0 ? agg.effects : undefined}
-          initialEffect={agg.commonEffect}
-          on={anyLightOn}
-          onToggle={toggleAll}
-          onChange={cascade}
-          onClose={() => setOpen(false)}
-        />
-      )}
+      <CornerFiligree colors={plateHexes} />
+      <RoomCard
+        variant="widget"
+        name={cfg.name || room.name}
+        roomId={room.id}
+        lights={members.lights}
+        power={members.power}
+        audio={members.audio}
+        controls={room.controls}
+        scenes={scenes}
+        dialogs={dialogs}
+        interactive={!edit}
+        onScenesChanged={onChanged}
+        onLightUpdate={onLightUpdate}
+        onMediaPatch={onMediaPatch}
+        onPowerToggle={onPowerToggle}
+        onChanged={onChanged}
+      />
     </div>
   );
 }
+
 
 /** A sensor readout tile — a live value (temperature, humidity, …) from a generic
  * device's control. `cfg.provider_id`/`cfg.device_id`/`cfg.key`. */
@@ -1955,7 +1867,7 @@ function SensorWidget({ cfg, generic }: { cfg: Record<string, unknown>; generic:
   const v = ctrl?.value;
   const display = v === undefined || v === null ? "—" : typeof v === "boolean" ? (v ? "On" : "Off") : String(v);
   return (
-    <div style={{ ...widgetPlate(color.gold, false), display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "0.1rem", padding: "0.5rem" }}>
+    <div style={{ ...widgetPlate(color.gold, false), display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "0.1rem", padding: PLATE_PAD }}>
       <CornerFiligree />
       <div style={{ fontSize: "clamp(1.3rem, 24cqmin, 4rem)", fontWeight: 600, color: T.text, fontVariantNumeric: "tabular-nums", lineHeight: 1.1 }}>
         {display}
@@ -1987,7 +1899,7 @@ function WeatherWidget({ cfg, generic }: { cfg: Record<string, unknown>; generic
         alignItems: "center",
         justifyContent: "center",
         gap: "0.7rem",
-        padding: "0.5rem 0.7rem",
+        padding: PLATE_PAD,
       }}
     >
       <CornerFiligree colors={[color.gold]} />

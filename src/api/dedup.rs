@@ -29,6 +29,11 @@ pub(crate) async fn reconcile_duplicates(state: &AppState) {
             tracing::error!("de-dup reconcile failed for {table}: {e}");
         }
     }
+    // Shadowing knows nothing about composite groups, so a media row that just
+    // got shadowed may be a group member — migrate its group (companions +
+    // paired remotes) onto the canonical row and detach it, keeping the
+    // "never both shadowed and grouped" invariant true.
+    crate::api::media::enforce_shadow_group_exclusion(state).await;
 }
 
 async fn reconcile_table(state: &AppState, table: &str) -> sqlx::Result<()> {
@@ -119,7 +124,14 @@ pub(crate) async fn set_device_shadow(
     .execute(&state.db)
     .await
     {
-        Ok(r) if r.rows_affected() > 0 => StatusCode::NO_CONTENT,
+        Ok(r) if r.rows_affected() > 0 => {
+            // A manually-shadowed media row may be a composite member — migrate
+            // its group to the canonical row (same invariant as the reconciler).
+            if table == "media_devices" && shadowed_by.is_some() {
+                crate::api::media::enforce_shadow_group_exclusion(state).await;
+            }
+            StatusCode::NO_CONTENT
+        }
         Ok(_) => StatusCode::NOT_FOUND,
         Err(e) => {
             tracing::error!("db error setting {table} shadow: {e}");

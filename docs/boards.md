@@ -27,9 +27,12 @@ anywhere.
 ## Widgets
 
 - **Room** — a whole room's card, exactly as on the Control page: its lit dot and
-  name, its quick-control buttons, and a room power toggle that fans out to every
-  member (lights, switches, speakers) server-side. Tapping the header opens the
-  shared colour/brightness editor over the room's lights.
+  name, its quick-control buttons, a room power toggle that fans out to every
+  member (lights, switches, speakers) server-side, and one glyph button per member
+  device — speakers playing in sync collapse into a single grouped button, and each
+  button opens that device's full fly-out (hold one to quick-toggle its power).
+  Tapping anywhere else on the header opens the shared colour/brightness editor
+  over the room's lights, with the room's scenes behind its Scenes button.
 - **Device tile** — one light, speaker/TV, or switch. The tile glows in the
   device's real colour. Drag the bar to set brightness or volume, the round button
   toggles power, and tapping it opens the full controls.

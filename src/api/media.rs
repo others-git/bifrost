@@ -192,11 +192,17 @@ fn kind_rank(kind: &str) -> u8 {
 /// kind (a `tv` over a bare `speaker` view), ties broken on the smallest id so
 /// the choice is stable. No surface is stored, so it can never drift from the
 /// members.
+///
+/// A shadowed or disabled member (or one whose provider is disabled) is never
+/// **elected** surface — a composite must never be represented by a row the
+/// control surfaces hide. Such members still get `companion_of` marked (they
+/// collapse in the inventory); they just can't be the face of the group.
 pub(crate) async fn group_surfaces(state: &AppState) -> std::collections::HashMap<String, String> {
     let rows = sqlx::query(
         "SELECT m.id, m.group_id, m.kind, p.provider_type
          FROM media_devices m JOIN providers p ON m.provider_id = p.id
-         WHERE m.group_id IS NOT NULL",
+         WHERE m.group_id IS NOT NULL
+           AND m.shadowed_by IS NULL AND m.enabled = 1 AND p.enabled = 1",
     )
     .fetch_all(&state.db)
     .await
@@ -311,9 +317,11 @@ fn merge_companion_into(primary: &mut MediaDeviceRow, companion: &MediaDeviceRow
     primary.capabilities.grouping |= companion.capabilities.grouping;
 }
 
-/// The companion rows (M26) merged into `primary_id`, if any.
 /// The other members of `id`'s composite group (everything sharing its
 /// `group_id`, excluding `id` itself). Empty for a standalone device.
+/// Disabled and shadowed members are excluded: disabled means "out of control",
+/// so a disabled member's stale cached state must not keep merging into the
+/// effective device or feeding its power resolution.
 async fn load_companions(state: &AppState, id: &str) -> Vec<MediaDeviceRow> {
     sqlx::query(
         "SELECT id, provider_id, device_id, name, kind, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto, receiver_id, receiver_source, group_id,
@@ -321,7 +329,8 @@ async fn load_companions(state: &AppState, id: &str) -> Vec<MediaDeviceRow> {
          FROM media_devices
          WHERE group_id IS NOT NULL
            AND group_id = (SELECT group_id FROM media_devices WHERE id = ?)
-           AND id != ?",
+           AND id != ?
+           AND enabled = 1 AND shadowed_by IS NULL",
     )
     .bind(id)
     .bind(id)
@@ -546,9 +555,11 @@ pub(crate) async fn list_all_devices(state: &AppState) -> Result<Vec<MediaDevice
     // receiver overlay (so a companion's receiver binding shows the receiver's
     // volume on the merged card). Companions stay in the list (marked
     // `companion_of`); control surfaces hide them, the inventory collapses them.
+    // A disabled or shadowed companion contributes nothing — neither merged
+    // state nor a power signal — matching `load_companions` on the live path.
     let companions: Vec<MediaDeviceRow> = devices
         .iter()
-        .filter(|d| d.companion_of.is_some())
+        .filter(|d| d.companion_of.is_some() && d.enabled && d.shadowed_by.is_none())
         .cloned()
         .collect();
     for c in &companions {
@@ -825,9 +836,33 @@ pub(crate) async fn set_media_companion(
     if pid == id {
         return SetCompanionOutcome::BadRequest("a device cannot be merged into itself".into());
     }
+    // The merged row must exist and must not be a hidden duplicate: a shadowed
+    // row is a discarded copy, and a row is never both shadowed and a composite
+    // member (the mutual-exclusion invariant, docs/composite-devices.md).
+    let src_group: Option<String> =
+        match sqlx::query("SELECT group_id, shadowed_by FROM media_devices WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await
+        {
+            Ok(Some(r)) => {
+                if r.get::<Option<String>, _>("shadowed_by").is_some() {
+                    return SetCompanionOutcome::BadRequest(
+                        "that device is a hidden duplicate; clear its duplicate link first".into(),
+                    );
+                }
+                r.get("group_id")
+            }
+            Ok(None) => return SetCompanionOutcome::NotFound,
+            Err(e) => {
+                tracing::error!("db error reading source group: {e}");
+                return SetCompanionOutcome::Db;
+            }
+        };
+
     // The target must exist and not be a hidden duplicate. Its group is the
     // destination; a standalone target gets a fresh singleton group (its own id).
-    let target_group =
+    let target_group: Option<String> =
         match sqlx::query("SELECT group_id, shadowed_by FROM media_devices WHERE id = ?")
             .bind(&pid)
             .fetch_optional(&state.db)
@@ -839,22 +874,7 @@ pub(crate) async fn set_media_companion(
                         "that device is a hidden duplicate".into(),
                     );
                 }
-                match r.get::<Option<String>, _>("group_id") {
-                    Some(g) => g,
-                    None => {
-                        if let Err(e) =
-                            sqlx::query("UPDATE media_devices SET group_id = ? WHERE id = ?")
-                                .bind(&pid)
-                                .bind(&pid)
-                                .execute(&state.db)
-                                .await
-                        {
-                            tracing::error!("db error creating group: {e}");
-                            return SetCompanionOutcome::Db;
-                        }
-                        pid.clone()
-                    }
-                }
+                r.get("group_id")
             }
             Ok(None) => return SetCompanionOutcome::BadRequest("unknown target device".into()),
             Err(e) => {
@@ -862,47 +882,171 @@ pub(crate) async fn set_media_companion(
                 return SetCompanionOutcome::Db;
             }
         };
+    if src_group.is_some() && src_group == target_group {
+        return SetCompanionOutcome::Ok; // already in the same group
+    }
 
-    // Fold `id`'s current group (or just `id`) into the target group — media and
-    // any remotes that share that group travel together.
-    let src_group: Option<String> =
-        sqlx::query_scalar::<_, Option<String>>("SELECT group_id FROM media_devices WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| tracing::error!("db error reading source group: {e}"))
-            .ok()
-            .flatten()
-            .flatten();
-
-    let result = if let Some(src) = src_group {
-        if src == target_group {
-            return SetCompanionOutcome::Ok; // already in the same group
+    // All writes land in one transaction: the target's group creation and the
+    // fold (media rows and the remotes that travel with them) commit together —
+    // a partial fold would strand remotes on an orphaned group that nothing
+    // re-adopts (`reconcile_remote_pairings` only touches unpaired remotes).
+    let mut tx = match state.db.begin().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("db error starting merge transaction: {e}");
+            return SetCompanionOutcome::Db;
         }
+    };
+    let target_group = match target_group {
+        Some(g) => g,
+        None => {
+            if let Err(e) = sqlx::query("UPDATE media_devices SET group_id = ? WHERE id = ?")
+                .bind(&pid)
+                .bind(&pid)
+                .execute(&mut *tx)
+                .await
+            {
+                tracing::error!("db error creating group: {e}");
+                return SetCompanionOutcome::Db;
+            }
+            pid.clone()
+        }
+    };
+
+    // Fold `id`'s current group (or just `id`) into the target group.
+    let fold = if let Some(src) = src_group {
         let m = sqlx::query("UPDATE media_devices SET group_id = ? WHERE group_id = ?")
             .bind(&target_group)
             .bind(&src)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await;
-        let _ = sqlx::query("UPDATE remote_devices SET group_id = ? WHERE group_id = ?")
-            .bind(&target_group)
-            .bind(&src)
-            .execute(&state.db)
-            .await;
+        if m.is_ok()
+            && let Err(e) = sqlx::query("UPDATE remote_devices SET group_id = ? WHERE group_id = ?")
+                .bind(&target_group)
+                .bind(&src)
+                .execute(&mut *tx)
+                .await
+        {
+            tracing::error!("db error moving remotes with merged group: {e}");
+            return SetCompanionOutcome::Db;
+        }
         m
     } else {
         sqlx::query("UPDATE media_devices SET group_id = ? WHERE id = ?")
             .bind(&target_group)
             .bind(id)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await
     };
-    match result {
-        Ok(r) if r.rows_affected() > 0 => SetCompanionOutcome::Ok,
+    match fold {
+        Ok(r) if r.rows_affected() > 0 => match tx.commit().await {
+            Ok(()) => SetCompanionOutcome::Ok,
+            Err(e) => {
+                tracing::error!("db error committing merge: {e}");
+                SetCompanionOutcome::Db
+            }
+        },
         Ok(_) => SetCompanionOutcome::NotFound,
         Err(e) => {
             tracing::error!("db error merging group: {e}");
             SetCompanionOutcome::Db
+        }
+    }
+}
+
+/// Enforce the composite invariant that a row is never both **shadowed** (a
+/// hidden de-dup duplicate) and a **group member** — docs/composite-devices.md.
+/// De-dup doesn't know about groups, so after the reconciler (or a manual
+/// shadow) runs, a grouped row may have just been shadowed: e.g. an HA TV that
+/// carried the composite (and its paired remote) gets shadowed the day the
+/// native provider is added. Simply detaching it would orphan the group's
+/// remotes — nothing re-adopts a paired remote (`reconcile_remote_pairings`
+/// only touches unpaired ones) — so the shadowed row's group is first folded
+/// onto its canonical (shadowing) row, which inherits the companions and
+/// remotes, and only then does the shadowed row leave the group.
+pub(crate) async fn enforce_shadow_group_exclusion(state: &AppState) {
+    let rows = sqlx::query(
+        "SELECT id, group_id, shadowed_by FROM media_devices
+         WHERE shadowed_by IS NOT NULL AND group_id IS NOT NULL",
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| tracing::error!("db error loading shadowed group members: {e}"))
+    .unwrap_or_default();
+    for r in rows {
+        let id: String = r.get("id");
+        let group: String = r.get("group_id");
+        let canonical: String = r.get("shadowed_by");
+        // The canonical row's own group: `None` = the row is gone (dangling
+        // shadow — just detach), `Some(None)` = standalone (adopts the group),
+        // `Some(Some(g))` = grouped (fold ours into it, unless already there).
+        let canon_group: Option<Option<String>> =
+            match sqlx::query_scalar("SELECT group_id FROM media_devices WHERE id = ?")
+                .bind(&canonical)
+                .fetch_optional(&state.db)
+                .await
+            {
+                Ok(g) => g,
+                Err(e) => {
+                    tracing::error!("db error reading canonical group: {e}");
+                    continue;
+                }
+            };
+        let mut tx = match state.db.begin().await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("db error starting shadow-group fixup: {e}");
+                continue;
+            }
+        };
+        let migrate = async {
+            match &canon_group {
+                None => {} // dangling shadow link — nothing to migrate to
+                Some(None) => {
+                    // The canonical row adopts the shadowed row's group, keeping
+                    // its companions and remotes reachable from the visible row.
+                    sqlx::query("UPDATE media_devices SET group_id = ? WHERE id = ?")
+                        .bind(&group)
+                        .bind(&canonical)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                Some(Some(cg)) if cg != &group => {
+                    sqlx::query("UPDATE media_devices SET group_id = ? WHERE group_id = ?")
+                        .bind(cg)
+                        .bind(&group)
+                        .execute(&mut *tx)
+                        .await?;
+                    sqlx::query("UPDATE remote_devices SET group_id = ? WHERE group_id = ?")
+                        .bind(cg)
+                        .bind(&group)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                Some(Some(_)) => {} // canonical already carries this group
+            }
+            sqlx::query("UPDATE media_devices SET group_id = NULL WHERE id = ?")
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?;
+            Ok::<(), sqlx::Error>(())
+        }
+        .await;
+        match migrate {
+            Ok(()) => {
+                if let Err(e) = tx.commit().await {
+                    tracing::error!("db error committing shadow-group fixup: {e}");
+                } else {
+                    tracing::debug!(
+                        target: "bifrost::composite",
+                        device = %id,
+                        canonical = %canonical,
+                        group = %group,
+                        "shadowed row detached from its composite; group migrated to the canonical row",
+                    );
+                }
+            }
+            Err(e) => tracing::error!("db error migrating shadowed row's group: {e}"),
         }
     }
 }
@@ -1175,6 +1319,12 @@ async fn device_name_remote(state: &AppState, id: &str) -> Option<String> {
 /// The composite's backings (primary first, then companions), or just `[id]`
 /// when `id` has no companions. Each carries the capability/binding facts the
 /// router needs.
+///
+/// Only **controllable** group members qualify as backings (enabled, not
+/// shadowed, provider enabled) — a disabled member must not attract a routed
+/// command it would then refuse, failing the whole command. The targeted `id`
+/// itself is always included so an uncontrollable target still resolves to the
+/// proper NotFound downstream instead of an empty composite.
 async fn load_composite_backings(state: &AppState, id: &str) -> Vec<Backing> {
     let rows = sqlx::query(
         "SELECT m.id, m.name, m.capabilities, m.receiver_id, m.last_state, p.provider_type,
@@ -1182,7 +1332,8 @@ async fn load_composite_backings(state: &AppState, id: &str) -> Vec<Backing> {
          FROM media_devices m JOIN providers p ON m.provider_id = p.id
          WHERE m.id = ?
             OR (m.group_id IS NOT NULL
-                AND m.group_id = (SELECT group_id FROM media_devices WHERE id = ?))
+                AND m.group_id = (SELECT group_id FROM media_devices WHERE id = ?)
+                AND m.enabled = 1 AND m.shadowed_by IS NULL AND p.enabled = 1)
          ORDER BY is_primary DESC, m.name",
     )
     .bind(id)

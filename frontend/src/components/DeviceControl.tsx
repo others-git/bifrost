@@ -137,16 +137,22 @@ export function DeviceControl(props: DeviceControlProps & { anchor: Anchor; onCl
   // — neither needs a refresh here.
   const refreshMediaId = props.domain === "media" ? props.device.id : null;
   const patchMedia = props.domain === "media" ? props.onLocalPatch : null;
+  // The patch callback rides in a ref: pages pass an inline `onLocalPatch`
+  // whose identity changes every render, and depending on it re-fires this
+  // effect after its own patch re-renders the page — an infinite fetch loop
+  // hammering the device (one live round-trip per ~150ms). One read per open.
+  const patchMediaRef = useRef(patchMedia);
+  patchMediaRef.current = patchMedia;
   useEffect(() => {
-    if (!refreshMediaId || !patchMedia) return;
+    if (!refreshMediaId) return;
     let alive = true;
     getMediaDevice(refreshMediaId).then((d) => {
-      if (alive && d) patchMedia(d.id, d.state);
+      if (alive && d) patchMediaRef.current?.(d.id, d.state);
     });
     return () => {
       alive = false;
     };
-  }, [refreshMediaId, patchMedia]);
+  }, [refreshMediaId]);
 
   if (props.domain === "light") {
     return (

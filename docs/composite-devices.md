@@ -106,6 +106,12 @@ are **excluded from room membership** (`effective_media_members` filters
 collapsed by `group_surfaces`, `src/api/rooms.rs`). They remain in the device list,
 marked, so the Devices page can show/un-merge them.
 
+A **disabled or shadowed member contributes nothing**: it neither merges state,
+nor feeds a power signal, nor qualifies as a routing backing, nor can be elected
+the surface — disabled means "out of control", and that includes a member's
+stale cache steering the composite. It stays marked (`companion_of`) so the
+inventory keeps it collapsed under the surface.
+
 ### 2. Paired remote — `remote_devices.group_id` → `remote_id`
 
 A virtual remote (`remote_devices` — D-pad keys, text, app launch) **joins its
@@ -207,7 +213,9 @@ the primary in, so a stale primary is corrected by a fresher member).
 session / `/api/v1` / MCP — drives the composite. It loads the **backings**
 (`load_composite_backings`: the primary first, then companions, each with its
 capability flags, receiver-bound flag, current volume, now-playing flag, and a
-priority) and routes per field via `route_across_backings`:
+priority — only **controllable** members qualify: a disabled/shadowed member
+must not attract a command it would then refuse, failing the whole command)
+and routes per field via `route_across_backings`:
 
 | Command field | Routes to |
 |---|---|
@@ -272,7 +280,14 @@ These have no single owner either, so they resolve across the composite:
 Keep these true whenever you touch the composite code:
 
 - **Mutual exclusion** — a row is never both `shadowed_by` (de-dup) and a member
-  of a composite `group_id`. Shadowing discards; grouping merges.
+  of a composite `group_id`. Shadowing discards; grouping merges. **Enforced**,
+  not just conventional: `set_media_companion` rejects merging a shadowed row,
+  and whenever a grouped media row gets shadowed (the de-dup reconciler or a
+  manual shadow), `enforce_shadow_group_exclusion` migrates its group —
+  companions *and* paired remotes — onto the canonical (shadowing) row before
+  detaching it, so a composite is never stranded on a hidden row (the classic
+  sequence: an HA TV carries the group + remote, then the native provider
+  arrives and de-dup shadows the HA row).
 - **Flat groups, no primary** — membership is a single `group_id`; there's no
   stored primary and no chains to reject. The surface (representative) is derived
   by [`group_surfaces`], so merging is symmetric and a **union**
@@ -353,6 +368,7 @@ return/act on the effective device.
 | Power-on remote fan-out | `wake_paired_remote` — `src/api/media.rs` |
 | Cast across backings | `cast_to_device` / `cast_one` — `src/api/media.rs` |
 | Set/clear companion | `set_media_companion` — `src/api/media.rs` |
+| Shadow/group mutual exclusion (group migration) | `enforce_shadow_group_exclusion` — `src/api/media.rs`, run by `reconcile_duplicates` + `set_device_shadow` |
 | Remote pairing reconcile | `reconcile_remote_pairings` — `src/api/remote.rs` |
 | Remote command favourites | `set_command_pin`, `overlay_pins`, `remote_command_pins` table — `src/api/remote.rs` |
 | Receiver-link liveness | `onkyo_link_actor` heartbeat (`HEARTBEAT`) — `src/providers/onkyo/mod.rs` |

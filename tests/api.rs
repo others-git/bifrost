@@ -8223,6 +8223,336 @@ async fn media_power_on_also_wakes_paired_remote() {
 }
 
 #[tokio::test]
+async fn disabled_companion_stops_merging_state_and_power() {
+    let ha = ha_remote_mock().await;
+    let (app, prov_id, db) = helpers::test_app_with_ha_db(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // A composite whose companion was disabled on the Devices page: its stale
+    // cached state (on, volume 40) must not keep merging into the effective
+    // device or feeding the composite power resolution.
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, group_id)
+         VALUES ('tv1', ?, 'media_player.bedroom_tv', 'Bedroom TV', 'tv', '{}', '{\"power\":false,\"volume\":0,\"mute\":false}', 'g1')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, enabled, group_id)
+         VALUES ('comp1', ?, 'media_player.bedroom_tv_cast', 'Bedroom TV Cast', 'speaker', '{}', '{\"power\":true,\"volume\":40,\"mute\":false}', 0, 'g1')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/media/devices", &cookie))
+        .await
+        .unwrap();
+    let devices = helpers::response_json(resp).await;
+    let by = |id: &str| {
+        devices
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("{id} not in media list"))
+    };
+    // The disabled companion's stale on/volume don't leak onto the surface…
+    assert_eq!(by("tv1")["state"]["power"], false);
+    assert_eq!(by("tv1")["state"]["volume"], 0);
+    // …but it's still marked as a member, so the inventory keeps it collapsed.
+    assert_eq!(by("comp1")["companion_of"], "tv1");
+}
+
+#[tokio::test]
+async fn disabled_companion_does_not_attract_routed_commands() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let ha = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/services/media_player/volume_set"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&ha)
+        .await;
+    let (app, prov_id, db) = helpers::test_app_with_ha_db(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // The disabled companion's cached volume (40) would otherwise mark it as
+    // "the backing carrying audio" and attract the routed volume command — which
+    // it would then refuse (disabled), failing the whole command.
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, group_id)
+         VALUES ('tv1', ?, 'media_player.bedroom_tv', 'Bedroom TV', 'tv', '{}', '{\"power\":true,\"volume\":0,\"mute\":false}', 'g1')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, enabled, group_id)
+         VALUES ('comp1', ?, 'media_player.bedroom_tv_cast', 'Bedroom TV Cast', 'speaker', '{}', '{\"power\":true,\"volume\":40,\"mute\":false}', 0, 'g1')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/media/devices/tv1/state",
+            &cookie,
+            r#"{"volume":20}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let reqs = ha.received_requests().await.unwrap();
+    let volume_calls: Vec<_> = reqs
+        .iter()
+        .filter(|r| r.url.path() == "/api/services/media_player/volume_set")
+        .collect();
+    assert_eq!(
+        volume_calls.len(),
+        1,
+        "volume must reach exactly one backing"
+    );
+    let body: serde_json::Value = serde_json::from_slice(&volume_calls[0].body).unwrap();
+    assert_eq!(
+        body["entity_id"], "media_player.bedroom_tv",
+        "volume routed to the disabled companion instead of the enabled surface"
+    );
+}
+
+#[tokio::test]
+async fn merging_a_hidden_duplicate_is_rejected() {
+    let ha = ha_remote_mock().await;
+    let (app, prov_id, db) = helpers::test_app_with_ha_db(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state)
+         VALUES ('tv1', ?, 'media_player.tv', 'TV', 'tv', '{}', '{\"power\":false,\"volume\":0,\"mute\":false}')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    // A de-dup-shadowed copy — a row is never both shadowed and a group member,
+    // so merging it must be rejected, not quietly grouped.
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, shadowed_by)
+         VALUES ('dup1', ?, 'media_player.tv_ha', 'TV (HA)', 'tv', '{}', '{\"power\":false,\"volume\":0,\"mute\":false}', 'tv1')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/media/devices/dup1/companion",
+            &cookie,
+            r#"{"primary_id":"tv1"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn shadowing_a_grouped_row_migrates_its_composite_to_the_canonical() {
+    let ha = ha_remote_mock().await;
+    let (app, prov_id, db) = helpers::test_app_with_ha_db(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // The orphaned-composite sequence: an HA TV carries the group (and its
+    // paired remote); the native row arrives later, standalone. Shadowing the
+    // HA row must hand its group — remote included — to the canonical row,
+    // never strand them on a hidden one.
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, group_id)
+         VALUES ('tvOld', ?, 'media_player.tv', 'TV (HA)', 'tv', '{}', '{\"power\":false,\"volume\":0,\"mute\":false}', 'g1')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO remote_devices (id, provider_id, device_id, name, enabled, group_id)
+         VALUES ('rem1', ?, 'remote.tv', 'TV Remote', 1, 'g1')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state)
+         VALUES ('tvNew', ?, 'bravia.tv', 'TV (native)', 'tv', '{}', '{\"power\":false,\"volume\":0,\"mute\":false}')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/media/devices/tvOld/shadow",
+            &cookie,
+            r#"{"shadowed_by":"tvNew"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // The canonical row adopted the group; the shadowed row left it.
+    let group_of = |id: &str| {
+        let db = db.clone();
+        let id = id.to_string();
+        async move {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT group_id FROM media_devices WHERE id = ?",
+            )
+            .bind(&id)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(group_of("tvNew").await.as_deref(), Some("g1"));
+    assert_eq!(group_of("tvOld").await, None);
+    // The paired remote now surfaces on the canonical row's effective device.
+    let devices = helpers::response_json(
+        app.oneshot(helpers::authed_get("/api/media/devices", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let tv_new = devices
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == "tvNew")
+        .expect("canonical row in list");
+    assert_eq!(tv_new["remote_id"], "rem1");
+}
+
+#[tokio::test]
+async fn shadowing_a_grouped_row_folds_into_the_canonicals_group() {
+    let ha = ha_remote_mock().await;
+    let (app, prov_id, db) = helpers::test_app_with_ha_db(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Both rows already carry groups: shadowing one folds its whole group
+    // (remotes included) into the canonical's group.
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, group_id)
+         VALUES ('tvOld', ?, 'media_player.tv', 'TV (HA)', 'tv', '{}', '{\"power\":false,\"volume\":0,\"mute\":false}', 'g1')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO remote_devices (id, provider_id, device_id, name, enabled, group_id)
+         VALUES ('rem1', ?, 'remote.tv', 'TV Remote (HA)', 1, 'g1')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, group_id)
+         VALUES ('tvNew', ?, 'bravia.tv', 'TV (native)', 'tv', '{}', '{\"power\":false,\"volume\":0,\"mute\":false}', 'g2')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/media/devices/tvOld/shadow",
+            &cookie,
+            r#"{"shadowed_by":"tvNew"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let remote_group: Option<String> =
+        sqlx::query_scalar("SELECT group_id FROM remote_devices WHERE id = 'rem1'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(remote_group.as_deref(), Some("g2"));
+    let old_group: Option<String> =
+        sqlx::query_scalar("SELECT group_id FROM media_devices WHERE id = 'tvOld'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(old_group, None);
+}
+
+#[tokio::test]
+async fn shadowed_member_is_never_elected_surface() {
+    let ha = ha_remote_mock().await;
+    let (app, prov_id, db) = helpers::test_app_with_ha_db(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // The tv-kind member would win surface election on kind — but it's shadowed,
+    // so the composite must be represented by the visible member instead of
+    // vanishing behind a hidden surface.
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, shadowed_by, group_id)
+         VALUES ('a_tv', ?, 'media_player.tv', 'TV', 'tv', '{}', '{\"power\":false,\"volume\":0,\"mute\":false}', 'elsewhere', 'g1')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, group_id)
+         VALUES ('b_spk', ?, 'media_player.tv_speaker', 'TV Speaker', 'speaker', '{}', '{\"power\":false,\"volume\":0,\"mute\":false}', 'g1')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    let devices = helpers::response_json(
+        app.oneshot(helpers::authed_get("/api/media/devices", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let by = |id: &str| {
+        devices
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("{id} not in media list"))
+    };
+    assert!(
+        by("b_spk")["companion_of"].is_null(),
+        "the visible member must be the surface"
+    );
+    assert_eq!(by("a_tv")["companion_of"], "b_spk");
+}
+
+#[tokio::test]
 async fn remote_apps_record_recents_pin_and_order() {
     let ha = ha_remote_mock().await;
     let (app, prov_id) = helpers::test_app_with_ha(&ha.uri()).await;
