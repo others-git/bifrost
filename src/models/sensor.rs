@@ -99,7 +99,7 @@ impl SensorReading {
 
 /// Full sensor state: the latest reading plus reachability. A sensor that has
 /// never reported (or is unreachable) carries `reading: None`.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct SensorState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reading: Option<SensorReading>,
@@ -107,6 +107,12 @@ pub struct SensorState {
     /// doesn't report it). Mirrors `PowerState::reachable`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reachable: Option<bool>,
+    /// When the reading last **changed**, as the provider reports it (RFC 3339
+    /// UTC — Hue's `motion_report.changed`, HA's `last_changed`). `None` when
+    /// the provider doesn't say. Display-only: the engine detects edges from
+    /// the readings themselves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_at: Option<String>,
 }
 
 impl SensorState {
@@ -115,6 +121,7 @@ impl SensorState {
         Self {
             reading: Some(SensorReading::Bool(on)),
             reachable: Some(true),
+            changed_at: None,
         }
     }
 
@@ -123,6 +130,7 @@ impl SensorState {
         Self {
             reading: Some(SensorReading::Number(value)),
             reachable: Some(true),
+            changed_at: None,
         }
     }
 

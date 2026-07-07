@@ -533,6 +533,9 @@ struct HaEntity {
     state: String,
     #[serde(default)]
     attributes: Value,
+    /// RFC 3339 timestamp of the entity's last state change.
+    #[serde(default)]
+    last_changed: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -872,6 +875,7 @@ fn parse_sensor_state(e: &HaEntity, kind: SensorKind) -> SensorState {
         return SensorState {
             reading: None,
             reachable,
+            changed_at: None,
         };
     }
     let reading = match kind {
@@ -880,7 +884,11 @@ fn parse_sensor_state(e: &HaEntity, kind: SensorKind) -> SensorState {
         }
         _ => e.state.parse::<f64>().ok().map(SensorReading::Number),
     };
-    SensorState { reading, reachable }
+    SensorState {
+        reading,
+        reachable,
+        changed_at: e.last_changed.clone(),
+    }
 }
 
 /// Map one modeled sensor entity to a [`SensorDevice`], or `None` to skip it.
@@ -2494,6 +2502,7 @@ mod tests {
             entity_id: "light.kitchen".into(),
             state: "on".into(),
             attributes: json!({ "brightness": 255 }),
+            last_changed: None,
         };
         assert!(matches!(
             classify_push(light, "http://ha.local:8123"),
@@ -2504,6 +2513,7 @@ mod tests {
             entity_id: "media_player.tv".into(),
             state: "playing".into(),
             attributes: json!({ "volume_level": 0.5 }),
+            last_changed: None,
         };
         match classify_push(media, "http://ha.local:8123") {
             Some(HaPushEvent::Media(ev)) => {
@@ -2517,6 +2527,7 @@ mod tests {
             entity_id: "fan.bedroom".into(),
             state: "on".into(),
             attributes: json!({}),
+            last_changed: None,
         };
         assert!(matches!(
             classify_push(fan, "http://ha.local:8123"),
@@ -2528,6 +2539,7 @@ mod tests {
             entity_id: "sensor.temp".into(),
             state: "21".into(),
             attributes: json!({}),
+            last_changed: None,
         };
         assert!(classify_push(sensor, "http://ha.local:8123").is_none());
 
@@ -2537,6 +2549,7 @@ mod tests {
             entity_id: "sensor.hall_temp".into(),
             state: "21.5".into(),
             attributes: json!({ "device_class": "temperature", "unit_of_measurement": "°C" }),
+            last_changed: None,
         };
         assert!(matches!(
             classify_push(temp, "http://ha.local:8123"),
@@ -2548,6 +2561,7 @@ mod tests {
             entity_id: "binary_sensor.hall_motion".into(),
             state: "on".into(),
             attributes: json!({ "device_class": "motion" }),
+            last_changed: None,
         };
         assert!(matches!(
             classify_push(motion, "http://ha.local:8123"),
@@ -2632,6 +2646,7 @@ mod tests {
             entity_id: "sensor.x".into(),
             state: state.into(),
             attributes: json!({}),
+            last_changed: None,
         };
         // Unavailable → no reading, unreachable.
         let s = parse_sensor_state(&ent("unavailable"), SensorKind::Temperature);

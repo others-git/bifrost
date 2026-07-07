@@ -15,12 +15,16 @@ import {
   getRooms,
   getScenes,
   getSensors,
+  rgbToHex,
+  rgbToXy,
   runAutomation,
   updateAutomation,
+  xyToRgb,
   type Automation,
   type AutomationBody,
   type AutomationTrigger,
   type Light,
+  type LightState,
   type MediaDevice,
   type PowerDevice,
   type Room,
@@ -32,7 +36,9 @@ import {
   type TriggerDeviceDomain,
 } from "../api";
 import { Button, Switch } from "./controls";
+import { OptionCheckList, deviceSelectOptions } from "./deviceOptions";
 import { Modal } from "./dialogs";
+import { hexToRgb } from "./LightEditor";
 import { Glyph } from "./glyphs";
 import { Select } from "./Select";
 import { S } from "../styles";
@@ -129,18 +135,22 @@ type NameMaps = {
   scene: Map<string, string>;
 };
 
+/** "Office to 40% (colored)" — the compact clause-aware phrasing for list rows. */
+function lightActionText(name: string, state: LightState): string {
+  if (!state.on) return `${name} off`;
+  const clauses = [
+    ...(state.brightness != null ? [`to ${state.brightness}%`] : []),
+    ...(state.color ? ["(colored)"] : []),
+  ];
+  return clauses.length > 0 ? `${name} ${clauses.join(" ")}` : `${name} on`;
+}
+
 function actionText(a: RuleAction, names: NameMaps): string {
   switch (a.kind) {
-    case "room": {
-      const room = names.room.get(a.room_id) ?? "room";
-      if (!a.state.on) return `${room} off`;
-      return a.state.brightness != null ? `${room} to ${a.state.brightness}%` : `${room} on`;
-    }
-    case "light": {
-      const light = names.light.get(a.light_id) ?? "light";
-      if (!a.state.on) return `${light} off`;
-      return a.state.brightness != null ? `${light} to ${a.state.brightness}%` : `${light} on`;
-    }
+    case "room":
+      return lightActionText(names.room.get(a.room_id) ?? "room", a.state);
+    case "light":
+      return lightActionText(names.light.get(a.light_id) ?? "light", a.state);
     case "power":
       return `${names.power.get(a.device_id) ?? "switch"} ${a.on ? "on" : "off"}`;
     case "scene":
@@ -294,6 +304,8 @@ export function AutomationRow({
           {`${triggerText(rule.trigger, sensors)} → ${rule.actions.map((a) => actionText(a, names)).join(", ")}`}
           {rule.conditions.length > 0 &&
             ` · only ${rule.conditions.map((c) => conditionText(c, names, sensorName)).join(", ")}`}
+          {rule.restore_secs != null &&
+            ` · puts things back after ${Math.round(rule.restore_secs / 60)} min`}
           {rule.last_fired_at && ` · ran ${firedAgo(rule.last_fired_at)}`}
         </div>
       </div>
@@ -532,6 +544,10 @@ function AutomationEditor({
   const [cooldownMins, setCooldownMins] = useState(
     initial ? Math.round(initial.cooldown_secs / 60) : 0,
   );
+  // Timed hold: 0 = off (changes stick), N = put things back after N minutes.
+  const [restoreMins, setRestoreMins] = useState(
+    initial?.restore_secs ? Math.max(1, Math.round(initial.restore_secs / 60)) : 0,
+  );
 
   /** Switching the subject can change its reading type; keep the event legal. */
   function pickSubject(key: string) {
@@ -578,24 +594,37 @@ function AutomationEditor({
   const numInput: React.CSSProperties = { ...S.input, width: 72, padding: "0.35rem 0.5rem" };
   const isStay = eventKind === "clear_for" || eventKind === "held_for";
 
-  // One grouped subject picker: Rooms (aggregate occupancy), Sensors, then
-  // device power — TVs & speakers (surfaces only), lights, switches.
+  // One grouped subject picker: Rooms (aggregate occupancy) first, then every
+  // watchable subject — sensors, TVs & speakers (surfaces only), lights,
+  // switches — under its room's header (the shared room-grouped pattern; ids
+  // pre-prefixed to carry the subject kind).
   const subjectOptions = [
     ...rooms
       .filter((r) => r.enabled)
       .map((r) => ({ value: `room:${r.id}`, label: r.name, group: "Rooms" })),
-    ...sensors
-      .filter((s) => s.enabled !== false && !s.shadowed_by)
-      .map((s) => ({ value: `sensor:${s.id}`, label: s.name, group: "Sensors" })),
-    ...media
-      .filter((m) => m.enabled !== false && !m.shadowed_by && !m.companion_of)
-      .map((m) => ({ value: `device:media:${m.id}`, label: m.name, group: "TVs & speakers" })),
-    ...lights
-      .filter((l) => l.enabled !== false)
-      .map((l) => ({ value: `device:light:${l.id}`, label: l.name, group: "Lights (as trigger)" })),
-    ...power
-      .filter((d) => d.enabled !== false)
-      .map((d) => ({ value: `device:power:${d.id}`, label: d.name, group: "Switches (as trigger)" })),
+    ...deviceSelectOptions(
+      [
+        ...sensors
+          .filter((s) => s.enabled !== false && !s.shadowed_by)
+          .map((s) => ({
+            ...s,
+            id: `sensor:${s.id}`,
+            // No reading = it can't fire (disabled at its bridge/hub, or has
+            // never reported) — say so where the rule gets bound.
+            name: s.state.reading == null ? `${s.name} — no signal` : s.name,
+          })),
+        ...media
+          .filter((m) => m.enabled !== false && !m.shadowed_by && !m.companion_of)
+          .map((m) => ({ ...m, id: `device:media:${m.id}` })),
+        ...lights
+          .filter((l) => l.enabled !== false)
+          .map((l) => ({ ...l, id: `device:light:${l.id}` })),
+        ...power
+          .filter((d) => d.enabled !== false)
+          .map((d) => ({ ...d, id: `device:power:${d.id}` })),
+      ],
+      rooms,
+    ),
   ];
   const subjectValue = subject
     ? subject.type === "room"
@@ -668,6 +697,7 @@ function AutomationEditor({
         conditions={conditions}
         gateSensors={gateSensors}
         gateRooms={gateRooms}
+        allRooms={rooms}
         onChange={setConditions}
       />
 
@@ -693,6 +723,25 @@ function AutomationEditor({
         <span style={{ color: T.dim, fontSize: "0.8rem" }}>minutes</span>
       </div>
 
+      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+        <Switch on={restoreMins > 0} onChange={(v) => setRestoreMins(v ? 10 : 0)} />
+        <span style={{ color: restoreMins > 0 ? T.text : T.dim, fontSize: "0.8rem" }}>
+          Put things back after
+        </span>
+        <input
+          type="number"
+          min={1}
+          max={1440}
+          disabled={restoreMins === 0}
+          style={{ ...numInput, opacity: restoreMins === 0 ? 0.5 : 1 }}
+          value={restoreMins || 10}
+          onChange={(e) => setRestoreMins(Math.max(1, Number(e.target.value) || 1))}
+        />
+        <span style={{ color: restoreMins > 0 ? T.text : T.dim, fontSize: "0.8rem" }}>
+          minutes — everything this rule changes returns to how it was
+        </span>
+      </div>
+
       {error && <span style={{ color: T.bad, fontSize: "0.8rem" }}>{error}</span>}
       <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end" }}>
         <Button variant="ghost" onClick={onCancel}>
@@ -711,6 +760,7 @@ function AutomationEditor({
               conditions,
               actions,
               cooldown_secs: cooldownMins * 60,
+              restore_secs: restoreMins > 0 ? restoreMins * 60 : null,
             });
           }}
         >
@@ -727,11 +777,15 @@ function ConditionList({
   conditions,
   gateSensors,
   gateRooms,
+  allRooms,
   onChange,
 }: {
   conditions: RuleCondition[];
   gateSensors: SensorDevice[];
+  /** Rooms offered as occupancy gates (the trigger's own room excluded). */
   gateRooms: Room[];
+  /** Every room — for grouping sensors under their room header. */
+  allRooms: Room[];
   onChange: (c: RuleCondition[]) => void;
 }) {
   const set = (i: number, c: RuleCondition) => onChange(conditions.map((x, j) => (j === i ? c : x)));
@@ -745,10 +799,14 @@ function ConditionList({
     colorScheme: "dark",
   };
 
-  // One grouped gate picker (Rooms' occupancy / Sensors' readings).
+  // One grouped gate picker: Rooms' occupancy first, then sensors under their
+  // room headers (the shared room-grouped pattern).
   const gateOptions = [
     ...gateRooms.map((r) => ({ value: `room:${r.id}`, label: r.name, group: "Rooms" })),
-    ...gateSensors.map((s) => ({ value: `sensor:${s.id}`, label: s.name, group: "Sensors" })),
+    ...deviceSelectOptions(
+      gateSensors.map((s) => ({ ...s, id: `sensor:${s.id}` })),
+      allRooms,
+    ),
   ];
   const numericGate = (id: string) => {
     const k = gateSensors.find((s) => s.id === id)?.kind;
@@ -918,6 +976,74 @@ function ConditionList({
 
 // ── Actions ───────────────────────────────────────────────────────────────────
 
+/** One authored action step, read as a sentence: **[verb] (and clause…) to
+ * [several targets]** — "turn on *and set brightness to 40%* — Office, Desk
+ * lamp". Storage stays one action per target (the backend model is untouched):
+ * rows group stored actions by their verb signature and flatten back on every
+ * edit. `brightness`/`colorHex` are the optional **"and…" clauses** on "turn
+ * on" — clauses compose into ONE command per target (`{on:true, brightness,
+ * color}`), never separate writes, and only "turn on" carries them: a light
+ * won't change color while off, so "set color" without the power verb would
+ * silently do nothing — the sentence always says "turn on and…". */
+type ActionRow = {
+  targets: string[];
+  verb: "on" | "off" | "scene";
+  /** The "and set brightness to N%" clause; only meaningful on `on`. */
+  brightness: number | null;
+  /** The "and set color to ▮" clause (hex); only meaningful on `on`. */
+  colorHex: string | null;
+};
+
+const rowSig = (r: Pick<ActionRow, "verb" | "brightness" | "colorHex">) =>
+  r.verb === "on" ? `on:${r.brightness ?? ""}:${r.colorHex ?? ""}` : r.verb;
+
+function rowsFromActions(actions: RuleAction[]): ActionRow[] {
+  const rows: ActionRow[] = [];
+  for (const a of actions) {
+    let verb: ActionRow["verb"];
+    let brightness: number | null = null;
+    let colorHex: string | null = null;
+    let target: string;
+    if (a.kind === "scene") {
+      verb = "scene";
+      target = `scene:${a.scene_id}`;
+    } else if (a.kind === "power") {
+      verb = a.on ? "on" : "off";
+      target = `power:${a.device_id}`;
+    } else {
+      verb = a.state.on ? "on" : "off";
+      brightness = a.state.brightness ?? null;
+      const c = a.state.color;
+      colorHex = c ? rgbToHex(...xyToRgb(c.x, c.y, c.brightness)) : null;
+      target = a.kind === "room" ? `room:${a.room_id}` : `light:${a.light_id}`;
+    }
+    const next = { verb, brightness, colorHex };
+    const row = rows.find((r) => rowSig(r) === rowSig(next));
+    if (row) row.targets.push(target);
+    else rows.push({ targets: [target], ...next });
+  }
+  return rows;
+}
+
+function actionsFromRows(rows: ActionRow[]): RuleAction[] {
+  return rows.flatMap((r) =>
+    r.targets.map((t): RuleAction => {
+      const sep = t.indexOf(":");
+      const kind = t.slice(0, sep);
+      const id = t.slice(sep + 1);
+      if (kind === "scene") return { kind: "scene", scene_id: id };
+      const on = r.verb !== "off";
+      if (kind === "power") return { kind: "power", device_id: id, on };
+      const state: LightState = { on };
+      if (r.verb === "on" && r.brightness != null) state.brightness = r.brightness;
+      if (r.verb === "on" && r.colorHex) state.color = rgbToXy(...hexToRgb(r.colorHex));
+      return kind === "room"
+        ? { kind: "room", room_id: id, state }
+        : { kind: "light", light_id: id, state };
+    }),
+  );
+}
+
 function ActionList({
   actions,
   rooms,
@@ -933,119 +1059,251 @@ function ActionList({
   scenes: Scene[];
   onChange: (a: RuleAction[]) => void;
 }) {
-  const set = (i: number, a: RuleAction) => onChange(actions.map((x, j) => (j === i ? a : x)));
-  const numInput: React.CSSProperties = { ...S.input, width: 72, padding: "0.35rem 0.5rem" };
-
-  // One grouped target picker: rooms, then lights, switches, scenes.
-  const targetOptions = [
-    ...rooms.filter((r) => r.enabled).map((r) => ({ value: `room:${r.id}`, label: r.name, group: "Rooms" })),
-    ...lights.filter((l) => l.enabled !== false).map((l) => ({ value: `light:${l.id}`, label: l.name, group: "Lights" })),
-    ...power.filter((p) => p.enabled !== false).map((p) => ({ value: `power:${p.id}`, label: p.name, group: "Switches" })),
-    ...scenes.map((s) => ({ value: `scene:${s.id}`, label: s.name, group: "Scenes" })),
-  ];
-
-  const targetOf = (a: RuleAction) =>
-    a.kind === "room"
-      ? `room:${a.room_id}`
-      : a.kind === "light"
-        ? `light:${a.light_id}`
-        : a.kind === "power"
-          ? `power:${a.device_id}`
-          : `scene:${a.scene_id}`;
-
-  const forTarget = (v: string, prev: RuleAction): RuleAction => {
-    const [kind, id] = [v.slice(0, v.indexOf(":")), v.slice(v.indexOf(":") + 1)];
-    const on =
-      prev.kind === "power"
-        ? prev.on
-        : prev.kind === "room" || prev.kind === "light"
-          ? prev.state.on
-          : true;
-    if (kind === "room") return { kind: "room", room_id: id, state: { on } };
-    if (kind === "light") return { kind: "light", light_id: id, state: { on } };
-    if (kind === "power") return { kind: "power", device_id: id, on };
-    return { kind: "scene", scene_id: id };
+  const rows = rowsFromActions(actions);
+  // A new step with no targets yet can't exist in `actions`; it lives here
+  // until its first target is picked, then materializes as a real row.
+  const [draft, setDraft] = useState<Omit<ActionRow, "targets"> | null>(null);
+  const [openPicker, setOpenPicker] = useState<number | null>(null);
+  const numInput: React.CSSProperties = { ...S.input, width: 64, padding: "0.35rem 0.5rem" };
+  const conj: React.CSSProperties = { color: T.dim, fontSize: "0.8rem", whiteSpace: "nowrap" };
+  const swatch: React.CSSProperties = {
+    width: 40,
+    height: 30,
+    padding: 2,
+    cursor: "pointer",
+    border: `1px solid ${alpha(color.text, 0.2)}`,
+    borderRadius: 6,
+    background: "rgba(0,0,0,0.25)",
   };
 
-  /** The on/off/brightness verb for room/light/power actions. */
-  const verbOf = (a: RuleAction) =>
-    a.kind === "scene"
-      ? null
-      : a.kind === "power"
-        ? a.on
-          ? "on"
-          : "off"
-        : a.state.brightness != null
-          ? "dim"
-          : a.state.on
-            ? "on"
-            : "off";
+  // Verb-first grammar: the verb decides what it can act on. Power steps offer
+  // rooms + devices under their room headers (the shared room-grouped pattern);
+  // "apply scene" offers only scenes — scenes are a verb's object, never a
+  // pseudo-device. Clauses only shape the light command, so switches can share
+  // a "turn on and set brightness" step — they simply turn on.
+  const targetOptionsFor = (verb: ActionRow["verb"]) => {
+    if (verb === "scene") {
+      return scenes.map((s) => ({ value: `scene:${s.id}`, label: s.name, group: "Scenes" }));
+    }
+    return [
+      ...rooms
+        .filter((r) => r.enabled)
+        .map((r) => ({ value: `room:${r.id}`, label: r.name, group: "Rooms" })),
+      ...deviceSelectOptions(
+        [
+          ...lights.filter((l) => l.enabled !== false).map((l) => ({ ...l, id: `light:${l.id}` })),
+          ...power.filter((p) => p.enabled !== false).map((p) => ({ ...p, id: `power:${p.id}` })),
+        ],
+        rooms,
+      ),
+    ];
+  };
+  // Summaries resolve against the superset, whatever the row's current verb.
+  const labelOf = new Map(
+    (["on", "scene"] as const).flatMap((v) => targetOptionsFor(v)).map((o) => [o.value, o.label]),
+  );
 
-  const setVerb = (i: number, a: RuleAction, verb: string) => {
-    if (a.kind === "power") {
-      set(i, { ...a, on: verb === "on" });
-      return;
+  const emit = (next: ActionRow[]) => onChange(actionsFromRows(next));
+  const setRow = (i: number, patch: Partial<ActionRow>) => {
+    if (patch.verb && patch.verb !== rows[i].verb) {
+      // A verb change keeps only the targets it can still act on (a scene step
+      // can't drive lamps), and clauses belong to "turn on" alone.
+      const valid = new Set(targetOptionsFor(patch.verb).map((o) => o.value));
+      patch = { ...patch, targets: rows[i].targets.filter((t) => valid.has(t)) };
+      if (patch.verb !== "on") patch = { ...patch, brightness: null, colorHex: null };
     }
-    if (a.kind === "room" || a.kind === "light") {
-      const state = verb === "dim" ? { on: true, brightness: 50 } : { on: verb === "on" };
-      set(i, { ...a, state });
-    }
+    emit(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  };
+  const toggleTarget = (i: number, v: string) =>
+    setRow(i, {
+      targets: rows[i].targets.includes(v)
+        ? rows[i].targets.filter((x) => x !== v)
+        : [...rows[i].targets, v],
+    });
+
+  /** The draft's first pick creates the real row, and the picker follows it. */
+  const draftPick = (v: string) => {
+    if (!draft) return;
+    const next = [...rows, { targets: [v], ...draft }];
+    const merged = rowsFromActions(actionsFromRows(next));
+    setDraft(null);
+    setOpenPicker(merged.findIndex((r) => rowSig(r) === rowSig(draft)));
+    emit(next);
+  };
+
+  const summary = (targets: string[], verb: ActionRow["verb"]) =>
+    targets.length === 0
+      ? verb === "scene"
+        ? "Pick scenes…"
+        : "Pick rooms or devices…"
+      : targets.length === 1
+        ? (labelOf.get(targets[0]) ?? "1 target")
+        : `${labelOf.get(targets[0]) ?? "…"} + ${targets.length - 1} more`;
+
+  const targetBtn: React.CSSProperties = {
+    ...S.input,
+    width: 200,
+    textAlign: "left",
+    cursor: "pointer",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  };
+  const pickerBox: React.CSSProperties = {
+    border: `1px solid ${alpha(color.cyan, 0.25)}`,
+    borderRadius: 8,
+    padding: "0.5rem 0.6rem",
+    background: "rgba(0,0,0,0.25)",
+  };
+
+  const verbSelect = (value: ActionRow["verb"], onPick: (v: ActionRow["verb"]) => void) => (
+    <Select
+      value={value}
+      options={[
+        { value: "on", label: "turn on" },
+        { value: "off", label: "turn off" },
+        { value: "scene", label: "apply scene" },
+      ]}
+      onChange={(v) => onPick(v as ActionRow["verb"])}
+      width={124}
+    />
+  );
+
+  /** The "and…" clause chain after "turn on": each active clause reads as a
+   * sentence fragment with its own quiet remove, and the trailing "and…" menu
+   * chains the next one. Shared verbatim between real rows and the draft. */
+  const clauseChain = (
+    r: Omit<ActionRow, "targets">,
+    set: (patch: Partial<Omit<ActionRow, "targets">>) => void,
+  ) => {
+    if (r.verb !== "on") return null;
+    const clauseX = (clear: () => void) => (
+      <button onClick={clear} title="Remove this clause" style={{ ...ICON_BTN, opacity: 0.45 }}>
+        ✕
+      </button>
+    );
+    return (
+      <>
+        {r.brightness != null && (
+          <>
+            <span style={conj}>and set brightness to</span>
+            <input
+              type="number"
+              min={1}
+              max={100}
+              style={numInput}
+              value={r.brightness}
+              onChange={(e) =>
+                set({ brightness: Math.max(1, Math.min(100, Number(e.target.value) || 1)) })
+              }
+            />
+            <span style={conj}>%</span>
+            {clauseX(() => set({ brightness: null }))}
+          </>
+        )}
+        {r.colorHex != null && (
+          <>
+            <span style={conj}>and set color to</span>
+            <input
+              type="color"
+              value={r.colorHex}
+              onChange={(e) => set({ colorHex: e.target.value })}
+              title="Pick the color"
+              style={swatch}
+            />
+            {clauseX(() => set({ colorHex: null }))}
+          </>
+        )}
+        {(r.brightness == null || r.colorHex == null) && (
+          <Select
+            options={[
+              ...(r.brightness == null
+                ? [{ value: "brightness", label: "set brightness to…" }]
+                : []),
+              ...(r.colorHex == null ? [{ value: "color", label: "set color to…" }] : []),
+            ]}
+            onChange={(v) => set(v === "brightness" ? { brightness: 50 } : { colorHex: "#ffb84d" })}
+            placeholder="and…"
+            width={86}
+            title="Chain another clause onto this step"
+          />
+        )}
+      </>
+    );
   };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem" }}>
-      {actions.map((a, i) => (
-        <div key={i} style={ROW}>
-          <Select value={targetOf(a)} options={targetOptions} onChange={(v) => set(i, forTarget(v, a))} width={180} searchable />
-          {verbOf(a) && (
-            <Select
-              value={verbOf(a)!}
-              options={[
-                { value: "on", label: "turn on" },
-                { value: "off", label: "turn off" },
-                ...(a.kind !== "power" ? [{ value: "dim", label: "set brightness…" }] : []),
-              ]}
-              onChange={(v) => setVerb(i, a, v)}
-              width={150}
-            />
-          )}
-          {(a.kind === "room" || a.kind === "light") && a.state.brightness != null && (
-            <>
-              <input
-                type="number"
-                min={1}
-                max={100}
-                style={numInput}
-                value={a.state.brightness}
-                onChange={(e) =>
-                  set(i, { ...a, state: { on: true, brightness: Math.max(1, Math.min(100, Number(e.target.value) || 1)) } })
-                }
+      {rows.map((r, i) => (
+        <div key={i} style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
+          <div style={ROW}>
+            {verbSelect(r.verb, (v) => setRow(i, { verb: v }))}
+            {clauseChain(r, (patch) => setRow(i, patch))}
+            <button
+              onClick={() => setOpenPicker(openPicker === i ? null : i)}
+              title={
+                r.verb === "scene"
+                  ? "Choose which scenes to apply"
+                  : "Choose which rooms and devices this step drives"
+              }
+              style={targetBtn}
+            >
+              {summary(r.targets, r.verb)}
+            </button>
+            <button
+              onClick={() => emit(rows.filter((_, j) => j !== i))}
+              title="Remove this step"
+              style={ICON_BTN}
+            >
+              ✕
+            </button>
+          </div>
+          {openPicker === i && (
+            <div style={pickerBox}>
+              <OptionCheckList
+                options={targetOptionsFor(r.verb)}
+                selected={r.targets}
+                onToggle={(v) => toggleTarget(i, v)}
               />
-              <span style={{ color: T.dim, fontSize: "0.8rem" }}>%</span>
-            </>
+            </div>
           )}
-          <button onClick={() => onChange(actions.filter((_, j) => j !== i))} title="Remove action" style={ICON_BTN}>
-            ✕
-          </button>
         </div>
       ))}
-      <div style={ROW}>
-        <Button
-          variant="ghost"
-          disabled={targetOptions.length === 0}
-          onClick={() => {
-            const first = rooms.find((r) => r.enabled);
-            onChange([
-              ...actions,
-              first
-                ? { kind: "room", room_id: first.id, state: { on: true } }
-                : { kind: "power", device_id: power[0]?.id ?? "", on: true },
-            ]);
-          }}
-        >
-          + Action
-        </Button>
-      </div>
+
+      {draft && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
+          <div style={ROW}>
+            {verbSelect(draft.verb, (v) =>
+              setDraft({ ...draft, verb: v, ...(v !== "on" ? { brightness: null, colorHex: null } : {}) }),
+            )}
+            {clauseChain(draft, (patch) => setDraft({ ...draft, ...patch }))}
+            <span style={{ ...targetBtn, color: T.faint }}>
+              {draft.verb === "scene" ? "Pick scenes…" : "Pick rooms or devices…"}
+            </span>
+            <button onClick={() => setDraft(null)} title="Discard this step" style={ICON_BTN}>
+              ✕
+            </button>
+          </div>
+          <div style={pickerBox}>
+            <OptionCheckList options={targetOptionsFor(draft.verb)} selected={[]} onToggle={draftPick} />
+          </div>
+        </div>
+      )}
+
+      {!draft && (
+        <div style={ROW}>
+          <Button
+            variant="ghost"
+            disabled={targetOptionsFor("on").length + scenes.length === 0}
+            onClick={() => {
+              setDraft({ verb: "on", brightness: null, colorHex: null });
+              setOpenPicker(null);
+            }}
+          >
+            + Action
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

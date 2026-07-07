@@ -32,6 +32,7 @@ import {
   type LightStatePatch,
   type MediaDevice,
   type PowerDevice,
+  type ControlTarget,
   type Room,
   type RoomControl,
   type Scene,
@@ -49,6 +50,7 @@ import { AlbumArt, MediaEditor, fanMediaCommand } from "../components/MediaContr
 import { InlineSlider } from "../components/InlineSlider";
 import { RestoreHomeButton } from "./Dashboard";
 import { GlyphButton, RoomCard, RoomControlButton, litHexes, roomMembers } from "../components/RoomCard";
+import { OptionCheckList, deviceSelectOptions, type RoomedDevice } from "../components/deviceOptions";
 import { CornerFiligree } from "../components/ornament";
 import { Button, Segmented } from "../components/controls";
 import { Modal, useDialogs, type Dialogs } from "../components/dialogs";
@@ -642,29 +644,6 @@ export function BoardsPage() {
 // Parse an "<w>:<h>" aspect into a grid: `BASE` cells on the longer axis, the
 // shorter axis scaled to keep cells ≈ square. Falls back to 16:9 for junk.
 const GRID_BASE = 48;
-// Group a device list by its room (direct `room_id`, else the inherited
-// provider-group room), so the picker reads room-by-room. Rooms come first in
-// name order; devices with no room fall into a trailing "No room" bucket.
-type RoomedDevice = { id: string; name: string; room_id?: string | null; inherited_room_id?: string | null };
-function groupByRoom<T extends RoomedDevice>(devices: T[], rooms: Room[]): { room: string; devices: T[] }[] {
-  const nameOf = (id?: string | null) => (id ? rooms.find((r) => r.id === id)?.name : undefined);
-  const buckets = new Map<string, T[]>();
-  for (const d of devices) {
-    const key = nameOf(d.room_id) ?? nameOf(d.inherited_room_id) ?? "";
-    (buckets.get(key) ?? buckets.set(key, []).get(key)!).push(d);
-  }
-  return [...buckets.entries()]
-    .sort((a, b) => {
-      if (a[0] === "") return 1; // "No room" last
-      if (b[0] === "") return -1;
-      return a[0].localeCompare(b[0]);
-    })
-    .map(([room, devs]) => ({
-      room: room || "No room",
-      devices: devs.slice().sort((x, y) => x.name.localeCompare(y.name)),
-    }));
-}
-
 // Clamp a widget's box into the current grid, so a widget can never render off
 // the (non-scrolling) canvas — e.g. after the board's aspect ratio changes the
 // row/column count, or a board is opened on a different grid than it was built on.
@@ -678,15 +657,6 @@ function clampWidget(w: Widget, cols: number, rows: number): Widget {
     x: Math.max(0, Math.min(cols - ww, w.x)),
     y: Math.max(0, Math.min(rows - wh, w.y)),
   };
-}
-
-// Room-grouped options for a device `Select` — same room ordering as the
-// checkbox picker, so every device chooser reads room-by-room (with the Select's
-// built-in search box on top).
-function deviceSelectOptions<T extends RoomedDevice>(devices: T[], rooms: Room[]) {
-  return groupByRoom(devices, rooms).flatMap(({ room, devices }) =>
-    devices.map((d) => ({ value: d.id, label: d.name, group: room })),
-  );
 }
 
 function aspectGrid(aspect: string): { ar: number; cols: number; rows: number } {
@@ -2107,7 +2077,6 @@ function WidgetEditorModal({
   // Optional glyph override for the Button widget ("" = auto from the device/domain).
   const [buttonGlyph, setButtonGlyph] = useState<string>((cfg.glyph as string) ?? "");
   // Filter text for the group/button device checkbox list.
-  const [groupQuery, setGroupQuery] = useState("");
 
   // clock / label
   const [clockFormat, setClockFormat] = useState<string>((cfg.format as string) ?? "24h");
@@ -2247,14 +2216,8 @@ function WidgetEditorModal({
             />
           </Field>
           <Field label={type === "button" ? "Device or group (pick one for a single device)" : "Devices"}>
-            <input
-              value={groupQuery}
-              onChange={(e) => setGroupQuery(e.target.value)}
-              placeholder="Search…"
-              style={{ ...INPUT, marginBottom: "0.4rem", fontSize: "0.82rem" }}
-            />
-            <div style={{ maxHeight: 240, overflowY: "auto", display: "flex", flexDirection: "column", gap: "0.1rem" }}>
-              {groupByRoom(
+            <OptionCheckList
+              options={deviceSelectOptions(
                 (groupDomain === "light"
                   ? selLights
                   : groupDomain === "media"
@@ -2263,32 +2226,12 @@ function WidgetEditorModal({
                       ? selPower
                       : [...selLights, ...selMedia, ...selPower]) as RoomedDevice[],
                 rooms,
-              )
-                .map(({ room, devices }) => ({
-                  room,
-                  devices: groupQuery.trim()
-                    ? devices.filter((d) => d.name.toLowerCase().includes(groupQuery.trim().toLowerCase()))
-                    : devices,
-                }))
-                .filter(({ devices }) => devices.length > 0)
-                .map(({ room, devices }) => (
-                <div key={room}>
-                  <div style={ROOM_HEADER}>{room}</div>
-                  {devices.map((d) => (
-                    <label key={d.id} style={CHECK_ROW}>
-                      <input
-                        type="checkbox"
-                        checked={groupIds.includes(d.id)}
-                        onChange={() =>
-                          setGroupIds((cur) => (cur.includes(d.id) ? cur.filter((x) => x !== d.id) : [...cur, d.id]))
-                        }
-                      />
-                      <span style={ELLIPSIS}>{d.name}</span>
-                    </label>
-                  ))}
-                </div>
-              ))}
-            </div>
+              )}
+              selected={groupIds}
+              onToggle={(id) =>
+                setGroupIds((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]))
+              }
+            />
           </Field>
           {type === "button" && (
             <Field label="Icon">
@@ -2510,16 +2453,19 @@ function ControlEditor({
         </Field>
       ) : (
         <Field label="Devices">
-          <div style={{ maxHeight: 180, overflowY: "auto", display: "flex", flexDirection: "column", gap: "0.25rem" }}>
-            {pool.flatMap(({ domain, list }) =>
-              list.map((d) => (
-                <label key={`${domain}:${d.id}`} style={CHECK_ROW}>
-                  <input type="checkbox" checked={has(domain, d.id)} onChange={() => toggleTarget(domain, d.id)} />
-                  <span style={ELLIPSIS}>{d.name}</span>
-                </label>
-              )),
+          <OptionCheckList
+            maxHeight={180}
+            options={pool.flatMap(({ domain, list }) =>
+              list.map((d) => ({ value: `${domain}:${d.id}`, label: d.name })),
             )}
-          </div>
+            selected={pool.flatMap(({ domain, list }) =>
+              list.filter((d) => has(domain, d.id)).map((d) => `${domain}:${d.id}`),
+            )}
+            onToggle={(v) => {
+              const sep = v.indexOf(":");
+              toggleTarget(v.slice(0, sep) as ControlTarget["domain"], v.slice(sep + 1));
+            }}
+          />
         </Field>
       )}
     </>
@@ -2627,21 +2573,4 @@ const GLYPH_OPT: React.CSSProperties = {
   background: T.surface,
   color: T.dim,
   cursor: "pointer",
-};
-const CHECK_ROW: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: "0.5rem",
-  fontSize: "0.82rem",
-  color: T.text,
-  padding: "0.2rem 0.1rem 0.2rem 0.6rem",
-  cursor: "pointer",
-};
-const ROOM_HEADER: React.CSSProperties = {
-  fontSize: "0.64rem",
-  textTransform: "uppercase",
-  letterSpacing: "0.06em",
-  color: T.dim,
-  margin: "0.5rem 0 0.15rem",
-  fontWeight: 600,
 };

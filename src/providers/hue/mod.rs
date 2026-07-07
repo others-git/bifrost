@@ -966,11 +966,14 @@ impl HueProvider {
 
 /// A Hue motion service. Newer firmware nests the reading under
 /// `motion.motion_report.motion`; older firmware uses `motion.motion` — both are
-/// tolerated.
+/// tolerated. `enabled` is the bridge-side sensor toggle (a MotionAware area's
+/// convenience/security halves are toggled independently in the Hue app).
 #[derive(Debug, Deserialize)]
 struct HueMotionResource {
     id: String,
     owner: HueResourceRef,
+    #[serde(default)]
+    enabled: Option<bool>,
     #[serde(default)]
     motion: HueMotionField,
 }
@@ -981,11 +984,18 @@ struct HueMotionField {
     motion: Option<bool>,
     #[serde(default)]
     motion_report: Option<HueMotionReport>,
+    /// `false` = the bridge marks the reading meaningless (sensor disabled,
+    /// area not sensing) — report *unknown*, never a confident "clear".
+    #[serde(default)]
+    motion_valid: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
 struct HueMotionReport {
     motion: bool,
+    /// RFC 3339 timestamp of the last reading change.
+    #[serde(default)]
+    changed: Option<String>,
 }
 
 impl HueMotionField {
@@ -995,16 +1005,35 @@ impl HueMotionField {
             .map(|r| r.motion)
             .or(self.motion)
     }
+
+    fn changed(&self) -> Option<String> {
+        self.motion_report.as_ref().and_then(|r| r.changed.clone())
+    }
 }
 
 /// A MotionAware area configuration (Bridge Pro) — carries the area's name;
 /// the `convenience_area_motion` / `security_area_motion` services point at it
-/// as their owner.
+/// as their owner. The bridge puts the name **top-level** (`name`), not under
+/// `metadata` — both are read, top-level first.
 #[derive(Debug, Deserialize)]
 struct HueMotionAreaConfigResource {
     id: String,
     #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
     metadata: HueMetadata,
+}
+
+impl HueMotionAreaConfigResource {
+    /// The area's display name, trimmed (the bridge pads a trailing space).
+    fn area_name(&self) -> String {
+        self.name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| self.metadata.name.trim())
+            .to_string()
+    }
 }
 
 /// A Hue light-level service. The raw `light_level` is `10000·log10(lux)+1`.
@@ -1027,6 +1056,8 @@ struct HueLightLevelField {
 #[derive(Debug, Deserialize)]
 struct HueLightLevelReport {
     light_level: u32,
+    #[serde(default)]
+    changed: Option<String>,
 }
 
 impl HueLightLevelField {
@@ -1035,6 +1066,12 @@ impl HueLightLevelField {
             .as_ref()
             .map(|r| r.light_level)
             .or(self.light_level)
+    }
+
+    fn changed(&self) -> Option<String> {
+        self.light_level_report
+            .as_ref()
+            .and_then(|r| r.changed.clone())
     }
 }
 
@@ -1063,6 +1100,8 @@ struct HueTemperatureField {
 #[derive(Debug, Deserialize)]
 struct HueTemperatureReport {
     temperature: f64,
+    #[serde(default)]
+    changed: Option<String>,
 }
 
 impl HueTemperatureField {
@@ -1071,6 +1110,12 @@ impl HueTemperatureField {
             .as_ref()
             .map(|r| r.temperature)
             .or(self.temperature)
+    }
+
+    fn changed(&self) -> Option<String> {
+        self.temperature_report
+            .as_ref()
+            .and_then(|r| r.changed.clone())
     }
 }
 
@@ -1081,28 +1126,76 @@ pub fn parse_sensor_from_event(item: &serde_json::Value) -> Option<(String, Sens
     let id = item.get("id")?.as_str()?.to_string();
     match item.get("type")?.as_str()? {
         // MotionAware areas (Bridge Pro) push the same motion payload shape as
-        // a physical motion sensor, just under their own resource types.
+        // a physical motion sensor, just under their own resource types. A
+        // bridge-side disable (or an invalid reading) clears the reading to
+        // unknown rather than leaving a stale confident "clear".
         "motion" | "convenience_area_motion" | "security_area_motion" => {
+            let enabled = item.get("enabled").and_then(serde_json::Value::as_bool);
+            if enabled == Some(false) {
+                return Some((
+                    id,
+                    SensorState {
+                        reading: None,
+                        reachable: Some(true),
+                        changed_at: None,
+                    },
+                ));
+            }
             let f: HueMotionField = serde_json::from_value(item.get("motion")?.clone()).ok()?;
-            Some((id, boolean_state(f.detected()?)))
+            if f.motion_valid == Some(false) {
+                return Some((
+                    id,
+                    SensorState {
+                        reading: None,
+                        reachable: Some(true),
+                        changed_at: None,
+                    },
+                ));
+            }
+            let mut state = boolean_state(f.detected()?);
+            state.changed_at = f.changed();
+            Some((id, state))
         }
         "light_level" => {
             let f: HueLightLevelField = serde_json::from_value(item.get("light")?.clone()).ok()?;
-            Some((id, number_state(hue_light_level_to_lux(f.raw()?))))
+            let mut state = number_state(hue_light_level_to_lux(f.raw()?));
+            state.changed_at = f.changed();
+            Some((id, state))
         }
         "temperature" => {
             let f: HueTemperatureField =
                 serde_json::from_value(item.get("temperature")?.clone()).ok()?;
-            Some((id, number_state(f.celsius()?)))
+            let mut state = number_state(f.celsius()?);
+            state.changed_at = f.changed();
+            Some((id, state))
         }
         _ => None,
     }
+}
+
+/// Sensor state for a motion service: a bridge-side **disabled** sensor or an
+/// **invalid** reading reports `reading: None` (unknown) — the honest value.
+/// A disabled MotionAware convenience sensor otherwise reads as a confident
+/// "clear" forever, which is exactly the trap that binds automations to a
+/// sensor that never fires.
+fn motion_sensor_state(enabled: Option<bool>, f: &HueMotionField) -> SensorState {
+    if enabled == Some(false) || f.motion_valid == Some(false) {
+        return SensorState {
+            reading: None,
+            reachable: Some(true),
+            changed_at: None,
+        };
+    }
+    let mut state = f.detected().map(boolean_state).unwrap_or_default();
+    state.changed_at = f.changed();
+    state
 }
 
 fn boolean_state(on: bool) -> SensorState {
     SensorState {
         reading: Some(SensorReading::Bool(on)),
         reachable: Some(true),
+        changed_at: None,
     }
 }
 
@@ -1110,6 +1203,7 @@ fn number_state(value: f64) -> SensorState {
     SensorState {
         reading: Some(SensorReading::Number(value)),
         reachable: Some(true),
+        changed_at: None,
     }
 }
 
@@ -1229,7 +1323,7 @@ impl SensorProvider for HueProvider {
                 id: Uuid::new_v4(),
                 name: name_of(&m.owner.rid, "motion"),
                 kind: SensorKind::Motion,
-                state: m.motion.detected().map(boolean_state).unwrap_or_default(),
+                state: motion_sensor_state(m.enabled, &m.motion),
                 unit: None,
                 hw_id: hw_of(&m.owner.rid),
                 provider_id: m.id,
@@ -1244,11 +1338,15 @@ impl SensorProvider for HueProvider {
                 id: Uuid::new_v4(),
                 name: name_of(&l.owner.rid, "light level"),
                 kind: SensorKind::Illuminance,
-                state: l
-                    .light
-                    .raw()
-                    .map(|r| number_state(hue_light_level_to_lux(r)))
-                    .unwrap_or_default(),
+                state: {
+                    let mut st = l
+                        .light
+                        .raw()
+                        .map(|r| number_state(hue_light_level_to_lux(r)))
+                        .unwrap_or_default();
+                    st.changed_at = l.light.changed();
+                    st
+                },
                 unit: Some("lx".into()),
                 hw_id: hw_of(&l.owner.rid),
                 provider_id: l.id,
@@ -1263,11 +1361,15 @@ impl SensorProvider for HueProvider {
                 id: Uuid::new_v4(),
                 name: name_of(&t.owner.rid, "temperature"),
                 kind: SensorKind::Temperature,
-                state: t
-                    .temperature
-                    .celsius()
-                    .map(number_state)
-                    .unwrap_or_default(),
+                state: {
+                    let mut st = t
+                        .temperature
+                        .celsius()
+                        .map(number_state)
+                        .unwrap_or_default();
+                    st.changed_at = t.temperature.changed();
+                    st
+                },
                 unit: Some("°C".into()),
                 hw_id: hw_of(&t.owner.rid),
                 provider_id: t.id,
@@ -1285,7 +1387,10 @@ impl SensorProvider for HueProvider {
             .await
             .unwrap_or_default()
             .into_iter()
-            .map(|c| (c.id, c.metadata.name))
+            .map(|c| {
+                let name = c.area_name();
+                (c.id, name)
+            })
             .collect();
         let area_name = |owner: &HueResourceRef, suffix: &str| {
             let base = area_names
@@ -1308,7 +1413,7 @@ impl SensorProvider for HueProvider {
                     id: Uuid::new_v4(),
                     name: area_name(&m.owner, suffix),
                     kind: SensorKind::Motion,
-                    state: m.motion.detected().map(boolean_state).unwrap_or_default(),
+                    state: motion_sensor_state(m.enabled, &m.motion),
                     unit: None,
                     hw_id: None,
                     provider_id: m.id,
@@ -1327,7 +1432,7 @@ impl SensorProvider for HueProvider {
             .ok()
             .and_then(|mut v| v.pop())
         {
-            return Ok(m.motion.detected().map(boolean_state).unwrap_or_default());
+            return Ok(motion_sensor_state(m.enabled, &m.motion));
         }
         for area_path in ["/convenience_area_motion", "/security_area_motion"] {
             if let Some(m) = self
@@ -1336,7 +1441,7 @@ impl SensorProvider for HueProvider {
                 .ok()
                 .and_then(|mut v| v.pop())
             {
-                return Ok(m.motion.detected().map(boolean_state).unwrap_or_default());
+                return Ok(motion_sensor_state(m.enabled, &m.motion));
             }
         }
         if let Some(l) = self
@@ -1345,20 +1450,25 @@ impl SensorProvider for HueProvider {
             .ok()
             .and_then(|mut v| v.pop())
         {
-            return Ok(l
+            let mut st = l
                 .light
                 .raw()
                 .map(|r| number_state(hue_light_level_to_lux(r)))
-                .unwrap_or_default());
+                .unwrap_or_default();
+            st.changed_at = l.light.changed();
+            return Ok(st);
         }
         let mut v = self
             .list_resource::<HueTemperatureResource>(&format!("/temperature/{device_id}"))
             .await?;
         let t = v.pop().context("Hue sensor not found")?;
-        Ok(t.temperature
+        let mut st = t
+            .temperature
             .celsius()
             .map(number_state)
-            .unwrap_or_default())
+            .unwrap_or_default();
+        st.changed_at = t.temperature.changed();
+        Ok(st)
     }
 
     /// Hue rooms/zones containing this sensor's owner device — reuses the light
@@ -2340,21 +2450,29 @@ mod tests {
             )
             .await;
         }
+        // The Bridge Pro puts the area name TOP-LEVEL (and pads a trailing
+        // space); metadata is the spec'd fallback location.
         mount_json(
             &server,
             "/clip/v2/resource/motion_area_configuration",
             serde_json::json!({ "data": [
-                { "id": "area-cfg-1", "metadata": { "name": "Kitchen" } }
+                { "id": "area-cfg-1", "name": "Living Room MotionAware ",
+                  "metadata": { "name": "" } }
             ]}),
         )
         .await;
+        // The convenience half is disabled bridge-side (the Hue app's toggle) —
+        // the live shape that must NOT read as a confident "clear".
         mount_json(
             &server,
             "/clip/v2/resource/convenience_area_motion",
             serde_json::json!({ "data": [
                 { "id": "conv-1", "type": "convenience_area_motion",
                   "owner": {"rid": "area-cfg-1", "rtype": "motion_area_configuration"},
-                  "enabled": true, "motion": { "motion": true } }
+                  "enabled": false,
+                  "motion": { "motion": false,
+                              "motion_report": { "changed": "t", "motion": false },
+                              "motion_valid": false } }
             ]}),
         )
         .await;
@@ -2364,7 +2482,10 @@ mod tests {
             serde_json::json!({ "data": [
                 { "id": "sec-1", "type": "security_area_motion",
                   "owner": {"rid": "area-cfg-1", "rtype": "motion_area_configuration"},
-                  "enabled": true, "motion": { "motion": false } }
+                  "enabled": true,
+                  "motion": { "motion": true,
+                              "motion_report": { "changed": "t", "motion": true },
+                              "motion_valid": true } }
             ]}),
         )
         .await;
@@ -2375,13 +2496,49 @@ mod tests {
         assert_eq!(sensors.len(), 2);
         let conv = sensors.iter().find(|s| s.provider_id == "conv-1").unwrap();
         assert_eq!(conv.kind, SensorKind::Motion);
-        assert_eq!(conv.name, "Kitchen motion");
-        assert!(conv.state.is_detecting());
+        assert_eq!(conv.name, "Living Room MotionAware motion"); // top-level name, trimmed
+        // Disabled + invalid ⇒ unknown, never "clear".
+        assert_eq!(conv.state.reading, None);
+        assert_eq!(conv.state.reachable, Some(true));
         // A virtual area has no MAC — it must not enter hw_id de-dup.
         assert!(conv.hw_id.is_none());
         let sec = sensors.iter().find(|s| s.provider_id == "sec-1").unwrap();
-        assert_eq!(sec.name, "Kitchen security motion");
-        assert!(!sec.state.is_detecting());
+        assert_eq!(sec.name, "Living Room MotionAware security motion");
+        assert!(sec.state.is_detecting());
+        // The report's change stamp rides along for the UI's "last changed".
+        assert_eq!(sec.state.changed_at.as_deref(), Some("t"));
+    }
+
+    #[test]
+    fn area_config_name_prefers_top_level_and_falls_back_to_metadata() {
+        let top: HueMotionAreaConfigResource = serde_json::from_value(serde_json::json!(
+            { "id": "a", "name": "Kitchen ", "metadata": { "name": "ignored" } }
+        ))
+        .unwrap();
+        assert_eq!(top.area_name(), "Kitchen");
+        let fallback: HueMotionAreaConfigResource = serde_json::from_value(serde_json::json!(
+            { "id": "a", "metadata": { "name": "Hall" } }
+        ))
+        .unwrap();
+        assert_eq!(fallback.area_name(), "Hall");
+    }
+
+    #[test]
+    fn parse_sensor_from_event_clears_reading_on_disable_or_invalid() {
+        // A bridge-side disable event (no usable motion payload) → unknown.
+        let (_, state) = parse_sensor_from_event(&serde_json::json!({
+            "id": "conv-1", "type": "convenience_area_motion", "enabled": false
+        }))
+        .unwrap();
+        assert_eq!(state.reading, None);
+        assert_eq!(state.reachable, Some(true));
+        // An invalid reading (motion_valid false) → unknown, not "clear".
+        let (_, state) = parse_sensor_from_event(&serde_json::json!({
+            "id": "m-1", "type": "motion",
+            "motion": { "motion": false, "motion_valid": false }
+        }))
+        .unwrap();
+        assert_eq!(state.reading, None);
     }
 
     #[test]
@@ -2393,6 +2550,7 @@ mod tests {
         .unwrap();
         assert_eq!(id, "conv-1");
         assert!(state.is_detecting());
+        assert_eq!(state.changed_at.as_deref(), Some("t"));
         let (_, state) = parse_sensor_from_event(&serde_json::json!({
             "id": "sec-1", "type": "security_area_motion", "motion": { "motion": false }
         }))

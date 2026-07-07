@@ -76,18 +76,46 @@ Conditions are checked at the moment the trigger fires; all must hold.
 
 Each action drives the same shared control paths as the UI and voice:
 
-- **A room** — on, off, or a brightness. Room on/off is the *pure power*
-  command: it also stops the room's speakers and switches; a brightness change
-  touches only the lights.
-- **A single light** — on, off, or a brightness.
+- **A room** — on, off, or on with a brightness/colour. Room on/off is the
+  *pure power* command: it also stops the room's speakers and switches; a
+  brightness or colour clause touches only the lights.
+- **A single light** — on, off, or on with a brightness/colour.
 - **A power device** — on or off.
 - **A scene** — apply any saved scene.
 
-A rule can carry several actions; they run in order, best-effort (one
-unreachable device doesn't stop the rest).
+An action step reads as a sentence: a verb (**turn on**, **turn off**, or
+**apply scene**), then its targets — pick several at once from one searchable,
+room-grouped checklist. "Turn on" can chain **"and…" clauses** — *and set
+brightness to 40%*, *and set colour to ▮* — which compose into **one command
+per target**, not separate writes. Clauses only exist on "turn on": a light
+won't change colour while off, so "set colour" without the power verb would
+silently do nothing — the sentence always says it. Switches sharing a clause
+step simply turn on. A rule can carry several steps; they run in order,
+best-effort (one unreachable device doesn't stop the rest).
 
 **Cooldown** ("don't re-run within N minutes") stops rapid re-fires — useful
 for anything triggered by motion in a busy hallway.
+
+**Put things back** — a timed hold: when the rule fires, Bifrost first
+snapshots the current state of everything the actions touch (each light's full
+colour/brightness, each switch's power — room and scene targets expand to
+their member devices), applies the actions, and restores the snapshot after
+the configured time. "Someone's at the door → porch to 100% — put things back
+after 5 minutes" returns the porch to whatever it was, not just "off". A
+re-fire during the hold extends the timer but keeps the original snapshot, and
+holds survive a restart. When **two rules'** holds overlap on the same device,
+the later one inherits the earlier capture — whichever timer runs last, the
+device returns to its true pre-automation state, never to another rule's
+output. (Speakers aren't resumed — playback isn't a state.)
+
+**Manual override wins.** The hold exists to undo what the *automation* did —
+so once anything else changes a held device (the Bifrost UI, the Hue app, a
+wall switch: they all arrive on the same live push streams), that device is
+released from the hold and keeps your change; the rest of the snapshot still
+restores on time. "Motion turned the hall on at 30%, I bumped it to full" —
+the hall stays at full, it doesn't snap off ten minutes later. Detection is
+tolerant of device-side rounding and ignores reachability blips, so only a
+genuine change counts as yours.
 
 ---
 
@@ -126,6 +154,7 @@ act on the device, and watch the decision happen.
 | Movie lighting when the TV wakes | When *BRAVIA* **turns on** · then *Living Room to 20%*, *Hallway off* |
 | Fridge door alarm | When *Fridge contact* **stays open for 5 min** · then *Kitchen light on* (blink your attention) |
 | Dark-day lamp | When *Office lux* **drops below 15** · only *Mon–Fri* *08:00–17:00* · then *Desk lamp on* |
+| Doorbell spotlight | When *Porch motion* **detects motion** · then *Porch at 100%* · **put things back after 5 min** |
 
 ---
 

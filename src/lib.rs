@@ -38,6 +38,10 @@ pub struct AppState {
     /// must not wait for a restart) and the demand pollers leave their idle
     /// nap right away. `Arc` so the pollers can hold it without `AppState`.
     pub automations_changed: std::sync::Arc<tokio::sync::Notify>,
+    /// The automation engine's watch over devices held by a pending timed
+    /// hold: a manual change to one releases it from the hold instead of
+    /// being clobbered at restore time.
+    pub hold_watch: api::automations::HoldWatch,
     cipher: Aes256Gcm,
     /// Non-reversible fingerprint of the derived credential key — for the startup
     /// diagnostic that catches a silently-changed `BIFROST_SECRET`.
@@ -56,6 +60,7 @@ impl AppState {
             instance_id: uuid::Uuid::new_v4().to_string(),
             kiosk_commands: tokio::sync::broadcast::channel(64).0,
             automations_changed: std::sync::Arc::new(tokio::sync::Notify::new()),
+            hold_watch: api::automations::HoldWatch::default(),
         }
     }
 

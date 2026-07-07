@@ -302,6 +302,17 @@ impl AutomationTrigger {
     }
 }
 
+/// One device's pre-fire state, captured for a timed hold ("put things back
+/// after N minutes"). Restores replay through the same shared service fns as
+/// actions. Media members aren't captured — resuming playback is a different
+/// problem than re-applying a state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RestoreEntry {
+    Light { light_id: String, state: LightState },
+    Power { device_id: String, on: bool },
+}
+
 /// A stored automation, as served to clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Automation {
@@ -312,6 +323,10 @@ pub struct Automation {
     pub conditions: Vec<RuleCondition>,
     pub actions: Vec<RuleAction>,
     pub cooldown_secs: u32,
+    /// Timed hold: put everything the actions touched back to its pre-fire
+    /// state after this many seconds. `None` = the changes stick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_secs: Option<u32>,
     /// When the automation last ran (`datetime('now')` UTC), for the UI readout.
     pub last_fired_at: Option<String>,
 }

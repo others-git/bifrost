@@ -17,7 +17,8 @@ use crate::AppState;
 use crate::api::auth::Session;
 use crate::connection::SensorEvent;
 use crate::models::automation::{
-    Automation, AutomationTrigger, RuleAction, RuleCondition, SensorTrigger, TriggerDeviceDomain,
+    Automation, AutomationTrigger, RestoreEntry, RuleAction, RuleCondition, SensorTrigger,
+    TriggerDeviceDomain,
 };
 
 /// The table a device-trigger domain lives in (fixed identifiers — injection-free).
@@ -68,6 +69,7 @@ fn row_to_automation(r: sqlx::sqlite::SqliteRow) -> Automation {
             .unwrap_or_default(),
         actions: serde_json::from_str(&r.get::<String, _>("actions_json")).unwrap_or_default(),
         cooldown_secs: r.get::<i64, _>("cooldown_secs") as u32,
+        restore_secs: r.get::<Option<i64>, _>("restore_secs").map(|v| v as u32),
         last_fired_at: r.get("last_fired_at"),
     }
 }
@@ -95,6 +97,9 @@ pub(crate) struct AutomationBody {
     pub actions: Vec<RuleAction>,
     #[serde(default)]
     pub cooldown_secs: u32,
+    /// Timed hold: put everything back after this many seconds.
+    #[serde(default)]
+    pub restore_secs: Option<u32>,
 }
 
 fn default_true() -> bool {
@@ -194,6 +199,13 @@ async fn validate_body(state: &AppState, body: &AutomationBody) -> Result<(), Sa
             "a stays-for duration must be between 30 seconds and 24 hours".into(),
         ));
     }
+    if let Some(secs) = body.restore_secs
+        && !(30..=24 * 3600).contains(&secs)
+    {
+        return Err(SaveRuleOutcome::BadRequest(
+            "the put-things-back delay must be between 30 seconds and 24 hours".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -212,8 +224,8 @@ pub(crate) async fn create_rule(state: &AppState, body: AutomationBody) -> SaveR
     }
     let id = uuid::Uuid::new_v4().to_string();
     let res = sqlx::query(
-        "INSERT INTO automations (id, sensor_id, name, enabled, trigger_json, conditions_json, actions_json, cooldown_secs)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO automations (id, sensor_id, name, enabled, trigger_json, conditions_json, actions_json, cooldown_secs, restore_secs)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(body.trigger.sensor_id())
@@ -223,6 +235,7 @@ pub(crate) async fn create_rule(state: &AppState, body: AutomationBody) -> SaveR
     .bind(serde_json::to_string(&body.conditions).unwrap_or_else(|_| "[]".into()))
     .bind(actions_json(&body.actions))
     .bind(body.cooldown_secs as i64)
+    .bind(body.restore_secs.map(|v| v as i64))
     .execute(&state.db)
     .await;
     match res {
@@ -247,7 +260,7 @@ pub(crate) async fn update_rule(
     }
     let res = sqlx::query(
         "UPDATE automations SET sensor_id = ?, name = ?, enabled = ?, trigger_json = ?,
-                conditions_json = ?, actions_json = ?, cooldown_secs = ? WHERE id = ?",
+                conditions_json = ?, actions_json = ?, cooldown_secs = ?, restore_secs = ? WHERE id = ?",
     )
     .bind(body.trigger.sensor_id())
     .bind(body.name.trim())
@@ -256,6 +269,7 @@ pub(crate) async fn update_rule(
     .bind(serde_json::to_string(&body.conditions).unwrap_or_else(|_| "[]".into()))
     .bind(actions_json(&body.actions))
     .bind(body.cooldown_secs as i64)
+    .bind(body.restore_secs.map(|v| v as i64))
     .bind(id)
     .execute(&state.db)
     .await;
@@ -598,6 +612,520 @@ async fn conditions_hold(state: &AppState, rule: &Automation) -> bool {
     true
 }
 
+/// The pre-fire snapshot for a timed hold: the current cached state of every
+/// device the rule's actions will touch — room actions expand to the room's
+/// effective light + power members, scene actions to the devices the scene
+/// drives. Deduped (first capture of a device wins). Media members are not
+/// captured: resuming playback isn't re-applying a state.
+async fn snapshot_targets(state: &AppState, actions: &[RuleAction]) -> Vec<RestoreEntry> {
+    let mut seen: std::collections::HashSet<(bool, String)> = std::collections::HashSet::new();
+    let mut light_ids: Vec<String> = Vec::new();
+    let mut power_ids: Vec<String> = Vec::new();
+    let mut want = |is_light: bool, id: String| {
+        if seen.insert((is_light, id.clone())) {
+            if is_light {
+                light_ids.push(id);
+            } else {
+                power_ids.push(id);
+            }
+        }
+    };
+    for action in actions {
+        match action {
+            RuleAction::Light { light_id, .. } => want(true, light_id.clone()),
+            RuleAction::Power { device_id, .. } => want(false, device_id.clone()),
+            RuleAction::Room { room_id, .. } => {
+                for id in crate::api::rooms::effective_member_ids(state, room_id).await {
+                    want(true, id);
+                }
+                for id in crate::api::rooms::effective_power_member_ids(state, room_id).await {
+                    want(false, id);
+                }
+            }
+            RuleAction::Scene { scene_id } => {
+                let lights: Vec<String> =
+                    sqlx::query_scalar("SELECT light_id FROM scene_entries WHERE scene_id = ?")
+                        .bind(scene_id)
+                        .fetch_all(&state.db)
+                        .await
+                        .unwrap_or_default();
+                for id in lights {
+                    want(true, id);
+                }
+                let power: Vec<String> = sqlx::query_scalar(
+                    "SELECT power_device_id FROM scene_power_entries WHERE scene_id = ?",
+                )
+                .bind(scene_id)
+                .fetch_all(&state.db)
+                .await
+                .unwrap_or_default();
+                for id in power {
+                    want(false, id);
+                }
+            }
+        }
+    }
+
+    let mut entries = Vec::new();
+    for id in light_ids {
+        let raw: Option<String> = sqlx::query_scalar("SELECT last_state FROM lights WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+        if let Some(st) =
+            raw.and_then(|s| serde_json::from_str::<crate::models::LightState>(&s).ok())
+        {
+            entries.push(RestoreEntry::Light {
+                light_id: id,
+                state: st,
+            });
+        }
+    }
+    for id in power_ids {
+        let raw: Option<String> =
+            sqlx::query_scalar("SELECT last_state FROM power_devices WHERE id = ?")
+                .bind(&id)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten();
+        if let Some(st) =
+            raw.and_then(|s| serde_json::from_str::<crate::models::power::PowerState>(&s).ok())
+        {
+            entries.push(RestoreEntry::Power {
+                device_id: id,
+                on: st.on,
+            });
+        }
+    }
+    entries
+}
+
+/// The device states already captured by **other rules' pending holds**,
+/// keyed by device. When two holds overlap on a device, only the first
+/// capture saw the true pre-automation state — every later hold must inherit
+/// it, or the final restore replays a mid-automation state (which rule fires
+/// first is arbitrary, so both must converge on the same original).
+async fn pending_hold_entries(
+    state: &AppState,
+) -> std::collections::HashMap<(bool, String), RestoreEntry> {
+    let rows: Vec<String> = sqlx::query_scalar("SELECT snapshot_json FROM automation_restores")
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+    let mut map = std::collections::HashMap::new();
+    for raw in rows {
+        for entry in serde_json::from_str::<Vec<RestoreEntry>>(&raw).unwrap_or_default() {
+            let key = match &entry {
+                RestoreEntry::Light { light_id, .. } => (true, light_id.clone()),
+                RestoreEntry::Power { device_id, .. } => (false, device_id.clone()),
+            };
+            // With inheritance in place every pending copy of a device is the
+            // same original, so first-seen is as good as any.
+            map.entry(key).or_insert(entry);
+        }
+    }
+    map
+}
+
+// ── Manual-override drop-out ─────────────────────────────────────────────────
+//
+// A timed hold exists to undo what the AUTOMATION did. Once something else —
+// a human in the Bifrost UI, the Hue app, a wall switch — changes a held
+// device, the automation's write is no longer the last word, and replaying
+// the stale snapshot at restore time would destroy newer intent. The engine
+// therefore watches every held device on the same push pipelines that keep
+// the UI live and, on a genuine divergence, releases that device from every
+// pending snapshot (the rest of the hold still restores on time).
+//
+// "Genuine" is the hard part: the rule's own writes echo back on those same
+// streams (Hue SSE within a second, poll providers a full snapshot every
+// cycle), so each held device carries a **reference state** — what the device
+// should look like while held, seeded from the cache the shared apply path
+// just wrote. A short grace window after each hold-affecting write lets the
+// provider echo settle into the reference (device-side rounding); after it,
+// only a toleranced divergence counts as manual. Dimensions the reference has
+// never seen adopt fill-only, so a slow first poll can't false-positive.
+
+/// How long provider echoes of a hold-affecting write may keep settling the
+/// reference instead of counting as a manual change.
+const HOLD_GRACE: Duration = Duration::from_secs(15);
+
+enum HoldRef {
+    Light(crate::models::LightState),
+    Power(bool),
+}
+
+struct WatchedHold {
+    grace_until: Instant,
+    reference: HoldRef,
+}
+
+/// The in-memory watch over devices held by pending timed holds, keyed like
+/// snapshot entries: `(is_light, device_row_id)`. Lives on [`AppState`]; the
+/// references are rebuilt from the state cache on restart ([`seed_hold_watch`]).
+#[derive(Default)]
+pub struct HoldWatch {
+    inner: tokio::sync::Mutex<HashMap<(bool, String), WatchedHold>>,
+}
+
+/// (Re)register every device of a snapshot with a fresh reference from the
+/// state cache — call **after** the hold-affecting write (rule actions, a
+/// restore), when the shared apply path has just updated that cache.
+async fn watch_hold_devices(state: &AppState, entries: &[RestoreEntry]) {
+    let grace_until = Instant::now() + HOLD_GRACE;
+    for entry in entries {
+        let (key, reference) = match entry {
+            RestoreEntry::Light { light_id, .. } => {
+                let raw: Option<String> =
+                    sqlx::query_scalar("SELECT last_state FROM lights WHERE id = ?")
+                        .bind(light_id)
+                        .fetch_optional(&state.db)
+                        .await
+                        .ok()
+                        .flatten();
+                let Some(st) =
+                    raw.and_then(|s| serde_json::from_str::<crate::models::LightState>(&s).ok())
+                else {
+                    continue;
+                };
+                ((true, light_id.clone()), HoldRef::Light(st))
+            }
+            RestoreEntry::Power { device_id, .. } => {
+                let raw: Option<String> =
+                    sqlx::query_scalar("SELECT last_state FROM power_devices WHERE id = ?")
+                        .bind(device_id)
+                        .fetch_optional(&state.db)
+                        .await
+                        .ok()
+                        .flatten();
+                let Some(st) = raw.and_then(|s| {
+                    serde_json::from_str::<crate::models::power::PowerState>(&s).ok()
+                }) else {
+                    continue;
+                };
+                ((false, device_id.clone()), HoldRef::Power(st.on))
+            }
+        };
+        state.hold_watch.inner.lock().await.insert(
+            key,
+            WatchedHold {
+                grace_until,
+                reference,
+            },
+        );
+    }
+}
+
+/// Rebuild the watch from the persisted pending holds (references from the
+/// state cache) — holds survive a restart, so their watches must too.
+pub(crate) async fn seed_hold_watch(state: &AppState) {
+    let rows: Vec<String> = sqlx::query_scalar("SELECT snapshot_json FROM automation_restores")
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+    for raw in rows {
+        let entries: Vec<RestoreEntry> = serde_json::from_str(&raw).unwrap_or_default();
+        watch_hold_devices(state, &entries).await;
+    }
+}
+
+/// Whether a pushed light patch genuinely diverges from a held reference —
+/// toleranced so provider rounding (Govee RGB⇄xy, fractional brightness)
+/// can't read as a manual change. A reachability drop is a device going
+/// dark, never human intent, and an off light's attribute echoes are stale
+/// by definition, so only its power edge counts.
+fn light_patch_diverges(
+    reference: &crate::models::LightState,
+    patch: &crate::models::LightStatePatch,
+) -> bool {
+    if patch.reachable == Some(false) {
+        return false;
+    }
+    if let Some(on) = patch.on
+        && on != reference.on
+    {
+        return true;
+    }
+    if !reference.on {
+        return false;
+    }
+    if let (Some(b), Some(rb)) = (patch.brightness, reference.brightness)
+        && (b - rb).abs() > 2.0
+    {
+        return true;
+    }
+    if let (Some(c), Some(rc)) = (patch.color.as_ref(), reference.color.as_ref())
+        && ((c.x - rc.x).abs() > 0.02 || (c.y - rc.y).abs() > 0.02)
+    {
+        return true;
+    }
+    if let (Some(ct), Some(rct)) = (patch.color_temp_mirek, reference.color_temp_mirek)
+        && ct.abs_diff(rct) > 10
+    {
+        return true;
+    }
+    if let (Some(e), Some(re)) = (patch.effect.as_deref(), reference.effect.as_deref()) {
+        let (e_clear, re_clear) = (
+            crate::models::is_clear_effect(e),
+            crate::models::is_clear_effect(re),
+        );
+        if e_clear != re_clear || (!e_clear && e != re) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Adopt patch dimensions the reference hasn't seen yet (fill-only) — a push
+/// provider only echoes the dimensions a write touched, so the first manual
+/// change on an untouched dimension needs a baseline to diverge FROM next time.
+fn fill_reference(
+    reference: &mut crate::models::LightState,
+    patch: &crate::models::LightStatePatch,
+) {
+    if reference.brightness.is_none() {
+        reference.brightness = patch.brightness;
+    }
+    if reference.color.is_none() {
+        reference.color = patch.color.clone();
+    }
+    if reference.color_temp_mirek.is_none() {
+        reference.color_temp_mirek = patch.color_temp_mirek;
+    }
+    if reference.effect.is_none() {
+        reference.effect = patch.effect.clone();
+    }
+}
+
+/// Remove one device from every pending snapshot (a snapshot left empty is
+/// deleted whole). The manual-change release path.
+async fn release_held_device(state: &AppState, is_light: bool, id: &str) {
+    let rows = sqlx::query("SELECT automation_id, snapshot_json FROM automation_restores")
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+    for row in rows {
+        let rule_id: String = row.get("automation_id");
+        let entries: Vec<RestoreEntry> =
+            serde_json::from_str(&row.get::<String, _>("snapshot_json")).unwrap_or_default();
+        let kept: Vec<&RestoreEntry> = entries
+            .iter()
+            .filter(|e| match e {
+                RestoreEntry::Light { light_id, .. } => !(is_light && light_id == id),
+                RestoreEntry::Power { device_id, .. } => is_light || device_id != id,
+            })
+            .collect();
+        if kept.len() == entries.len() {
+            continue;
+        }
+        if kept.is_empty() {
+            let _ = sqlx::query("DELETE FROM automation_restores WHERE automation_id = ?")
+                .bind(&rule_id)
+                .execute(&state.db)
+                .await;
+        } else {
+            let _ = sqlx::query(
+                "UPDATE automation_restores SET snapshot_json = ? WHERE automation_id = ?",
+            )
+            .bind(serde_json::to_string(&kept).unwrap_or_else(|_| "[]".into()))
+            .bind(&rule_id)
+            .execute(&state.db)
+            .await;
+        }
+        tracing::debug!(
+            target: "bifrost::automation",
+            rule = %rule_id,
+            device = %id,
+            light = is_light,
+            "manual change: device released from pending hold",
+        );
+    }
+}
+
+/// A pushed light event vs the hold watch: inside grace it settles the
+/// reference (provider echo); after it, a divergence releases the device.
+pub(crate) async fn observe_hold_light(
+    state: &AppState,
+    light_row_id: &str,
+    patch: &crate::models::LightStatePatch,
+) {
+    observe_hold_light_at(state, light_row_id, patch, Instant::now()).await;
+}
+
+async fn observe_hold_light_at(
+    state: &AppState,
+    light_row_id: &str,
+    patch: &crate::models::LightStatePatch,
+    now: Instant,
+) {
+    {
+        let mut watch = state.hold_watch.inner.lock().await;
+        let key = (true, light_row_id.to_string());
+        let Some(held) = watch.get_mut(&key) else {
+            return;
+        };
+        let HoldRef::Light(reference) = &mut held.reference else {
+            return;
+        };
+        if patch.reachable == Some(false) {
+            return; // a device going dark is never a manual change
+        }
+        if now < held.grace_until {
+            patch.apply_to(reference);
+            return;
+        }
+        if !light_patch_diverges(reference, patch) {
+            fill_reference(reference, patch);
+            return;
+        }
+        watch.remove(&key);
+    }
+    release_held_device(state, true, light_row_id).await;
+}
+
+/// A pushed power event vs the hold watch (power is a plain boolean — exact).
+pub(crate) async fn observe_hold_power(state: &AppState, device_row_id: &str, on: bool) {
+    observe_hold_power_at(state, device_row_id, on, Instant::now()).await;
+}
+
+async fn observe_hold_power_at(state: &AppState, device_row_id: &str, on: bool, now: Instant) {
+    {
+        let mut watch = state.hold_watch.inner.lock().await;
+        let key = (false, device_row_id.to_string());
+        let Some(held) = watch.get_mut(&key) else {
+            return;
+        };
+        let HoldRef::Power(reference) = &mut held.reference else {
+            return;
+        };
+        if now < held.grace_until {
+            *reference = on;
+            return;
+        }
+        if on == *reference {
+            return;
+        }
+        watch.remove(&key);
+    }
+    release_held_device(state, false, device_row_id).await;
+}
+
+/// Schedule (or extend) a rule's timed hold. A re-fire during the hold pushes
+/// `restore_at` out but keeps the **original** snapshot — re-capturing would
+/// snapshot the rule's own triggered state, making the "restore" a no-op.
+async fn schedule_restore(state: &AppState, rule: &Automation, secs: u32) {
+    let modifier = format!("+{secs} seconds");
+    let existing: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM automation_restores WHERE automation_id = ?")
+            .bind(&rule.id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+    if existing.is_some() {
+        let _ = sqlx::query(
+            "UPDATE automation_restores SET restore_at = datetime('now', ?) WHERE automation_id = ?",
+        )
+        .bind(&modifier)
+        .bind(&rule.id)
+        .execute(&state.db)
+        .await;
+        tracing::debug!(target: "bifrost::automation", rule = %rule.id, secs, "hold extended (original snapshot kept)");
+        return;
+    }
+    let mut snapshot = snapshot_targets(state, &rule.actions).await;
+    if snapshot.is_empty() {
+        return; // nothing capturable — nothing to put back
+    }
+    // Overlapping holds: a device another rule's pending hold already captured
+    // keeps that (true pre-automation) state — this rule may only be seeing
+    // the other rule's output.
+    let inherited = pending_hold_entries(state).await;
+    for entry in &mut snapshot {
+        let key = match &*entry {
+            RestoreEntry::Light { light_id, .. } => (true, light_id.clone()),
+            RestoreEntry::Power { device_id, .. } => (false, device_id.clone()),
+        };
+        if let Some(original) = inherited.get(&key) {
+            *entry = original.clone();
+        }
+    }
+    let _ = sqlx::query(
+        "INSERT INTO automation_restores (automation_id, restore_at, snapshot_json)
+         VALUES (?, datetime('now', ?), ?)",
+    )
+    .bind(&rule.id)
+    .bind(&modifier)
+    .bind(serde_json::to_string(&snapshot).unwrap_or_else(|_| "[]".into()))
+    .execute(&state.db)
+    .await;
+    tracing::debug!(target: "bifrost::automation", rule = %rule.id, secs, devices = snapshot.len(), "hold scheduled: state snapshotted");
+}
+
+/// Apply and clear every due timed hold. Runs on the engine tick; persisted in
+/// the DB, so a hold survives a restart.
+pub(crate) async fn apply_due_restores(state: &AppState) {
+    let rows = sqlx::query(
+        "SELECT automation_id, snapshot_json FROM automation_restores
+         WHERE restore_at <= datetime('now')",
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    for row in rows {
+        let rule_id: String = row.get("automation_id");
+        let entries: Vec<RestoreEntry> =
+            serde_json::from_str(&row.get::<String, _>("snapshot_json")).unwrap_or_default();
+        tracing::debug!(target: "bifrost::automation", rule = %rule_id, devices = entries.len(), "hold ended: putting things back");
+        for entry in &entries {
+            match entry {
+                RestoreEntry::Light {
+                    light_id,
+                    state: st,
+                } => {
+                    let _ = crate::api::lights::apply_light_state(state, light_id, st).await;
+                }
+                RestoreEntry::Power { device_id, on } => {
+                    let _ = crate::api::power::apply_power_state(state, device_id, *on).await;
+                }
+            }
+        }
+        let _ = sqlx::query("DELETE FROM automation_restores WHERE automation_id = ?")
+            .bind(&rule_id)
+            .execute(&state.db)
+            .await;
+        // The restore's own writes echo on the push streams like anything
+        // else: devices another rule still holds (overlap inheritance) get a
+        // fresh reference + grace; the rest leave the watch.
+        let still_held = pending_hold_entries(state).await;
+        let mut done = Vec::new();
+        let mut refresh = Vec::new();
+        for entry in entries {
+            let key = match &entry {
+                RestoreEntry::Light { light_id, .. } => (true, light_id.clone()),
+                RestoreEntry::Power { device_id, .. } => (false, device_id.clone()),
+            };
+            if still_held.contains_key(&key) {
+                refresh.push(entry);
+            } else {
+                done.push(key);
+            }
+        }
+        if !done.is_empty() {
+            let mut watch = state.hold_watch.inner.lock().await;
+            for key in done {
+                watch.remove(&key);
+            }
+        }
+        if !refresh.is_empty() {
+            watch_hold_devices(state, &refresh).await;
+        }
+    }
+}
+
 /// Execute a rule's actions through the shared service layer. Best-effort per
 /// action: one failing action is logged and the rest still run.
 pub(crate) async fn execute_rule(state: &AppState, rule: &Automation) {
@@ -608,6 +1136,9 @@ pub(crate) async fn execute_rule(state: &AppState, rule: &Automation) {
         actions = rule.actions.len(),
         "rule fired",
     );
+    if let Some(secs) = rule.restore_secs {
+        schedule_restore(state, rule, secs).await;
+    }
     for action in &rule.actions {
         match action {
             RuleAction::Room { room_id, state: st } => {
@@ -631,6 +1162,24 @@ pub(crate) async fn execute_rule(state: &AppState, rule: &Automation) {
                 let applied = crate::api::scenes::apply_scene_entries(state, scene_id, None).await;
                 tracing::debug!(target: "bifrost::automation", rule = %rule.id, scene = %scene_id, ok = applied.is_some(), "action: scene");
             }
+        }
+    }
+    // Watch the held devices now the shared apply path has written the cache:
+    // the reference is "what the rule left behind", and any later genuine
+    // divergence is a manual change that releases the device from the hold.
+    // (Re-fires re-register — the rule just re-applied its output.)
+    if rule.restore_secs.is_some() {
+        let raw: Option<String> = sqlx::query_scalar(
+            "SELECT snapshot_json FROM automation_restores WHERE automation_id = ?",
+        )
+        .bind(&rule.id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+        if let Some(entries) = raw.and_then(|s| serde_json::from_str::<Vec<RestoreEntry>>(&s).ok())
+        {
+            watch_hold_devices(state, &entries).await;
         }
     }
     let _ = sqlx::query("UPDATE automations SET last_fired_at = datetime('now') WHERE id = ?")
@@ -932,6 +1481,7 @@ pub async fn run_engine(state: Arc<AppState>) {
 
     let mut engine = EngineState::default();
     seed_engine(&state, &mut engine).await;
+    seed_hold_watch(&state).await;
 
     /// One event off any of the pipelines the engine watches.
     enum EngineEvent {
@@ -1002,10 +1552,14 @@ pub async fn run_engine(state: Arc<AppState>) {
                         process_sensor_event(&state, &mut engine, &provider_id, &event).await;
                     }
                     Some(EngineEvent::Light(event)) => {
-                        // A patch without `on` is an attribute change, not a
-                        // power edge. Light events aren't provider-tagged (the
-                        // SSE feed matches them the same way).
-                        if let Some(on) = event.patch.on {
+                        // Light events aren't provider-tagged (the SSE feed
+                        // matches them the same way). Resolve the row once for
+                        // both consumers: the hold watch sees every patch (a
+                        // manual brightness/colour nudge has no `on`), the
+                        // device-trigger path only power edges. Skip the
+                        // lookup when neither can care.
+                        let watching = !state.hold_watch.inner.lock().await.is_empty();
+                        if event.patch.on.is_some() || watching {
                             let row: Option<String> = sqlx::query_scalar(
                                 "SELECT id FROM lights WHERE device_id = ? AND enabled = 1 AND shadowed_by IS NULL",
                             )
@@ -1015,7 +1569,12 @@ pub async fn run_engine(state: Arc<AppState>) {
                             .ok()
                             .flatten();
                             if let Some(id) = row {
-                                process_device_event(&state, &mut engine, TriggerDeviceDomain::Light, &id, on).await;
+                                if watching {
+                                    observe_hold_light(&state, &id, &event.patch).await;
+                                }
+                                if let Some(on) = event.patch.on {
+                                    process_device_event(&state, &mut engine, TriggerDeviceDomain::Light, &id, on).await;
+                                }
                             }
                         }
                     }
@@ -1044,12 +1603,16 @@ pub async fn run_engine(state: Arc<AppState>) {
                         .ok()
                         .flatten();
                         if let Some(id) = row {
+                            observe_hold_power(&state, &id, event.state.on).await;
                             process_device_event(&state, &mut engine, TriggerDeviceDomain::Power, &id, event.state.on).await;
                         }
                     }
                     None => break, // every stream closed — resubscribe
                 },
-                _ = tick.tick() => fire_due_timers(&state, &mut engine).await,
+                _ = tick.tick() => {
+                    fire_due_timers(&state, &mut engine).await;
+                    apply_due_restores(&state).await;
+                }
                 // A rule was created/edited: baseline its subject now (fill-only,
                 // so live readings and armed timers are untouched) — a rule made
                 // mid-flight must fire on the next edge, not after a restart.
@@ -1465,6 +2028,479 @@ mod tests {
         assert!(fired(&state, "r1").await);
     }
 
+    #[tokio::test]
+    async fn timed_hold_snapshots_before_actions_and_restores_after() {
+        let state = test_state().await;
+        sqlx::query(
+            r#"INSERT INTO lights (id, provider_id, device_id, name, capabilities, last_state)
+               VALUES ('l1', 'p', 'bulb-1', 'Desk lamp', '{}', '{"on":true,"brightness":80.0}')"#,
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO automations (id, trigger_json, actions_json, restore_secs)
+             VALUES ('r1', '{\"kind\":\"sensor\",\"sensor_id\":\"x\",\"event\":{\"kind\":\"became_true\"}}',
+                     '[{\"kind\":\"light\",\"light_id\":\"l1\",\"state\":{\"on\":false}}]', 600)",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let rule = match fetch_rule(&state, "r1").await {
+            SaveRuleOutcome::Ok(r) => r,
+            _ => unreachable!(),
+        };
+
+        execute_rule(&state, &rule).await;
+        // The pre-fire state (on at 80%) was captured before the off action.
+        let snap: String = sqlx::query_scalar(
+            "SELECT snapshot_json FROM automation_restores WHERE automation_id = 'r1'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert!(
+            snap.contains("80"),
+            "snapshot must hold the pre-fire brightness: {snap}"
+        );
+
+        // A re-fire during the hold keeps the ORIGINAL snapshot (re-capturing
+        // would snapshot the rule's own triggered state).
+        sqlx::query(r#"UPDATE lights SET last_state = '{"on":false}' WHERE id = 'l1'"#)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        execute_rule(&state, &rule).await;
+        let snap2: String = sqlx::query_scalar(
+            "SELECT snapshot_json FROM automation_restores WHERE automation_id = 'r1'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(snap, snap2, "re-fire must not re-snapshot");
+
+        // Force the hold due; the tick applies it and clears the row.
+        sqlx::query(
+            "UPDATE automation_restores SET restore_at = datetime('now', '-1 seconds') WHERE automation_id = 'r1'",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        apply_due_restores(&state).await;
+        let remaining: Option<String> = sqlx::query_scalar(
+            "SELECT snapshot_json FROM automation_restores WHERE automation_id = 'r1'",
+        )
+        .fetch_optional(&state.db)
+        .await
+        .unwrap();
+        assert!(remaining.is_none(), "an applied hold must be cleared");
+    }
+
+    #[tokio::test]
+    async fn overlapping_holds_inherit_the_first_captured_original() {
+        // Two rules with holds touch the same light. Whichever fires second
+        // only sees the first rule's OUTPUT — it must inherit the first
+        // capture, so the final restore (in either timer order) is the true
+        // pre-automation state.
+        let state = test_state().await;
+        sqlx::query(
+            r#"INSERT INTO lights (id, provider_id, device_id, name, capabilities, last_state)
+               VALUES ('l1', 'p', 'bulb-1', 'Lamp', '{}', '{"on":false}')"#,
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        for (id, action) in [
+            (
+                "rA",
+                r#"[{"kind":"light","light_id":"l1","state":{"on":true}}]"#,
+            ),
+            (
+                "rB",
+                r#"[{"kind":"light","light_id":"l1","state":{"on":true,"brightness":100.0}}]"#,
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO automations (id, trigger_json, actions_json, restore_secs)
+                 VALUES (?, '{\"kind\":\"sensor\",\"sensor_id\":\"x\",\"event\":{\"kind\":\"became_true\"}}', ?, 600)",
+            )
+            .bind(id)
+            .bind(action)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        }
+        let rule = |id: &str| {
+            let state = &state;
+            let id = id.to_string();
+            async move {
+                match fetch_rule(state, &id).await {
+                    SaveRuleOutcome::Ok(r) => r,
+                    _ => unreachable!(),
+                }
+            }
+        };
+
+        // Rule A fires against the true original (off), then its action lands.
+        execute_rule(&state, &rule("rA").await).await;
+        sqlx::query(
+            r#"UPDATE lights SET last_state = '{"on":true,"brightness":40.0}' WHERE id = 'l1'"#,
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        // Rule B fires while A's hold is pending — it sees "on at 40" but must
+        // inherit A's captured "off".
+        execute_rule(&state, &rule("rB").await).await;
+        let snap_b: String = sqlx::query_scalar(
+            "SELECT snapshot_json FROM automation_restores WHERE automation_id = 'rB'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        let entries: Vec<RestoreEntry> = serde_json::from_str(&snap_b).unwrap();
+        assert!(
+            matches!(&entries[0], RestoreEntry::Light { state, .. } if !state.on),
+            "rule B must inherit the true original (off), got: {snap_b}"
+        );
+    }
+
+    fn lstate(json: &str) -> crate::models::LightState {
+        serde_json::from_str(json).unwrap()
+    }
+    fn lpatch(json: &str) -> crate::models::LightStatePatch {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn light_patch_divergence_is_toleranced() {
+        let held = lstate(r#"{"on":true,"brightness":50.0,"color_temp_mirek":300}"#);
+        // A power flip always diverges; a matching power echo never does.
+        assert!(light_patch_diverges(&held, &lpatch(r#"{"on":false}"#)));
+        assert!(!light_patch_diverges(&held, &lpatch(r#"{"on":true}"#)));
+        // Brightness: device rounding stays, a real nudge diverges.
+        assert!(!light_patch_diverges(
+            &held,
+            &lpatch(r#"{"brightness":51.5}"#)
+        ));
+        assert!(light_patch_diverges(
+            &held,
+            &lpatch(r#"{"brightness":80.0}"#)
+        ));
+        // Colour temperature.
+        assert!(!light_patch_diverges(
+            &held,
+            &lpatch(r#"{"color_temp_mirek":305}"#)
+        ));
+        assert!(light_patch_diverges(
+            &held,
+            &lpatch(r#"{"color_temp_mirek":400}"#)
+        ));
+        // A dimension the reference has never seen can't diverge (fill-only).
+        assert!(!light_patch_diverges(
+            &held,
+            &lpatch(r#"{"color":{"x":0.5,"y":0.4,"brightness":0.8}}"#)
+        ));
+        // A reachability drop is a device going dark, not a manual change.
+        assert!(!light_patch_diverges(
+            &held,
+            &lpatch(r#"{"on":false,"reachable":false}"#)
+        ));
+        // An off light's attribute echoes are stale — only its power edge counts.
+        let held_off = lstate(r#"{"on":false,"brightness":50.0}"#);
+        assert!(!light_patch_diverges(
+            &held_off,
+            &lpatch(r#"{"brightness":100.0}"#)
+        ));
+        assert!(light_patch_diverges(&held_off, &lpatch(r#"{"on":true}"#)));
+    }
+
+    #[test]
+    fn colour_divergence_is_toleranced() {
+        let held = lstate(r#"{"on":true,"color":{"x":0.5,"y":0.4,"brightness":0.8}}"#);
+        assert!(!light_patch_diverges(
+            &held,
+            &lpatch(r#"{"color":{"x":0.51,"y":0.41,"brightness":0.8}}"#)
+        ));
+        assert!(light_patch_diverges(
+            &held,
+            &lpatch(r#"{"color":{"x":0.2,"y":0.7,"brightness":0.8}}"#)
+        ));
+    }
+
+    /// Seed one held light: a pending restore row + its watch entry
+    /// (reference = the cached `last_state`).
+    async fn seed_held_light(state: &AppState, reference: &str) {
+        sqlx::query(
+            "INSERT INTO lights (id, provider_id, device_id, name, capabilities, last_state)
+               VALUES ('l1', 'p', 'bulb-1', 'Lamp', '{}', ?)",
+        )
+        .bind(reference)
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO automations (id, trigger_json, actions_json, restore_secs)
+             VALUES ('r1', '{\"kind\":\"sensor\",\"sensor_id\":\"x\",\"event\":{\"kind\":\"became_true\"}}',
+                     '[]', 600)",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"INSERT INTO automation_restores (automation_id, restore_at, snapshot_json)
+               VALUES ('r1', datetime('now', '+600 seconds'),
+                       '[{"kind":"light","light_id":"l1","state":{"on":false}}]')"#,
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        watch_hold_devices(
+            state,
+            &[RestoreEntry::Light {
+                light_id: "l1".into(),
+                state: lstate(r#"{"on":false}"#),
+            }],
+        )
+        .await;
+    }
+
+    async fn hold_pending(state: &AppState, rule: &str) -> bool {
+        sqlx::query_scalar::<_, String>(
+            "SELECT snapshot_json FROM automation_restores WHERE automation_id = ?",
+        )
+        .bind(rule)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap()
+        .is_some()
+    }
+
+    #[tokio::test]
+    async fn manual_change_releases_a_held_light() {
+        let state = test_state().await;
+        seed_held_light(&state, r#"{"on":true,"brightness":50.0}"#).await;
+        let after_grace = Instant::now() + Duration::from_secs(60);
+
+        // The rule's own poll echo (identical state) keeps the hold.
+        observe_hold_light_at(
+            &state,
+            "l1",
+            &lpatch(r#"{"on":true,"brightness":50.0}"#),
+            after_grace,
+        )
+        .await;
+        assert!(
+            hold_pending(&state, "r1").await,
+            "an echo must not release the hold"
+        );
+
+        // A manual brightness nudge releases the device — and here it was the
+        // snapshot's only entry, so the whole row goes.
+        observe_hold_light_at(&state, "l1", &lpatch(r#"{"brightness":90.0}"#), after_grace).await;
+        assert!(
+            !hold_pending(&state, "r1").await,
+            "a manual change must release the device from the hold"
+        );
+        assert!(
+            state.hold_watch.inner.lock().await.is_empty(),
+            "a released device must leave the watch"
+        );
+    }
+
+    #[tokio::test]
+    async fn echo_within_grace_settles_the_reference() {
+        let state = test_state().await;
+        seed_held_light(&state, r#"{"on":true,"brightness":50.0}"#).await;
+
+        // Inside grace the device's own rounding (49 ≠ 50 beyond tolerance
+        // would be a false release later) merges into the reference…
+        observe_hold_light_at(
+            &state,
+            "l1",
+            &lpatch(r#"{"on":true,"brightness":45.0}"#),
+            Instant::now(),
+        )
+        .await;
+        assert!(
+            hold_pending(&state, "r1").await,
+            "a grace-window echo must never release"
+        );
+
+        // …so the settled value no longer reads as manual after grace.
+        let after_grace = Instant::now() + Duration::from_secs(60);
+        observe_hold_light_at(&state, "l1", &lpatch(r#"{"brightness":45.0}"#), after_grace).await;
+        assert!(
+            hold_pending(&state, "r1").await,
+            "the settled echo value is the reference"
+        );
+    }
+
+    #[tokio::test]
+    async fn unseen_dimension_adopts_then_diverges() {
+        let state = test_state().await;
+        // Reference knows nothing about colour (the rule only touched power).
+        seed_held_light(&state, r#"{"on":true}"#).await;
+        let after_grace = Instant::now() + Duration::from_secs(60);
+
+        // First colour observation is baseline, not a manual change…
+        observe_hold_light_at(
+            &state,
+            "l1",
+            &lpatch(r#"{"color":{"x":0.5,"y":0.4,"brightness":0.8}}"#),
+            after_grace,
+        )
+        .await;
+        assert!(
+            hold_pending(&state, "r1").await,
+            "first sight of a dimension must adopt"
+        );
+
+        // …a later different colour is one.
+        observe_hold_light_at(
+            &state,
+            "l1",
+            &lpatch(r#"{"color":{"x":0.2,"y":0.7,"brightness":0.8}}"#),
+            after_grace,
+        )
+        .await;
+        assert!(
+            !hold_pending(&state, "r1").await,
+            "a colour change past baseline must release"
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_power_flip_releases_only_that_device() {
+        let state = test_state().await;
+        sqlx::query(
+            r#"INSERT INTO power_devices (id, provider_id, device_id, name, kind, last_state)
+               VALUES ('p1', 'p', 'plug-1', 'Plug', 'plug', '{"on":true}')"#,
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO automations (id, trigger_json, actions_json, restore_secs)
+             VALUES ('r1', '{\"kind\":\"sensor\",\"sensor_id\":\"x\",\"event\":{\"kind\":\"became_true\"}}',
+                     '[]', 600)",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        // The snapshot holds a light AND the plug — only the plug is touched.
+        sqlx::query(
+            r#"INSERT INTO automation_restores (automation_id, restore_at, snapshot_json)
+               VALUES ('r1', datetime('now', '+600 seconds'),
+                       '[{"kind":"light","light_id":"l1","state":{"on":false}},
+                         {"kind":"power","device_id":"p1","on":false}]')"#,
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        watch_hold_devices(
+            &state,
+            &[RestoreEntry::Power {
+                device_id: "p1".into(),
+                on: false,
+            }],
+        )
+        .await;
+        let after_grace = Instant::now() + Duration::from_secs(60);
+
+        observe_hold_power_at(&state, "p1", true, after_grace).await; // echo of cached on:true
+        assert!(hold_pending(&state, "r1").await);
+
+        observe_hold_power_at(&state, "p1", false, after_grace).await; // manual flip
+        let snap: String = sqlx::query_scalar(
+            "SELECT snapshot_json FROM automation_restores WHERE automation_id = 'r1'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert!(
+            !snap.contains("p1"),
+            "the flipped plug must leave the snapshot: {snap}"
+        );
+        assert!(
+            snap.contains("l1"),
+            "the untouched light must stay held: {snap}"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_clears_the_devices_watch() {
+        let state = test_state().await;
+        seed_held_light(&state, r#"{"on":true,"brightness":50.0}"#).await;
+        sqlx::query("UPDATE automation_restores SET restore_at = datetime('now', '-1 seconds')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        apply_due_restores(&state).await;
+        assert!(
+            state.hold_watch.inner.lock().await.is_empty(),
+            "a completed restore must stop watching its devices"
+        );
+    }
+
+    #[tokio::test]
+    async fn room_actions_snapshot_the_rooms_members() {
+        let state = test_state().await;
+        sqlx::query("INSERT INTO rooms (id, name) VALUES ('room1', 'Office')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"INSERT INTO lights (id, provider_id, device_id, name, capabilities, last_state)
+               VALUES ('l1', 'p', 'bulb-1', 'Lamp', '{}', '{"on":true,"brightness":40.0}')"#,
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO room_lights (room_id, light_id) VALUES ('room1', 'l1')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"INSERT INTO power_devices (id, provider_id, device_id, name, kind, last_state)
+               VALUES ('p1', 'p', 'switch-1', 'Fan', 'switch', '{"on":true}')"#,
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO room_power_devices (room_id, power_device_id) VALUES ('room1', 'p1')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        let entries = snapshot_targets(
+            &state,
+            &[RuleAction::Room {
+                room_id: "room1".into(),
+                state: crate::models::LightState {
+                    on: false,
+                    ..Default::default()
+                },
+            }],
+        )
+        .await;
+        assert_eq!(
+            entries.len(),
+            2,
+            "room expands to its light + power members"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| matches!(e, RestoreEntry::Light { light_id, .. } if light_id == "l1"))
+        );
+        assert!(entries.iter().any(
+            |e| matches!(e, RestoreEntry::Power { device_id, on: true } if device_id == "p1")
+        ));
+    }
+
     #[test]
     fn cooldown_compares_against_the_utc_stamp() {
         let mk = |last: Option<&str>, cooldown| Automation {
@@ -1478,6 +2514,7 @@ mod tests {
             conditions: vec![],
             actions: vec![],
             cooldown_secs: cooldown,
+            restore_secs: None,
             last_fired_at: last.map(str::to_string),
         };
         let now = chrono::Utc::now();

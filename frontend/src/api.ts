@@ -899,6 +899,8 @@ export type SensorReading = { bool: boolean } | { number: number };
 export interface SensorState {
   reading?: SensorReading;
   reachable?: boolean;
+  /** When the reading last changed (RFC 3339 UTC), if the provider reports it. */
+  changed_at?: string | null;
 }
 
 /** A read-only sensor. Has no controllable surface — only a reading. Rooms
@@ -1008,6 +1010,9 @@ export interface Automation {
   conditions: RuleCondition[];
   actions: RuleAction[];
   cooldown_secs: number;
+  /** Timed hold: put everything the actions touched back after this many
+   * seconds. Null/absent = the changes stick. */
+  restore_secs?: number | null;
   /** UTC "YYYY-MM-DD HH:MM:SS" of the last fire, or null. */
   last_fired_at?: string | null;
 }

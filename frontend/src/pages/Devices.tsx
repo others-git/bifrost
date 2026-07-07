@@ -117,6 +117,8 @@ interface Item {
   /** Sensor only: the sensor kind, so the automations editor can phrase its
    * trigger options (motion vs contact vs numeric thresholds). */
   sensorKind?: SensorDevice["kind"];
+  /** Sensor only: when the reading last changed (RFC 3339 UTC), if reported. */
+  changedAt?: string | null;
 }
 
 const POWER_KIND_LABEL: Record<PowerKind, string> = {
@@ -240,6 +242,7 @@ function sensorItem(s: SensorDevice): Item {
     inheritedRoomId: s.inherited_room_id ?? null,
     readingText: sensorReadingText(s),
     sensorKind: s.kind,
+    changedAt: s.state.changed_at ?? null,
   };
 }
 
@@ -946,6 +949,11 @@ function DeviceCard({
             </DetailRow>
           )}
           <DetailRow label="Status">{statusText}</DetailRow>
+          {item.domain === "sensor" && item.changedAt && (
+            <DetailRow label="Last changed">
+              <span title={item.changedAt}>{new Date(item.changedAt).toLocaleString()}</span>
+            </DetailRow>
+          )}
           {item.domain === "sensor" && (
             <DetailRow label="Automations">
               <button onClick={() => setAutomating(true)} style={detailBtnStyle}>

@@ -1820,6 +1820,18 @@ mod tests {
 
     const MAC: &str = "AA:BB:CC:DD:EE:FF"; // the shared id used by both mocks
 
+    /// Serialize the tests that clear/populate the process-wide LAN IP cache —
+    /// under a parallel run, another test repopulating the cache between this
+    /// test's `clear_lan_ip_cache` and its `set_state` flips the device's LAN
+    /// eligibility mid-test (and a UDP send to a dead port "succeeds", so the
+    /// cloud fallback never triggers).
+    async fn lan_cache_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
+
     /// A LAN transport pointed at a dead port: no device answers a scan, so every
     /// device is LAN-ineligible and control falls through to the cloud.
     fn dead_lan() -> GoveeLanProvider {
@@ -1833,6 +1845,7 @@ mod tests {
         // (didn't answer a scan) is still controllable — its command goes cloud.
         // (No clear_sku_cache: it's a process-wide map shared with the SKU-cache
         // test; this test's unique mock URL + identical SKU make a clear needless.)
+        let _serial = lan_cache_lock().await;
         clear_lan_ip_cache().await;
         let server = MockServer::start().await;
         mount_control_mocks(&server).await;
@@ -1862,6 +1875,7 @@ mod tests {
     #[tokio::test]
     async fn set_state_prefers_lan_when_device_is_on_lan() {
         // A scanned device is controlled over the LAN; the cloud is never touched.
+        let _serial = lan_cache_lock().await;
         clear_lan_ip_cache().await;
         let server = MockServer::start().await;
         mount_control_mocks(&server).await;
@@ -1901,6 +1915,7 @@ mod tests {
     async fn effect_routes_to_cloud_and_errors_without_one() {
         // Dynamic scenes only exist in the cloud catalogue, so an effect on a
         // LAN-only provider (no cloud key) is a clear error, never sent to the LAN.
+        let _serial = lan_cache_lock().await;
         clear_lan_ip_cache().await;
         let mock = spawn_mock_device().await;
         let provider = GoveeProvider::new(None, Some(test_provider(&mock)));
@@ -1927,6 +1942,7 @@ mod tests {
 
     #[tokio::test]
     async fn discover_surfaces_lan_only_device_without_cloud() {
+        let _serial = lan_cache_lock().await;
         clear_lan_ip_cache().await;
         let mock = spawn_mock_device().await;
         let provider = GoveeProvider::new(None, Some(test_provider(&mock)));
@@ -1948,6 +1964,7 @@ mod tests {
         // The same physical device on both transports is one light — the cloud
         // row (richer name/caps) wins, and the LAN address is cached for control.
         // (discover uses fetch_devices directly, not the SKU cache, so no clear.)
+        let _serial = lan_cache_lock().await;
         clear_lan_ip_cache().await;
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -1977,6 +1994,7 @@ mod tests {
     async fn discover_marks_cloud_only_device_as_cloud() {
         // LAN is configured but the device doesn't answer a scan → it's reached
         // (and reported) over the cloud.
+        let _serial = lan_cache_lock().await;
         clear_lan_ip_cache().await;
         let server = MockServer::start().await;
         Mock::given(method("GET"))
