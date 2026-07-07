@@ -10,6 +10,7 @@ import { DevicesPage } from "./pages/Devices";
 import { ScenesPage } from "./pages/Scenes";
 import { RoomsPage } from "./pages/Rooms";
 import { FloorPlanPage } from "./pages/FloorPlan";
+import { AutomationsPage } from "./pages/Automations";
 import { SettingsPage, type AddPrefill } from "./pages/Settings";
 import { S } from "./styles";
 import { color, font, navAurora as NAV_AURORA, alpha } from "./theme";
@@ -19,7 +20,7 @@ import { VoiceFeedback } from "./components/VoiceFeedback";
 import { PushToTalk } from "./components/PushToTalk";
 
 /** Pages reachable from the nav tray. */
-type NavPage = "dashboard" | "boards" | "media" | "devices" | "scenes" | "rooms" | "plan" | "settings";
+type NavPage = "dashboard" | "boards" | "media" | "devices" | "scenes" | "rooms" | "plan" | "automations" | "settings";
 type Page = "loading" | "setup" | "login" | NavPage;
 
 /** True when served inside the Bifrost kiosk WebView (it appends
@@ -67,6 +68,7 @@ const NAV_ITEMS: { id: NavPage; glyph: string; label: string }[] = [
   { id: "scenes", glyph: "✦", label: "Scenes" },
   { id: "rooms", glyph: "⌂", label: "Rooms" },
   { id: "plan", glyph: "▦", label: "Floor Plan" },
+  { id: "automations", glyph: "ϟ", label: "Automations" },
   { id: "settings", glyph: "⚙", label: "Settings" },
 ];
 
@@ -190,6 +192,7 @@ export function App() {
           ) : (
             <FloorPlanPage lights={lights} />
           ))}
+        {page === "automations" && <AutomationsPage />}
         {page === "settings" && (
           <SettingsPage
             onNavigate={(p) => setPage(p)}

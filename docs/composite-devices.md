@@ -152,9 +152,11 @@ owns its volume. Stored on the *source* (`media_devices.receiver_id` +
   re-queries on a timer and reconnects a silently half-open socket), so a frozen
   link can't surface a stale bound-source volume.
 - **Write:** `volume`/`mute` route to the receiver; `power`/`source`/`transport`
-  stay on the source. Powering the source **on** also wakes the receiver and
-  switches it to `receiver_source`. (`MediaCommand::split_for_receiver` /
-  `apply_with_receiver`.)
+  stay on the source. The receiver **mirrors the source's power**: on wakes it
+  and switches it to `receiver_source`, off takes it down too — the bound pair
+  behaves as one appliance, and commands are absolute (never toggles) so a
+  receiver already in the desired state is a no-op.
+  (`MediaCommand::split_for_receiver` / `apply_with_receiver`.)
 
 ---
 

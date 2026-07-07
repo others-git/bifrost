@@ -59,9 +59,17 @@ pub trait DeviceDiscovery: Send + Sync {
     async fn scan(&self, opts: &ScanOptions) -> Result<Vec<DiscoveredDevice>>;
 }
 
-/// Send `payload` once to `target` (a broadcast or multicast address), then
-/// collect every reply datagram until `timeout` elapses. Binds an ephemeral
-/// local port on all interfaces; replies arrive there as unicast, so no
+/// Gap between probe retransmissions inside the listen window.
+const RESEND_GAP: Duration = Duration::from_millis(400);
+
+/// Send `payload` to `target` (a broadcast or multicast address), then collect
+/// every reply datagram until `timeout` elapses. The probe is **retransmitted
+/// up to twice** (~400ms apart) within the window: discovery datagrams are
+/// unacknowledged UDP, and a Wi-Fi device dozing in power-save routinely misses
+/// the first multicast frame — the UPnP spec itself tells control points to
+/// send M-SEARCH more than once. Every consumer dedupes replies by host, so a
+/// device answering each retransmission is harmless. Binds an ephemeral local
+/// port on all interfaces; replies arrive there as unicast, so no
 /// multicast-group membership is needed for the M-SEARCH / probe-and-listen
 /// pattern these providers use.
 pub async fn udp_probe(
@@ -79,6 +87,8 @@ pub async fn udp_probe(
         .context("binding discovery socket")?;
     // Harmless for unicast/multicast sends; required for 255.255.255.255.
     let _ = socket.set_broadcast(true);
+    // The first send is fail-fast (an unreachable network should surface);
+    // retransmissions are best-effort.
     socket
         .send_to(payload, target)
         .await
@@ -87,17 +97,42 @@ pub async fn udp_probe(
     let mut replies = Vec::new();
     let mut buf = [0u8; 2048];
     let deadline = tokio::time::Instant::now() + timeout;
+    let mut resends_left: u8 = 2;
+    let mut next_send = tokio::time::Instant::now() + RESEND_GAP;
     loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
             break;
         }
-        match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
+        // Wake at whichever comes first: the retransmit slot or the deadline.
+        let wake = if resends_left > 0 {
+            next_send.min(deadline)
+        } else {
+            deadline
+        };
+        match tokio::time::timeout(wake - now, socket.recv_from(&mut buf)).await {
             Ok(Ok((n, from))) => replies.push((from, buf[..n].to_vec())),
-            // Socket error or window elapsed — stop collecting.
-            Ok(Err(_)) | Err(_) => break,
+            Ok(Err(_)) => break, // socket error — stop collecting
+            Err(_) => {
+                // This wait segment elapsed: retransmit if that's what we woke
+                // for, otherwise the whole window is done.
+                if resends_left > 0 && tokio::time::Instant::now() >= next_send {
+                    let _ = socket.send_to(payload, target).await;
+                    resends_left -= 1;
+                    next_send = tokio::time::Instant::now() + RESEND_GAP;
+                } else {
+                    break;
+                }
+            }
         }
     }
+    tracing::debug!(
+        target: "bifrost::discover",
+        %target,
+        replies = replies.len(),
+        resends = 2 - resends_left,
+        "udp probe complete",
+    );
     Ok(replies)
 }
 
@@ -186,6 +221,7 @@ impl DeviceDiscovery for SsdpDiscovery {
             opts.timeout.min(MULTICAST_WINDOW),
         )
         .await?;
+        let raw = replies.len();
         let mut seen = HashSet::new();
         let mut out = Vec::new();
         for (_, bytes) in replies {
@@ -205,6 +241,14 @@ impl DeviceDiscovery for SsdpDiscovery {
                 host,
             });
         }
+        tracing::debug!(
+            target: "bifrost::discover",
+            st = self.st,
+            signature = self.signature,
+            raw,
+            matched = out.len(),
+            "ssdp scan",
+        );
         Ok(out)
     }
 }
@@ -240,11 +284,14 @@ fn extra_subnet_bases(base: Ipv4Addr) -> Vec<String> {
         .collect()
 }
 
-/// GET `{base}{path}` for every base in parallel (capped), returning the bases
-/// whose response body satisfies `matches`.
+/// Hit `{base}{path}` for every base in parallel (capped), returning the bases
+/// whose response body satisfies `matches`. `post_body = None` is a GET;
+/// `Some(json)` POSTs that body (for probe endpoints that are RPC-shaped, like
+/// Sony's ScalarWeb).
 async fn http_probe(
     bases: Vec<String>,
     path: &str,
+    post_body: Option<&'static str>,
     per_host_timeout: Duration,
     matches: fn(&str) -> bool,
 ) -> Vec<String> {
@@ -257,7 +304,14 @@ async fn http_probe(
             let client = client.clone();
             let url = format!("{base}{path}");
             async move {
-                let body = client.get(&url).send().await.ok()?.text().await.ok()?;
+                let req = match post_body {
+                    None => client.get(&url),
+                    Some(body) => client
+                        .post(&url)
+                        .header("content-type", "application/json")
+                        .body(body),
+                };
+                let body = req.send().await.ok()?.text().await.ok()?;
                 matches(&body).then_some(base)
             }
         })
@@ -276,6 +330,8 @@ pub struct HttpSweepDiscovery {
     label: &'static str,
     cred_field: &'static str,
     signature: fn(&str) -> bool,
+    /// `None` = GET; `Some(json)` = POST that body (RPC-shaped probe endpoints).
+    post_body: Option<&'static str>,
     /// Injected in tests; `None` = derive the local /24 at runtime.
     bases: Option<Vec<String>>,
 }
@@ -292,12 +348,19 @@ impl HttpSweepDiscovery {
             label,
             cred_field,
             signature,
+            post_body: None,
             bases: None,
         }
     }
 
+    /// Probe by POSTing `body` (JSON) instead of a GET.
+    pub fn post(mut self, body: &'static str) -> Self {
+        self.post_body = Some(body);
+        self
+    }
+
     #[cfg(test)]
-    fn with_bases(mut self, bases: Vec<String>) -> Self {
+    pub(crate) fn with_bases(mut self, bases: Vec<String>) -> Self {
         self.bases = Some(bases);
         self
     }
@@ -324,7 +387,15 @@ impl DeviceDiscovery for HttpSweepDiscovery {
         // Cap per-host wait so a full sweep fits the budget (unused IPs hang to
         // this limit; live ones answer in milliseconds).
         let per_host = opts.timeout.min(Duration::from_millis(600));
-        let hosts = http_probe(bases, self.path, per_host, self.signature).await;
+        let probed = bases.len();
+        let hosts = http_probe(bases, self.path, self.post_body, per_host, self.signature).await;
+        tracing::debug!(
+            target: "bifrost::discover",
+            path = self.path,
+            probed,
+            matched = hosts.len(),
+            "http sweep",
+        );
         Ok(hosts
             .into_iter()
             .map(|base| {
@@ -336,6 +407,45 @@ impl DeviceDiscovery for HttpSweepDiscovery {
                 }
             })
             .collect())
+    }
+}
+
+// ── Union of discoverers ──────────────────────────────────────────────────────
+
+/// Run several discoverers concurrently and merge their results, deduped by
+/// host (first leg wins — order the legs by precision). One leg failing to
+/// probe never hides another's finds: a device that broadcasts *and* answers an
+/// HTTP signature is found even where multicast is broken (container bridge
+/// networking, APs that drop multicast), because the sweep leg still works.
+pub struct UnionDiscovery(Vec<Box<dyn DeviceDiscovery>>);
+
+impl UnionDiscovery {
+    pub fn new(legs: Vec<Box<dyn DeviceDiscovery>>) -> Self {
+        Self(legs)
+    }
+}
+
+#[async_trait]
+impl DeviceDiscovery for UnionDiscovery {
+    async fn scan(&self, opts: &ScanOptions) -> Result<Vec<DiscoveredDevice>> {
+        let results = futures_util::future::join_all(self.0.iter().map(|leg| leg.scan(opts))).await;
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for r in results {
+            match r {
+                Ok(devices) => {
+                    for d in devices {
+                        if seen.insert(d.host.clone()) {
+                            out.push(d);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(target: "bifrost::discover", "union leg could not probe: {e:#}");
+                }
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -359,6 +469,28 @@ mod tests {
 
         let target = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
         let replies = udp_probe(target, b"PING", Duration::from_millis(300))
+            .await
+            .unwrap();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].1, b"PONG");
+    }
+
+    #[tokio::test]
+    async fn udp_probe_retransmits_when_the_first_probe_is_lost() {
+        // The responder swallows the first datagram (a dozing Wi-Fi device) and
+        // only answers the retransmission.
+        let responder = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = responder.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 256];
+            let _ = responder.recv_from(&mut buf).await; // first probe: dropped
+            if let Ok((_, from)) = responder.recv_from(&mut buf).await {
+                let _ = responder.send_to(b"PONG", from).await;
+            }
+        });
+
+        let target = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let replies = udp_probe(target, b"PING", Duration::from_secs(2))
             .await
             .unwrap();
         assert_eq!(replies.len(), 1);
@@ -462,6 +594,70 @@ mod tests {
         assert!(found[0].host.starts_with("127.0.0.1:"));
         assert_eq!(found[0].label.as_deref(), Some("WLED"));
         assert!(found[0].credentials.get("device_ip").is_some());
+    }
+
+    #[tokio::test]
+    async fn http_sweep_post_probes_with_the_body_and_matches_the_response() {
+        // An RPC-shaped probe endpoint (ScalarWeb style): the sweep POSTs the
+        // configured JSON body and matches on the response.
+        let tv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/sony/system"))
+            .and(wiremock::matchers::body_string_contains(
+                "getInterfaceInformation",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"result":[{"productCategory":"tv","productName":"BRAVIA"}],"id":1}"#,
+            ))
+            .mount(&tv)
+            .await;
+
+        let found = HttpSweepDiscovery::new("/sony/system", "Sony Bravia", "host", |b| {
+            b.contains(r#""productCategory":"tv""#)
+        })
+        .post(r#"{"method":"getInterfaceInformation","id":1,"params":[],"version":"1.0"}"#)
+        .with_bases(vec![tv.uri()])
+        .scan(&ScanOptions::new(Duration::from_secs(1)))
+        .await
+        .unwrap();
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].label.as_deref(), Some("Sony Bravia"));
+    }
+
+    /// A stub discovery leg returning fixed hosts (or an error).
+    struct StubLeg(Result<Vec<&'static str>, &'static str>);
+
+    #[async_trait]
+    impl DeviceDiscovery for StubLeg {
+        async fn scan(&self, _opts: &ScanOptions) -> Result<Vec<DiscoveredDevice>> {
+            match &self.0 {
+                Ok(hosts) => Ok(hosts
+                    .iter()
+                    .map(|h| DiscoveredDevice {
+                        host: h.to_string(),
+                        label: None,
+                        credentials: host_credentials("host", h),
+                    })
+                    .collect()),
+                Err(e) => Err(anyhow::anyhow!(*e)),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn union_discovery_merges_legs_dedupes_hosts_and_survives_a_failed_leg() {
+        let union = UnionDiscovery::new(vec![
+            Box::new(StubLeg(Ok(vec!["192.168.1.22", "192.168.1.30"]))),
+            Box::new(StubLeg(Err("multicast unavailable"))), // must not hide the others
+            Box::new(StubLeg(Ok(vec!["192.168.1.22", "192.168.1.40"]))), // dup of leg 1
+        ]);
+        let found = union
+            .scan(&ScanOptions::new(Duration::from_millis(100)))
+            .await
+            .unwrap();
+        let hosts: Vec<&str> = found.iter().map(|d| d.host.as_str()).collect();
+        assert_eq!(hosts, vec!["192.168.1.22", "192.168.1.30", "192.168.1.40"]);
     }
 
     #[tokio::test]

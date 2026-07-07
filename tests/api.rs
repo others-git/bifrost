@@ -4956,6 +4956,91 @@ async fn wait_for_volume_set(recorded: &std::sync::Arc<tokio::sync::Mutex<Vec<St
     false
 }
 
+/// Wait for a specific eISCP command substring to arrive at a mock device.
+async fn wait_for_command(
+    recorded: &std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
+    needle: &str,
+) -> bool {
+    for _ in 0..40 {
+        if recorded.lock().await.iter().any(|c| c.contains(needle)) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    false
+}
+
+#[tokio::test]
+async fn receiver_mirrors_the_bound_sources_power_both_ways() {
+    let (port_s, src_cmds) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let (port_r, rcv_cmds) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let source = add_onkyo_device(&app, &cookie, port_s, "TV Zone", &[]).await;
+    let receiver = add_onkyo_device(
+        &app,
+        &cookie,
+        port_r,
+        "Receiver",
+        std::slice::from_ref(&source),
+    )
+    .await;
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/media/devices/{source}/receiver"),
+            &cookie,
+            &format!(r#"{{"receiver_id":"{receiver}"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // The bound pair is one appliance: power-off on the source takes the
+    // receiver down with it…
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/media/devices/{source}/state"),
+            &cookie,
+            r#"{"power":false}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        wait_for_command(&src_cmds, "PWR00").await,
+        "the source must power off"
+    );
+    assert!(
+        wait_for_command(&rcv_cmds, "PWR00").await,
+        "the receiver must mirror the source's power-off"
+    );
+
+    // …and power-on wakes both.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/media/devices/{source}/state"),
+            &cookie,
+            r#"{"power":true}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        wait_for_command(&src_cmds, "PWR01").await,
+        "the source must power on"
+    );
+    assert!(
+        wait_for_command(&rcv_cmds, "PWR01").await,
+        "the receiver must wake with the source"
+    );
+}
+
 #[tokio::test]
 async fn audio_receiver_binding_crud_and_validation() {
     let (port_s, _) = audio_mock::spawn(audio_mock::receiver_state()).await;
@@ -7530,6 +7615,213 @@ async fn v1_sensors_list_with_key_returns_ok() {
 }
 
 #[tokio::test]
+async fn sensor_rules_require_a_session() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/automations")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn sensor_rule_crud_and_validation() {
+    let ha = ha_remote_mock().await;
+    let (app, prov_id, db) = helpers::test_app_with_ha_db(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    sqlx::query(
+        "INSERT INTO sensor_devices (id, provider_id, device_id, name, kind, last_state)
+         VALUES ('m1', ?, 'binary_sensor.hall', 'Hall motion', 'motion', '{\"reading\":{\"bool\":false}}')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    // A threshold trigger on a motion sensor can never fire — rejected.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "POST",
+            "/api/automations",
+            &cookie,
+            r#"{"trigger":{"kind":"sensor","sensor_id":"m1","event":{"kind":"rose_above","value":5}},
+                "actions":[{"kind":"power","device_id":"p1","on":true}]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // A rule with no actions is rejected.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "POST",
+            "/api/automations",
+            &cookie,
+            r#"{"trigger":{"kind":"sensor","sensor_id":"m1","event":{"kind":"became_true"}},"actions":[]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Happy path: motion → room on, gated to darkness, overnight window.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "POST",
+            "/api/automations",
+            &cookie,
+            r#"{"name":"Hall night light",
+                "trigger":{"kind":"sensor","sensor_id":"m1","event":{"kind":"became_true"}},
+                "conditions":[{"kind":"time_window","start":"21:00","end":"06:00"}],
+                "actions":[{"kind":"room","room_id":"r1","state":{"on":true,"brightness":30}}],
+                "cooldown_secs":60}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let rule = helpers::response_json(resp).await;
+    let rule_id = rule["id"].as_str().unwrap().to_string();
+    assert_eq!(rule["name"], "Hall night light");
+    assert_eq!(rule["trigger"]["kind"], "sensor");
+    assert_eq!(rule["trigger"]["event"]["kind"], "became_true");
+    assert!(rule["last_fired_at"].is_null());
+
+    // Update flips it to a clear-for rule.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/automations/{rule_id}"),
+            &cookie,
+            r#"{"name":"Hall off","enabled":false,
+                "trigger":{"kind":"sensor","sensor_id":"m1","event":{"kind":"clear_for","secs":600}},
+                "actions":[{"kind":"room","room_id":"r1","state":{"on":false}}]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let rule = helpers::response_json(resp).await;
+    assert_eq!(rule["trigger"]["event"]["secs"], 600);
+    assert_eq!(rule["enabled"], false);
+
+    // List reflects the stored rule; delete removes it.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/automations", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(
+        helpers::response_json(resp).await.as_array().unwrap().len(),
+        1
+    );
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_delete(
+            &format!("/api/automations/{rule_id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = app
+        .oneshot(helpers::authed_get("/api/automations", &cookie))
+        .await
+        .unwrap();
+    assert!(
+        helpers::response_json(resp)
+            .await
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn run_automation_executes_actions_immediately() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let ha = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/services/homeassistant/turn_on"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&ha)
+        .await;
+    let (app, prov_id, db) = helpers::test_app_with_ha_db(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    sqlx::query(
+        "INSERT INTO sensor_devices (id, provider_id, device_id, name, kind, last_state)
+         VALUES ('m1', ?, 'binary_sensor.hall', 'Hall motion', 'motion', '{\"reading\":{\"bool\":false}}')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO power_devices (id, provider_id, device_id, name, kind, last_state)
+         VALUES ('p1', ?, 'switch.fan', 'Fan', 'switch', '{\"on\":false}')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO automations (id, sensor_id, trigger_json, actions_json)
+         VALUES ('a1', 'm1', '{\"kind\":\"sensor\",\"sensor_id\":\"m1\",\"event\":{\"kind\":\"became_true\"}}',
+                 '[{\"kind\":\"power\",\"device_id\":\"p1\",\"on\":true}]')",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+
+    // Run now: actions execute (skipping trigger/conditions), last-fired stamps.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/automations/a1/run",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        ha.received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.url.path() == "/api/services/homeassistant/turn_on"),
+        "manual run must reach the power provider"
+    );
+    let stamped: Option<String> =
+        sqlx::query_scalar("SELECT last_fired_at FROM automations WHERE id = 'a1'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert!(stamped.is_some(), "manual run must stamp last_fired_at");
+
+    // Unknown id → 404.
+    let resp = app
+        .oneshot(helpers::authed_post(
+            "/api/automations/nope/run",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn v1_power_without_key_returns_401() {
     let app = helpers::test_app_with_password().await;
     let resp = app
@@ -7990,6 +8282,85 @@ async fn dev_device_raw_returns_ha_attributes() {
     assert_eq!(j["domain"], "climate");
     assert_eq!(j["supported_features"], 1);
     assert_eq!(j["attributes"]["current_temperature"], 19.5);
+}
+
+#[tokio::test]
+async fn dev_event_journal_serves_and_clears_entries() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Off by default → invisible.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/dev/events", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    enable_dev_mode(&app, &cookie).await;
+
+    // Seed the process-wide journal directly (tests install no tracing
+    // subscriber; the layer's capture has its own unit test).
+    bifrost::journal::Journal::global().record(
+        "DEBUG",
+        "bifrost::automation",
+        "rule fired".into(),
+        Default::default(),
+    );
+    bifrost::journal::Journal::global().record(
+        "DEBUG",
+        "bifrost::voice",
+        "heard".into(),
+        Default::default(),
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get(
+            "/api/dev/events?target=bifrost::automation",
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    let entries = body["entries"].as_array().unwrap();
+    // Other parallel tests may journal too — assert on our own entry, not counts.
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["message"] == "rule fired" && e["target"] == "bifrost::automation"),
+        "filtered read must include the automation entry"
+    );
+    assert!(
+        entries.iter().all(|e| e["target"]
+            .as_str()
+            .unwrap()
+            .starts_with("bifrost::automation")),
+        "target filter must exclude other areas"
+    );
+    let last_seq = body["last_seq"].as_u64().unwrap();
+    assert!(last_seq >= 2);
+
+    // The cursor advances past everything already seen.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get(
+            &format!("/api/dev/events?after={last_seq}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    let body = helpers::response_json(resp).await;
+    assert!(body["entries"].as_array().unwrap().is_empty());
+
+    // Clear empties the buffer.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post("/api/dev/events/clear", &cookie, "{}"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 }
 
 #[tokio::test]

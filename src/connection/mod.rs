@@ -479,10 +479,17 @@ async fn media_db_writer_task(
     provider_row_id: String,
     db: SqlitePool,
 ) {
+    let mut last_logged = std::collections::HashMap::new();
     loop {
         match rx.recv().await {
             Ok(event) => {
                 let state_json = serde_json::to_string(&event.state).unwrap_or_default();
+                journal_state_push(
+                    &mut last_logged,
+                    "media",
+                    &event.device_id,
+                    state_json.clone(),
+                );
                 let _ = sqlx::query(
                     "UPDATE media_devices SET last_state = ?, last_seen = datetime('now')
                      WHERE provider_id = ? AND device_id = ?",
@@ -598,10 +605,17 @@ async fn sensor_db_writer_task(
     provider_row_id: String,
     db: SqlitePool,
 ) {
+    let mut last_logged = std::collections::HashMap::new();
     loop {
         match rx.recv().await {
             Ok(event) => {
                 let state_json = serde_json::to_string(&event.state).unwrap_or_default();
+                journal_state_push(
+                    &mut last_logged,
+                    "sensor",
+                    &event.device_id,
+                    state_json.clone(),
+                );
                 let _ = sqlx::query(
                     "UPDATE sensor_devices SET last_state = ?, last_seen = datetime('now')
                      WHERE provider_id = ? AND device_id = ?",
@@ -627,10 +641,17 @@ async fn power_db_writer_task(
     provider_row_id: String,
     db: SqlitePool,
 ) {
+    let mut last_logged = std::collections::HashMap::new();
     loop {
         match rx.recv().await {
             Ok(event) => {
                 let state_json = serde_json::to_string(&event.state).unwrap_or_default();
+                journal_state_push(
+                    &mut last_logged,
+                    "power",
+                    &event.device_id,
+                    state_json.clone(),
+                );
                 let _ = sqlx::query(
                     "UPDATE power_devices SET last_state = ?, last_seen = datetime('now')
                      WHERE provider_id = ? AND device_id = ?",
@@ -732,6 +753,45 @@ impl ConnectionRegistry {
                 state,
                 events,
                 media_events: None,
+                power_events: None,
+                sensor_events: None,
+                tasks: vec![poll_task, db_task],
+            },
+        );
+    }
+
+    /// Spawn the **demand-driven media poller** for an on-demand provider: it
+    /// polls only while an enabled automation watches one of the provider's
+    /// media devices as a trigger input, so a TV turned on with its own remote
+    /// still fires "TV turns on" rules within seconds — and a provider nobody
+    /// watches gets zero background traffic, preserving on-demand semantics.
+    pub fn start_media_demand_polling(
+        &mut self,
+        provider_id: String,
+        provider: Box<dyn MediaProvider>,
+        db: SqlitePool,
+        rules_changed: Arc<tokio::sync::Notify>,
+    ) {
+        let (tx, rx) = broadcast::channel(64);
+        let state = Arc::new(RwLock::new(ConnectionState::Connected {
+            since: Instant::now(),
+            last_event: Instant::now(),
+        }));
+        let poll_task = tokio::spawn(media_demand_poll_loop(
+            provider,
+            provider_id.clone(),
+            db.clone(),
+            tx.clone(),
+            rules_changed,
+        ));
+        let db_task = tokio::spawn(media_db_writer_task(rx, provider_id.clone(), db));
+        let (events, _) = broadcast::channel(1);
+        self.entries.insert(
+            provider_id,
+            ConnectionEntry {
+                state,
+                events,
+                media_events: Some(tx),
                 power_events: None,
                 sensor_events: None,
                 tasks: vec![poll_task, db_task],
@@ -876,11 +936,120 @@ impl Default for ConnectionRegistry {
     }
 }
 
+/// Poll cadence while an automation watches one of the provider's devices.
+const DEMAND_POLL_HOT: Duration = Duration::from_secs(5);
+/// Recheck cadence while nothing watches (no device traffic in this state).
+const DEMAND_POLL_IDLE: Duration = Duration::from_secs(30);
+
+/// The provider's media devices currently watched by an enabled automation's
+/// device trigger: `(row id, provider-native device id)`.
+async fn watched_media_devices(db: &SqlitePool, provider_id: &str) -> Vec<(String, String)> {
+    let rules = sqlx::query_scalar::<_, String>(
+        "SELECT trigger_json FROM automations WHERE enabled = 1 AND sensor_id IS NULL",
+    )
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+    let watched_ids: std::collections::HashSet<String> = rules
+        .iter()
+        .filter_map(|t| {
+            serde_json::from_str::<crate::models::automation::AutomationTrigger>(t).ok()
+        })
+        .filter_map(|t| match t.device() {
+            Some((crate::models::automation::TriggerDeviceDomain::Media, id)) => {
+                Some(id.to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    if watched_ids.is_empty() {
+        return Vec::new();
+    }
+    sqlx::query_as::<_, (String, String)>(
+        "SELECT id, device_id FROM media_devices
+         WHERE provider_id = ? AND enabled = 1 AND shadowed_by IS NULL",
+    )
+    .bind(provider_id)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .filter(|(id, _)| watched_ids.contains(id))
+    .collect()
+}
+
+/// The demand-driven poll loop (see [`ConnectionRegistry::start_media_demand_polling`]):
+/// idle until watched, then tight polling with **changed-only** broadcasts so
+/// the pipeline (DB writer, SSE, automation engine, journal) only sees real
+/// transitions.
+async fn media_demand_poll_loop(
+    provider: Box<dyn crate::providers::MediaProvider>,
+    provider_id: String,
+    db: SqlitePool,
+    tx: broadcast::Sender<MediaEvent>,
+    rules_changed: Arc<tokio::sync::Notify>,
+) {
+    let mut last_sent: HashMap<String, String> = HashMap::new();
+    loop {
+        let watched = watched_media_devices(&db, &provider_id).await;
+        if watched.is_empty() {
+            last_sent.clear(); // a fresh watch re-baselines against live state
+            // Idle costs nothing — and a new rule ends it immediately.
+            tokio::select! {
+                _ = tokio::time::sleep(DEMAND_POLL_IDLE) => {}
+                _ = rules_changed.notified() => {}
+            }
+            continue;
+        }
+        for (_, device_id) in &watched {
+            match provider.get_state(device_id).await {
+                Ok(state) => {
+                    let payload = serde_json::to_string(&state).unwrap_or_default();
+                    if last_sent.get(device_id) != Some(&payload) {
+                        last_sent.insert(device_id.clone(), payload);
+                        let _ = tx.send(MediaEvent {
+                            device_id: device_id.clone(),
+                            state,
+                        });
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(target: "bifrost::events", provider = %provider_id, device = %device_id, "demand poll failed: {e:#}");
+                }
+            }
+        }
+        tokio::time::sleep(DEMAND_POLL_HOT).await;
+    }
+}
+
+/// Journal a device state push, but only when `payload` differs from the last
+/// one seen for this device — heartbeat re-reads and unchanged poll echoes
+/// (Onkyo re-announces its full state every beat) would otherwise flood the
+/// event journal with identical lines. TRACE level: the journal layer captures
+/// `bifrost::events` at TRACE, the console stays quiet at `bifrost=debug`.
+fn journal_state_push(
+    last: &mut std::collections::HashMap<String, String>,
+    domain: &'static str,
+    device_id: &str,
+    payload: String,
+) {
+    if last.get(device_id) == Some(&payload) {
+        return;
+    }
+    tracing::trace!(target: "bifrost::events", domain, device = %device_id, state = %payload, "state push");
+    last.insert(device_id.to_string(), payload);
+}
+
 /// Writes incoming light events to the DB. Runs as a background task alongside each manager.
 async fn db_writer_task(mut rx: broadcast::Receiver<LightEvent>, db: SqlitePool) {
+    let mut last_logged = std::collections::HashMap::new();
     loop {
         match rx.recv().await {
-            Ok(event) => apply_event_to_db(&event, &db).await,
+            Ok(event) => {
+                let payload = serde_json::to_string(&event.patch).unwrap_or_default();
+                journal_state_push(&mut last_logged, "light", &event.device_id, payload);
+                apply_event_to_db(&event, &db).await;
+            }
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 warn!("light event db writer lagged by {n} events");
             }

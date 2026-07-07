@@ -60,6 +60,11 @@ behaviour reads this room-level state rather than any one sensor; the first
 consumer is the wall tablet's display power saving (blank while the room is
 empty, wake on motion — see [Kiosk control](api.md#kiosk-control-apikiosks)).
 
+### Automations
+
+Sensors, room occupancy, and device power can drive **automations** — "when
+this, then that" rules that run in the hub. See [Automations](automations.md).
+
 ### Enable / disable & merge
 
 - **Disable** a room to hide it from control without deleting its setup.
@@ -116,8 +121,9 @@ A **source** device (TV, streamer, console) that has no volume of its own can be
 
 - **Volume & mute** route to the receiver.
 - **Power, input/source, and transport** stay on the source.
-- Powering the source **on** wakes the receiver and switches it to the source's
-  input. (Power-off isn't propagated — the receiver may serve other sources.)
+- The receiver **mirrors the source's power**: powering the source on wakes the
+  receiver and switches it to the source's input; powering the source off takes
+  the receiver down with it — the bound pair behaves as one appliance.
 
 Many sources can bind to one receiver. Configure this on the Devices page; it maps
 to [`PUT /audio/devices/{id}/receiver`](api.md#bind-a-source-to-a-receiver).

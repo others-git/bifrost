@@ -1,0 +1,531 @@
+//! Automations — the "when this, then that" layer. An automation's **trigger
+//! input** is a tagged enum ([`AutomationTrigger`]) so new input kinds
+//! (schedules, device state, …) can join without reshaping storage; the only
+//! kind today is a **sensor event**, which is edge-triggered: it fires on a
+//! state *transition* (motion appearing, a value crossing a threshold), never
+//! on a level, so it can't re-fire every report.
+//! Conditions gate the fire (time window, other sensors' current readings);
+//! actions replay through the **shared service layer** (rooms / lights / power
+//! / scenes) — the same fns behind session, `/api/v1`, and MCP — never a
+//! parallel control path.
+
+use super::sensor::SensorReading;
+use super::{LightState, is_clear_effect};
+use serde::{Deserialize, Serialize};
+
+/// What a rule listens for on its sensor. Boolean triggers suit motion /
+/// occupancy / contact; threshold triggers suit numeric sensors (lux, °C, %).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SensorTrigger {
+    /// The reading flipped to `true` (motion detected, contact opened).
+    BecameTrue,
+    /// The reading flipped to `false` (motion cleared, contact closed).
+    BecameFalse,
+    /// The reading has stayed `false` for `secs` — the "no motion for N
+    /// minutes" trigger. Armed by the falling edge, fired by the engine's
+    /// clock, cancelled by any `true` in between.
+    ClearFor { secs: u32 },
+    /// The reading has stayed `true` for `secs` — the mirror of [`Self::ClearFor`]
+    /// ("door left open ten minutes", "occupied for an hour"). Same timer
+    /// machinery, watching the opposite state.
+    HeldFor { secs: u32 },
+    /// The numeric reading crossed **up** through `value`.
+    RoseAbove { value: f64 },
+    /// The numeric reading crossed **down** through `value`.
+    DroppedBelow { value: f64 },
+}
+
+impl SensorTrigger {
+    /// Whether the `prev → now` transition fires this trigger. Edge-triggered:
+    /// an unknown `prev` (first observation after startup) never fires, so a
+    /// restart can't replay actions for a state that was already true.
+    /// The stay triggers (`ClearFor`/`HeldFor`) never fire here — an edge only
+    /// *arms* their timer ([`Self::arms_stay_timer`]); the engine's clock fires it.
+    pub fn fires(&self, prev: Option<SensorReading>, now: SensorReading) -> bool {
+        match self {
+            SensorTrigger::BecameTrue => {
+                now.as_bool() == Some(true) && prev.and_then(SensorReading::as_bool) == Some(false)
+            }
+            SensorTrigger::BecameFalse => {
+                now.as_bool() == Some(false) && prev.and_then(SensorReading::as_bool) == Some(true)
+            }
+            SensorTrigger::ClearFor { .. } | SensorTrigger::HeldFor { .. } => false,
+            SensorTrigger::RoseAbove { value } => {
+                now.as_number().is_some_and(|n| n > *value)
+                    && prev
+                        .and_then(SensorReading::as_number)
+                        .is_some_and(|p| p <= *value)
+            }
+            SensorTrigger::DroppedBelow { value } => {
+                now.as_number().is_some_and(|n| n < *value)
+                    && prev
+                        .and_then(SensorReading::as_number)
+                        .is_some_and(|p| p >= *value)
+            }
+        }
+    }
+
+    /// The stayed-state timer this trigger describes: the boolean state it
+    /// watches and how long the reading must hold it. `ClearFor` watches
+    /// `false`, `HeldFor` watches `true`; edge triggers have none.
+    pub fn stay_watch(&self) -> Option<(bool, u32)> {
+        match self {
+            SensorTrigger::ClearFor { secs } => Some((false, *secs)),
+            SensorTrigger::HeldFor { secs } => Some((true, *secs)),
+            _ => None,
+        }
+    }
+
+    /// Whether this transition arms the stay timer: the reading just entered
+    /// the watched state (or, with unknown `prev`, is first observed in it).
+    /// Unlike [`Self::fires`], an unknown `prev` **does** arm: after a restart
+    /// with the room already empty, "off after N minutes empty" should still
+    /// eventually run (the actions are idempotent). Returns the watched state
+    /// and the wait.
+    pub fn arms_stay_timer(
+        &self,
+        prev: Option<SensorReading>,
+        now: SensorReading,
+    ) -> Option<(bool, u32)> {
+        let (watched, secs) = self.stay_watch()?;
+        (now.as_bool() == Some(watched) && prev.and_then(SensorReading::as_bool) != Some(watched))
+            .then_some((watched, secs))
+    }
+}
+
+/// An optional gate checked at fire time (not at arm time).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RuleCondition {
+    /// Only fire between `start` and `end` (`"HH:MM"`, server-local). An
+    /// overnight window (`start > end`, e.g. 21:00–06:00) wraps midnight.
+    /// `days` limits it to weekdays (ISO: 0 = Monday … 6 = Sunday); `None` or
+    /// empty = every day. An overnight window belongs to the day it **starts**.
+    TimeWindow {
+        start: String,
+        end: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        days: Option<Vec<u8>>,
+    },
+    /// The Room's aggregate occupancy currently reads `occupied` — the room
+    /// analog of [`Self::SensorIs`] ("only while the office is occupied").
+    RoomIs { room_id: String, occupied: bool },
+    /// Another sensor's current numeric reading is above `value`.
+    SensorAbove { sensor_id: String, value: f64 },
+    /// Another sensor's current numeric reading is below `value` (the classic
+    /// "only when dark" gate on a lux sensor).
+    SensorBelow { sensor_id: String, value: f64 },
+    /// Another boolean sensor currently reads `on`.
+    SensorIs { sensor_id: String, on: bool },
+}
+
+/// Parse `"HH:MM"` into minutes-since-midnight. `None` for malformed input.
+pub fn parse_hhmm(s: &str) -> Option<u16> {
+    let (h, m) = s.split_once(':')?;
+    let h: u16 = h.parse().ok()?;
+    let m: u16 = m.parse().ok()?;
+    (h < 24 && m < 60).then_some(h * 60 + m)
+}
+
+/// Whether `now_min` (minutes since midnight) falls inside the window,
+/// wrapping midnight when `start > end`. An equal start/end means "always"
+/// (a zero-length window would be useless, and the UI can't express it).
+pub fn time_window_contains(start: u16, end: u16, now_min: u16) -> bool {
+    use std::cmp::Ordering;
+    match start.cmp(&end) {
+        Ordering::Equal => true,
+        Ordering::Less => (start..end).contains(&now_min),
+        Ordering::Greater => now_min >= start || now_min < end,
+    }
+}
+
+impl RuleCondition {
+    /// Evaluate against the clock (`now_min` minutes past midnight, `now_day`
+    /// ISO weekday 0 = Monday) and lookups for the other sensors' cached
+    /// readings and Rooms' occupancy. A condition whose sensor/room has no
+    /// reading is **false** (fail closed — better to skip an automation than
+    /// fire it blind); a malformed time window is **true** (fail open — don't
+    /// let a typo silently disable the whole rule).
+    pub fn holds(
+        &self,
+        now_min: u16,
+        now_day: u8,
+        reading_of: impl Fn(&str) -> Option<SensorReading>,
+        occupancy_of: impl Fn(&str) -> Option<bool>,
+    ) -> bool {
+        match self {
+            RuleCondition::TimeWindow { start, end, days } => {
+                match (parse_hhmm(start), parse_hhmm(end)) {
+                    (Some(s), Some(e)) => {
+                        // An overnight window past midnight still belongs to the
+                        // weekday it started on.
+                        let started_yesterday = s > e && now_min < e;
+                        let effective_day = if started_yesterday {
+                            (now_day + 6) % 7
+                        } else {
+                            now_day
+                        };
+                        let day_ok = days
+                            .as_ref()
+                            .is_none_or(|d| d.is_empty() || d.contains(&effective_day));
+                        day_ok && time_window_contains(s, e, now_min)
+                    }
+                    _ => true,
+                }
+            }
+            RuleCondition::RoomIs { room_id, occupied } => {
+                occupancy_of(room_id).is_some_and(|o| o == *occupied)
+            }
+            RuleCondition::SensorAbove { sensor_id, value } => reading_of(sensor_id)
+                .and_then(SensorReading::as_number)
+                .is_some_and(|n| n > *value),
+            RuleCondition::SensorBelow { sensor_id, value } => reading_of(sensor_id)
+                .and_then(SensorReading::as_number)
+                .is_some_and(|n| n < *value),
+            RuleCondition::SensorIs { sensor_id, on } => reading_of(sensor_id)
+                .and_then(SensorReading::as_bool)
+                .is_some_and(|b| b == *on),
+        }
+    }
+}
+
+/// One thing a rule does when it fires. Every variant maps to a shared
+/// service-layer fn — a rule is just another caller, like session/v1/MCP.
+/// (No `PartialEq`: `LightState` deliberately isn't comparable.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RuleAction {
+    /// Drive a whole room (`apply_room_state`): `{on:false}` is a pure power
+    /// command fanning to lights + switches + speakers; a state with light
+    /// attributes (brightness, colour) touches only the lights.
+    Room { room_id: String, state: LightState },
+    /// Drive one light (`apply_light_state`).
+    Light { light_id: String, state: LightState },
+    /// Switch one power device (`apply_power_state`).
+    Power { device_id: String, on: bool },
+    /// Apply a scene (`apply_scene_entries`).
+    Scene { scene_id: String },
+}
+
+impl RuleAction {
+    /// Normalize a stored action: clear-effect tokens in embedded light states
+    /// become `None`, mirroring what the light service does on write.
+    pub fn normalized(mut self) -> Self {
+        if let RuleAction::Room { state, .. } | RuleAction::Light { state, .. } = &mut self
+            && state.effect.as_deref().is_some_and(is_clear_effect)
+        {
+            state.effect = None;
+        }
+        self
+    }
+}
+
+/// Which device table a device trigger watches. The boolean each domain
+/// contributes: a light's `on`, a media device's `power`, a power device's `on`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerDeviceDomain {
+    Light,
+    Media,
+    Power,
+}
+
+/// What starts an automation — the **trigger input**, tagged so more input
+/// kinds (schedules, device state, …) can be added without a schema change.
+/// Today: a sensor event, or a Room's aggregate occupancy making the same
+/// boolean transitions (provider-agnostic — every presence sensor in the room
+/// feeds it, so "room empty for 15 minutes" is one rule however many sensors
+/// the room has).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AutomationTrigger {
+    /// A sensor's reading makes the given edge transition.
+    Sensor {
+        sensor_id: String,
+        event: SensorTrigger,
+    },
+    /// A Room's occupancy (see `rooms::room_occupancy`) makes the given
+    /// **boolean** transition — occupied (`became_true`), empty
+    /// (`became_false`), stays empty (`clear_for`), stays occupied (`held_for`).
+    Room {
+        room_id: String,
+        event: SensorTrigger,
+    },
+    /// A device's power makes the given **boolean** transition — "the TV turns
+    /// on", "the fan has been on for an hour". Watches the same push streams
+    /// that keep the UI live, so a change made on the device itself (the TV's
+    /// own remote) triggers too.
+    Device {
+        domain: TriggerDeviceDomain,
+        device_id: String,
+        event: SensorTrigger,
+    },
+}
+
+impl AutomationTrigger {
+    /// The sensor this trigger listens to, if it's a sensor input — the
+    /// denormalized `automations.sensor_id` lookup column (`None` for other
+    /// input kinds, which the engine matches in code).
+    pub fn sensor_id(&self) -> Option<&str> {
+        match self {
+            AutomationTrigger::Sensor { sensor_id, .. } => Some(sensor_id),
+            _ => None,
+        }
+    }
+
+    /// The room this trigger listens to, if it's a room-occupancy input.
+    pub fn room_id(&self) -> Option<&str> {
+        match self {
+            AutomationTrigger::Room { room_id, .. } => Some(room_id),
+            _ => None,
+        }
+    }
+
+    /// The device this trigger watches, if it's a device-state input.
+    pub fn device(&self) -> Option<(TriggerDeviceDomain, &str)> {
+        match self {
+            AutomationTrigger::Device {
+                domain, device_id, ..
+            } => Some((*domain, device_id)),
+            _ => None,
+        }
+    }
+
+    /// The transition event — every input kind carries one.
+    pub fn event(&self) -> &SensorTrigger {
+        match self {
+            AutomationTrigger::Sensor { event, .. }
+            | AutomationTrigger::Room { event, .. }
+            | AutomationTrigger::Device { event, .. } => event,
+        }
+    }
+}
+
+/// A stored automation, as served to clients.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Automation {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub trigger: AutomationTrigger,
+    pub conditions: Vec<RuleCondition>,
+    pub actions: Vec<RuleAction>,
+    pub cooldown_secs: u32,
+    /// When the automation last ran (`datetime('now')` UTC), for the UI readout.
+    pub last_fired_at: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn b(v: bool) -> SensorReading {
+        SensorReading::Bool(v)
+    }
+    fn n(v: f64) -> SensorReading {
+        SensorReading::Number(v)
+    }
+
+    #[test]
+    fn became_true_fires_only_on_the_rising_edge() {
+        let t = SensorTrigger::BecameTrue;
+        assert!(t.fires(Some(b(false)), b(true)));
+        assert!(!t.fires(Some(b(true)), b(true))); // level, not edge
+        assert!(!t.fires(None, b(true))); // unknown prev: no startup replay
+        assert!(!t.fires(Some(b(false)), b(false)));
+        assert!(!t.fires(Some(n(1.0)), b(true))); // numeric prev is not "false"
+    }
+
+    #[test]
+    fn became_false_fires_only_on_the_falling_edge() {
+        let t = SensorTrigger::BecameFalse;
+        assert!(t.fires(Some(b(true)), b(false)));
+        assert!(!t.fires(Some(b(false)), b(false)));
+        assert!(!t.fires(None, b(false)));
+    }
+
+    #[test]
+    fn threshold_triggers_fire_on_the_crossing_not_the_level() {
+        let up = SensorTrigger::RoseAbove { value: 25.0 };
+        assert!(up.fires(Some(n(24.0)), n(26.0)));
+        assert!(up.fires(Some(n(25.0)), n(25.1))); // from exactly-at counts as below
+        assert!(!up.fires(Some(n(26.0)), n(27.0))); // already above
+        assert!(!up.fires(None, n(30.0)));
+        let down = SensorTrigger::DroppedBelow { value: 20.0 };
+        assert!(down.fires(Some(n(21.0)), n(19.0)));
+        assert!(!down.fires(Some(n(19.0)), n(18.0)));
+    }
+
+    #[test]
+    fn stay_triggers_arm_on_entering_their_watched_state() {
+        let clear = SensorTrigger::ClearFor { secs: 600 };
+        assert_eq!(
+            clear.arms_stay_timer(Some(b(true)), b(false)),
+            Some((false, 600))
+        );
+        assert_eq!(clear.arms_stay_timer(None, b(false)), Some((false, 600))); // startup seed arms
+        assert_eq!(clear.arms_stay_timer(Some(b(false)), b(false)), None); // already armed
+        assert_eq!(clear.arms_stay_timer(Some(b(false)), b(true)), None);
+        assert!(!clear.fires(Some(b(true)), b(false))); // never fires on the edge itself
+
+        // HeldFor is the exact mirror: it watches `true`.
+        let held = SensorTrigger::HeldFor { secs: 300 };
+        assert_eq!(
+            held.arms_stay_timer(Some(b(false)), b(true)),
+            Some((true, 300))
+        );
+        assert_eq!(held.arms_stay_timer(None, b(true)), Some((true, 300)));
+        assert_eq!(held.arms_stay_timer(Some(b(true)), b(true)), None);
+        assert_eq!(held.arms_stay_timer(Some(b(true)), b(false)), None);
+        assert!(!held.fires(Some(b(false)), b(true)));
+
+        // Edge triggers describe no stay timer.
+        assert_eq!(SensorTrigger::BecameTrue.stay_watch(), None);
+    }
+
+    #[test]
+    fn time_window_handles_day_overnight_and_always() {
+        // Daytime window 08:00–17:00.
+        assert!(time_window_contains(480, 1020, 600));
+        assert!(!time_window_contains(480, 1020, 1200));
+        // Overnight window 21:00–06:00 wraps midnight.
+        assert!(time_window_contains(1260, 360, 1380)); // 23:00
+        assert!(time_window_contains(1260, 360, 120)); // 02:00
+        assert!(!time_window_contains(1260, 360, 720)); // noon
+        // Equal start/end = always.
+        assert!(time_window_contains(300, 300, 0));
+    }
+
+    #[test]
+    fn parse_hhmm_accepts_valid_and_rejects_garbage() {
+        assert_eq!(parse_hhmm("06:30"), Some(390));
+        assert_eq!(parse_hhmm("23:59"), Some(1439));
+        assert_eq!(parse_hhmm("24:00"), None);
+        assert_eq!(parse_hhmm("6"), None);
+        assert_eq!(parse_hhmm("aa:bb"), None);
+    }
+
+    #[test]
+    fn conditions_fail_closed_on_missing_sensor_readings() {
+        let cond = RuleCondition::SensorBelow {
+            sensor_id: "lux".into(),
+            value: 20.0,
+        };
+        assert!(cond.holds(0, 0, |_| Some(n(5.0)), |_| None));
+        assert!(!cond.holds(0, 0, |_| Some(n(50.0)), |_| None));
+        assert!(!cond.holds(0, 0, |_| None, |_| None)); // unknown reading never satisfies
+        let is = RuleCondition::SensorIs {
+            sensor_id: "door".into(),
+            on: true,
+        };
+        assert!(is.holds(0, 0, |_| Some(b(true)), |_| None));
+        assert!(!is.holds(0, 0, |_| Some(n(3.0)), |_| None)); // numeric is not a boolean
+    }
+
+    #[test]
+    fn room_is_condition_reads_occupancy_and_fails_closed() {
+        let cond = RuleCondition::RoomIs {
+            room_id: "r1".into(),
+            occupied: false,
+        };
+        assert!(cond.holds(0, 0, |_| None, |_| Some(false)));
+        assert!(!cond.holds(0, 0, |_| None, |_| Some(true)));
+        assert!(!cond.holds(0, 0, |_| None, |_| None)); // no presence sensors → unknown
+    }
+
+    #[test]
+    fn malformed_time_window_fails_open() {
+        let cond = RuleCondition::TimeWindow {
+            start: "9am".into(),
+            end: "17:00".into(),
+            days: None,
+        };
+        assert!(cond.holds(0, 0, |_| None, |_| None));
+    }
+
+    #[test]
+    fn time_window_weekday_filter_tracks_the_starting_day_overnight() {
+        let weekend_evening = RuleCondition::TimeWindow {
+            start: "21:00".into(),
+            end: "06:00".into(),
+            days: Some(vec![5, 6]), // Sat, Sun
+        };
+        // Saturday 23:00 — inside.
+        assert!(weekend_evening.holds(23 * 60, 5, |_| None, |_| None));
+        // Sunday 02:00 — still Saturday's window (it started yesterday).
+        assert!(weekend_evening.holds(2 * 60, 6, |_| None, |_| None));
+        // Monday 02:00 — Sunday's window, still allowed (Sunday is listed).
+        assert!(weekend_evening.holds(2 * 60, 0, |_| None, |_| None));
+        // Wednesday 23:00 — right time, wrong day.
+        assert!(!weekend_evening.holds(23 * 60, 2, |_| None, |_| None));
+        // An empty day list means every day.
+        let daily = RuleCondition::TimeWindow {
+            start: "08:00".into(),
+            end: "17:00".into(),
+            days: Some(vec![]),
+        };
+        assert!(daily.holds(9 * 60, 3, |_| None, |_| None));
+    }
+
+    #[test]
+    fn automation_trigger_tags_the_input_kind() {
+        let t: AutomationTrigger = serde_json::from_str(
+            r#"{"kind":"sensor","sensor_id":"s1","event":{"kind":"became_true"}}"#,
+        )
+        .unwrap();
+        assert_eq!(t.sensor_id(), Some("s1"));
+        assert_eq!(t.room_id(), None);
+        assert_eq!(t.event(), &SensorTrigger::BecameTrue);
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(json.contains(r#""kind":"sensor""#));
+
+        let t: AutomationTrigger = serde_json::from_str(
+            r#"{"kind":"room","room_id":"r1","event":{"kind":"clear_for","secs":900}}"#,
+        )
+        .unwrap();
+        assert_eq!(t.sensor_id(), None); // room rules have no sensor lookup key
+        assert_eq!(t.room_id(), Some("r1"));
+        assert_eq!(t.event().stay_watch(), Some((false, 900)));
+
+        let t: AutomationTrigger = serde_json::from_str(
+            r#"{"kind":"device","domain":"media","device_id":"tv1","event":{"kind":"became_true"}}"#,
+        )
+        .unwrap();
+        assert_eq!(t.sensor_id(), None);
+        assert_eq!(t.device(), Some((TriggerDeviceDomain::Media, "tv1")));
+        assert_eq!(t.event(), &SensorTrigger::BecameTrue);
+        assert!(
+            serde_json::to_string(&t)
+                .unwrap()
+                .contains(r#""domain":"media""#)
+        );
+    }
+
+    #[test]
+    fn trigger_and_action_json_round_trips_snake_case_tags() {
+        let t: SensorTrigger = serde_json::from_str(r#"{"kind":"clear_for","secs":300}"#).unwrap();
+        assert_eq!(t, SensorTrigger::ClearFor { secs: 300 });
+        let a: RuleAction =
+            serde_json::from_str(r#"{"kind":"power","device_id":"p1","on":false}"#).unwrap();
+        assert!(matches!(a, RuleAction::Power { ref device_id, on: false } if device_id == "p1"));
+        let s = serde_json::to_string(&SensorTrigger::RoseAbove { value: 25.5 }).unwrap();
+        assert!(s.contains(r#""kind":"rose_above""#));
+    }
+
+    #[test]
+    fn normalized_clears_effect_tokens_in_embedded_light_states() {
+        let a = RuleAction::Light {
+            light_id: "l1".into(),
+            state: LightState {
+                on: true,
+                effect: Some("no_effect".into()),
+                ..Default::default()
+            },
+        };
+        match a.normalized() {
+            RuleAction::Light { state, .. } => assert_eq!(state.effect, None),
+            _ => unreachable!(),
+        }
+    }
+}

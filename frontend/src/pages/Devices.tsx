@@ -57,6 +57,7 @@ import {
 } from "../api";
 import { Glyph, GlyphGrid, ALL_GLYPH_OPTIONS, powerKindGlyph, mediaKindGlyph, sensorKindGlyph } from "../components/glyphs";
 import { PageHeader, SectionLabel } from "../components/PageHeader";
+import { AutomationsModal } from "../components/Automations";
 import { Switch, Segmented } from "../components/controls";
 import { GenericDevicesSection } from "../components/GenericDevices";
 import type { AddPrefill } from "./Settings";
@@ -113,6 +114,9 @@ interface Item {
   /** Sensor only: the human-readable current reading (e.g. "Detected", "480 lx"),
    * shown as the status line in place of on/off. */
   readingText?: string | null;
+  /** Sensor only: the sensor kind, so the automations editor can phrase its
+   * trigger options (motion vs contact vs numeric thresholds). */
+  sensorKind?: SensorDevice["kind"];
 }
 
 const POWER_KIND_LABEL: Record<PowerKind, string> = {
@@ -235,6 +239,7 @@ function sensorItem(s: SensorDevice): Item {
     roomId: s.room_id ?? null,
     inheritedRoomId: s.inherited_room_id ?? null,
     readingText: sensorReadingText(s),
+    sensorKind: s.kind,
   };
 }
 
@@ -703,6 +708,8 @@ function DeviceCard({
   const [expanded, setExpanded] = useState(false);
   const [picking, setPicking] = useState(false);
   const [roomPicking, setRoomPicking] = useState(false);
+  // Sensor rows: the automations editor modal (rules live in it).
+  const [automating, setAutomating] = useState(false);
   const [receiverPicking, setReceiverPicking] = useState(false);
   const [mergePicking, setMergePicking] = useState(false);
   const [raw, setRaw] = useState<DeviceRaw | null>(null);
@@ -939,6 +946,21 @@ function DeviceCard({
             </DetailRow>
           )}
           <DetailRow label="Status">{statusText}</DetailRow>
+          {item.domain === "sensor" && (
+            <DetailRow label="Automations">
+              <button onClick={() => setAutomating(true)} style={detailBtnStyle}>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem" }}>
+                  <Glyph name="bolt" size={13} /> Configure…
+                </span>
+              </button>
+            </DetailRow>
+          )}
+          {automating && (
+            <AutomationsModal
+              sensor={{ id: item.id, name: item.name, kind: item.sensorKind ?? "generic" }}
+              onClose={() => setAutomating(false)}
+            />
+          )}
           <DetailRow label="Room">
             <button ref={roomBtnRef} onClick={() => setRoomPicking((v) => !v)} style={detailBtnStyle}>
               {roomName ? (isInheritedRoom ? `${roomName} · linked` : roomName) : "Assign…"}
@@ -1020,11 +1042,44 @@ function DeviceCard({
  * state + every attribute (incl. `supported_features`), so unmodelled
  * capabilities are visible at a glance. */
 function RawUpstream({ data }: { data: DeviceRaw }) {
+  const mono = "ui-monospace, SFMono-Regular, Menlo, monospace";
   if (data.note) {
     return <span style={{ color: T.faint, fontSize: "0.76rem" }}>{data.note}</span>;
   }
+  if (data.error) {
+    return (
+      <span style={{ color: T.bad, fontSize: "0.76rem", fontFamily: mono }}>{data.error}</span>
+    );
+  }
+  // Hue: the raw CLIP v2 resource (+ owner) — nested JSON, shown as a dump
+  // rather than the HA-style attribute table.
+  if (data.resource !== undefined) {
+    const dump: React.CSSProperties = {
+      margin: 0,
+      padding: "0.4rem 0.5rem",
+      background: "rgba(0,0,0,0.3)",
+      borderRadius: 6,
+      overflow: "auto",
+      maxHeight: 260,
+      whiteSpace: "pre",
+    };
+    return (
+      <div style={{ fontFamily: mono, fontSize: "0.72rem", display: "flex", flexDirection: "column", gap: 4, maxWidth: 440 }}>
+        <div style={{ color: T.dim }}>
+          {String(data.resource?.type ?? "resource")} ·{" "}
+          <span style={{ color: T.text }}>{data.resource_id}</span>
+        </div>
+        <pre style={dump}>{JSON.stringify(data.resource, null, 2)}</pre>
+        {data.owner != null && (
+          <>
+            <div style={{ color: T.faint }}>owner · {String(data.owner.type ?? "")}</div>
+            <pre style={dump}>{JSON.stringify(data.owner, null, 2)}</pre>
+          </>
+        )}
+      </div>
+    );
+  }
   const attrs = data.attributes ?? {};
-  const mono = "ui-monospace, SFMono-Regular, Menlo, monospace";
   return (
     <div style={{ fontFamily: mono, fontSize: "0.72rem", display: "flex", flexDirection: "column", gap: 2, maxWidth: 440 }}>
       <div style={{ color: T.dim }}>

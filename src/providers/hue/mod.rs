@@ -295,6 +295,19 @@ struct HueDeviceResource {
     metadata: HueMetadata,
     #[serde(default)]
     services: Vec<HueResourceRef>,
+    #[serde(default)]
+    product_data: HueProductData,
+}
+
+/// The manufacturer block on a Hue device. On the bridge's own device row,
+/// `model_id` identifies the bridge generation (`BSB002` = square v2,
+/// `BSB003` = Bridge Pro — the MotionAware-capable one).
+#[derive(Debug, Deserialize, Default)]
+struct HueProductData {
+    #[serde(default)]
+    model_id: Option<String>,
+    #[serde(default)]
+    product_name: Option<String>,
 }
 
 // ── Scene resources (imported as Bifrost colour palettes) ───────────────────
@@ -546,6 +559,33 @@ fn hue_resource_to_light(r: HueLightResource, hw_id: Option<String>) -> Light {
 impl LightProvider for HueProvider {
     fn name(&self) -> &str {
         "hue"
+    }
+
+    /// Dev-mode diagnostics: which bridge generation this is (`BSB003` =
+    /// Bridge Pro, the MotionAware-capable one) and the configured MotionAware
+    /// areas — so "why don't I see area sensors?" is answerable from the UI.
+    async fn debug_info(&self) -> Option<serde_json::Value> {
+        let devices = self
+            .list_resource::<HueDeviceResource>("/device")
+            .await
+            .ok()?;
+        let bridge = devices
+            .iter()
+            .find(|d| d.services.iter().any(|s| s.rtype == "bridge"));
+        let model_id = bridge.and_then(|b| b.product_data.model_id.clone());
+        let areas: Vec<String> = self
+            .list_resource::<HueMotionAreaConfigResource>("/motion_area_configuration")
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| c.metadata.name)
+            .collect();
+        Some(serde_json::json!({
+            "bridge_model_id": model_id,
+            "bridge_product_name": bridge.and_then(|b| b.product_data.product_name.clone()),
+            "is_bridge_pro": model_id.as_deref() == Some("BSB003"),
+            "motion_aware_areas": areas,
+        }))
     }
 
     async fn discover(&self) -> Result<Vec<Light>> {
@@ -957,6 +997,16 @@ impl HueMotionField {
     }
 }
 
+/// A MotionAware area configuration (Bridge Pro) — carries the area's name;
+/// the `convenience_area_motion` / `security_area_motion` services point at it
+/// as their owner.
+#[derive(Debug, Deserialize)]
+struct HueMotionAreaConfigResource {
+    id: String,
+    #[serde(default)]
+    metadata: HueMetadata,
+}
+
 /// A Hue light-level service. The raw `light_level` is `10000·log10(lux)+1`.
 #[derive(Debug, Deserialize)]
 struct HueLightLevelResource {
@@ -1030,7 +1080,9 @@ impl HueTemperatureField {
 pub fn parse_sensor_from_event(item: &serde_json::Value) -> Option<(String, SensorState)> {
     let id = item.get("id")?.as_str()?.to_string();
     match item.get("type")?.as_str()? {
-        "motion" => {
+        // MotionAware areas (Bridge Pro) push the same motion payload shape as
+        // a physical motion sensor, just under their own resource types.
+        "motion" | "convenience_area_motion" | "security_area_motion" => {
             let f: HueMotionField = serde_json::from_value(item.get("motion")?.clone()).ok()?;
             Some((id, boolean_state(f.detected()?)))
         }
@@ -1074,6 +1126,42 @@ impl HueProvider {
             .json()
             .await?;
         Ok(resp.data)
+    }
+
+    /// Dev-mode introspection: the raw CLIP v2 resource with id `rid`, plus its
+    /// owner resource when it has one — everything the bridge exposes for it,
+    /// including fields Bifrost doesn't model. `Ok(None)` = no such resource.
+    pub(crate) async fn raw_resource(&self, rid: &str) -> Result<Option<serde_json::Value>> {
+        let resp: serde_json::Value = self
+            .client
+            .get(self.resource_url(""))
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .context("Hue resource list request failed")?
+            .error_for_status()?
+            .json()
+            .await?;
+        let empty = Vec::new();
+        let data = resp
+            .get("data")
+            .and_then(|d| d.as_array())
+            .unwrap_or(&empty);
+        let by_id = |id: &str| {
+            data.iter()
+                .find(|r| r.get("id").and_then(|i| i.as_str()) == Some(id))
+        };
+        let Some(resource) = by_id(rid) else {
+            return Ok(None);
+        };
+        let owner = resource
+            .pointer("/owner/rid")
+            .and_then(|o| o.as_str())
+            .and_then(by_id);
+        Ok(Some(serde_json::json!({
+            "resource": resource,
+            "owner": owner,
+        })))
     }
 
     /// device rid → (friendly name, hardware id) for sensor owners, so each
@@ -1185,6 +1273,48 @@ impl SensorProvider for HueProvider {
                 provider_id: t.id,
             });
         }
+
+        // MotionAware areas (Hue Bridge Pro): virtual motion sensors sensed from
+        // the Zigbee RF field of 3+ lights — new CLIP rtypes, NOT `motion`. Each
+        // configured area surfaces its "convenience" sensor (and, when armed, a
+        // "security" one) with the same motion payload shape. Named from the
+        // owning `motion_area_configuration`; no MAC (virtual), so no hw_id. On
+        // a non-Pro bridge these endpoints return empty/404 → no sensors.
+        let area_names: std::collections::HashMap<String, String> = self
+            .list_resource::<HueMotionAreaConfigResource>("/motion_area_configuration")
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| (c.id, c.metadata.name))
+            .collect();
+        let area_name = |owner: &HueResourceRef, suffix: &str| {
+            let base = area_names
+                .get(&owner.rid)
+                .filter(|n| !n.is_empty())
+                .cloned()
+                .unwrap_or_else(|| "MotionAware".to_string());
+            format!("{base} {suffix}")
+        };
+        for (path, suffix) in [
+            ("/convenience_area_motion", "motion"),
+            ("/security_area_motion", "security motion"),
+        ] {
+            for m in self
+                .list_resource::<HueMotionResource>(path)
+                .await
+                .unwrap_or_default()
+            {
+                out.push(SensorDevice {
+                    id: Uuid::new_v4(),
+                    name: area_name(&m.owner, suffix),
+                    kind: SensorKind::Motion,
+                    state: m.motion.detected().map(boolean_state).unwrap_or_default(),
+                    unit: None,
+                    hw_id: None,
+                    provider_id: m.id,
+                });
+            }
+        }
         Ok(out)
     }
 
@@ -1198,6 +1328,16 @@ impl SensorProvider for HueProvider {
             .and_then(|mut v| v.pop())
         {
             return Ok(m.motion.detected().map(boolean_state).unwrap_or_default());
+        }
+        for area_path in ["/convenience_area_motion", "/security_area_motion"] {
+            if let Some(m) = self
+                .list_resource::<HueMotionResource>(&format!("{area_path}/{device_id}"))
+                .await
+                .ok()
+                .and_then(|mut v| v.pop())
+            {
+                return Ok(m.motion.detected().map(boolean_state).unwrap_or_default());
+            }
         }
         if let Some(l) = self
             .list_resource::<HueLightLevelResource>(&format!("/light_level/{device_id}"))
@@ -2181,6 +2321,140 @@ mod tests {
         assert_eq!(lux.kind, SensorKind::Illuminance);
         assert_eq!(lux.unit.as_deref(), Some("lx"));
         assert_eq!(lux.state.reading, Some(SensorReading::Number(100.0)));
+    }
+
+    #[tokio::test]
+    async fn discover_surfaces_motion_aware_areas_named_from_their_configuration() {
+        let server = MockServer::start().await;
+        for empty in [
+            "motion",
+            "light_level",
+            "temperature",
+            "device",
+            "zigbee_connectivity",
+        ] {
+            mount_json(
+                &server,
+                &format!("/clip/v2/resource/{empty}"),
+                serde_json::json!({ "data": [] }),
+            )
+            .await;
+        }
+        mount_json(
+            &server,
+            "/clip/v2/resource/motion_area_configuration",
+            serde_json::json!({ "data": [
+                { "id": "area-cfg-1", "metadata": { "name": "Kitchen" } }
+            ]}),
+        )
+        .await;
+        mount_json(
+            &server,
+            "/clip/v2/resource/convenience_area_motion",
+            serde_json::json!({ "data": [
+                { "id": "conv-1", "type": "convenience_area_motion",
+                  "owner": {"rid": "area-cfg-1", "rtype": "motion_area_configuration"},
+                  "enabled": true, "motion": { "motion": true } }
+            ]}),
+        )
+        .await;
+        mount_json(
+            &server,
+            "/clip/v2/resource/security_area_motion",
+            serde_json::json!({ "data": [
+                { "id": "sec-1", "type": "security_area_motion",
+                  "owner": {"rid": "area-cfg-1", "rtype": "motion_area_configuration"},
+                  "enabled": true, "motion": { "motion": false } }
+            ]}),
+        )
+        .await;
+
+        let sensors = SensorProvider::discover(&mock_provider(&server).await)
+            .await
+            .unwrap();
+        assert_eq!(sensors.len(), 2);
+        let conv = sensors.iter().find(|s| s.provider_id == "conv-1").unwrap();
+        assert_eq!(conv.kind, SensorKind::Motion);
+        assert_eq!(conv.name, "Kitchen motion");
+        assert!(conv.state.is_detecting());
+        // A virtual area has no MAC — it must not enter hw_id de-dup.
+        assert!(conv.hw_id.is_none());
+        let sec = sensors.iter().find(|s| s.provider_id == "sec-1").unwrap();
+        assert_eq!(sec.name, "Kitchen security motion");
+        assert!(!sec.state.is_detecting());
+    }
+
+    #[test]
+    fn parse_sensor_from_event_handles_motion_aware_area_types() {
+        let (id, state) = parse_sensor_from_event(&serde_json::json!({
+            "id": "conv-1", "type": "convenience_area_motion",
+            "motion": { "motion": true, "motion_report": { "changed": "t", "motion": true } }
+        }))
+        .unwrap();
+        assert_eq!(id, "conv-1");
+        assert!(state.is_detecting());
+        let (_, state) = parse_sensor_from_event(&serde_json::json!({
+            "id": "sec-1", "type": "security_area_motion", "motion": { "motion": false }
+        }))
+        .unwrap();
+        assert!(!state.is_detecting());
+    }
+
+    #[tokio::test]
+    async fn debug_info_reports_bridge_model_and_motion_aware_areas() {
+        let server = MockServer::start().await;
+        mount_json(
+            &server,
+            "/clip/v2/resource/device",
+            serde_json::json!({ "data": [
+                { "id": "bridge-dev", "metadata": { "name": "Hue Bridge" },
+                  "product_data": { "model_id": "BSB003", "product_name": "Hue Bridge Pro" },
+                  "services": [ {"rid": "b-1", "rtype": "bridge"} ] },
+                { "id": "bulb-dev", "metadata": { "name": "Bulb" },
+                  "product_data": { "model_id": "LCA001" }, "services": [] }
+            ]}),
+        )
+        .await;
+        mount_json(
+            &server,
+            "/clip/v2/resource/motion_area_configuration",
+            serde_json::json!({ "data": [ { "id": "a1", "metadata": { "name": "Kitchen" } } ]}),
+        )
+        .await;
+
+        let info = LightProvider::debug_info(&mock_provider(&server).await)
+            .await
+            .unwrap();
+        assert_eq!(info["bridge_model_id"], "BSB003");
+        assert_eq!(info["is_bridge_pro"], true);
+        assert_eq!(info["motion_aware_areas"][0], "Kitchen");
+    }
+
+    #[tokio::test]
+    async fn raw_resource_returns_the_resource_and_its_owner() {
+        let server = MockServer::start().await;
+        mount_json(
+            &server,
+            "/clip/v2/resource",
+            serde_json::json!({ "data": [
+                { "id": "svc-1", "type": "convenience_area_motion",
+                  "owner": {"rid": "cfg-1", "rtype": "motion_area_configuration"},
+                  "motion": { "motion": true } },
+                { "id": "cfg-1", "type": "motion_area_configuration",
+                  "metadata": { "name": "Kitchen" } }
+            ]}),
+        )
+        .await;
+
+        let p = mock_provider(&server).await;
+        let raw = p.raw_resource("svc-1").await.unwrap().unwrap();
+        assert_eq!(raw["resource"]["type"], "convenience_area_motion");
+        assert_eq!(raw["owner"]["metadata"]["name"], "Kitchen");
+        // Unknown id → None (the dev endpoint reports "no such resource").
+        assert!(p.raw_resource("nope").await.unwrap().is_none());
+        // A resource without an owner still introspects (owner null).
+        let raw = p.raw_resource("cfg-1").await.unwrap().unwrap();
+        assert!(raw["owner"].is_null());
     }
 
     #[test]

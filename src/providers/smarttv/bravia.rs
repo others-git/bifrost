@@ -86,8 +86,38 @@ impl BraviaVendor {
         version: &str,
         params: Value,
     ) -> Result<Value> {
+        self.scalar_at(false, service, method, version, params)
+            .await
+    }
+
+    /// [`Self::scalar`] for the **snapshot read path** (power/volume/playing/
+    /// inputs): success chatter logs at TRACE, so the automation demand
+    /// poller's 5-second reads stay off a `bifrost=debug` console. Failures
+    /// still log at debug — a broken poll must stay visible.
+    async fn scalar_read(
+        &self,
+        service: &str,
+        method: &str,
+        version: &str,
+        params: Value,
+    ) -> Result<Value> {
+        self.scalar_at(true, service, method, version, params).await
+    }
+
+    async fn scalar_at(
+        &self,
+        quiet: bool,
+        service: &str,
+        method: &str,
+        version: &str,
+        params: Value,
+    ) -> Result<Value> {
         let body = json!({ "method": method, "id": 1, "version": version, "params": params });
-        tracing::debug!(target: "bifrost::smarttv", base = %self.base, service, method, params = %body["params"], "bravia scalar →");
+        if quiet {
+            tracing::trace!(target: "bifrost::smarttv", base = %self.base, service, method, params = %body["params"], "bravia scalar →");
+        } else {
+            tracing::debug!(target: "bifrost::smarttv", base = %self.base, service, method, params = %body["params"], "bravia scalar →");
+        }
         let mut req = self
             .client
             .post(format!("{}/sony/{service}", self.base))
@@ -113,7 +143,11 @@ impl BraviaVendor {
             bail!("bravia {method}: status {status}");
         }
         let result = v.get("result").cloned().unwrap_or(Value::Null);
-        tracing::debug!(target: "bifrost::smarttv", method, "bravia scalar ✓");
+        if quiet {
+            tracing::trace!(target: "bifrost::smarttv", method, "bravia scalar ✓");
+        } else {
+            tracing::debug!(target: "bifrost::smarttv", method, "bravia scalar ✓");
+        }
         Ok(result)
     }
 
@@ -145,7 +179,7 @@ impl BraviaVendor {
 
     async fn power_status(&self) -> Result<bool> {
         let r = self
-            .scalar("system", "getPowerStatus", "1.0", json!([]))
+            .scalar_read("system", "getPowerStatus", "1.0", json!([]))
             .await?;
         let status = r
             .get(0)
@@ -157,7 +191,7 @@ impl BraviaVendor {
 
     async fn volume_info(&self) -> Result<(u8, bool)> {
         let r = self
-            .scalar("audio", "getVolumeInformation", "1.0", json!([]))
+            .scalar_read("audio", "getVolumeInformation", "1.0", json!([]))
             .await?;
         let targets = r
             .get(0)
@@ -184,7 +218,7 @@ impl BraviaVendor {
     /// External inputs (HDMI, etc.) as `(friendly title, uri)` pairs.
     async fn external_inputs(&self) -> Result<Vec<(String, String)>> {
         let r = self
-            .scalar(
+            .scalar_read(
                 "avContent",
                 "getCurrentExternalInputsStatus",
                 "1.0",
@@ -214,7 +248,7 @@ impl BraviaVendor {
     /// (the TV returns an error in that state, which the caller tolerates).
     async fn playing_content(&self) -> Result<(Option<String>, Option<NowPlaying>)> {
         let r = self
-            .scalar("avContent", "getPlayingContentInfo", "1.0", json!([]))
+            .scalar_read("avContent", "getPlayingContentInfo", "1.0", json!([]))
             .await?;
         let info = r.get(0);
         let source = info
@@ -458,11 +492,16 @@ pub(crate) mod pairing {
     /// Stable client id so a re-pair reuses the TV's existing grant.
     const CLIENT_ID: &str = "Bifrost:bifrost-hub";
 
+    #[derive(Debug)]
     pub(crate) enum PairOutcome {
         /// The TV is now showing a PIN; call [`complete`] with it.
         PinDisplayed,
         /// Already authorised (some firmwares) — the auth cookie.
         Paired(String),
+        /// The TV has no pairing service **and** accepts unauthenticated
+        /// control (IP-control Authentication set to "None") — nothing to
+        /// store; add the provider without a token.
+        NotRequired,
     }
 
     fn act_register_body() -> serde_json::Value {
@@ -520,10 +559,48 @@ pub(crate) mod pairing {
                 }
                 None => Ok(PairOutcome::PinDisplayed),
             },
+            // No `accessControl` service at all: Bravias with IP-control
+            // Authentication set to "None" (and older PSK-only sets) don't
+            // expose registration. Probe a real control method without
+            // credentials — if it answers, pairing simply isn't needed.
+            reqwest::StatusCode::NOT_FOUND => {
+                if unauthenticated_control_works(host).await {
+                    tracing::debug!(target: "bifrost::smarttv", host, "bravia pairing: no pairing service, unauthenticated control works (Authentication: None)");
+                    Ok(PairOutcome::NotRequired)
+                } else {
+                    tracing::warn!(target: "bifrost::smarttv", host, "bravia pairing: no pairing service and control rejected");
+                    bail!(
+                        "the TV has no pairing service and refused control without one — in the TV's \
+                         network settings, set IP control / Authentication to \"Normal and Pre-Shared Key\" \
+                         or \"None\", or enable remote device control, then try again"
+                    )
+                }
+            }
             s => {
                 tracing::warn!(target: "bifrost::smarttv", host, %s, "bravia pairing: unexpected status");
                 bail!("unexpected Bravia pairing status: {s}")
             }
+        }
+    }
+
+    /// Whether the TV honours a control call with no credentials — the
+    /// Authentication-set-to-"None" configuration.
+    async fn unauthenticated_control_works(host: &str) -> bool {
+        let Ok(client) = Client::builder().timeout(Duration::from_secs(10)).build() else {
+            return false;
+        };
+        let body = json!({ "method": "getPowerStatus", "id": 1, "version": "1.0", "params": [] });
+        match client
+            .post(format!("{}/sony/system", base_url(host)))
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => resp
+                .json::<serde_json::Value>()
+                .await
+                .is_ok_and(|v| v.get("result").is_some()),
+            _ => false,
         }
     }
 
@@ -701,6 +778,50 @@ mod tests {
 
         let v = BraviaVendor::new_for_test(&tv.uri(), Some("c".into()));
         v.set_source("HDMI 1").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pairing_reports_not_required_when_auth_is_none() {
+        // No accessControl service (404) but unauthenticated control works —
+        // the Authentication-set-to-"None" configuration.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/sony/accessControl"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/sony/system"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"result":[{"status":"active"}],"id":1}"#),
+            )
+            .mount(&server)
+            .await;
+        assert!(matches!(
+            pairing::begin(&server.uri()).await.unwrap(),
+            pairing::PairOutcome::NotRequired
+        ));
+    }
+
+    #[tokio::test]
+    async fn pairing_explains_when_no_service_and_control_refused() {
+        // 404 on pairing AND control refused: the actionable settings hint,
+        // not a bare status code.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/sony/accessControl"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/sony/system"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        let err = pairing::begin(&server.uri()).await.unwrap_err().to_string();
+        assert!(err.contains("no pairing service"), "got: {err}");
+        assert!(err.contains("Authentication"), "got: {err}");
     }
 
     #[tokio::test]

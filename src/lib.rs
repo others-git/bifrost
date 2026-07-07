@@ -3,6 +3,7 @@ pub mod config;
 pub mod connection;
 pub mod crypto;
 pub mod db;
+pub mod journal;
 pub mod models;
 pub mod providers;
 pub mod wol;
@@ -32,6 +33,11 @@ pub struct AppState {
     /// (`GET /api/kiosks/stream`). `kiosks.pending_command` is the fallback for a
     /// kiosk that's offline / mid-reconnect (delivered on its next check-in).
     pub kiosk_commands: tokio::sync::broadcast::Sender<api::kiosks::KioskCommand>,
+    /// Poked whenever an automation is created/updated/deleted, so the engine
+    /// re-baselines new trigger subjects immediately (a rule made mid-flight
+    /// must not wait for a restart) and the demand pollers leave their idle
+    /// nap right away. `Arc` so the pollers can hold it without `AppState`.
+    pub automations_changed: std::sync::Arc<tokio::sync::Notify>,
     cipher: Aes256Gcm,
     /// Non-reversible fingerprint of the derived credential key — for the startup
     /// diagnostic that catches a silently-changed `BIFROST_SECRET`.
@@ -49,6 +55,7 @@ impl AppState {
             started_at: std::time::Instant::now(),
             instance_id: uuid::Uuid::new_v4().to_string(),
             kiosk_commands: tokio::sync::broadcast::channel(64).0,
+            automations_changed: std::sync::Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -142,9 +149,25 @@ pub async fn verify_credential_key(db: &SqlitePool, key_fp: &str) -> KeyCheck {
 
 /// Entry point called by `main`. Reads env vars, connects to DB, runs the server.
 pub async fn run() -> Result<()> {
-    use tracing_subscriber::{EnvFilter, fmt};
+    use tracing_subscriber::filter::{LevelFilter, Targets};
+    use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
-    fmt().with_env_filter(EnvFilter::from_default_env()).init();
+    // Console logging keeps the RUST_LOG contract; the journal layer captures
+    // Bifrost's own events at DEBUG **independently**, so the in-app event log
+    // (Settings → Developer) works without restarting with a louder filter.
+    tracing_subscriber::registry()
+        .with(fmt::layer().with_filter(EnvFilter::from_default_env()))
+        .with(
+            journal::JournalLayer.with_filter(
+                Targets::new()
+                    .with_target("bifrost", LevelFilter::DEBUG)
+                    // Device state pushes log at TRACE (changed-only) so they
+                    // reach the journal without spamming a `bifrost=debug`
+                    // console; see `connection::journal_state_push`.
+                    .with_target("bifrost::events", LevelFilter::TRACE),
+            ),
+        )
+        .init();
 
     let cfg = config::Config::from_env()?;
     let db = db::connect(&cfg.database_url).await?;
@@ -181,6 +204,8 @@ pub async fn run() -> Result<()> {
 
     // Enforce kiosk scheduled quiet hours (display power saving) in the background.
     tokio::spawn(api::kiosks::run_scheduler(Arc::clone(&state)));
+    // Sensor automations: edge-triggered rules over the sensor push streams.
+    tokio::spawn(api::automations::run_engine(Arc::clone(&state)));
 
     let app = build_app(Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
@@ -299,8 +324,26 @@ pub fn start_manager_for(
                 }
             }
             Some(providers::MediaConnectionMode::OnDemand) => {
-                // State is read live per request; nothing to keep alive.
-                tracing::info!("media provider {provider_id} ({provider_type}) reads on demand");
+                // State is read live per request; the demand poller stays idle
+                // unless an automation watches one of this provider's devices
+                // as a trigger input (then it polls tightly so out-of-band
+                // changes — the TV's own remote — fire rules within seconds).
+                match state.registry.build_media(provider_type, creds_json) {
+                    Ok(provider) => {
+                        tracing::info!(
+                            "media provider {provider_id} ({provider_type}) reads on demand (+ automation demand-poll)"
+                        );
+                        connections.start_media_demand_polling(
+                            provider_id.to_string(),
+                            provider,
+                            state.db.clone(),
+                            std::sync::Arc::clone(&state.automations_changed),
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("failed to build media provider {provider_id}: {e:#}")
+                    }
+                }
             }
             None => tracing::warn!("provider {provider_id} has unknown type '{provider_type}'"),
         },

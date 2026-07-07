@@ -378,6 +378,11 @@ export interface DeviceRaw {
   attributes?: Record<string, unknown>;
   /** How a generic passthrough device would model this entity (dev preview). */
   generic_preview?: GenericControl[];
+  /** Hue: the raw CLIP v2 resource with this id, and its owner resource. */
+  resource_id?: string;
+  resource?: Record<string, unknown> | null;
+  owner?: Record<string, unknown> | null;
+  error?: string;
   note?: string;
 }
 
@@ -960,6 +965,122 @@ export async function setSensorRoom(id: string, room_id: string | null): Promise
 }
 
 /** Human-readable one-line reading for a sensor (e.g. "Detected", "480 lx"). */
+// ── Sensor automations ────────────────────────────────────────────────────────
+
+/** What a rule listens for on its sensor (edge-triggered, never a level). */
+export type SensorTrigger =
+  | { kind: "became_true" }
+  | { kind: "became_false" }
+  | { kind: "clear_for"; secs: number }
+  | { kind: "held_for"; secs: number }
+  | { kind: "rose_above"; value: number }
+  | { kind: "dropped_below"; value: number };
+
+/** An optional gate checked when the rule fires. */
+export type RuleCondition =
+  | { kind: "time_window"; start: string; end: string; days?: number[] }
+  | { kind: "sensor_above"; sensor_id: string; value: number }
+  | { kind: "sensor_below"; sensor_id: string; value: number }
+  | { kind: "sensor_is"; sensor_id: string; on: boolean }
+  | { kind: "room_is"; room_id: string; occupied: boolean };
+
+/** One thing the rule does — each maps to a shared service-layer call. */
+export type RuleAction =
+  | { kind: "room"; room_id: string; state: LightState }
+  | { kind: "light"; light_id: string; state: LightState }
+  | { kind: "power"; device_id: string; on: boolean }
+  | { kind: "scene"; scene_id: string };
+
+/** What starts an automation — a tagged trigger input, so more kinds
+ * (schedules, device state, …) can join later. Sensor events today. */
+export type TriggerDeviceDomain = "light" | "media" | "power";
+
+export type AutomationTrigger =
+  | { kind: "sensor"; sensor_id: string; event: SensorTrigger }
+  | { kind: "room"; room_id: string; event: SensorTrigger }
+  | { kind: "device"; domain: TriggerDeviceDomain; device_id: string; event: SensorTrigger };
+
+export interface Automation {
+  id: string;
+  name: string;
+  enabled: boolean;
+  trigger: AutomationTrigger;
+  conditions: RuleCondition[];
+  actions: RuleAction[];
+  cooldown_secs: number;
+  /** UTC "YYYY-MM-DD HH:MM:SS" of the last fire, or null. */
+  last_fired_at?: string | null;
+}
+
+export type AutomationBody = Omit<Automation, "id" | "last_fired_at">;
+
+export async function getAutomations(): Promise<Automation[]> {
+  const res = await fetch("/api/automations");
+  if (!res.ok) return [];
+  return res.json();
+}
+
+/** Create/update return the stored rule, or an error string for a 422. */
+async function ruleResult(res: Response): Promise<Automation | string> {
+  if (res.ok) return res.json();
+  return (await res.text()) || "Couldn't save the automation";
+}
+
+export async function createAutomation(body: AutomationBody): Promise<Automation | string> {
+  const res = await fetch("/api/automations", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return ruleResult(res);
+}
+
+export async function updateAutomation(id: string, body: AutomationBody): Promise<Automation | string> {
+  const res = await fetch(`/api/automations/${id}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return ruleResult(res);
+}
+
+export async function deleteAutomation(id: string): Promise<void> {
+  await fetch(`/api/automations/${id}`, { method: "DELETE" });
+}
+
+// ── Dev event journal ─────────────────────────────────────────────────────────
+
+/** One captured server event (dev mode): a `bifrost::*` tracing record. */
+export interface DevEvent {
+  seq: number;
+  ts: string;
+  level: string;
+  target: string;
+  message: string;
+  fields?: Record<string, string>;
+}
+
+export async function getDevEvents(
+  after: number,
+  target?: string,
+): Promise<{ entries: DevEvent[]; last_seq: number } | null> {
+  const params = new URLSearchParams({ after: String(after) });
+  if (target) params.set("target", target);
+  const res = await fetch(`/api/dev/events?${params}`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function clearDevEvents(): Promise<void> {
+  await fetch("/api/dev/events/clear", { method: "POST" });
+}
+
+/** Run an automation's actions right now (skipping trigger and conditions). */
+export async function runAutomation(id: string): Promise<boolean> {
+  const res = await fetch(`/api/automations/${id}/run`, { method: "POST" });
+  return res.ok;
+}
+
 export function sensorReadingText(s: SensorDevice): string {
   const r = s.state.reading;
   if (r == null) return s.state.reachable === false ? "Unreachable" : "—";

@@ -75,7 +75,10 @@ its volume here, so "turn the TV up" controls the right box.
 
 Bravia control is authorised by a token you get through an on-screen **PIN**, so
 there's nothing to copy off a website. The TV and your Bifrost host must be on the
-**same network** (in Docker, auto-detect needs host networking).
+**same network**. Scan network probes twice over: an SSDP multicast search plus an
+HTTP sweep of the local subnet that asks each host the (unauthenticated) ScalarWeb
+identity question — so the TV is found even when it dozes through the multicast
+probe, and in Docker without host networking.
 
 **1 — Allow control on the TV (one-time).** The exact menu wording differs by model:
 
@@ -94,7 +97,9 @@ there's nothing to copy off a website. The TV and your Bifrost host must be on t
 2. Click **Scan network** and pick your TV — its **IP auto-fills** and the vendor
    (Bravia) is auto-selected. (Or type the TV's IP into the *TV IP address* field.)
 3. Click **Pair**. Bifrost asks the TV to register Bifrost; the TV shows a **4-digit
-   PIN** on screen.
+   PIN** on screen. (If the TV's IP-control **Authentication is set to "None"**, it
+   has no pairing service at all — Pair reports **"No pairing needed"** and you can
+   add the provider without a token.)
 4. Type that PIN into the field that appears and click **Submit PIN**. On success the
    *Pairing token* is filled in for you (✓ Paired with TV).
 5. Give the provider a **name** and click **Add**. Bifrost discovers the TV as a media

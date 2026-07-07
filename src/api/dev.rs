@@ -36,6 +36,8 @@ pub fn router() -> Router<Arc<AppState>> {
             get(device_raw_handler),
         )
         .route("/media/{id}/routing", get(media_routing_handler))
+        .route("/events", get(events_handler))
+        .route("/events/clear", axum::routing::post(events_clear_handler))
 }
 
 /// Composite **precedence** diagnostic: for the media device `id`, which
@@ -80,6 +82,46 @@ async fn guard(state: &Arc<AppState>, headers: &HeaderMap) -> Result<(), StatusC
         return Err(StatusCode::UNAUTHORIZED);
     }
     Ok(())
+}
+
+/// Query for the event journal: `after` = last seen seq (0 = from the start),
+/// `target` = a target prefix (`bifrost::automation`), `limit` caps the batch.
+#[derive(serde::Deserialize)]
+struct EventsQuery {
+    #[serde(default)]
+    after: u64,
+    target: Option<String>,
+    limit: Option<usize>,
+}
+
+/// The in-app event log: everything Bifrost traced at debug+ under `bifrost::*`
+/// (see `crate::journal`), regardless of the console `RUST_LOG` filter. The
+/// panel polls with `after=<last_seq>` and appends.
+async fn events_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<EventsQuery>,
+) -> impl IntoResponse {
+    if let Err(code) = guard(&state, &headers).await {
+        return code.into_response();
+    }
+    let (entries, last_seq) = crate::journal::Journal::global().entries_after(
+        q.after,
+        q.target.as_deref(),
+        q.limit.unwrap_or(200).min(500),
+    );
+    Json(json!({ "entries": entries, "last_seq": last_seq })).into_response()
+}
+
+async fn events_clear_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(code) = guard(&state, &headers).await {
+        return code.into_response();
+    }
+    crate::journal::Journal::global().clear();
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn info_handler(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
@@ -158,8 +200,9 @@ async fn device_raw_handler(
 /// The **raw upstream representation** of one device — everything the source
 /// exposes, including the parts Bifrost doesn't model (the `supported_features`
 /// bitmask and every attribute). For Home Assistant that's `GET /api/states/
-/// <entity_id>`; it's the introspection that drives generic "passthrough" mapping
-/// and capability auditing. Non-HA providers don't have an analog yet.
+/// <entity_id>` (the introspection that drives generic "passthrough" mapping and
+/// capability auditing); for Hue it's the CLIP v2 resource with this id, plus
+/// its owner resource. Other providers don't have an analog yet.
 async fn device_raw(state: &AppState, provider_id: &str, device_id: &str) -> Option<Value> {
     let row = sqlx::query("SELECT provider_type, credentials FROM providers WHERE id = ?")
         .bind(provider_id)
@@ -168,11 +211,47 @@ async fn device_raw(state: &AppState, provider_id: &str, device_id: &str) -> Opt
         .ok()
         .flatten()?;
     let ptype: String = row.get("provider_type");
+    tracing::debug!(target: "bifrost::dev", provider = %provider_id, device = %device_id, %ptype, "raw introspection requested");
+    if ptype == "hue" {
+        // The raw CLIP v2 resource (+ its owner) straight off the bridge —
+        // `device_id` is the service's resource id for Hue rows.
+        let creds = state
+            .decrypt_credentials(&row.get::<String, _>("credentials"))
+            .ok()?;
+        let provider = crate::providers::hue::HueProvider::from_credentials(&creds).ok()?;
+        return match provider.raw_resource(device_id).await {
+            Ok(Some(raw)) => {
+                tracing::debug!(target: "bifrost::dev", device = %device_id, "raw introspection: CLIP resource found");
+                Some(json!({
+                "provider_type": "hue",
+                "resource_id": device_id,
+                    "resource": raw.get("resource"),
+                    "owner": raw.get("owner"),
+                }))
+            }
+            Ok(None) => {
+                tracing::debug!(target: "bifrost::dev", device = %device_id, "raw introspection: no CLIP resource with this id");
+                Some(json!({
+                    "provider_type": "hue",
+                    "resource_id": device_id,
+                    "note": "no CLIP v2 resource with this id on the bridge",
+                }))
+            }
+            Err(e) => {
+                tracing::warn!(target: "bifrost::dev", device = %device_id, "raw introspection failed: {e:#}");
+                Some(json!({
+                    "provider_type": "hue",
+                    "resource_id": device_id,
+                    "error": format!("{e:#}"),
+                }))
+            }
+        };
+    }
     if ptype != "ha" {
         return Some(json!({
             "provider_type": ptype,
             "device_id": device_id,
-            "note": "raw upstream introspection is available for Home Assistant devices",
+            "note": "raw upstream introspection is not implemented for this provider type",
         }));
     }
     let creds = state

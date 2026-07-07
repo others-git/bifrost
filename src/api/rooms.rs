@@ -243,9 +243,19 @@ pub(crate) async fn effective_power_member_ids(state: &AppState, room_id: &str) 
 /// Non-presence sensors (contact/lux/temp/humidity) and disabled/shadowed members
 /// are ignored, so this is safe to read from any surface (kiosk scheduler today).
 pub(crate) async fn room_occupancy(state: &AppState, room_id: &str) -> Option<bool> {
+    let members = room_presence_readings(state, room_id).await;
+    (!members.is_empty()).then(|| members.iter().any(|(_, detecting)| *detecting))
+}
+
+/// Each of a room's enabled, non-shadowed **presence** members (motion /
+/// occupancy) with whether its cached reading is currently detecting. The
+/// member list behind [`room_occupancy`]; the automation engine also reads it
+/// directly so it can overlay its own fresher in-memory readings (the DB cache
+/// is written by a separate task and can trail a push event by a beat).
+pub(crate) async fn room_presence_readings(state: &AppState, room_id: &str) -> Vec<(String, bool)> {
     use crate::models::sensor::SensorState;
     let rows = sqlx::query(
-        "SELECT sd.kind AS kind, sd.last_state AS last_state
+        "SELECT sd.id AS id, sd.kind AS kind, sd.last_state AS last_state
          FROM sensor_devices sd
          JOIN providers p ON p.id = sd.provider_id
          WHERE p.enabled = 1 AND sd.enabled = 1 AND sd.shadowed_by IS NULL
@@ -265,23 +275,16 @@ pub(crate) async fn room_occupancy(state: &AppState, room_id: &str) -> Option<bo
     .await
     .unwrap_or_default();
 
-    let mut any_presence = false;
-    let mut detecting = false;
-    for r in rows {
-        let kind = crate::api::sensors::parse_kind(&r.get::<String, _>("kind"));
-        if !kind.is_presence() {
-            continue;
-        }
-        any_presence = true;
-        let st: SensorState = r
-            .get::<Option<String>, _>("last_state")
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-        if st.is_detecting() {
-            detecting = true;
-        }
-    }
-    any_presence.then_some(detecting)
+    rows.into_iter()
+        .filter(|r| crate::api::sensors::parse_kind(&r.get::<String, _>("kind")).is_presence())
+        .map(|r| {
+            let st: SensorState = r
+                .get::<Option<String>, _>("last_state")
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            (r.get("id"), st.is_detecting())
+        })
+        .collect()
 }
 
 /// Assign a device to (at most) one room from the *device* side — the knob the

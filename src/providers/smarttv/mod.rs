@@ -30,7 +30,7 @@ use crate::models::remote::{RemoteCommandInfo, RemoteDevice, RemoteKey, RemoteSt
 use crate::providers::{
     CredentialField, FieldKind, MediaProvider, MediaProviderFactory, RemoteProvider,
     RemoteProviderFactory,
-    discovery::{DeviceDiscovery, SsdpDiscovery},
+    discovery::{DeviceDiscovery, HttpSweepDiscovery, SsdpDiscovery, UnionDiscovery},
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -156,6 +156,9 @@ pub enum SmartTvPairOutcome {
     PinDisplayed,
     /// Paired — `auth` is the credential to store alongside `host`.
     Paired { auth: String },
+    /// The TV allows control without pairing (Authentication "None") — add the
+    /// provider with no token.
+    NotRequired,
 }
 
 /// Begin pairing with the TV at `host` (vendor auto-selected — Bravia today). The
@@ -164,6 +167,7 @@ pub async fn pair_begin(host: &str) -> Result<SmartTvPairOutcome> {
     match bravia::pairing::begin(host).await? {
         bravia::pairing::PairOutcome::PinDisplayed => Ok(SmartTvPairOutcome::PinDisplayed),
         bravia::pairing::PairOutcome::Paired(auth) => Ok(SmartTvPairOutcome::Paired { auth }),
+        bravia::pairing::PairOutcome::NotRequired => Ok(SmartTvPairOutcome::NotRequired),
     }
 }
 
@@ -235,16 +239,50 @@ const SMARTTV_SCHEMA: &[CredentialField] = &[
 /// SSDP search target Sony's ScalarWeb (Bravia) service answers.
 const SONY_SCALARWEB_ST: &str = "urn:schemas-sony-com:service:ScalarWebAPI:1";
 
+/// The ScalarWeb probe for the HTTP sweep: `getInterfaceInformation` needs no
+/// PSK/pairing on a Bravia (it's part of the pre-auth surface), so it's callable
+/// on a TV that's never been paired — exactly the add-provider situation.
+pub(crate) const BRAVIA_SWEEP_BODY: &str =
+    r#"{"method":"getInterfaceInformation","id":1,"params":[],"version":"1.0"}"#;
+
+/// `true` when a `/sony/system` response identifies the box as a **TV** —
+/// `productCategory` is `"tv"` on a Bravia, and something else on other Sony
+/// ScalarWeb gear (soundbars, Blu-ray). Whitespace-stripped before matching so
+/// a pretty-printing firmware can't dodge it.
+pub(crate) fn bravia_sweep_match(body: &str) -> bool {
+    let compact: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.contains(r#""productCategory":"tv""#)
+}
+
 fn smarttv_discoverer() -> Box<dyn DeviceDiscovery> {
-    // Sony TVs answer the ScalarWeb ST and carry "sony" in the reply; the IP from
-    // the LOCATION header pre-fills `host`. Only Bravia today, so no brand stamp
-    // is needed (the dispatch defaults to it).
-    Box::new(SsdpDiscovery::new(
-        SONY_SCALARWEB_ST,
-        "sony",
-        "Sony Bravia (Smart TV)",
-        "host",
-    ))
+    // Two legs, deduped by host. Only Bravia today, so no brand stamp is needed
+    // (the dispatch defaults to it).
+    // 1. SSDP: Sony TVs answer the ScalarWeb ST and carry "sony" in the reply;
+    //    the IP comes from the LOCATION header. Fast, but multicast — a Wi-Fi TV
+    //    dozing in power-save (or any container/VLAN setup that can't multicast)
+    //    can miss it.
+    // 2. HTTP sweep: POST the unauthenticated ScalarWeb `getInterfaceInformation`
+    //    to every host in the local /24 (+ Expanded-LAN subnets) and keep the
+    //    ones that answer `productCategory: tv`. Authoritative — it's the same
+    //    endpoint the provider drives after pairing — and it works where SSDP
+    //    physically can't.
+    Box::new(UnionDiscovery::new(vec![
+        Box::new(SsdpDiscovery::new(
+            SONY_SCALARWEB_ST,
+            "sony",
+            "Sony Bravia (Smart TV)",
+            "host",
+        )),
+        Box::new(
+            HttpSweepDiscovery::new(
+                "/sony/system",
+                "Sony Bravia (Smart TV)",
+                "host",
+                bravia_sweep_match,
+            )
+            .post(BRAVIA_SWEEP_BODY),
+        ),
+    ]))
 }
 
 // ── The framework adapter: one TV, two domains ───────────────────────────────
@@ -450,6 +488,61 @@ impl RemoteProviderFactory for SmartTvRemoteFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bravia_sweep_match_accepts_a_tv_and_rejects_other_sony_gear() {
+        // Compact (real Bravia shape) and pretty-printed both match.
+        assert!(bravia_sweep_match(
+            r#"{"result":[{"interfaceVersion":"5.0.1","modelName":"XR-55A80J","productCategory":"tv","productName":"BRAVIA"}],"id":1}"#
+        ));
+        assert!(bravia_sweep_match(
+            "{\"result\": [{ \"productCategory\" : \"tv\" }], \"id\": 1}"
+        ));
+        // A Sony soundbar answers ScalarWeb too, but is not a TV.
+        assert!(!bravia_sweep_match(
+            r#"{"result":[{"productCategory":"homeTheaterSystem","productName":"HT-A7000"}],"id":1}"#
+        ));
+        // An unauthenticated-error or non-ScalarWeb response never matches.
+        assert!(!bravia_sweep_match(r#"{"error":[403,"Forbidden"],"id":1}"#));
+        assert!(!bravia_sweep_match("<html>not a bravia</html>"));
+    }
+
+    #[tokio::test]
+    async fn smarttv_http_sweep_finds_a_bravia_by_scalarweb_probe() {
+        use crate::providers::discovery::ScanOptions;
+        use wiremock::matchers::{body_string_contains, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // A mock Bravia: the sweep's exact POST (getInterfaceInformation, no
+        // auth) gets the exact compact reply a real TV sends.
+        let tv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/sony/system"))
+            .and(body_string_contains("getInterfaceInformation"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"result":[{"interfaceVersion":"5.0.1","modelName":"XR-55A80J","productCategory":"tv","productName":"BRAVIA"}],"id":1}"#,
+            ))
+            .mount(&tv)
+            .await;
+
+        // The same sweep leg `smarttv_discoverer` unions in, with test bases.
+        let found = HttpSweepDiscovery::new(
+            "/sony/system",
+            "Sony Bravia (Smart TV)",
+            "host",
+            bravia_sweep_match,
+        )
+        .post(BRAVIA_SWEEP_BODY)
+        .with_bases(vec![tv.uri()])
+        .scan(&ScanOptions::new(std::time::Duration::from_secs(1)))
+        .await
+        .unwrap();
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].label.as_deref(), Some("Sony Bravia (Smart TV)"));
+        // Credentials pre-shape the add-provider form's host field.
+        assert!(found[0].credentials.get("host").is_some());
+    }
 
     #[test]
     fn build_vendor_defaults_to_bravia() {

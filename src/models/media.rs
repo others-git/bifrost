@@ -160,12 +160,13 @@ impl MediaCommand {
 
     /// Split a command for a source device bound to a receiver (M22). The
     /// receiver is the volume authority, so `volume`/`mute` route to it while
-    /// `power`/`source`/`transport` stay on the source. Powering the source
-    /// **on** also wakes the receiver and (when `receiver_source` is set)
-    /// switches it to that input — so "turn on the TV" lands sound on the right
-    /// receiver input. Powering *off* is not propagated: a receiver may serve
-    /// several bound sources (many-to-one), so one source going dark mustn't
-    /// silence it. Returns `(source_cmd, receiver_cmd)`.
+    /// `power`/`source`/`transport` stay on the source. The receiver **mirrors
+    /// the source's power**: powering the source on wakes the receiver and
+    /// (when `receiver_source` is set) switches it to that input — so "turn on
+    /// the TV" lands sound on the right receiver input — and powering off takes
+    /// the receiver down with it. The bound pair reads as one appliance, and
+    /// commands are absolute (never toggles), so a receiver already in the
+    /// desired state is a no-op. Returns `(source_cmd, receiver_cmd)`.
     pub fn split_for_receiver(
         &self,
         receiver_source: Option<&str>,
@@ -180,10 +181,11 @@ impl MediaCommand {
         let mut receiver_cmd = MediaCommand {
             volume: self.volume,
             mute: self.mute,
+            power: self.power,
             ..Default::default()
         };
         if self.power == Some(true) {
-            receiver_cmd.power = Some(true);
+            // Only the way *up* selects the input; the way down just powers off.
             receiver_cmd.source = receiver_source.map(str::to_string);
         }
         (source_cmd, receiver_cmd)
@@ -290,15 +292,17 @@ mod tests {
     }
 
     #[test]
-    fn split_for_receiver_power_off_is_not_propagated_to_receiver() {
-        // Many sources may share one receiver, so one going dark mustn't silence it.
+    fn split_for_receiver_power_off_takes_the_receiver_down_too() {
+        // The bound pair is one appliance: the receiver mirrors the source's
+        // power in both directions.
         let cmd = MediaCommand {
             power: Some(false),
             ..Default::default()
         };
         let (source, receiver) = cmd.split_for_receiver(Some("Game"));
         assert_eq!(source.power, Some(false));
-        assert!(receiver.is_empty());
+        assert_eq!(receiver.power, Some(false));
+        assert_eq!(receiver.source, None); // never re-asserts the input on the way down
     }
 
     #[test]

@@ -170,6 +170,12 @@ const BODIES: Record<string, JSX.Element> = {
       <path d="M12 2.5v2.4M12 19.1v2.4M2.5 12h2.4M19.1 12h2.4M5.1 5.1l1.7 1.7M17.2 17.2l1.7 1.7M18.9 5.1l-1.7 1.7M6.8 17.2l-1.7 1.7" />
     </>
   ),
+  bolt: (
+    // A lightning bolt — automation ("when this, then that").
+    <>
+      <path d="M13 2.5 5.5 13.2h5L10 21.5l8.5-11.2h-5.2L13 2.5Z" />
+    </>
+  ),
   scene: (
     // Three sliders — a saved scene / preset look.
     <>
@@ -471,6 +477,7 @@ export function weatherLabel(condition: string | undefined | null): string {
 /// renders, so they all show the same complete set. Add a glyph to `BODIES` and a
 /// row here and it appears everywhere.
 export const ALL_GLYPH_OPTIONS: { name: string; label: string }[] = [
+  { name: "bolt", label: "Automation" },
   // Devices
   { name: "bulb", label: "Bulb" },
   { name: "led_strip", label: "LED strip" },

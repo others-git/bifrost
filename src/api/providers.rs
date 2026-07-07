@@ -1030,6 +1030,11 @@ async fn smarttv_pair(_: Session, Json(req): Json<SmartTvPairRequest>) -> impl I
             "message": "Enter the PIN shown on the TV screen."
         }))
         .into_response(),
+        Ok(SmartTvPairOutcome::NotRequired) => Json(serde_json::json!({
+            "status": "not_required",
+            "message": "This TV allows control without pairing — no token needed."
+        }))
+        .into_response(),
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({ "error": "tv_unreachable", "message": e.to_string() })),

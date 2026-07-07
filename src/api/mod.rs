@@ -1,6 +1,7 @@
 pub mod ai_endpoints;
 pub mod apikeys;
 pub mod auth;
+pub(crate) mod automations;
 pub mod dashboards;
 pub mod dedup;
 pub mod dev;
@@ -257,6 +258,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .nest("/ai-endpoints", ai_endpoints::router())
         .nest("/api-keys", apikeys::router())
+        .nest("/automations", automations::router())
         .nest("/media", media::router())
         .nest("/auth", auth::router())
         .nest("/dashboards", dashboards::router())

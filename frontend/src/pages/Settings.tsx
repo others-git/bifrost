@@ -52,8 +52,11 @@ import {
   type Kiosk,
   type KioskUpdateManifest,
   type Room,
+  clearDevEvents,
+  getDevEvents,
   type ConnectionStatus,
   type CredentialField,
+  type DevEvent,
   type Provider,
   type ProviderType,
 } from "../api";
@@ -583,10 +586,126 @@ function DeveloperTab() {
       {devMode && (
         <>
           <DevInfoCard />
+          <DevEventLog />
           <DevProviderDebugSection />
         </>
       )}
     </section>
+  );
+}
+
+/** Live server event log: everything Bifrost traces at debug+ (automations
+ * firing and their skip reasons, the voice pipeline, device state pushes,
+ * discovery, composite routing), captured server-side regardless of RUST_LOG.
+ * Polls while visible; pause to scroll back, filter by area, clear to reset. */
+function DevEventLog() {
+  const AREAS: { value: string; label: string }[] = [
+    { value: "", label: "All areas" },
+    { value: "bifrost::automation", label: "Automations" },
+    { value: "bifrost::voice", label: "Voice" },
+    { value: "bifrost::events", label: "Device state" },
+    { value: "bifrost::discover", label: "Discovery" },
+    { value: "bifrost::composite", label: "Composite" },
+    { value: "bifrost::smarttv", label: "Smart TV" },
+  ];
+  const [events, setEvents] = useState<DevEvent[]>([]);
+  const [area, setArea] = useState("");
+  const [paused, setPaused] = useState(false);
+  const lastSeq = useRef(0);
+
+  // Poll while mounted (the tab is open) and not paused. Changing the area
+  // filter re-reads from the start so history under the new filter shows too.
+  useEffect(() => {
+    let alive = true;
+    lastSeq.current = 0;
+    setEvents([]);
+    async function poll() {
+      if (!alive || paused) return;
+      const batch = await getDevEvents(lastSeq.current, area || undefined);
+      if (!alive || !batch) return;
+      lastSeq.current = batch.last_seq;
+      if (batch.entries.length > 0) {
+        // Newest first; cap what the panel keeps.
+        setEvents((prev) => [...batch.entries.reverse(), ...prev].slice(0, 500));
+      }
+    }
+    poll();
+    const t = setInterval(poll, 2000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [area, paused]);
+
+  const mono = "ui-monospace, SFMono-Regular, Menlo, monospace";
+  const timeOf = (ts: string) => ts.slice(11, 19);
+
+  return (
+    <div style={{ ...S.card, marginTop: "1rem", padding: "0.8rem 1rem", gap: "0.6rem" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap" }}>
+        <div style={{ fontWeight: 600, fontSize: "0.92rem", flex: 1, minWidth: 120 }}>Event log</div>
+        <Select value={area} options={AREAS} onChange={setArea} width={160} />
+        <Button variant="ghost" onClick={() => setPaused((p) => !p)}>
+          {paused ? "Resume" : "Pause"}
+        </Button>
+        <Button
+          variant="ghost"
+          onClick={async () => {
+            await clearDevEvents();
+            setEvents([]);
+          }}
+        >
+          Clear
+        </Button>
+      </div>
+      <div
+        style={{
+          fontFamily: mono,
+          fontSize: "0.72rem",
+          maxHeight: 380,
+          overflowY: "auto",
+          display: "flex",
+          flexDirection: "column",
+          gap: 2,
+          background: "rgba(0,0,0,0.3)",
+          borderRadius: 8,
+          padding: "0.5rem 0.6rem",
+        }}
+      >
+        {events.length === 0 && (
+          <span style={{ color: "var(--bf-faint)" }}>
+            Waiting for events… act on a device, run an automation, or speak a command.
+          </span>
+        )}
+        {events.map((e) => (
+          <div key={e.seq} style={{ display: "flex", gap: "0.5rem", alignItems: "baseline", minWidth: 0 }}>
+            <span style={{ color: "var(--bf-faint)", flexShrink: 0 }}>{timeOf(e.ts)}</span>
+            <span
+              style={{
+                color: e.level === "ERROR" ? "#f88" : e.level === "WARN" ? "#fc6" : ACCENT,
+                flexShrink: 0,
+                minWidth: 86,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+              title={e.target}
+            >
+              {e.target.replace(/^bifrost::/, "")}
+            </span>
+            <span style={{ color: "var(--bf-text, #eee)", minWidth: 0 }}>
+              {e.message}
+              {e.fields &&
+                Object.entries(e.fields).map(([k, v]) => (
+                  <span key={k} style={{ color: "var(--bf-faint)" }}>
+                    {" "}
+                    {k}={v}
+                  </span>
+                ))}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -1405,6 +1524,13 @@ function AddProviderForm({
     } else if ("status" in result && result.status === "pin_displayed") {
       setTvPinStep(true);
       setPairMsg("Enter the PIN shown on the TV, then click Submit PIN.");
+    } else if ("status" in result && result.status === "not_required") {
+      // IP-control Authentication is "None": the TV takes commands without a
+      // token, so there's nothing to pair — just add the provider.
+      setField("auth", "");
+      setTvPinStep(false);
+      setTvPin("");
+      setPairMsg("✓ No pairing needed — this TV allows control without a token.");
     } else if ("error" in result) {
       setPairMsg(`Could not reach the TV: ${result.message}`);
     }
