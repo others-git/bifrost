@@ -4902,16 +4902,33 @@ async fn add_onkyo_device(
         .as_str()
         .unwrap()
         .to_string();
-    let resp = app
-        .clone()
-        .oneshot(helpers::authed_post(
-            &format!("/api/providers/{provider_id}/discover"),
-            cookie,
-            "{}",
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    // Discovery multiplexes over the shared eISCP link, whose test-mode
+    // heartbeat (100ms, 2 silent probes → reconnect + backoff) can tear the
+    // socket mid-exchange when a loaded CI scheduler starves the mock's task —
+    // a transient 502 against a healthy mock. Retry through the turbulence;
+    // a real regression still fails after the deadline.
+    let mut status = StatusCode::INTERNAL_SERVER_ERROR;
+    for _ in 0..8 {
+        let resp = app
+            .clone()
+            .oneshot(helpers::authed_post(
+                &format!("/api/providers/{provider_id}/discover"),
+                cookie,
+                "{}",
+            ))
+            .await
+            .unwrap();
+        status = resp.status();
+        if status == StatusCode::OK {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "onkyo mock discovery never succeeded"
+    );
     let resp = app
         .clone()
         .oneshot(helpers::authed_get("/api/media/devices", cookie))

@@ -334,7 +334,12 @@ impl OnkyoProvider {
     #[cfg(test)]
     pub fn new_for_test(host: impl Into<String>, port: u16) -> Self {
         Self {
-            timeout: Duration::from_millis(500),
+            // Wide enough to absorb a test-mode heartbeat break (100ms probes,
+            // 2 silent → reconnect) PLUS its 250ms backoff on a starved CI
+            // scheduler — a 500ms window could expire mid-reconnect and fail
+            // discovery against a perfectly healthy mock. Failure-path tests
+            // (dead port) just wait this long; that's fine.
+            timeout: Duration::from_secs(2),
             ..Self::new(host, port)
         }
     }
