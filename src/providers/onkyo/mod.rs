@@ -1499,17 +1499,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn event_stream_against_dead_port_yields_no_events() {
+    async fn event_stream_against_dead_port_never_fabricates_state() {
         // The link connects (and reconnects) in the background, so subscribing
-        // always succeeds; a dead receiver simply produces no events.
-        let p = OnkyoProvider::new_for_test("127.0.0.1", 1);
+        // always succeeds. A dead receiver may emit link-state snapshots
+        // (`reachable: false` — that's the point of the link-down announce),
+        // but it must never fabricate REAL state: nothing a dead port produces
+        // may claim the receiver reachable. (Whether a DOWN lands inside the
+        // window depends on the shared actor's backoff phase — port 2 is
+        // shared with no other test, so the first failed connect is quick.)
+        let p = OnkyoProvider::new_for_test("127.0.0.1", 2);
         let mut rx = p.event_stream().await.expect("subscribe is lazy");
-        assert!(
-            tokio::time::timeout(Duration::from_millis(150), rx.recv())
-                .await
-                .is_err(),
-            "a dead receiver yields no events"
-        );
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(600);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(150), rx.recv()).await {
+                Ok(Some(ev)) => {
+                    assert_eq!(
+                        ev.state.reachable,
+                        Some(false),
+                        "a dead receiver may only mark itself unreachable, got: {:?}",
+                        ev.state
+                    );
+                }
+                Ok(None) => panic!("stream closed"),
+                Err(_) => {}
+            }
+        }
     }
 
     #[tokio::test]
