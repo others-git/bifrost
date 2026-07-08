@@ -608,20 +608,27 @@ function DevEventLog() {
     { value: "bifrost::composite", label: "Composite" },
     { value: "bifrost::smarttv", label: "Smart TV" },
   ];
+  const LEVELS: { value: string; label: string }[] = [
+    { value: "", label: "All levels" },
+    { value: "warn", label: "Warnings +" },
+    { value: "error", label: "Errors" },
+  ];
   const [events, setEvents] = useState<DevEvent[]>([]);
   const [area, setArea] = useState("");
+  const [level, setLevel] = useState("");
   const [paused, setPaused] = useState(false);
   const lastSeq = useRef(0);
 
-  // Poll while mounted (the tab is open) and not paused. Changing the area
-  // filter re-reads from the start so history under the new filter shows too.
+  // Poll while mounted (the tab is open) and not paused. Changing the area or
+  // level filter re-reads from the start so history under the new filter shows
+  // too (the server filters the whole ring buffer, not just fresh entries).
   useEffect(() => {
     let alive = true;
     lastSeq.current = 0;
     setEvents([]);
     async function poll() {
       if (!alive || paused) return;
-      const batch = await getDevEvents(lastSeq.current, area || undefined);
+      const batch = await getDevEvents(lastSeq.current, area || undefined, level || undefined);
       if (!alive || !batch) return;
       lastSeq.current = batch.last_seq;
       if (batch.entries.length > 0) {
@@ -635,7 +642,7 @@ function DevEventLog() {
       alive = false;
       clearInterval(t);
     };
-  }, [area, paused]);
+  }, [area, level, paused]);
 
   const mono = "ui-monospace, SFMono-Regular, Menlo, monospace";
   const timeOf = (ts: string) => ts.slice(11, 19);
@@ -645,6 +652,7 @@ function DevEventLog() {
       <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap" }}>
         <div style={{ fontWeight: 600, fontSize: "0.92rem", flex: 1, minWidth: 120 }}>Event log</div>
         <Select value={area} options={AREAS} onChange={setArea} width={160} />
+        <Select value={level} options={LEVELS} onChange={setLevel} width={124} />
         <Button variant="ghost" onClick={() => setPaused((p) => !p)}>
           {paused ? "Resume" : "Pause"}
         </Button>

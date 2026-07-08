@@ -1068,9 +1068,11 @@ export interface DevEvent {
 export async function getDevEvents(
   after: number,
   target?: string,
+  level?: string,
 ): Promise<{ entries: DevEvent[]; last_seq: number } | null> {
   const params = new URLSearchParams({ after: String(after) });
   if (target) params.set("target", target);
+  if (level) params.set("level", level);
   const res = await fetch(`/api/dev/events?${params}`);
   if (!res.ok) return null;
   return res.json();

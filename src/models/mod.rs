@@ -146,21 +146,33 @@ impl LightStatePatch {
         // modes — a light is in exactly one. A patch that sets any one clears the
         // other two so the merged state names a single honest mode (and a scene
         // snapshot never carries a stale effect onto a now-plain-colour light).
-        if let Some(c) = &self.color {
-            state.color = Some(c.clone());
-            state.color_temp_mirek = None;
-            state.effect = None;
-        } else if let Some(m) = self.color_temp_mirek {
-            state.color_temp_mirek = Some(m);
+        //
+        // An ACTIVE effect outranks a co-reported colour: a provider streaming an
+        // animating effect (HA `state_changed`, one full state per frame) reports
+        // each frame's colour ALONGSIDE the still-running effect — that colour is
+        // the effect's *output*, not a mode change. Colour-first demoted the
+        // cached mode to a plain colour on the first animation frame, so a scene
+        // saved mid-effect captured one random frame and reapplied as that colour
+        // instead of the effect.
+        let active_effect = self.effect.as_deref().filter(|e| !is_clear_effect(e));
+        if let Some(e) = active_effect {
+            state.effect = Some(e.to_string());
             state.color = None;
-            state.effect = None;
-        } else if let Some(e) = &self.effect {
-            if is_clear_effect(e) {
+            state.color_temp_mirek = None;
+        } else {
+            if self.effect.is_some() {
+                // A clear token ("no_effect"/"off"/"None") ends the effect; a
+                // co-sent colour/temperature below names the settled mode.
                 state.effect = None;
-            } else {
-                state.effect = Some(e.clone());
-                state.color = None;
+            }
+            if let Some(c) = &self.color {
+                state.color = Some(c.clone());
                 state.color_temp_mirek = None;
+                state.effect = None;
+            } else if let Some(m) = self.color_temp_mirek {
+                state.color_temp_mirek = Some(m);
+                state.color = None;
+                state.effect = None;
             }
         }
     }
@@ -429,6 +441,54 @@ mod tests {
         }
         assert!(!is_clear_effect("candle"));
         assert!(!is_clear_effect("breathe"));
+    }
+
+    #[test]
+    fn active_effect_outranks_a_co_reported_frame_color() {
+        // A provider streaming an animating effect (HA state_changed, one full
+        // state per frame) reports each frame's colour ALONGSIDE the running
+        // effect. The colour is the effect's output — the merged mode must stay
+        // "effect", or a scene saved mid-effect captures one random frame.
+        let mut s = LightState {
+            on: true,
+            effect: Some("windmill".into()),
+            ..Default::default()
+        };
+        LightStatePatch {
+            on: Some(true),
+            brightness: Some(60.0),
+            color: Some(Color::from_rgb(200, 190, 170)), // this frame's wash
+            effect: Some("windmill".into()),
+            ..Default::default()
+        }
+        .apply_to(&mut s);
+        assert_eq!(
+            s.effect.as_deref(),
+            Some("windmill"),
+            "the effect stays the mode"
+        );
+        assert!(s.color.is_none(), "the frame colour is not a mode change");
+        assert_eq!(s.brightness, Some(60.0));
+
+        // A frame that co-reports a colour TEMPERATURE is the same story.
+        LightStatePatch {
+            color_temp_mirek: Some(300),
+            effect: Some("windmill".into()),
+            ..Default::default()
+        }
+        .apply_to(&mut s);
+        assert_eq!(s.effect.as_deref(), Some("windmill"));
+        assert!(s.color_temp_mirek.is_none());
+
+        // But a clear token + colour is a real mode change: effect ends, colour mode.
+        LightStatePatch {
+            color: Some(Color::from_rgb(0, 255, 0)),
+            effect: Some("None".into()),
+            ..Default::default()
+        }
+        .apply_to(&mut s);
+        assert_eq!(s.effect, None, "clear token ends the effect");
+        assert!(s.color.is_some(), "the settled colour becomes the mode");
     }
 
     #[test]

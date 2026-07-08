@@ -157,6 +157,14 @@ owns its volume. Stored on the *source* (`media_devices.receiver_id` +
   behaves as one appliance, and commands are absolute (never toggles) so a
   receiver already in the desired state is a no-op.
   (`MediaCommand::split_for_receiver` / `apply_with_receiver`.)
+- **In a composite, the binding may live on a different member than power.**
+  Power routes to the most authoritative member (the native TV), while the
+  receiver binding often sits on its HA twin. The power mirror still fires:
+  `apply_routed` mirrors composite power to a receiver bound to **any** member
+  (after the source wakes, so the receiver selects an active input), skipping
+  the case where the power member carries the binding itself (its own split
+  already mirrors). The bound member is never sent its own power command — it's
+  the same physical device the surface already drives.
 
 ---
 

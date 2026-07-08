@@ -199,6 +199,13 @@ const BODIES: Record<string, JSX.Element> = {
       <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
     </>
   ),
+  search: (
+    // Magnifier — lens + handle.
+    <>
+      <circle cx="11" cy="11" r="6.5" />
+      <path d="M15.8 15.8 21 21" />
+    </>
+  ),
   gear: (
     // A cog — configure / settings.
     <>
@@ -511,6 +518,7 @@ export const ALL_GLYPH_OPTIONS: { name: string; label: string }[] = [
   { name: "scene", label: "Scene" },
   { name: "restore", label: "Restore" },
   { name: "copy", label: "Copy" },
+  { name: "search", label: "Search" },
   { name: "play", label: "Play" },
   { name: "pause", label: "Pause" },
   { name: "play_pause", label: "Play / pause" },

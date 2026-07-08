@@ -91,6 +91,8 @@ struct EventsQuery {
     #[serde(default)]
     after: u64,
     target: Option<String>,
+    /// Minimum severity to include ("warn", "error") — the panel's errors filter.
+    level: Option<String>,
     limit: Option<usize>,
 }
 
@@ -108,6 +110,7 @@ async fn events_handler(
     let (entries, last_seq) = crate::journal::Journal::global().entries_after(
         q.after,
         q.target.as_deref(),
+        q.level.as_deref(),
         q.limit.unwrap_or(200).min(500),
     );
     Json(json!({ "entries": entries, "last_seq": last_seq })).into_response()

@@ -13,6 +13,7 @@
 use crate::AppState;
 use crate::api::auth::Session;
 use crate::models::sensor::{SensorKind, SensorState};
+use anyhow::Context as _;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -125,7 +126,11 @@ pub(crate) fn build_sensor_provider(
     provider_type: &str,
     credentials_enc: &str,
 ) -> anyhow::Result<Box<dyn crate::providers::SensorProvider>> {
-    let creds_json = state.decrypt_credentials(credentials_enc)?;
+    // Name the provider in the chain — a bare \"decryption failed\" doesn't
+    // say WHICH provider needs its credentials re-entered.
+    let creds_json = state
+        .decrypt_credentials(credentials_enc)
+        .with_context(|| format!("{provider_type} credentials"))?;
     state.registry.build_sensor(provider_type, &creds_json)
 }
 

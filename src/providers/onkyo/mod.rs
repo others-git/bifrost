@@ -452,6 +452,15 @@ const HEARTBEAT: Duration = if cfg!(test) {
 /// quiet receiver answers the very first probe, resetting the count).
 const MAX_SILENT_HEARTBEATS: u32 = 2;
 
+/// Pseudo-code the actor broadcasts on link-state transitions (`UP`/`DOWN`),
+/// picked so it can't collide with a real 3-char ISCP code. Without it, a
+/// receiver that can't be reached — powered down hard, LAN gone, or its
+/// single eISCP slot held by a competing controller — leaves subscribers
+/// showing the last pushed state as live truth indefinitely; the fold in
+/// `event_stream` turns DOWN into `reachable: false` snapshots so every
+/// surface degrades to "unreachable, last known …" instead.
+const LINK_STATE: &str = "_LK";
+
 /// Owns the single socket: connects (refreshing full state each time), then
 /// loops writing queued batches and broadcasting decoded replies/echoes.
 async fn onkyo_link_actor(
@@ -473,6 +482,7 @@ async fn onkyo_link_actor(
                 init.extend_from_slice(&encode_packet(q));
             }
             if stream.write_all(&init).await.is_ok() {
+                let _ = events.send((LINK_STATE.to_string(), "UP".to_string()));
                 let mut buf: Vec<u8> = Vec::with_capacity(1024);
                 let mut chunk = [0u8; 1024];
                 let mut silent: u32 = 0;
@@ -523,6 +533,10 @@ async fn onkyo_link_actor(
                 }
             }
         }
+        // Reached on a dead session (socket closed/errored, heartbeats
+        // exhausted, init write failed) or a failed connect — either way the
+        // receiver is unreachable right now; say so instead of going quiet.
+        let _ = events.send((LINK_STATE.to_string(), "DOWN".to_string()));
         // Backoff before reconnecting (capped); writes queued meanwhile flush on reconnect.
         let delay = Duration::from_millis(250u64.saturating_mul(1 << attempt.min(6)).min(20_000));
         attempt = attempt.saturating_add(1);
@@ -747,6 +761,35 @@ impl MediaProvider for OnkyoProvider {
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => return,
                 };
+                if code == LINK_STATE {
+                    // Link transition: flip reachability on both zones, keep the
+                    // last-known state fields (the UI shows "unreachable, last
+                    // known on" — not a fabricated off). On UP the actor's
+                    // reconnect re-query re-syncs the real values right after.
+                    let up = data == "UP";
+                    main_state.reachable = Some(up);
+                    zone2_state.reachable = Some(up);
+                    for (device_id, state, last) in [
+                        ("main", &main_state, &mut last_main),
+                        ("zone2", &zone2_state, &mut last_zone2),
+                    ] {
+                        if last.as_ref() != Some(state) {
+                            let snapshot = state.clone();
+                            *last = Some(snapshot.clone());
+                            if tx
+                                .send(MediaEvent {
+                                    device_id: device_id.to_string(),
+                                    state: snapshot,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if data == "QSTN" || data == "N/A" {
                     // A query echo, or "command unsupported" (e.g. ZPW on a
                     // receiver with no zone 2) — not state.
@@ -1052,7 +1095,16 @@ mod tests {
     /// state table (or `N/A`), echoes accepted commands like real hardware,
     /// and records every message it receives.
     async fn spawn_mock_receiver(scripted: Scripted) -> (u16, Arc<Mutex<Vec<String>>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        spawn_mock_receiver_on(0, scripted).await
+    }
+
+    /// Bind on a specific port (0 = ephemeral) — the reconnect test needs to
+    /// bring a "receiver" up on the port an actor is already retrying.
+    async fn spawn_mock_receiver_on(
+        port: u16,
+        scripted: Scripted,
+    ) -> (u16, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let recorded: Arc<Mutex<Vec<String>>> = Arc::default();
         let rec = Arc::clone(&recorded);
@@ -1325,6 +1377,59 @@ mod tests {
         assert!(cmds.contains(&"ZMT00".to_string()), "{cmds:?}");
         assert!(cmds.contains(&"SLZ10".to_string()), "{cmds:?}");
         assert!(cmds.contains(&"NTZPLAY".to_string()), "{cmds:?}");
+    }
+
+    #[tokio::test]
+    async fn link_down_marks_zones_unreachable_and_reconnect_recovers() {
+        // Reserve a port with nothing listening: the link actor's connects fail.
+        let reserved = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+
+        let p = OnkyoProvider::new_for_test("127.0.0.1", port);
+        let mut rx = p.event_stream().await.unwrap();
+
+        // A failed connect must degrade the stream to "unreachable" — not go
+        // silent while surfaces keep showing week-old cached state as live.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut down = false;
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(400), rx.recv()).await {
+                Ok(Some(ev)) if ev.device_id == "main" => {
+                    if ev.state.reachable == Some(false) {
+                        down = true;
+                        break;
+                    }
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("stream closed"),
+                Err(_) => {}
+            }
+        }
+        assert!(down, "an unreachable receiver must push reachable:false");
+
+        // Bring the receiver up on that port: the actor's retry loop connects,
+        // announces UP, and the reconnect re-query restores real state.
+        let _mock = spawn_mock_receiver_on(port, baseline_scripted()).await;
+        let mut recovered = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(400), rx.recv()).await {
+                Ok(Some(ev)) if ev.device_id == "main" => {
+                    if ev.state.reachable == Some(true) && ev.state.power {
+                        recovered = true;
+                        break;
+                    }
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("stream closed"),
+                Err(_) => {}
+            }
+        }
+        assert!(
+            recovered,
+            "a reconnect must restore reachable:true + real state"
+        );
     }
 
     #[tokio::test]

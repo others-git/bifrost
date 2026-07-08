@@ -268,7 +268,7 @@ export function BrightnessSlider({
         <SunGlyph size={compact ? 19 : 15} tint={color.dim} />
         <div
           ref={trackRef}
-          title={`${value}%`}
+          title={`${Math.round(value)}%`}
           onPointerDown={(e) => {
             dragging.current = true;
             e.currentTarget.setPointerCapture(e.pointerId);
@@ -317,7 +317,9 @@ export function BrightnessSlider({
             fontVariantNumeric: "tabular-nums",
           }}
         >
-          {value}%
+          {/* Device-reported brightness can be fractional (HA's 0-255 → %);
+              the readout is always a whole number. */}
+          {Math.round(value)}%
         </span>
       </div>
     </div>
@@ -949,7 +951,7 @@ function SegmentEditor({
             const pctY = ry - RIB / 2 - 5; // baseline just above the ribbon
             return (
               <g key={`seg-ctl${i}`} onClick={() => toggle(i)} style={{ cursor: "pointer" }}>
-                <title>{`Segment ${i + 1} · ${brightness[i]}%`}</title>
+                <title>{`Segment ${i + 1} · ${Math.round(brightness[i])}%`}</title>
                 <text
                   x={x}
                   y={pctY}
@@ -961,7 +963,7 @@ function SegmentEditor({
                     fontVariantNumeric: "tabular-nums",
                   }}
                 >
-                  {brightness[i]}%
+                  {Math.round(brightness[i])}%
                 </text>
                 <rect
                   x={x - step / 2}

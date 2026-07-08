@@ -225,21 +225,23 @@ pub async fn run() -> Result<()> {
 async fn start_managers(state: &Arc<AppState>) {
     use sqlx::Row;
 
-    let rows =
-        match sqlx::query("SELECT id, provider_type, credentials FROM providers WHERE enabled = 1")
-            .fetch_all(&state.db)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("could not load providers at startup: {e}");
-                return;
-            }
-        };
+    let rows = match sqlx::query(
+        "SELECT id, name, provider_type, credentials FROM providers WHERE enabled = 1",
+    )
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("could not load providers at startup: {e}");
+            return;
+        }
+    };
 
     let mut connections = state.connections.lock().await;
     for row in rows {
         let id: String = row.get("id");
+        let name: String = row.get("name");
         let provider_type: String = row.get("provider_type");
         let creds_enc: String = row.get("credentials");
 
@@ -247,7 +249,7 @@ async fn start_managers(state: &Arc<AppState>) {
             Ok(j) => j,
             Err(e) => {
                 tracing::error!(
-                    "failed to decrypt credentials for provider {id}: {e:#}. \
+                    "failed to decrypt credentials for provider \"{name}\" ({provider_type}, {id}): {e:#}. \
                      This almost always means BIFROST_SECRET changed since the provider \
                      was added. Restore the original secret, or re-enter this provider's \
                      credentials in Settings (Edit credentials) — lights, scenes, groups \

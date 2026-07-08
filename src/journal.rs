@@ -77,15 +77,18 @@ impl Journal {
         buf.push_back(entry);
     }
 
-    /// Entries with `seq > after`, optionally filtered to a target prefix,
-    /// oldest first, capped at `limit`. Also returns the newest seq overall so
-    /// a filtered poll still advances its cursor past non-matching entries.
+    /// Entries with `seq > after`, optionally filtered to a target prefix and
+    /// a minimum severity, oldest first, capped at `limit`. Also returns the
+    /// newest seq overall so a filtered poll still advances its cursor past
+    /// non-matching entries.
     pub fn entries_after(
         &self,
         after: u64,
         target_prefix: Option<&str>,
+        min_level: Option<&str>,
         limit: usize,
     ) -> (Vec<JournalEntry>, u64) {
+        let floor = min_level.map(level_rank);
         let buf = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let last_seq = buf
             .back()
@@ -94,6 +97,7 @@ impl Journal {
             .iter()
             .filter(|e| e.seq > after)
             .filter(|e| target_prefix.is_none_or(|p| e.target.starts_with(p)))
+            .filter(|e| floor.is_none_or(|f| level_rank(e.level) >= f))
             .take(limit)
             .cloned()
             .collect();
@@ -106,6 +110,18 @@ impl Journal {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+    }
+}
+
+/// Severity order for the panel's level filter ("warnings and up", "errors
+/// only"). Unknown strings rank lowest, so they never sneak past a floor.
+fn level_rank(level: &str) -> u8 {
+    match level.to_ascii_uppercase().as_str() {
+        "ERROR" => 4,
+        "WARN" => 3,
+        "INFO" => 2,
+        "DEBUG" => 1,
+        _ => 0, // TRACE + anything unexpected
     }
 }
 
@@ -171,11 +187,31 @@ mod tests {
         for i in 0..(CAPACITY + 10) {
             j.record("DEBUG", "bifrost::test", format!("m{i}"), BTreeMap::new());
         }
-        let (entries, last_seq) = j.entries_after(0, None, usize::MAX);
+        let (entries, last_seq) = j.entries_after(0, None, None, usize::MAX);
         assert_eq!(entries.len(), CAPACITY);
         // Oldest 10 dropped; sequence still monotonic and gap-free at the tail.
         assert_eq!(entries.first().unwrap().seq, 11);
         assert_eq!(last_seq, (CAPACITY + 10) as u64);
+    }
+
+    #[test]
+    fn entries_after_honors_a_minimum_level() {
+        let j = Journal::default();
+        j.record("DEBUG", "bifrost::a", "noise".into(), BTreeMap::new());
+        j.record("WARN", "bifrost::a", "wobble".into(), BTreeMap::new());
+        j.record("ERROR", "bifrost::a", "broken".into(), BTreeMap::new());
+
+        let (warn_up, _) = j.entries_after(0, None, Some("warn"), usize::MAX);
+        assert_eq!(warn_up.len(), 2, "warn floor keeps WARN + ERROR");
+
+        let (errors, last) = j.entries_after(0, None, Some("error"), usize::MAX);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].message, "broken");
+        // The cursor still advances past filtered-out entries.
+        assert_eq!(last, 3);
+
+        let (unknown_floor, _) = j.entries_after(0, None, Some("bogus"), usize::MAX);
+        assert_eq!(unknown_floor.len(), 3, "an unknown floor filters nothing");
     }
 
     #[test]
@@ -190,17 +226,17 @@ mod tests {
         );
         j.record("INFO", "bifrost::voice", "spoke".into(), BTreeMap::new());
 
-        let (all, last) = j.entries_after(0, None, usize::MAX);
+        let (all, last) = j.entries_after(0, None, None, usize::MAX);
         assert_eq!(all.len(), 3);
         assert_eq!(last, 3);
 
-        let (voice, last) = j.entries_after(0, Some("bifrost::voice"), usize::MAX);
+        let (voice, last) = j.entries_after(0, Some("bifrost::voice"), None, usize::MAX);
         assert_eq!(voice.len(), 2);
         // The cursor still reports the global tail so polls advance past
         // non-matching entries.
         assert_eq!(last, 3);
 
-        let (after, _) = j.entries_after(2, None, usize::MAX);
+        let (after, _) = j.entries_after(2, None, None, usize::MAX);
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].message, "spoke");
     }
@@ -210,12 +246,16 @@ mod tests {
         use tracing_subscriber::prelude::*;
         // A scoped subscriber writing into the global journal.
         let subscriber = tracing_subscriber::registry().with(JournalLayer);
-        let before = Journal::global().entries_after(0, None, usize::MAX).1;
+        let before = Journal::global().entries_after(0, None, None, usize::MAX).1;
         tracing::subscriber::with_default(subscriber, || {
             tracing::debug!(target: "bifrost::journal_test", device = "l1", on = true, "state push");
         });
-        let (entries, _) =
-            Journal::global().entries_after(before, Some("bifrost::journal_test"), usize::MAX);
+        let (entries, _) = Journal::global().entries_after(
+            before,
+            Some("bifrost::journal_test"),
+            None,
+            usize::MAX,
+        );
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].message, "state push");
         assert_eq!(

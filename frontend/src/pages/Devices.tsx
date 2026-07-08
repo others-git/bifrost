@@ -57,6 +57,7 @@ import {
 } from "../api";
 import { Glyph, GlyphGrid, ALL_GLYPH_OPTIONS, powerKindGlyph, mediaKindGlyph, sensorKindGlyph } from "../components/glyphs";
 import { PageHeader, SectionLabel } from "../components/PageHeader";
+import { S } from "../styles";
 import { AutomationsModal } from "../components/Automations";
 import { Switch, Segmented } from "../components/controls";
 import { GenericDevicesSection } from "../components/GenericDevices";
@@ -1323,6 +1324,7 @@ function buildComposites(
 
 export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill) => void }) {
   const [tab, setTab] = useState<"controlled" | "detected">("controlled");
+  const [query, setQuery] = useState("");
   const [items, setItems] = useState<Item[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -1450,8 +1452,38 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
 
   const byId = new Map(items.map((d) => [d.id, d] as const));
 
+  // Fuzzy search: every whitespace-separated token must appear somewhere in a
+  // device's name, type, provider, or room — so "center lamp", "switch",
+  // "couch string", and "hue light" all narrow the way you'd expect, in any
+  // token order. Filtering only shapes what's rendered; the full inventory
+  // (ordering, reorder persistence, merge candidates) stays on `items`.
+  const providerName = new Map(providers.map((p) => [p.id, `${p.name} ${p.type_name ?? ""}`]));
+  const roomName = new Map(rooms.map((r) => [r.id, r.name]));
+  const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const matchesQuery = (hay: string) => {
+    const h = hay.toLowerCase();
+    return tokens.every((t) => h.includes(t));
+  };
+  const searching = tokens.length > 0;
+  const shown = !searching
+    ? items
+    : items.filter((d) =>
+        matchesQuery(
+          `${d.name} ${d.typeLabel} ${d.domain} ${providerName.get(d.providerId) ?? ""} ${
+            roomName.get(d.roomId ?? d.inheritedRoomId ?? "") ?? ""
+          }`,
+        ),
+      );
+
   // Dev-only diagnostic: devices that aggregate several underlying entities.
   const composites = devMode ? buildComposites(mediaDevices, remotes, items) : [];
+  const shownComposites = !searching
+    ? composites
+    : composites.filter((c) =>
+        matchesQuery(
+          `${c.name} ${c.kindLabel} ${c.members.map((m) => `${m.name} ${m.role}`).join(" ")}`,
+        ),
+      );
 
   // Merge (M26) matches the *same physical device*, which a different provider
   // may also serve — so candidates are all visible audio devices, not just the
@@ -1677,30 +1709,73 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
         }
       />
 
-      <div style={{ marginBottom: "1.4rem", maxWidth: 360 }}>
-        <Segmented
-          value={tab}
-          onChange={setTab}
-          variant="outline"
-          accent={ACCENT}
-          options={[
-            { value: "controlled", label: "Controlled" },
-            { value: "detected", label: "Detected" },
-          ]}
-        />
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "0.8rem",
+          flexWrap: "wrap",
+          marginBottom: "1.4rem",
+        }}
+      >
+        <div style={{ width: 360, maxWidth: "100%", flexShrink: 0 }}>
+          <Segmented
+            value={tab}
+            onChange={setTab}
+            variant="outline"
+            accent={ACCENT}
+            options={[
+              { value: "controlled", label: "Controlled" },
+              { value: "detected", label: "Detected" },
+            ]}
+          />
+        </div>
+        {tab === "controlled" && (
+          <div style={{ position: "relative", flex: "1 1 240px", maxWidth: 420 }}>
+            <span
+              style={{
+                position: "absolute",
+                left: 12,
+                top: "50%",
+                transform: "translateY(-50%)",
+                color: T.faint,
+                pointerEvents: "none",
+                display: "inline-flex",
+              }}
+            >
+              <Glyph name="search" size={16} />
+            </span>
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search devices — name, type, room…"
+              style={{ ...S.input, paddingLeft: 36, fontSize: "0.88rem" }}
+            />
+          </div>
+        )}
       </div>
 
       {tab === "detected" ? (
         <DetectedDevices onAdd={onAddDetected} />
       ) : (
         <>
-      {devMode && composites.length > 0 && (
+      {devMode && shownComposites.length > 0 && (
         <section style={{ marginBottom: "2rem" }}>
           <SectionLabel style={{ fontSize: "0.7rem", color: T.faint, marginBottom: "0.6rem" }}>
             Composite devices · dev
           </SectionLabel>
-          <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem", maxWidth: 560 }}>
-            {composites.map((c) => (
+          <div
+            style={{
+              // Cards tile side by side while they fit (480–560px each,
+              // left-aligned), and only then stack — a fixed-range track
+              // instead of 1fr so a lone card doesn't stretch page-wide.
+              display: "grid",
+              gridTemplateColumns: isMobile ? "1fr" : "repeat(auto-fill, minmax(480px, 560px))",
+              gap: "0.6rem",
+              alignItems: "start",
+            }}
+          >
+            {shownComposites.map((c) => (
               <div
                 key={c.id}
                 style={{
@@ -1734,6 +1809,10 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
 
       {loading ? (
         <div style={{ color: T.faint, fontSize: "0.9rem" }}>Loading…</div>
+      ) : searching && shown.length === 0 ? (
+        <div style={{ color: T.dim, fontSize: "0.9rem" }}>
+          No devices match “{query.trim()}”.
+        </div>
       ) : items.length === 0 ? (
         <div
           style={{
@@ -1753,7 +1832,7 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
           ...visibleProviders.map((p, i) => ({ pid: p.id, provider: p as Provider | undefined, index: i })),
           ...orphanIds.map((pid) => ({ pid, provider: undefined as Provider | undefined, index: -1 })),
         ].map(({ pid, provider, index }) => {
-          const provItems = items.filter((d) => d.providerId === pid);
+          const provItems = shown.filter((d) => d.providerId === pid);
           if (provItems.length === 0) return null;
           // Domains this provider actually has devices in (an integration like
           // Home Assistant spans several; most providers just one).
@@ -1762,7 +1841,7 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
           );
           const multiDomain = domainsPresent.length > 1;
           const total = provItems.filter((d) => !d.shadowedBy && !d.companionOf).length;
-          const canReorder = index >= 0 && reorderable;
+          const canReorder = index >= 0 && reorderable && !searching;
           return (
             <section
               key={pid}

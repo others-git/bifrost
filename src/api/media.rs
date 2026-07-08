@@ -10,6 +10,7 @@ use crate::AppState;
 use crate::api::auth::Session;
 use crate::models::media::{MediaCapabilities, MediaCommand, MediaFavorite, MediaState};
 use crate::models::remote::RemoteState;
+use anyhow::Context as _;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -525,7 +526,11 @@ pub(crate) fn build_media_provider(
     provider_type: &str,
     credentials_enc: &str,
 ) -> anyhow::Result<Box<dyn crate::providers::MediaProvider>> {
-    let creds_json = state.decrypt_credentials(credentials_enc)?;
+    // Name the provider in the chain — a bare \"decryption failed\" doesn't
+    // say WHICH provider needs its credentials re-entered.
+    let creds_json = state
+        .decrypt_credentials(credentials_enc)
+        .with_context(|| format!("{provider_type} credentials"))?;
     state.registry.build_media(provider_type, &creds_json)
 }
 
@@ -1245,7 +1250,20 @@ pub(crate) async fn composite_routing(state: &AppState, id: &str) -> Vec<Control
     let mut out = Vec::new();
 
     let (b, why) = route_power(&backings);
-    out.push(row("power", b, why.into()));
+    let mut reason = why.to_string();
+    // Power also mirrors to a receiver bound to ANY member (the bound pair is
+    // one appliance) — via the power member's own split when it carries the
+    // binding, else the cross-member mirror in `apply_routed`.
+    let bound = backings
+        .iter()
+        .find(|x| x.receiver_bound)
+        .and_then(|x| x.receiver_id.as_deref());
+    if let Some(recv) = bound
+        && let Some(name) = device_name(state, recv).await
+    {
+        reason = format!("{why} · mirrors to {name}");
+    }
+    out.push(row("power", b, reason));
 
     let (b, why) = route_volume(&backings);
     let mut reason = why.to_string();
@@ -1430,6 +1448,41 @@ async fn apply_routed(
         match apply_with_receiver(state, &backing_id, &sub).await {
             SetMediaOutcome::Ok => {}
             other => return other,
+        }
+    }
+    // The composite's receiver binding can live on a DIFFERENT member than the
+    // one power routes to (the native TV wins power; its HA twin carries the
+    // binding). The bound pair is one appliance, so power must still mirror to
+    // the receiver — `apply_with_receiver` only does that when the power part
+    // lands on the bound row itself. Runs after the loop so the source is
+    // already awake when the receiver selects its input.
+    if cmd.power.is_some() {
+        let power_target = route_power(backings).0.id.clone();
+        if let Some(bound) = backings
+            .iter()
+            .find(|b| b.receiver_bound && b.id != power_target)
+            && let Ok(Some((receiver_id, receiver_source))) =
+                load_receiver_binding(state, &bound.id).await
+        {
+            let power_only = MediaCommand {
+                power: cmd.power,
+                ..Default::default()
+            };
+            let (_, receiver_cmd) = power_only.split_for_receiver(receiver_source.as_deref());
+            if !receiver_cmd.is_empty() {
+                tracing::debug!(
+                    target: "bifrost::composite",
+                    composite = %id,
+                    bound_member = %bound.id,
+                    receiver = %receiver_id,
+                    on = ?cmd.power,
+                    "composite power: mirroring to the bound receiver of a non-power member",
+                );
+                match apply_to_device(state, &receiver_id, &receiver_cmd).await {
+                    SetMediaOutcome::Ok => {}
+                    other => return other,
+                }
+            }
         }
     }
     SetMediaOutcome::Ok

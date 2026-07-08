@@ -5042,6 +5042,117 @@ async fn receiver_mirrors_the_bound_sources_power_both_ways() {
 }
 
 #[tokio::test]
+async fn composite_power_mirrors_to_a_companions_bound_receiver() {
+    // The BRAVIA shape: power routes to the composite's most authoritative
+    // member, but the receiver binding lives on a DIFFERENT member (the HA
+    // twin). The bound pair is one appliance — composite power must still
+    // reach the receiver.
+    let (port_a, cmds_a) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let (port_b, cmds_b) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let (port_r, rcv_cmds) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let a = add_onkyo_device(&app, &cookie, port_a, "TV", &[]).await;
+    let b = add_onkyo_device(&app, &cookie, port_b, "TV twin", std::slice::from_ref(&a)).await;
+    let receiver = add_onkyo_device(&app, &cookie, port_r, "AVR", &[a.clone(), b.clone()]).await;
+
+    // Merge b into a → one composite. The surface direction is derived; find it.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/media/devices/{b}/companion"),
+            &cookie,
+            &format!(r#"{{"primary_id":"{a}"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/media/devices", &cookie))
+        .await
+        .unwrap();
+    let devices = helpers::response_json(resp).await;
+    let companion_of = |id: &str| {
+        devices
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == id)
+            .and_then(|d| d["companion_of"].as_str().map(str::to_string))
+    };
+    let (surface, member) = if companion_of(&a).is_some() {
+        (b.clone(), a.clone())
+    } else {
+        (a.clone(), b.clone())
+    };
+    let (surface_cmds, member_cmds) = if surface == a {
+        (&cmds_a, &cmds_b)
+    } else {
+        (&cmds_b, &cmds_a)
+    };
+
+    // Bind the NON-surface member to the receiver — power will route to the
+    // surface, so only the cross-member mirror can reach the receiver.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/media/devices/{member}/receiver"),
+            &cookie,
+            &format!(r#"{{"receiver_id":"{receiver}"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Power-on the composite: the surface wakes AND the receiver mirrors on.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/media/devices/{surface}/state"),
+            &cookie,
+            r#"{"power":true}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        wait_for_command(surface_cmds, "PWR01").await,
+        "the composite's power member must power on"
+    );
+    assert!(
+        wait_for_command(&rcv_cmds, "PWR01").await,
+        "the receiver bound to the companion must mirror power-on"
+    );
+    // The bound member is the same physical device the surface already woke —
+    // it must not receive its own power command.
+    assert!(
+        !member_cmds.lock().await.iter().any(|c| c == "PWR01"),
+        "the bound member itself must not be sent power"
+    );
+
+    // …and power-off takes the receiver down too.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/media/devices/{surface}/state"),
+            &cookie,
+            r#"{"power":false}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        wait_for_command(&rcv_cmds, "PWR00").await,
+        "the receiver must mirror the composite's power-off"
+    );
+}
+
+#[tokio::test]
 async fn audio_receiver_binding_crud_and_validation() {
     let (port_s, _) = audio_mock::spawn(audio_mock::receiver_state()).await;
     let (port_r, _) = audio_mock::spawn(audio_mock::receiver_state()).await;

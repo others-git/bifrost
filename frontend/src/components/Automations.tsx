@@ -139,7 +139,7 @@ type NameMaps = {
 function lightActionText(name: string, state: LightState): string {
   if (!state.on) return `${name} off`;
   const clauses = [
-    ...(state.brightness != null ? [`to ${state.brightness}%`] : []),
+    ...(state.brightness != null ? [`to ${Math.round(state.brightness)}%`] : []),
     ...(state.color ? ["(colored)"] : []),
   ];
   return clauses.length > 0 ? `${name} ${clauses.join(" ")}` : `${name} on`;
@@ -1012,7 +1012,8 @@ function rowsFromActions(actions: RuleAction[]): ActionRow[] {
       target = `power:${a.device_id}`;
     } else {
       verb = a.state.on ? "on" : "off";
-      brightness = a.state.brightness ?? null;
+      // Whole numbers only — an API-authored rule may carry a fractional value.
+      brightness = a.state.brightness != null ? Math.round(a.state.brightness) : null;
       const c = a.state.color;
       colorHex = c ? rgbToHex(...xyToRgb(c.x, c.y, c.brightness)) : null;
       target = a.kind === "room" ? `room:${a.room_id}` : `light:${a.light_id}`;
@@ -1232,10 +1233,20 @@ function ActionList({
     );
   };
 
+  // Rows and the draft render as ONE keyed array, keyed by row signature: the
+  // draft carries the same key its materialized row will, so React updates the
+  // subtree in place on the first pick instead of unmounting the checklist
+  // mid-click (which yanked the modal's scroll to the top and lost the search
+  // text). A draft whose signature already matches a row will merge into it on
+  // pick — key it "draft" then, since two children must not share a key.
+  const draftKey =
+    draft && rows.every((r) => rowSig(r) !== rowSig(draft)) ? rowSig(draft) : "draft";
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem" }}>
-      {rows.map((r, i) => (
-        <div key={i} style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
+      {[
+        ...rows.map((r, i) => (
+        <div key={`s:${rowSig(r)}`} style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
           <div style={ROW}>
             {verbSelect(r.verb, (v) => setRow(i, { verb: v }))}
             {clauseChain(r, (patch) => setRow(i, patch))}
@@ -1268,27 +1279,40 @@ function ActionList({
             </div>
           )}
         </div>
-      ))}
-
-      {draft && (
-        <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
-          <div style={ROW}>
-            {verbSelect(draft.verb, (v) =>
-              setDraft({ ...draft, verb: v, ...(v !== "on" ? { brightness: null, colorHex: null } : {}) }),
-            )}
-            {clauseChain(draft, (patch) => setDraft({ ...draft, ...patch }))}
-            <span style={{ ...targetBtn, color: T.faint }}>
-              {draft.verb === "scene" ? "Pick scenes…" : "Pick rooms or devices…"}
-            </span>
-            <button onClick={() => setDraft(null)} title="Discard this step" style={ICON_BTN}>
-              ✕
-            </button>
-          </div>
-          <div style={pickerBox}>
-            <OptionCheckList options={targetOptionsFor(draft.verb)} selected={[]} onToggle={draftPick} />
-          </div>
-        </div>
-      )}
+        )),
+        ...(draft
+          ? [
+              <div
+                key={`s:${draftKey}`}
+                style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}
+              >
+                <div style={ROW}>
+                  {verbSelect(draft.verb, (v) =>
+                    setDraft({
+                      ...draft,
+                      verb: v,
+                      ...(v !== "on" ? { brightness: null, colorHex: null } : {}),
+                    }),
+                  )}
+                  {clauseChain(draft, (patch) => setDraft({ ...draft, ...patch }))}
+                  <span style={{ ...targetBtn, color: T.faint }}>
+                    {draft.verb === "scene" ? "Pick scenes…" : "Pick rooms or devices…"}
+                  </span>
+                  <button onClick={() => setDraft(null)} title="Discard this step" style={ICON_BTN}>
+                    ✕
+                  </button>
+                </div>
+                <div style={pickerBox}>
+                  <OptionCheckList
+                    options={targetOptionsFor(draft.verb)}
+                    selected={[]}
+                    onToggle={draftPick}
+                  />
+                </div>
+              </div>,
+            ]
+          : []),
+      ]}
 
       {!draft && (
         <div style={ROW}>

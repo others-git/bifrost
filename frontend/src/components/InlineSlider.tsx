@@ -103,7 +103,9 @@ export function InlineSlider({
           textShadow: "0 1px 2px #000",
         }}
       >
-        {value}
+        {/* Devices report fractional percents (HA's 0-255 → %); the readout is
+            always a whole number. The bar itself keeps the raw value. */}
+        {Math.round(value)}
         {unit}
       </span>
     </div>
