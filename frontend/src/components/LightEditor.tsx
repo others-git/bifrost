@@ -534,8 +534,72 @@ function EffectsPanel({
     [effects, categories],
   );
 
+  // The running effect, surfaced at a glance — a pinned banner above the grid,
+  // so "what is this light doing?" never means scrolling a 200-tile catalog.
+  const playing = active && effectLabel(active) !== "Off" ? active : undefined;
+  const clearToken = effects.find((e) => effectLabel(e) === "Off");
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: compact ? "0.6rem" : "0.5rem" }}>
+      {playing && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "0.55rem",
+            padding: compact ? "0.55rem 0.75rem" : "0.4rem 0.65rem",
+            borderRadius: 10,
+            border: `1px solid ${alpha(color.cyan, 0.45)}`,
+            background: alpha(color.cyan, 0.08),
+            boxShadow: `inset 0 0 18px -10px ${color.cyan}`,
+          }}
+        >
+          <span
+            aria-hidden
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: "50%",
+              background: color.cyan,
+              boxShadow: glow(color.cyan, 8),
+              flexShrink: 0,
+            }}
+          />
+          <span
+            style={{
+              flex: 1,
+              minWidth: 0,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              fontSize: compact ? "0.88rem" : "0.8rem",
+              color: color.text,
+            }}
+          >
+            <span style={{ color: color.dim }}>Playing · </span>
+            <span style={{ fontWeight: 600 }}>{effectLabel(playing)}</span>
+          </span>
+          {clearToken && (
+            <button
+              onClick={() => onPick(clearToken)}
+              style={{
+                flexShrink: 0,
+                padding: compact ? "0.35rem 0.7rem" : "0.2rem 0.55rem",
+                minHeight: compact ? 32 : undefined,
+                borderRadius: 999,
+                fontSize: compact ? "0.78rem" : "0.7rem",
+                fontWeight: 600,
+                cursor: "pointer",
+                color: color.dim,
+                background: "transparent",
+                border: `1px solid ${color.hairline}`,
+              }}
+            >
+              Stop
+            </button>
+          )}
+        </div>
+      )}
       {advanced && (
         <>
           <input

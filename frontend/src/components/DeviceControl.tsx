@@ -19,7 +19,7 @@ import {
   type PowerDevice,
 } from "../api";
 import { LightEditor, type LightControlChange } from "./LightEditor";
-import { lightOptimistic, lightSupports, lightWrite } from "./lightControl";
+import { lightOptimistic, lightSupports, lightWrite, isClearEffect } from "./lightControl";
 import { MediaEditor } from "./MediaControls";
 import { PowerFlyout } from "./PowerFlyout";
 
@@ -56,6 +56,10 @@ export function LightFlyout({
     : "#ffb84d";
   // White mode = a reported temperature and no colour.
   const whiteMode = st?.color_temp_mirek != null && !st?.color;
+  // A running effect IS the light's current mode — open the editor on it
+  // (with the Effects panel's now-playing banner) instead of a colour wheel
+  // that says nothing about what the light is actually doing.
+  const effectMode = !!st?.effect && !isClearEffect(st.effect);
 
   // Power is its own independent dimension: send just `{ on }` so toggling never
   // re-asserts a colour/effect (the server preserves the running mode on an
@@ -85,7 +89,7 @@ export function LightFlyout({
       initialHex={hex}
       initialBrightness={st?.brightness ?? 100}
       initialMirek={st?.color_temp_mirek ?? 366}
-      initialMode={whiteMode ? "white" : "color"}
+      initialMode={effectMode ? "effects" : whiteMode ? "white" : "color"}
       showColor={light.capabilities.color_rgb}
       showWhite={light.capabilities.color_temperature}
       showBrightness={light.capabilities.dimmable}
