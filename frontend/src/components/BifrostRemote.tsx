@@ -349,7 +349,7 @@ export function RemoteApps({
   if (apps.length === 0) {
     return (
       <div style={{ fontSize: "0.8rem", color: T.faint }}>
-        No apps yet — they appear here as you open them on the TV.
+        Couldn't read the TV's app list — apps also appear here as you open them.
       </div>
     );
   }
@@ -360,7 +360,7 @@ export function RemoteApps({
         return (
           <div key={a.package} style={{ position: "relative" }}>
             <button
-              onClick={() => onLaunch(a.package)}
+              onClick={() => onLaunch(a.activity ?? a.package)}
               title={`Launch ${a.name}`}
               style={{
                 width: "100%",

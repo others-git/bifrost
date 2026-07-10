@@ -771,6 +771,12 @@ impl ConnectionRegistry {
         provider: Box<dyn MediaProvider>,
         db: SqlitePool,
         rules_changed: Arc<tokio::sync::Notify>,
+        // A second instance of the same provider for its OPTIONAL push channel
+        // (a Smart TV's paired ATV session). Pushes forward onto the same
+        // broadcast the demand poller feeds, so the DB writer, SSE, and the
+        // automation engine inherit them with no extra plumbing. A provider
+        // without a push channel (event_stream errors) just doesn't forward.
+        push_provider: Option<Box<dyn MediaProvider>>,
     ) {
         let (tx, rx) = broadcast::channel(64);
         let state = Arc::new(RwLock::new(ConnectionState::Connected {
@@ -785,6 +791,38 @@ impl ConnectionRegistry {
             rules_changed,
         ));
         let db_task = tokio::spawn(media_db_writer_task(rx, provider_id.clone(), db));
+        let mut tasks = vec![poll_task, db_task];
+        if let Some(p) = push_provider {
+            let tx2 = tx.clone();
+            let pid = provider_id.clone();
+            tasks.push(tokio::spawn(async move {
+                // One attempt: no push channel (e.g. remote not paired) exits
+                // quietly — a re-pair rewrites credentials, which restarts the
+                // provider and retries. A live stream forwards until shutdown
+                // (the vendor link owns reconnection; the channel stays open).
+                match p.event_stream().await {
+                    Ok(mut rx) => {
+                        tracing::info!("media push channel active for provider {pid}");
+                        let mut journal_last = std::collections::HashMap::new();
+                        while let Some(ev) = rx.recv().await {
+                            if let Ok(payload) = serde_json::to_string(&ev.state) {
+                                journal_state_push(
+                                    &mut journal_last,
+                                    "media",
+                                    &ev.device_id,
+                                    payload,
+                                );
+                            }
+                            let _ = tx2.send(ev);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("provider {pid}: no media push channel: {e:#}");
+                    }
+                }
+            }));
+        }
+        // A dummy light channel keeps the entry shape uniform; nothing sends on it.
         let (events, _) = broadcast::channel(1);
         self.entries.insert(
             provider_id,
@@ -794,7 +832,7 @@ impl ConnectionRegistry {
                 media_events: Some(tx),
                 power_events: None,
                 sensor_events: None,
-                tasks: vec![poll_task, db_task],
+                tasks,
             },
         );
     }

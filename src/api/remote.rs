@@ -14,6 +14,7 @@
 
 use crate::AppState;
 use crate::api::auth::Session;
+use crate::models::remote::app_display_name;
 use crate::models::remote::{RemoteCommand, RemoteCommandInfo, RemoteState};
 use anyhow::Context as _;
 use axum::{
@@ -182,71 +183,9 @@ pub(crate) struct RemoteApp {
     pub name: String,
     pub pinned: bool,
     pub last_seen: Option<String>,
-}
-
-/// Friendly name for a known Play Store package. Matches by **brand keyword**,
-/// because the same app ships under many package ids across TV makers and regions
-/// (`com.hulu.plus`, `com.hulu.livingroomplus`, …) — exact matching missed those.
-/// Order matters: more specific keywords first. Unknown packages are prettified.
-fn app_display_name(package: &str) -> String {
-    let p = package.to_ascii_lowercase();
-    // (keyword, friendly name). Keywords are checked in order against the
-    // lowercased package id; the first contained match wins.
-    const KNOWN: &[(&str, &str)] = &[
-        ("youtube.tvkids", "YouTube Kids"),
-        ("youtube", "YouTube"),
-        ("netflix", "Netflix"),
-        ("amazonvideo", "Prime Video"),
-        ("amazon.avod", "Prime Video"),
-        ("primevideo", "Prime Video"),
-        ("disneyplus", "Disney+"),
-        ("hulu", "Hulu"),
-        ("hbo", "Max"),
-        ("wbd.stream", "Max"),
-        ("spotify", "Spotify"),
-        ("plexapp", "Plex"),
-        ("kodi", "Kodi"),
-        ("twitch", "Twitch"),
-        ("appletv", "Apple TV"),
-        ("apple.atve", "Apple TV"),
-        ("peacock", "Peacock"),
-        ("paramount", "Paramount+"),
-        ("crunchyroll", "Crunchyroll"),
-        ("tubitv", "Tubi"),
-        ("pluto", "Pluto TV"),
-        ("sling", "Sling TV"),
-        ("pandora", "Pandora"),
-        ("vudu", "Vudu"),
-        ("dreamx", "Screensaver"),
-    ];
-    for (kw, name) in KNOWN {
-        if p.contains(kw) {
-            return name.to_string();
-        }
-    }
-    prettify_package(package)
-}
-
-/// Best-effort readable name for an unknown package id — capitalize the vendor
-/// segment (`com.foobar.tv` → "Foobar"), falling back to the id if it's not a
-/// dotted package. Better than showing `com.foobar.tv` raw.
-fn prettify_package(package: &str) -> String {
-    if package.contains("://") || !package.contains('.') {
-        return package.to_string();
-    }
-    let parts: Vec<&str> = package.split('.').filter(|s| !s.is_empty()).collect();
-    // The vendor (2nd) segment is usually the brand; fall back to the last.
-    let seg = parts
-        .get(1)
-        .filter(|s| s.len() > 2)
-        .or_else(|| parts.last())
-        .copied()
-        .unwrap_or(package);
-    let mut chars = seg.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => package.to_string(),
-    }
+    /// The vendor launch URI from the TV's catalog, when known — the exact
+    /// token to launch with (a bare package doesn't launch on every vendor).
+    pub activity: Option<String>,
 }
 
 /// `true` if `activity` looks like a launchable package id (not a deep-link URL).
@@ -260,11 +199,13 @@ pub(crate) async fn record_app_seen(state: &AppState, remote_id: &str, package: 
     if !looks_like_package(package) {
         return;
     }
+    // On conflict only the recency moves — the stored name may be the TV
+    // catalog's real title, which the package-derived guess must not clobber.
     let _ = sqlx::query(
         "INSERT INTO remote_apps (remote_id, package, name, pinned, last_seen)
          VALUES (?, ?, ?, 0, datetime('now'))
          ON CONFLICT (remote_id, package)
-         DO UPDATE SET last_seen = datetime('now'), name = excluded.name",
+         DO UPDATE SET last_seen = datetime('now')",
     )
     .bind(remote_id)
     .bind(package)
@@ -273,15 +214,17 @@ pub(crate) async fn record_app_seen(state: &AppState, remote_id: &str, package: 
     .await;
 }
 
-/// Launchable apps for a remote: pinned first, then recents by most-recent. The
-/// display name is **re-derived from the package on read** (not read from the
-/// stored `name`), so the brand-keyword/prettify logic is always authoritative —
-/// an app recorded before a keyword existed shows its friendly name immediately,
-/// without waiting to be re-seen on the device.
+/// Launchable apps for a remote: pinned first, then recents by most-recent,
+/// then the rest of the TV's catalog by name. A row that came from the device
+/// catalog (it has an `activity`) keeps the TV's own title; anything else
+/// (observed-only foreground packages) re-derives its display name from the
+/// package on read, so the brand-keyword/prettify logic stays authoritative
+/// for rows the TV never named.
 pub(crate) async fn list_remote_apps(state: &AppState, remote_id: &str) -> Vec<RemoteApp> {
     sqlx::query(
-        "SELECT package, pinned, last_seen FROM remote_apps
-         WHERE remote_id = ? ORDER BY pinned DESC, last_seen DESC",
+        "SELECT package, name, activity, pinned, last_seen FROM remote_apps
+         WHERE remote_id = ?
+         ORDER BY pinned DESC, (last_seen IS NULL), last_seen DESC, name COLLATE NOCASE",
     )
     .bind(remote_id)
     .fetch_all(&state.db)
@@ -290,14 +233,71 @@ pub(crate) async fn list_remote_apps(state: &AppState, remote_id: &str) -> Vec<R
     .iter()
     .map(|r| {
         let package: String = r.get("package");
+        let activity: Option<String> = r.get("activity");
+        let stored: Option<String> = r.get("name");
+        let name = match (&activity, stored) {
+            (Some(_), Some(n)) if !n.trim().is_empty() => n,
+            _ => app_display_name(&package),
+        };
         RemoteApp {
-            name: app_display_name(&package),
+            name,
             pinned: r.get::<i64, _>("pinned") != 0,
             last_seen: r.get("last_seen"),
+            activity,
             package,
         }
     })
     .collect()
+}
+
+/// Pull the TV's installed-app catalog through the remote's provider and fold
+/// it into `remote_apps` (title + launch URI per bare package; pins and recency
+/// untouched) — the launcher lists what's INSTALLED, not just what's been seen
+/// in the foreground. Best-effort: an unreachable TV keeps the cached rows.
+pub(crate) async fn sync_app_catalog(state: &AppState, remote_id: &str) {
+    let row = sqlx::query(
+        "SELECT r.device_id, p.provider_type, p.credentials
+           FROM remote_devices r JOIN providers p ON r.provider_id = p.id
+          WHERE r.id = ? AND p.enabled = 1 AND r.enabled = 1",
+    )
+    .bind(remote_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let Some(row) = row else { return };
+    let device_id: String = row.get("device_id");
+    let provider_type: String = row.get("provider_type");
+    let credentials_enc: String = row.get("credentials");
+    let provider = match build_remote_provider(state, &provider_type, &credentials_enc) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::debug!(target: "bifrost::remote", remote = %remote_id, "app catalog: provider build failed: {e:#}");
+            return;
+        }
+    };
+    let apps = match provider.list_apps(&device_id).await {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::debug!(target: "bifrost::remote", remote = %remote_id, "app catalog read failed (keeping cached): {e:#}");
+            return;
+        }
+    };
+    for app in &apps {
+        let _ = sqlx::query(
+            "INSERT INTO remote_apps (remote_id, package, name, activity, pinned, last_seen)
+             VALUES (?, ?, ?, ?, 0, NULL)
+             ON CONFLICT (remote_id, package)
+             DO UPDATE SET name = excluded.name, activity = excluded.activity",
+        )
+        .bind(remote_id)
+        .bind(&app.package)
+        .bind(&app.name)
+        .bind(&app.activity)
+        .execute(&state.db)
+        .await;
+    }
+    tracing::debug!(target: "bifrost::remote", remote = %remote_id, apps = apps.len(), "app catalog synced from the device");
 }
 
 /// Pin or unpin an app on a remote. Pinning a never-seen package inserts it
@@ -617,6 +617,7 @@ async fn list_apps_handler(
     _: Session,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    sync_app_catalog(&state, &id).await;
     Json(list_remote_apps(&state, &id).await).into_response()
 }
 
@@ -750,7 +751,9 @@ async fn resolve_remote(state: &AppState, query: &str) -> Option<String> {
 
 async fn launch(state: &AppState, remote_id: &str, app: &RemoteApp) -> ResolveOutcome {
     let cmd = RemoteCommand::LaunchApp {
-        activity: app.package.clone(),
+        // The catalog's vendor URI is the exact launch token; a bare package is
+        // the fallback for apps only ever observed in the foreground.
+        activity: app.activity.clone().unwrap_or_else(|| app.package.clone()),
     };
     match apply_remote_command(state, remote_id, &cmd).await {
         RemoteOutcome::Ok => ResolveOutcome::Launched(app.name.clone()),
@@ -887,8 +890,9 @@ async fn paired_media_id(state: &AppState, remote_id: &str) -> Option<String> {
 mod tests {
     use super::{
         RemoteApp, RemoteCommandInfo, app_display_name, is_launchable_app, match_app, overlay_pins,
-        preferred_app, prettify_package,
+        preferred_app,
     };
+    use crate::models::remote::prettify_package;
 
     #[test]
     fn overlay_pins_marks_favourites_and_keeps_provider_order() {
@@ -938,6 +942,7 @@ mod tests {
             package: package.to_string(),
             pinned: false,
             last_seen: last_seen.map(str::to_string),
+            activity: None,
         }
     }
 

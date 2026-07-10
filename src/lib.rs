@@ -340,11 +340,16 @@ pub fn start_manager_for(
                         tracing::info!(
                             "media provider {provider_id} ({provider_type}) reads on demand (+ automation demand-poll)"
                         );
+                        // A second instance carries the provider's optional push
+                        // channel (a Smart TV's paired ATV session).
+                        let push_provider =
+                            state.registry.build_media(provider_type, creds_json).ok();
                         connections.start_media_demand_polling(
                             provider_id.to_string(),
                             provider,
                             state.db.clone(),
                             std::sync::Arc::clone(&state.automations_changed),
+                            push_provider,
                         );
                     }
                     Err(e) => {

@@ -394,6 +394,15 @@ pub trait RemoteProvider: Send + Sync {
     async fn send_native(&self, _device_id: &str, _token: &str) -> Result<()> {
         anyhow::bail!("this remote has no expanded commands")
     }
+    /// The TV's own installed-app catalog, when the vendor can enumerate it
+    /// (Bravia `getApplicationList`) — so the app launcher shows everything
+    /// installed rather than only apps observed in the foreground. Default: none.
+    async fn list_apps(
+        &self,
+        _device_id: &str,
+    ) -> Result<Vec<crate::models::remote::InstalledApp>> {
+        Ok(Vec::new())
+    }
 }
 
 /// Factory for one remote provider type (see [`PowerProviderFactory`] for the

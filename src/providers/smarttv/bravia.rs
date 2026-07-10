@@ -420,6 +420,66 @@ impl SmartTvVendor for BraviaVendor {
         self.ircc(ircc_code(key)).await
     }
 
+    async fn push_stream(&self) -> Result<tokio::sync::mpsc::Receiver<super::TvPush>> {
+        let Some(identity) = &self.atv else {
+            anyhow::bail!("bravia: remote not paired (no ATV identity) — no push channel");
+        };
+        let mut rx = super::atv::client::subscribe(&self.ip, identity);
+        let (tx, out) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move {
+            loop {
+                use super::atv::client::AtvEvent;
+                use tokio::sync::broadcast::error::RecvError;
+                let ev = match rx.recv().await {
+                    Ok(e) => e,
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => return,
+                };
+                let push = match ev {
+                    AtvEvent::CurrentApp(p) => super::TvPush::CurrentApp(p),
+                    AtvEvent::Volume { level, max, muted } => {
+                        super::TvPush::Volume { level, max, muted }
+                    }
+                    AtvEvent::Started(on) => super::TvPush::Screen(on),
+                };
+                if tx.send(push).await.is_err() {
+                    return;
+                }
+            }
+        });
+        Ok(out)
+    }
+
+    async fn apps(&self) -> Result<Vec<crate::models::remote::InstalledApp>> {
+        // getApplicationList: [{ title, uri, icon }] where uri is
+        // "<package>-<activity>" — the exact token setActiveApp wants. The bare
+        // package (identity across the ATV push channel / HA) is the prefix.
+        let r = self
+            .scalar_read("appControl", "getApplicationList", "1.0", json!([]))
+            .await?;
+        let apps = r
+            .get(0)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok(apps
+            .iter()
+            .filter_map(|a| {
+                let title = a.get("title")?.as_str()?.trim();
+                let uri = a.get("uri")?.as_str()?.trim();
+                if title.is_empty() || uri.is_empty() {
+                    return None;
+                }
+                let package = uri.split_once('-').map_or(uri, |(p, _)| p);
+                Some(crate::models::remote::InstalledApp {
+                    package: package.to_string(),
+                    name: title.to_string(),
+                    activity: Some(uri.to_string()),
+                })
+            })
+            .collect())
+    }
+
     async fn launch_app(&self, app: &str) -> Result<()> {
         self.scalar("appControl", "setActiveApp", "1.0", json!([{ "uri": app }]))
             .await
@@ -685,6 +745,40 @@ mod tests {
         let id = v.identity().await.unwrap();
         assert_eq!(id.name, "BRAVIA");
         assert_eq!(id.hw_id.as_deref(), Some("mac:aabbccddeeff"));
+    }
+
+    #[tokio::test]
+    async fn apps_parses_the_catalog_with_packages_and_launch_uris() {
+        let tv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/sony/appControl"))
+            .and(body_string_contains("getApplicationList"))
+            .respond_with(ok_result(json!({
+                "result": [[
+                    { "title": "Netflix",
+                      "uri": "com.netflix.ninja-com.netflix.ninja.MainActivity",
+                      "icon": "http://x/n.png" },
+                    { "title": "YouTube",
+                      "uri": "com.google.android.youtube.tv-com.google.android.apps.youtube.tv.activity.ShellActivity" },
+                    { "title": "", "uri": "com.skip.me-x" },        // no title → dropped
+                    { "title": "No URI" }                            // no uri → dropped
+                ]],
+                "id": 1
+            })))
+            .mount(&tv)
+            .await;
+
+        let v = BraviaVendor::new_for_test(&tv.uri(), None);
+        let apps = v.apps().await.unwrap();
+        assert_eq!(apps.len(), 2);
+        assert_eq!(apps[0].package, "com.netflix.ninja");
+        assert_eq!(apps[0].name, "Netflix");
+        assert_eq!(
+            apps[0].activity.as_deref(),
+            Some("com.netflix.ninja-com.netflix.ninja.MainActivity"),
+            "the full vendor URI is the launch token"
+        );
+        assert_eq!(apps[1].package, "com.google.android.youtube.tv");
     }
 
     #[tokio::test]

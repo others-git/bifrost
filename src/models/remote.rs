@@ -18,6 +18,83 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Friendly name for a known Play Store package. Matches by **brand keyword**,
+/// because the same app ships under many package ids across TV makers and regions
+/// (`com.hulu.plus`, `com.hulu.livingroomplus`, …) — exact matching missed those.
+/// Order matters: more specific keywords first. Unknown packages are prettified.
+pub fn app_display_name(package: &str) -> String {
+    let p = package.to_ascii_lowercase();
+    // (keyword, friendly name). Keywords are checked in order against the
+    // lowercased package id; the first contained match wins.
+    const KNOWN: &[(&str, &str)] = &[
+        ("youtube.tvkids", "YouTube Kids"),
+        ("youtube", "YouTube"),
+        ("netflix", "Netflix"),
+        ("amazonvideo", "Prime Video"),
+        ("amazon.avod", "Prime Video"),
+        ("primevideo", "Prime Video"),
+        ("disneyplus", "Disney+"),
+        ("hulu", "Hulu"),
+        ("hbo", "Max"),
+        ("wbd.stream", "Max"),
+        ("spotify", "Spotify"),
+        ("plexapp", "Plex"),
+        ("kodi", "Kodi"),
+        ("twitch", "Twitch"),
+        ("appletv", "Apple TV"),
+        ("apple.atve", "Apple TV"),
+        ("peacock", "Peacock"),
+        ("paramount", "Paramount+"),
+        ("crunchyroll", "Crunchyroll"),
+        ("tubitv", "Tubi"),
+        ("pluto", "Pluto TV"),
+        ("sling", "Sling TV"),
+        ("pandora", "Pandora"),
+        ("vudu", "Vudu"),
+        ("dreamx", "Screensaver"),
+    ];
+    for (kw, name) in KNOWN {
+        if p.contains(kw) {
+            return name.to_string();
+        }
+    }
+    prettify_package(package)
+}
+
+/// Best-effort readable name for an unknown package id — capitalize the vendor
+/// segment (`com.foobar.tv` → "Foobar"), falling back to the id if it's not a
+/// dotted package. Better than showing `com.foobar.tv` raw.
+pub fn prettify_package(package: &str) -> String {
+    if package.contains("://") || !package.contains('.') {
+        return package.to_string();
+    }
+    let parts: Vec<&str> = package.split('.').filter(|s| !s.is_empty()).collect();
+    // The vendor (2nd) segment is usually the brand; fall back to the last.
+    let seg = parts
+        .get(1)
+        .filter(|s| s.len() > 2)
+        .or_else(|| parts.last())
+        .copied()
+        .unwrap_or(package);
+    let mut chars = seg.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => package.to_string(),
+    }
+}
+
+/// One installed app from a TV's own catalog (`appControl.getApplicationList`):
+/// the bare package id (the cross-source identity — the ATV push channel and
+/// HA report foreground apps by package), the TV's display title, and the
+/// vendor launch URI when the catalog provides one richer than the package.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InstalledApp {
+    pub package: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<String>,
+}
+
 /// A virtual remote control for one device (a TV / streamer).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteDevice {

@@ -135,8 +135,18 @@ A TV/streamer can expose a **virtual remote** — a D-pad, navigation, volume,
 transport, and app-launch tiles — opened from the **Remote** button on the TV's
 audio fly-out. The remote **auto-pairs** to its TV: when a `remote` entity and a
 `media_player` share a hardware id (Home Assistant commonly exposes both for one
-TV), Bifrost links them during discovery — no manual step. App names are tidied to
-their brand (e.g. *Hulu*, *Prime Video*), and you can pin the ones you use.
+TV), Bifrost links them during discovery — no manual step. The app tiles are the
+TV's **own installed catalog** when the vendor can enumerate it (a Bravia's app
+list, refreshed each time the launcher opens), so everything installed is
+launchable — not just apps you've already opened; foreground-observed apps fill
+in for remotes without a catalog. App names are tidied to their brand (e.g.
+*Hulu*, *Prime Video*), and you can pin the ones you use.
+
+With the remote paired, the TV also **pushes its state live**: the foreground
+app shows as the TV's now-playing everywhere ("Netflix" on the card, boards,
+and now-playing widgets — Android TVs don't report this over their HTTP API),
+and volume/power changes made with the TV's own remote appear immediately
+(and fire device-trigger automations without waiting on a poll).
 
 If the TV's volume is owned by a receiver, bind it (above) and the remote's
 volume keys drive the receiver.

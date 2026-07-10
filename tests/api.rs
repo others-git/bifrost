@@ -9241,6 +9241,100 @@ async fn shadowed_member_is_never_elected_surface() {
 }
 
 #[tokio::test]
+async fn remote_apps_pull_the_tvs_installed_catalog() {
+    // The launcher lists what's INSTALLED on the TV (appControl.getApplicationList
+    // through the remote's provider), not just apps observed in the foreground —
+    // and keeps each app's vendor launch URI so a never-opened app launches with
+    // the exact token the TV expects.
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let tv = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/sony/appControl"))
+        .and(body_string_contains("getApplicationList"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "result": [[
+                { "title": "Netflix", "uri": "com.netflix.ninja-com.netflix.ninja.MainActivity" },
+                { "title": "Plex", "uri": "com.plexapp.android-com.plexapp.plex.activities.SplashActivity" }
+            ]],
+            "id": 1
+        })))
+        .mount(&tv)
+        .await;
+
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let host = tv.uri().trim_start_matches("http://").to_string();
+    let enc = state
+        .encrypt_credentials(&format!(r#"{{"host":"{host}"}}"#))
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO providers (id, provider_type, name, credentials) VALUES ('ptv', 'smarttv', 'TV', ?)",
+    )
+    .bind(&enc)
+    .execute(&state.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO remote_devices (id, provider_id, device_id, name) VALUES ('r1', 'ptv', ?, 'BRAVIA')",
+    )
+    .bind(&host)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let apps = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/remote/devices/r1/apps", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let apps = apps.as_array().unwrap();
+    assert_eq!(
+        apps.len(),
+        2,
+        "the full installed catalog is listed: {apps:?}"
+    );
+    let netflix = apps.iter().find(|a| a["name"] == "Netflix").unwrap();
+    assert_eq!(netflix["package"], "com.netflix.ninja");
+    assert_eq!(
+        netflix["activity"], "com.netflix.ninja-com.netflix.ninja.MainActivity",
+        "the vendor launch URI rides along"
+    );
+    assert_eq!(netflix["pinned"], false);
+
+    // Pinning + a later re-sync keep the catalog identity stable (idempotent
+    // upsert: pin preserved, title/activity refreshed, no duplicate rows).
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/remote/devices/r1/apps/pin",
+            &cookie,
+            r#"{"package":"com.netflix.ninja","pinned":true}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let apps = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/remote/devices/r1/apps", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let apps = apps.as_array().unwrap();
+    assert_eq!(apps.len(), 2, "re-sync must not duplicate rows");
+    assert_eq!(apps[0]["name"], "Netflix", "pinned floats first");
+    assert_eq!(apps[0]["pinned"], true);
+    assert_eq!(
+        apps[0]["activity"],
+        "com.netflix.ninja-com.netflix.ninja.MainActivity"
+    );
+}
+
+#[tokio::test]
 async fn remote_apps_record_recents_pin_and_order() {
     let ha = ha_remote_mock().await;
     let (app, prov_id) = helpers::test_app_with_ha(&ha.uri()).await;

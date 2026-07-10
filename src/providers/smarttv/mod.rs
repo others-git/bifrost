@@ -23,8 +23,8 @@ mod atv;
 mod bravia;
 
 use crate::models::media::{
-    MediaCapabilities, MediaCommand, MediaDevice, MediaDeviceKind, MediaState, NowPlaying,
-    TransportCmd,
+    MediaCapabilities, MediaCommand, MediaDevice, MediaDeviceKind, MediaEvent, MediaState,
+    NowPlaying, TransportCmd,
 };
 use crate::models::remote::{RemoteCommandInfo, RemoteDevice, RemoteKey, RemoteState};
 use crate::providers::{
@@ -62,6 +62,18 @@ pub(crate) struct TvSnapshot {
     pub ip: Option<String>,
 }
 
+/// A state push from the TV itself — today sourced from the Android TV Remote
+/// v2 session (see `atv::client::AtvEvent`), but vendor-agnostic at this seam.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum TvPush {
+    /// Foreground app package (e.g. `com.netflix.ninja`).
+    CurrentApp(String),
+    /// Absolute device volume.
+    Volume { level: u32, max: u32, muted: bool },
+    /// Screen on/off.
+    Screen(bool),
+}
+
 /// One smart-TV brand's protocol — the *only* thing a new vendor implements.
 /// Constructed cheaply (host + auth, no network); all I/O is in the async methods.
 #[async_trait]
@@ -91,6 +103,18 @@ pub(crate) trait SmartTvVendor: Send + Sync {
     /// exposes one. Default: none.
     async fn commands(&self) -> Result<Vec<RemoteCommandInfo>> {
         Ok(Vec::new())
+    }
+    /// The TV's installed-app catalog (title + launch URI), if enumerable.
+    /// Default: none.
+    async fn apps(&self) -> Result<Vec<crate::models::remote::InstalledApp>> {
+        Ok(Vec::new())
+    }
+    /// Subscribe to the TV's own state pushes (foreground app / volume /
+    /// screen), when the vendor has a push channel (Bravia: the paired Android
+    /// TV Remote session). The receiver survives reconnects — the vendor's
+    /// link owns the socket. Default: no push channel.
+    async fn push_stream(&self) -> Result<tokio::sync::mpsc::Receiver<TvPush>> {
+        anyhow::bail!("this TV has no push channel")
     }
     /// Invoke a native command by its token (from [`Self::commands`]). Default:
     /// unsupported.
@@ -192,12 +216,32 @@ fn atv_pairings() -> &'static std::sync::Mutex<std::collections::HashMap<String,
     M.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+/// The name this instance pairs under. MUST be distinct per Bifrost deployment:
+/// Android TV keeps ONE trusted certificate per client name, so two instances
+/// pairing as the same name silently evict each other's pairing (pairing the
+/// production deploy invalidated the dev instance's remote until re-paired).
+/// The machine hostname distinguishes them and reads well in the TV's own
+/// paired-devices list.
+fn pairing_client_name() -> String {
+    let host = std::env::var("HOSTNAME")
+        .ok()
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty());
+    match host {
+        Some(h) => format!("Bifrost ({h})"),
+        None => "Bifrost".to_string(),
+    }
+}
+
 /// Begin ATV Remote pairing: generate a fresh identity, drive the handshake to
 /// the point where the TV displays its 6-digit code, and park the live session.
 /// Call [`atv_pair_complete`] with the code to finish.
 pub async fn atv_pair_begin(host: &str) -> Result<()> {
     let identity = atv::crypto::Identity::generate()?;
-    let session = atv::client::PairingSession::begin(host, &identity, "Bifrost").await?;
+    let session =
+        atv::client::PairingSession::begin(host, &identity, &pairing_client_name()).await?;
     atv_pairings()
         .lock()
         .expect("atv pairing map poisoned")
@@ -291,7 +335,8 @@ fn smarttv_discoverer() -> Box<dyn DeviceDiscovery> {
 /// and remote provider traits over it. Each factory builds its own instance
 /// (cheap — host + auth + an HTTP client).
 struct SmartTv {
-    vendor: Box<dyn SmartTvVendor>,
+    // Shared with the push-fold task `event_stream` spawns.
+    vendor: std::sync::Arc<dyn SmartTvVendor>,
     /// Stable provider-native id for the single device this provider serves.
     device_id: String,
 }
@@ -301,8 +346,67 @@ impl SmartTv {
         let creds = parse_creds(credentials_json)?;
         Ok(Self {
             device_id: creds.host.clone(),
-            vendor: build_vendor(&creds)?,
+            vendor: std::sync::Arc::from(build_vendor(&creds)?),
         })
+    }
+}
+
+/// Foreground packages that aren't a user app on screen — the launcher, the
+/// screensaver, system chrome. Now-playing clears rather than naming them.
+fn is_system_surface(package: &str) -> bool {
+    let p = package.to_ascii_lowercase();
+    [
+        "launcher",
+        "dream",
+        "screensaver",
+        "backdrop",
+        "systemui",
+        "inputmethod",
+    ]
+    .iter()
+    .any(|kw| p.contains(kw))
+}
+
+/// Fold one TV push into the running media state. Pure — the shared logic the
+/// push stream applies, unit-tested without a TV. Any push proves the TV spoke
+/// to us, so reachability rides along.
+fn apply_tv_push(
+    state: &mut MediaState,
+    push: &TvPush,
+    apps: &[crate::models::remote::InstalledApp],
+) {
+    state.reachable = Some(true);
+    match push {
+        TvPush::CurrentApp(pkg) => {
+            state.now_playing = if is_system_surface(pkg) {
+                None
+            } else {
+                let name = apps
+                    .iter()
+                    .find(|a| &a.package == pkg)
+                    .map(|a| a.name.clone())
+                    .unwrap_or_else(|| crate::models::remote::app_display_name(pkg));
+                Some(NowPlaying {
+                    title: Some(name),
+                    artist: None,
+                    album: None,
+                    play_state: None,
+                    artwork_url: None,
+                })
+            };
+        }
+        TvPush::Volume { level, max, muted } => {
+            if *max > 0 {
+                state.volume = ((level * 100).div_ceil(*max) as u8).min(100);
+            }
+            state.mute = *muted;
+        }
+        TvPush::Screen(on) => {
+            state.power = *on;
+            if !on {
+                state.now_playing = None;
+            }
+        }
     }
 }
 
@@ -332,6 +436,49 @@ const TV_CAPS: MediaCapabilities = MediaCapabilities {
 impl MediaProvider for SmartTv {
     fn name(&self) -> &str {
         self.vendor.brand()
+    }
+
+    /// Live pushes from the TV itself (foreground app / volume / screen) when
+    /// the vendor has a push channel — the only source of "which app is on
+    /// screen" (ScalarWeb has no foreground getter, and its now-playing API
+    /// errors whenever an app owns the screen). Seeds from a scalar snapshot,
+    /// resolves app packages against the TV's installed catalog, and emits
+    /// changed-only full states on the same pipeline the demand poller feeds.
+    async fn event_stream(&self) -> Result<tokio::sync::mpsc::Receiver<MediaEvent>> {
+        let mut push = self.vendor.push_stream().await?;
+        let (tx, out) = tokio::sync::mpsc::channel::<MediaEvent>(64);
+        let vendor = std::sync::Arc::clone(&self.vendor);
+        let device_id = self.device_id.clone();
+        tokio::spawn(async move {
+            // Seed from a live snapshot so the first push patches real state,
+            // not defaults; the catalog names foreground packages.
+            let mut state = match vendor.snapshot().await {
+                Ok(s) => tv_media_state(&s),
+                Err(_) => MediaState {
+                    reachable: None,
+                    ..Default::default()
+                },
+            };
+            let apps = vendor.apps().await.unwrap_or_default();
+            let mut last: Option<MediaState> = None;
+            while let Some(p) = push.recv().await {
+                apply_tv_push(&mut state, &p, &apps);
+                if last.as_ref() != Some(&state) {
+                    last = Some(state.clone());
+                    if tx
+                        .send(MediaEvent {
+                            device_id: device_id.clone(),
+                            state: state.clone(),
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return; // consumer gone
+                    }
+                }
+            }
+        });
+        Ok(out)
     }
 
     async fn discover(&self) -> Result<Vec<MediaDevice>> {
@@ -422,6 +569,13 @@ impl RemoteProvider for SmartTv {
         self.vendor.send_key(key).await
     }
 
+    async fn list_apps(
+        &self,
+        _device_id: &str,
+    ) -> Result<Vec<crate::models::remote::InstalledApp>> {
+        self.vendor.apps().await
+    }
+
     async fn launch_app(&self, _device_id: &str, activity: &str) -> Result<()> {
         tracing::debug!(target: "bifrost::smarttv", brand = self.vendor.brand(), activity, "launch app");
         self.vendor.launch_app(activity).await
@@ -488,6 +642,113 @@ impl RemoteProviderFactory for SmartTvRemoteFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pairing_client_name_is_instance_distinct() {
+        // Whatever the hostname source, the name is non-empty, branded, and —
+        // when a hostname exists — carries it, so two deployments never pair
+        // under the same identity slot on the TV.
+        let name = pairing_client_name();
+        assert!(name.starts_with("Bifrost"));
+        if let Some(h) = std::env::var("HOSTNAME")
+            .ok()
+            .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+            .map(|h| h.trim().to_string())
+            .filter(|h| !h.is_empty())
+        {
+            assert_eq!(name, format!("Bifrost ({h})"));
+        }
+    }
+
+    fn catalog() -> Vec<crate::models::remote::InstalledApp> {
+        vec![crate::models::remote::InstalledApp {
+            package: "com.netflix.ninja".into(),
+            name: "Netflix".into(),
+            activity: Some("com.netflix.ninja-Main".into()),
+        }]
+    }
+
+    #[test]
+    fn push_fold_names_the_foreground_app_from_the_catalog() {
+        let mut st = MediaState::default();
+        apply_tv_push(
+            &mut st,
+            &TvPush::CurrentApp("com.netflix.ninja".into()),
+            &catalog(),
+        );
+        assert_eq!(
+            st.now_playing.as_ref().and_then(|n| n.title.as_deref()),
+            Some("Netflix")
+        );
+        assert_eq!(
+            st.reachable,
+            Some(true),
+            "a push proves the TV is reachable"
+        );
+
+        // Unknown package falls back to the shared brand/prettify naming.
+        apply_tv_push(
+            &mut st,
+            &TvPush::CurrentApp("com.hulu.livingroomplus".into()),
+            &catalog(),
+        );
+        assert_eq!(
+            st.now_playing.as_ref().and_then(|n| n.title.as_deref()),
+            Some("Hulu")
+        );
+
+        // The launcher/screensaver isn't "playing" anything.
+        apply_tv_push(
+            &mut st,
+            &TvPush::CurrentApp("com.google.android.tvlauncher".into()),
+            &catalog(),
+        );
+        assert!(
+            st.now_playing.is_none(),
+            "system surfaces clear now-playing"
+        );
+    }
+
+    #[test]
+    fn push_fold_scales_volume_and_tracks_screen_state() {
+        let mut st = MediaState::default();
+        apply_tv_push(
+            &mut st,
+            &TvPush::Volume {
+                level: 7,
+                max: 25,
+                muted: false,
+            },
+            &[],
+        );
+        assert_eq!(st.volume, 28, "7/25 scales to percent");
+        assert!(!st.mute);
+        // A zero max (proto3 omission / bogus push) must not divide by zero or
+        // clobber the known volume.
+        apply_tv_push(
+            &mut st,
+            &TvPush::Volume {
+                level: 0,
+                max: 0,
+                muted: true,
+            },
+            &[],
+        );
+        assert_eq!(st.volume, 28);
+        assert!(st.mute);
+
+        apply_tv_push(
+            &mut st,
+            &TvPush::CurrentApp("com.netflix.ninja".into()),
+            &[],
+        );
+        assert!(st.now_playing.is_some());
+        apply_tv_push(&mut st, &TvPush::Screen(false), &[]);
+        assert!(!st.power, "screen off is power off");
+        assert!(st.now_playing.is_none(), "a sleeping TV plays nothing");
+        apply_tv_push(&mut st, &TvPush::Screen(true), &[]);
+        assert!(st.power);
+    }
 
     #[test]
     fn bravia_sweep_match_accepts_a_tv_and_rejects_other_sony_gear() {

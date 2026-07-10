@@ -775,6 +775,8 @@ export interface RemoteApp {
   name: string;
   pinned: boolean;
   last_seen: string | null;
+  /** Vendor launch URI from the TV's app catalog — launch with this when set. */
+  activity: string | null;
 }
 
 export async function getRemoteDevices(): Promise<RemoteDevice[]> {

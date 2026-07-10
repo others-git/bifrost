@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
@@ -210,14 +210,37 @@ fn expect(body: &[u8], want: PairingIn) -> Result<()> {
     }
 }
 
+/// A state push from the TV on the remote channel — the Android TV Remote v2
+/// session isn't just an input pipe: the TV volunteers its foreground app,
+/// absolute volume, and screen state on it. These are the only push source for
+/// "which app is on screen" (ScalarWeb has no foreground getter and its
+/// now-playing API errors whenever an app owns the screen).
+#[derive(Debug, Clone, PartialEq)]
+pub enum AtvEvent {
+    /// Foreground app package (e.g. `com.netflix.ninja`).
+    CurrentApp(String),
+    /// Absolute device volume.
+    Volume { level: u32, max: u32, muted: bool },
+    /// Screen on/off.
+    Started(bool),
+}
+
 /// A persistent remote-channel connection to one TV. Android TV Remote injects
 /// only register on a **live, kept-open** session — the TV drops a key whose
 /// connection tears down in the same instant — so, like the Onkyo link, one
 /// background task owns the socket: it completes the configure/set-active
-/// handshake, answers keepalive pings, and writes key injects sent on `tx`. It
-/// reconnects with backoff and is shared per host.
+/// handshake, answers keepalive pings, writes key injects sent on `tx`, and
+/// broadcasts the TV's state pushes on `events`. It reconnects with backoff
+/// and is shared per host — key sends and push subscribers use one session.
 struct RemoteLink {
     tx: mpsc::UnboundedSender<u32>,
+    events: broadcast::Sender<AtvEvent>,
+    /// Fingerprint of the identity this link's actor holds — a re-pair mints a
+    /// new cert, and the running actor must not keep presenting the old one.
+    identity_fp: u64,
+    /// Set when a fresher link replaces this one; the actor exits its retry
+    /// loop instead of spinning forever with retired credentials.
+    retired: Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn remote_links() -> &'static Mutex<HashMap<String, Arc<RemoteLink>>> {
@@ -225,23 +248,63 @@ fn remote_links() -> &'static Mutex<HashMap<String, Arc<RemoteLink>>> {
     M.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn identity_fp(identity: &Identity) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    identity.cert_pem.hash(&mut h);
+    identity.key_pem.hash(&mut h);
+    h.finish()
+}
+
+/// Get (or lazily start) the shared link for `host`. A caller presenting a
+/// DIFFERENT identity than the running link (the remote was re-paired, so the
+/// provider rebuilt with fresh `atv_cert`/`atv_key`) retires the old link and
+/// starts a new one — a re-pair takes effect live, no restart needed.
+fn link_for(host: &str, identity: &Identity) -> Arc<RemoteLink> {
+    let fp = identity_fp(identity);
+    let mut map = remote_links().lock().expect("remote link map poisoned");
+    if let Some(link) = map.get(host) {
+        if link.identity_fp == fp {
+            return link.clone();
+        }
+        tracing::info!(target: "bifrost::smarttv", host, "ATV remote: credentials changed — restarting the link");
+        link.retired
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        map.remove(host);
+    }
+    let (tx, rx) = mpsc::unbounded_channel();
+    let (events, _) = broadcast::channel(64);
+    let retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    tokio::spawn(remote_link_actor(
+        host.to_string(),
+        identity.clone(),
+        rx,
+        events.clone(),
+        Arc::clone(&retired),
+    ));
+    let link = Arc::new(RemoteLink {
+        tx,
+        events,
+        identity_fp: fp,
+        retired,
+    });
+    map.insert(host.to_string(), link.clone());
+    link
+}
+
+/// Subscribe to the TV's state pushes (foreground app / volume / screen),
+/// lazily starting the persistent link. The receiver survives reconnects —
+/// the link owns the socket lifecycle, the channel never closes.
+pub fn subscribe(host: &str, identity: &Identity) -> broadcast::Receiver<AtvEvent> {
+    link_for(host, identity).events.subscribe()
+}
+
 /// Queue a key for the TV at `host`, lazily (re)starting its persistent remote
 /// link. Fire-and-forget: returns once enqueued (the link owns delivery), so a
 /// rapid key sequence pipelines over one open session instead of paying a full
 /// TLS + handshake per press.
 pub async fn send_key(host: &str, identity: &Identity, key_code: u32) -> Result<()> {
-    let link = {
-        let mut map = remote_links().lock().expect("remote link map poisoned");
-        if let Some(link) = map.get(host) {
-            link.clone()
-        } else {
-            let (tx, rx) = mpsc::unbounded_channel();
-            tokio::spawn(remote_link_actor(host.to_string(), identity.clone(), rx));
-            let link = Arc::new(RemoteLink { tx });
-            map.insert(host.to_string(), link.clone());
-            link
-        }
-    };
+    let link = link_for(host, identity);
     tracing::debug!(target: "bifrost::smarttv", host, key_code, "ATV remote: queue key");
     link.tx
         .send(key_code)
@@ -267,14 +330,66 @@ pub async fn send_text(host: &str, identity: &Identity, text: &str) -> Result<()
 }
 
 /// Own the persistent connection: (re)connect, run a session until it drops,
-/// then back off and retry. Queued keys wait for the next live session.
-async fn remote_link_actor(host: String, identity: Identity, mut rx: mpsc::UnboundedReceiver<u32>) {
+/// then back off (capped exponential — a rejected cert is permanent until the
+/// user re-pairs, and a flat 3s retry paints the event log) and retry. Queued
+/// keys wait for the next live session. Exits when the link is retired
+/// (credentials changed) or every sender is gone.
+async fn remote_link_actor(
+    host: String,
+    identity: Identity,
+    mut rx: mpsc::UnboundedReceiver<u32>,
+    events: broadcast::Sender<AtvEvent>,
+    retired: Arc<std::sync::atomic::AtomicBool>,
+) {
+    let mut delay = Duration::from_secs(3);
+    let mut warned_auth = false;
     loop {
-        if let Err(e) = run_session(&host, REMOTE_PORT, &identity, &mut rx).await {
-            tracing::debug!(target: "bifrost::smarttv", host, "ATV remote session ended: {e:#}");
+        let started = std::time::Instant::now();
+        match run_session(&host, REMOTE_PORT, &identity, &mut rx, &events).await {
+            Ok(()) => return, // all senders dropped — nothing left to serve
+            Err(e) => {
+                let msg = format!("{e:#}");
+                // A cert rejection means our pairing is no longer trusted —
+                // retrying can't fix it; say so once, loudly.
+                if msg.contains("CertificateUnknown") && !warned_auth {
+                    warned_auth = true;
+                    tracing::warn!(
+                        target: "bifrost::smarttv",
+                        host,
+                        "ATV remote: the TV no longer trusts our pairing — re-pair the remote (Settings → Smart TV → Pair remote)"
+                    );
+                }
+                tracing::debug!(target: "bifrost::smarttv", host, "ATV remote session ended: {msg}");
+            }
         }
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        // A session that lived a while was healthy — restart eagerly. Failing
+        // fast (connect/handshake) backs off up to 5 minutes.
+        if started.elapsed() > Duration::from_secs(60) {
+            delay = Duration::from_secs(3);
+            warned_auth = false;
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(Duration::from_secs(300));
+        if retired.load(std::sync::atomic::Ordering::Relaxed) {
+            tracing::debug!(target: "bifrost::smarttv", host, "ATV remote: link retired (superseded)");
+            return;
+        }
     }
+}
+
+/// Forward a parsed push onto the event channel (no subscribers = dropped).
+fn emit(events: &broadcast::Sender<AtvEvent>, msg: &RemoteIn) {
+    let ev = match msg {
+        RemoteIn::CurrentApp(pkg) => AtvEvent::CurrentApp(pkg.clone()),
+        RemoteIn::Volume { level, max, muted } => AtvEvent::Volume {
+            level: *level,
+            max: *max,
+            muted: *muted,
+        },
+        RemoteIn::Started(on) => AtvEvent::Started(*on),
+        _ => return,
+    };
+    let _ = events.send(ev);
 }
 
 /// One remote-channel session: connect, complete the configure/set-active
@@ -285,14 +400,17 @@ async fn run_session(
     port: u16,
     identity: &Identity,
     rx: &mut mpsc::UnboundedReceiver<u32>,
+    events: &broadcast::Sender<AtvEvent>,
 ) -> Result<()> {
     let mut stream = connect(host, port, identity).await?;
     let mut reader = FrameReader::default();
 
-    // Handshake: the TV drives configure → set-active.
+    // Handshake: the TV drives configure → set-active. It may front-load state
+    // pushes (volume, screen) before set-active — forward those too.
     let handshake = async {
         loop {
-            match messages::parse_remote(&read_msg(&mut stream, &mut reader).await?) {
+            let msg = messages::parse_remote(&read_msg(&mut stream, &mut reader).await?);
+            match &msg {
                 RemoteIn::Configure => {
                     write_msg(&mut stream, &messages::remote_configure()).await?
                 }
@@ -301,9 +419,9 @@ async fn run_session(
                     return Ok::<(), anyhow::Error>(());
                 }
                 RemoteIn::Ping(v) => {
-                    write_msg(&mut stream, &messages::remote_ping_response(v)).await?
+                    write_msg(&mut stream, &messages::remote_ping_response(*v)).await?
                 }
-                RemoteIn::Other => {}
+                other => emit(events, other),
             }
         }
     };
@@ -312,7 +430,8 @@ async fn run_session(
         .map_err(|_| anyhow!("timed out negotiating the remote channel"))??;
     tracing::debug!(target: "bifrost::smarttv", host, "ATV remote: session active");
 
-    // Live session: inject queued keys, answer pings, until the socket drops.
+    // Live session: inject queued keys, answer pings, broadcast state pushes,
+    // until the socket drops.
     loop {
         tokio::select! {
             code = rx.recv() => {
@@ -321,8 +440,11 @@ async fn run_session(
                 tracing::debug!(target: "bifrost::smarttv", host, key_code = code, "ATV remote: key injected");
             }
             frame = read_msg(&mut stream, &mut reader) => {
-                if let RemoteIn::Ping(v) = messages::parse_remote(&frame?) {
-                    write_msg(&mut stream, &messages::remote_ping_response(v)).await?;
+                let msg = messages::parse_remote(&frame?);
+                if let RemoteIn::Ping(v) = &msg {
+                    write_msg(&mut stream, &messages::remote_ping_response(*v)).await?;
+                } else {
+                    emit(events, &msg);
                 }
             }
         }
@@ -333,6 +455,163 @@ async fn run_session(
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+
+    /// Throwaway diagnostic against a REAL TV — run manually:
+    ///   ATV_PROBE_HOST=192.168.1.22 ATV_PROBE_DB=data/bifrost.db \
+    ///   BIFROST_SECRET=... cargo test --lib atv_probe -- --ignored --nocapture
+    /// Dumps every incoming RemoteMessage's field tags (+ nested fields and any
+    /// string payloads) for ~45s, triggering app switches + a volume nudge so
+    /// the TV pushes ime/volume/start messages. Used to pin down proto tags.
+    #[tokio::test]
+    #[ignore]
+    async fn atv_probe() {
+        let Ok(host) = std::env::var("ATV_PROBE_HOST") else {
+            return;
+        };
+        let db_path = std::env::var("ATV_PROBE_DB").unwrap_or("data/bifrost.db".into());
+        let secret = std::env::var("BIFROST_SECRET").expect("BIFROST_SECRET");
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect(&format!("sqlite://{db_path}?mode=ro"))
+            .await
+            .unwrap();
+        let rows: Vec<String> =
+            sqlx::query_scalar("SELECT credentials FROM providers WHERE provider_type = 'smarttv'")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        let state = crate::AppState::new(db, &secret, crate::providers::default_registry());
+        // Several TVs may exist — pick the provider whose host matches.
+        let creds: serde_json::Value = rows
+            .iter()
+            .filter_map(|enc| state.decrypt_credentials(enc).ok())
+            .filter_map(|j| serde_json::from_str::<serde_json::Value>(&j).ok())
+            .find(|c| c["host"].as_str().is_some_and(|h| h.contains(&host)))
+            .expect("no smarttv provider for that host");
+        let identity = Identity {
+            cert_pem: creds["atv_cert"].as_str().expect("paired atv_cert").into(),
+            key_pem: creds["atv_key"].as_str().unwrap().into(),
+        };
+
+        let mut stream = connect(&host, REMOTE_PORT, &identity).await.unwrap();
+        let mut reader = FrameReader::default();
+        // handshake
+        loop {
+            let f = read_msg(&mut stream, &mut reader).await.unwrap();
+            match messages::parse_remote(&f) {
+                RemoteIn::Configure => write_msg(&mut stream, &messages::remote_configure())
+                    .await
+                    .unwrap(),
+                RemoteIn::SetActive => {
+                    write_msg(&mut stream, &messages::remote_set_active())
+                        .await
+                        .unwrap();
+                    break;
+                }
+                RemoteIn::Ping(v) => write_msg(&mut stream, &messages::remote_ping_response(v))
+                    .await
+                    .unwrap(),
+                _ => dump("pre-handshake", &f),
+            }
+        }
+        println!("=== session active; listening 45s ===");
+
+        // Trigger pushes: app switch (YouTube → Netflix), one volume up+down.
+        let h = host.clone();
+        tokio::spawn(async move {
+            let c = reqwest::Client::new();
+            let post = |method: &'static str, params: serde_json::Value| {
+                let c = c.clone();
+                let h = h.clone();
+                async move {
+                    let _ = c.post(format!("http://{h}/sony/appControl"))
+                        .json(&serde_json::json!({"method": method, "id":1, "version":"1.0", "params": params}))
+                        .send().await;
+                }
+            };
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            post("setActiveApp", serde_json::json!([{ "uri": "com.google.android.youtube.tv-com.google.android.apps.youtube.tv.activity.ShellActivity" }])).await;
+            tokio::time::sleep(Duration::from_secs(8)).await;
+            post(
+                "setActiveApp",
+                serde_json::json!([{ "uri": "com.netflix.ninja-com.netflix.ninja.MainActivity" }]),
+            )
+            .await;
+        });
+        // Volume nudge over this same session at t≈20s.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+        let mut nudged = false;
+        while tokio::time::Instant::now() < deadline {
+            if !nudged && tokio::time::Instant::now() > deadline - Duration::from_secs(25) {
+                nudged = true;
+                write_msg(&mut stream, &messages::remote_key_inject(24))
+                    .await
+                    .unwrap(); // VOL_UP
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                write_msg(&mut stream, &messages::remote_key_inject(25))
+                    .await
+                    .unwrap(); // VOL_DOWN
+            }
+            match tokio::time::timeout(Duration::from_secs(2), read_msg(&mut stream, &mut reader))
+                .await
+            {
+                Ok(Ok(f)) => {
+                    if let RemoteIn::Ping(v) = messages::parse_remote(&f) {
+                        write_msg(&mut stream, &messages::remote_ping_response(v))
+                            .await
+                            .unwrap();
+                    } else {
+                        dump("msg", &f);
+                    }
+                }
+                Ok(Err(e)) => {
+                    println!("read error: {e:#}");
+                    break;
+                }
+                Err(_) => {}
+            }
+        }
+        println!("=== probe done ===");
+    }
+
+    #[cfg(test)]
+    fn dump(label: &str, body: &[u8]) {
+        fn render(fields: &[wire::Field], depth: usize) -> String {
+            fields
+                .iter()
+                .map(|f| match f {
+                    wire::Field::Varint(tag, v) => format!("{tag}={v}"),
+                    wire::Field::Bytes(tag, b) => {
+                        let nested = wire::parse_fields(b);
+                        if depth < 3 && !nested.is_empty() {
+                            format!("{tag}:{{ {} }}", render(&nested, depth + 1))
+                        } else {
+                            format!("{tag}:{:?}", String::from_utf8_lossy(b))
+                        }
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+        println!("{label}: {}", render(&wire::parse_fields(body), 0));
+    }
+
+    /// Re-pairing mints a new identity; the shared per-host link must be
+    /// replaced (old one retired), not reused with retired credentials.
+    #[tokio::test]
+    async fn repairing_replaces_the_hosts_link() {
+        let id1 = Identity::generate().unwrap();
+        let id2 = Identity::generate().unwrap();
+        let a = link_for("link-replacement-test-host", &id1);
+        let b = link_for("link-replacement-test-host", &id1);
+        assert!(Arc::ptr_eq(&a, &b), "same identity reuses the link");
+        let c = link_for("link-replacement-test-host", &id2);
+        assert!(!Arc::ptr_eq(&a, &c), "a new identity replaces the link");
+        assert!(
+            a.retired.load(std::sync::atomic::Ordering::Relaxed),
+            "the superseded link is retired so its actor exits"
+        );
+        assert_eq!(c.identity_fp, identity_fp(&id2));
+    }
 
     /// A RemoteMessage carrying just `field` (status-free; the remote channel has
     /// no status envelope) — used by the mock TV to drive the handshake.
@@ -419,16 +698,34 @@ mod tests {
                     saw_inject = true;
                 }
             }
+            // TV pushes a foreground-app change on the same live session.
+            let mut info = Vec::new();
+            wire::put_bytes_field(&mut info, 12, b"com.netflix.ninja");
+            let mut ime = Vec::new();
+            wire::put_bytes_field(&mut ime, 1, &info);
+            tls.write_all(&wire::frame(&remote_msg(20, &ime)))
+                .await
+                .unwrap();
+            tls.flush().await.unwrap();
+            // Hold the socket open until the client has seen the push.
+            tokio::time::sleep(Duration::from_millis(500)).await;
         });
 
         // Queue a key, then run one session against the mock's port.
         let (tx, mut rx) = mpsc::unbounded_channel();
         tx.send(23).unwrap();
+        let (events_tx, mut events_rx) = broadcast::channel(8);
         let host = addr.ip().to_string();
         let client = tokio::spawn(async move {
-            let _ = run_session(&host, addr.port(), &client_id, &mut rx).await;
+            let _ = run_session(&host, addr.port(), &client_id, &mut rx, &events_tx).await;
         });
 
+        // The push surfaces on the subscription channel.
+        let ev = tokio::time::timeout(Duration::from_secs(5), events_rx.recv())
+            .await
+            .expect("app push timed out")
+            .unwrap();
+        assert_eq!(ev, AtvEvent::CurrentApp("com.netflix.ninja".into()));
         tokio::time::timeout(Duration::from_secs(5), srv)
             .await
             .expect("mock TV handshake/ping/inject timed out")

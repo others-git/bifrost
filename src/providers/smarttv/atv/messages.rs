@@ -159,10 +159,24 @@ pub enum RemoteIn {
     SetActive,
     /// A ping carrying the value we must echo in a `RemotePingResponse`.
     Ping(u64),
+    /// The foreground app changed — `remote_ime_key_inject.app_info.app_package`
+    /// (the TV pushes one whenever a new app takes the screen).
+    CurrentApp(String),
+    /// Absolute device volume — `remote_set_volume_level`.
+    Volume {
+        level: u32,
+        max: u32,
+        muted: bool,
+    },
+    /// Screen state — `remote_start.started` (true = on, false = sleeping).
+    Started(bool),
     Other,
 }
 
-/// Classify an incoming `RemoteMessage` body.
+/// Classify an incoming `RemoteMessage` body. Field numbers are the canonical
+/// `remotemessage.proto` tags: configure=1, set_active=2, ping_request=8,
+/// ime_key_inject=20 (app_info=1 → app_package=12), start=40,
+/// set_volume_level=50 (volume_max=6, volume_level=7, volume_muted=8).
 pub fn parse_remote(body: &[u8]) -> RemoteIn {
     let fields = wire::parse_fields(body);
     if wire::field_bytes(&fields, 1).is_some() {
@@ -172,6 +186,27 @@ pub fn parse_remote(body: &[u8]) -> RemoteIn {
     } else if let Some(ping) = wire::field_bytes(&fields, 8) {
         let val1 = wire::field_varint(&wire::parse_fields(ping), 1).unwrap_or(0);
         RemoteIn::Ping(val1)
+    } else if let Some(ime) = wire::field_bytes(&fields, 20) {
+        let app = wire::field_bytes(&wire::parse_fields(ime), 1)
+            .map(wire::parse_fields)
+            .and_then(|info| {
+                wire::field_bytes(&info, 12).map(|b| String::from_utf8_lossy(b).into_owned())
+            });
+        match app {
+            Some(pkg) if !pkg.is_empty() => RemoteIn::CurrentApp(pkg),
+            _ => RemoteIn::Other,
+        }
+    } else if let Some(start) = wire::field_bytes(&fields, 40) {
+        let started = wire::field_varint(&wire::parse_fields(start), 1) == Some(1);
+        RemoteIn::Started(started)
+    } else if let Some(vol) = wire::field_bytes(&fields, 50) {
+        let f = wire::parse_fields(vol);
+        RemoteIn::Volume {
+            // proto3 omits zero fields — an absent level really is 0.
+            level: wire::field_varint(&f, 7).unwrap_or(0) as u32,
+            max: wire::field_varint(&f, 6).unwrap_or(0) as u32,
+            muted: wire::field_varint(&f, 8) == Some(1),
+        }
     } else {
         RemoteIn::Other
     }
@@ -180,6 +215,66 @@ pub fn parse_remote(body: &[u8]) -> RemoteIn {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A RemoteMessage body carrying `inner` as message-typed `field`.
+    fn msg(field: u32, inner: &[u8]) -> Vec<u8> {
+        let mut m = Vec::new();
+        wire::put_bytes_field(&mut m, field, inner);
+        m
+    }
+
+    #[test]
+    fn parse_current_app_from_ime_key_inject() {
+        // remote_ime_key_inject(20) { app_info(1) { app_package(12) } }
+        let mut info = Vec::new();
+        wire::put_varint_field(&mut info, 1, 42); // counter noise
+        wire::put_bytes_field(&mut info, 12, b"com.netflix.ninja");
+        let mut ime = Vec::new();
+        wire::put_bytes_field(&mut ime, 1, &info);
+        assert_eq!(
+            parse_remote(&msg(20, &ime)),
+            RemoteIn::CurrentApp("com.netflix.ninja".into())
+        );
+        // No package → not an app change.
+        let mut empty = Vec::new();
+        wire::put_bytes_field(&mut empty, 1, &[]);
+        assert_eq!(parse_remote(&msg(20, &empty)), RemoteIn::Other);
+    }
+
+    #[test]
+    fn parse_volume_level_with_max_and_mute() {
+        let mut vol = Vec::new();
+        wire::put_bytes_field(&mut vol, 3, b"BRAVIA"); // player_model noise
+        wire::put_varint_field(&mut vol, 6, 100);
+        wire::put_varint_field(&mut vol, 7, 28);
+        wire::put_varint_field(&mut vol, 8, 0);
+        assert_eq!(
+            parse_remote(&msg(50, &vol)),
+            RemoteIn::Volume {
+                level: 28,
+                max: 100,
+                muted: false
+            }
+        );
+        // proto3 zero-omission: an empty body is volume 0 of max 0, unmuted.
+        assert_eq!(
+            parse_remote(&msg(50, &[])),
+            RemoteIn::Volume {
+                level: 0,
+                max: 0,
+                muted: false
+            }
+        );
+    }
+
+    #[test]
+    fn parse_screen_state_from_remote_start() {
+        let mut on = Vec::new();
+        wire::put_varint_field(&mut on, 1, 1);
+        assert_eq!(parse_remote(&msg(40, &on)), RemoteIn::Started(true));
+        // started=false is omitted in proto3 → an empty RemoteStart means off.
+        assert_eq!(parse_remote(&msg(40, &[])), RemoteIn::Started(false));
+    }
 
     /// A pairing message we build round-trips through the field parser with the
     /// right envelope (version + OK status) and payload field.
