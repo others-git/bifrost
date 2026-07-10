@@ -1289,6 +1289,10 @@ pub(crate) async fn apply_uniform_state(
     room_id: &str,
     new_state: &LightState,
     members: Vec<MemberRow>,
+    // Whether to try the provider's native group call first. A native grouped
+    // call (Hue grouped_light) hits EVERY group member — right for a whole-room
+    // command, wrong for a lit-only cascade that must not wake off lights.
+    use_native: bool,
 ) -> (usize, usize) {
     let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut applied = 0usize;
@@ -1299,6 +1303,9 @@ pub(crate) async fn apply_uniform_state(
 
     // Native group calls first — one Hue grouped_light PUT replaces N per-light PUTs.
     for chunk in native_chunks(state, room_id).await {
+        if !use_native {
+            break;
+        }
         let provider = match build_provider(state, &chunk.provider_type, &chunk.credentials) {
             Ok(p) => p,
             Err(_) => continue,
@@ -1386,13 +1393,74 @@ pub(crate) async fn apply_uniform_state(
 /// "turn the room on/off" means the whole room (CLAUDE.md's room model), not
 /// just its lights. (Palette-scene apply stays lights-only and keeps calling
 /// `apply_uniform_state` directly — a color scene shouldn't toggle switches.)
+/// The room-state entry point for the UI's patch-shaped body: an EXPLICIT `on`
+/// is power intent and routes to [`apply_room_state`] (whole room, pure-power
+/// fan-out rules); a patch with NO `on` is an attribute-only cascade — it casts
+/// brightness/colour/temperature/effect onto the room's **lit lights only**.
+/// Dimming or recolouring a room must never wake its off lamps: the room slider
+/// says "adjust what's shining", not "power everything on at this level"
+/// (that command exists — it's `{on: true, brightness: …}`, what scenes and the
+/// automation editor's "turn on and…" emit).
+pub(crate) async fn apply_room_patch(
+    state: &AppState,
+    room_id: &str,
+    patch: &crate::models::LightStatePatch,
+    members: Vec<MemberRow>,
+) -> (usize, usize) {
+    if let Some(on) = patch.on {
+        let full = LightState {
+            on,
+            brightness: patch.brightness,
+            color: patch.color.clone(),
+            color_temp_mirek: patch.color_temp_mirek,
+            effect: patch.effect.clone(),
+            ..Default::default()
+        };
+        return apply_room_state(state, room_id, &full, members).await;
+    }
+    let has_attrs = patch.brightness.is_some()
+        || patch.color.is_some()
+        || patch.color_temp_mirek.is_some()
+        || patch.effect.is_some();
+    if !has_attrs {
+        return (0, 0); // an empty patch asks for nothing
+    }
+    // Only members that are currently shining take the attribute change.
+    let mut lit = Vec::new();
+    for m in members {
+        if crate::api::lights::current_light_state(&state.db, &m.light_id)
+            .await
+            .on
+        {
+            lit.push(m);
+        }
+    }
+    if lit.is_empty() {
+        tracing::debug!(room = %room_id, "attribute cascade: no lit members — nothing to do");
+        return (0, 0);
+    }
+    let full = LightState {
+        on: true, // the members are already on; absolute, so a no-op power-wise
+        brightness: patch.brightness,
+        color: patch.color.clone(),
+        color_temp_mirek: patch.color_temp_mirek,
+        effect: patch.effect.clone(),
+        ..Default::default()
+    };
+    // Never the native group call here — it would hit the off members too. And
+    // never the media/power fan-out: an attribute change has no power intent.
+    let (applied, failed) = apply_uniform_state(state, room_id, &full, lit, false).await;
+    tracing::debug!(room = %room_id, applied, failed, "attribute cascade applied to lit members only");
+    (applied, failed)
+}
+
 pub(crate) async fn apply_room_state(
     state: &AppState,
     room_id: &str,
     new_state: &LightState,
     members: Vec<MemberRow>,
 ) -> (usize, usize) {
-    let (applied, failed) = apply_uniform_state(state, room_id, new_state, members).await;
+    let (applied, failed) = apply_uniform_state(state, room_id, new_state, members, true).await;
     // Only a *pure* power change (on/off with no light attributes) fans out to
     // the room's media + power members. A brightness/color/temp/effect change is a
     // lighting-attribute command — its implicit `on: true` must NOT power on the
@@ -1444,11 +1512,13 @@ async fn set_room_state(
     State(state): State<Arc<AppState>>,
     _: Session,
     Path(id): Path<String>,
-    Json(new_state): Json<LightState>,
+    Json(new_state): Json<crate::models::LightStatePatch>,
 ) -> impl IntoResponse {
     let members = effective_members(&state, &id).await;
-    let (applied, failed) = apply_room_state(&state, &id, &new_state, members).await;
-    if applied == 0 && failed == 0 {
+    let (applied, failed) = apply_room_patch(&state, &id, &new_state, members).await;
+    // A power command that reached nothing is an unknown/empty room (404). An
+    // attribute cascade over a room with nothing lit is a successful no-op.
+    if applied == 0 && failed == 0 && new_state.on.is_some() {
         return StatusCode::NOT_FOUND.into_response();
     }
     Json(serde_json::json!({ "applied": applied, "failed": failed })).into_response()

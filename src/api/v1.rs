@@ -27,7 +27,7 @@ use crate::api::power::{
     set_power_status,
 };
 use crate::api::remote::{apply_remote_command, list_remotes, read_remote_state, remote_status};
-use crate::api::rooms::{apply_room_state, effective_members, list_public_rooms};
+use crate::api::rooms::{effective_members, list_public_rooms};
 use crate::api::scenes::{
     SceneCaptureError, apply_scene_entries, capture_scene, delete_scene as delete_scene_svc,
     list_all_scenes,
@@ -129,11 +129,14 @@ async fn set_room_state(
     State(state): State<Arc<AppState>>,
     _: RequireApiKey,
     Path(id): Path<String>,
-    Json(new_state): Json<LightState>,
+    Json(new_state): Json<crate::models::LightStatePatch>,
 ) -> impl IntoResponse {
     let members = effective_members(&state, &id).await;
-    let (applied, failed) = apply_room_state(&state, &id, &new_state, members).await;
-    if applied == 0 && failed == 0 {
+    let (applied, failed) =
+        crate::api::rooms::apply_room_patch(&state, &id, &new_state, members).await;
+    // A power command that reached nothing is an unknown/empty room (404). An
+    // attribute cascade over a room with nothing lit is a successful no-op.
+    if applied == 0 && failed == 0 && new_state.on.is_some() {
         return StatusCode::NOT_FOUND.into_response();
     }
     Json(serde_json::json!({ "applied": applied, "failed": failed })).into_response()

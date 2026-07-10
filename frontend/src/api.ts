@@ -1500,9 +1500,12 @@ export async function setRoomPowerDevices(id: string, power_device_ids: string[]
   });
 }
 
+/** Room state is patch-shaped: an explicit `on` is power intent (whole room,
+ * pure-power fan-out rules); a patch WITHOUT `on` is an attribute cascade the
+ * backend casts onto lit lights only — dimming a room never wakes off lamps. */
 export async function setRoomState(
   id: string,
-  state: LightState,
+  state: LightStatePatch,
 ): Promise<{ applied: number; failed: number }> {
   const res = await fetch(`/api/rooms/${id}/state`, {
     method: "PUT",

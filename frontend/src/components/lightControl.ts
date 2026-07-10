@@ -16,6 +16,7 @@ import {
   type Light,
   type LightCapabilities,
   type LightState,
+  type LightStatePatch,
 } from "../api";
 import { hexToRgb, type LightControlChange } from "./LightEditor";
 
@@ -23,6 +24,28 @@ import { hexToRgb, type LightControlChange } from "./LightEditor";
  * by the Floor Plan's synthesized `{ capabilities, last_state }` members (whose
  * live state lives in a separate map, not on the `Light` object). */
 export type LightLike = Pick<Light, "capabilities"> & { last_state?: LightState };
+
+/** The room-cascade variant of `lightWrite`: attribute changes carry NO power
+ * bit, so the backend casts them onto lit members only — dimming, recolouring,
+ * or retuning a room never wakes its off lamps. (Room power is its own
+ * explicit `{ on }` PUT, and single-device edits keep `lightWrite` — dragging
+ * one lamp's own slider is a deliberate act on that lamp.) */
+export function roomLightWrite(change: LightControlChange): LightStatePatch {
+  const { on: _implicitOn, ...attrs } = lightWrite(change);
+  return attrs;
+}
+
+/** The niche/glow colour worn while a dynamic effect runs — the drift
+ * animation cycles the full hue wheel from this base, and reduced-motion
+ * freezes here (the light-domain cyan, so a frozen niche still reads themed). */
+export const EFFECT_ACCENT = "#22d3ee";
+
+/** The light's running dynamic effect, or undefined — the one check every
+ * surface shares for "should this light wear the effect treatment". */
+export function activeEffect(l: LightLike & { last_state?: LightState }): string | undefined {
+  const e = l.last_state?.effect;
+  return e && !isClearEffect(e) ? e : undefined;
+}
 
 /** The provider-native tokens that all mean "no effect is running" (mirrors the
  * backend's `is_clear_effect`); such a pick clears effect mode rather than

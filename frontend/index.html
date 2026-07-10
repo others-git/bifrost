@@ -220,8 +220,18 @@
         100% { opacity: 0.25; transform: translateX(40%); }
       }
 
+      /* A light running a dynamic effect: its niche drifts through the hue
+         wheel — "this light is animating" at a glance, distinct from any static
+         colour a plain lit light wears. Slow (8s) so a wall panel stays calm. */
+      @keyframes bifrost-effect-drift {
+        from { filter: hue-rotate(0deg); }
+        to   { filter: hue-rotate(360deg); }
+      }
+      .bifrost-effect-drift { animation: bifrost-effect-drift 8s linear infinite; }
+
       @media (prefers-reduced-motion: reduce) {
         .bifrost-aurora, .bifrost-brand, .bifrost-card { animation: none; }
+        .bifrost-effect-drift { animation: none; }
         .bifrost-brand { transition: none; }
         .bifrost-voice-pulse, .bifrost-voice-edge { animation: none; }
         .bifrost-seal-breathe, .bifrost-seal-spin { animation: none; }

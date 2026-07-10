@@ -2,8 +2,9 @@
 
 How to organise your home in Bifrost: group devices into **rooms**, and tidy the
 **device inventory** (glyphs, de-duplication, receiver binding, TV remotes, and
-merging). Live control lives on the **Dashboard** and **Floor Plan**;
-*configuration* lives on the **Rooms** and **Devices** pages.
+merging). Live control lives on the **Dashboard** and **Boards**;
+*configuration* lives on the **Rooms** and **Devices** pages. (A **Floor Plan**
+visualization also exists — its nav entry shows only with dev mode enabled.)
 
 ---
 
@@ -17,7 +18,7 @@ speakers.
 
 Room **configuration** (membership, links, audio calibration, quick buttons,
 enable/disable, merge) is on the **Rooms page**. Live control (on/off, colour,
-scenes, quick volume) stays on the Dashboard / Floor Plan.
+scenes, quick volume) stays on the Dashboard / Boards.
 
 ### Members
 

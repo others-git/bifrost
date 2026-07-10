@@ -78,6 +78,9 @@ interface Props {
    * pre-filled with this device; `onConsumeAdd` clears it once consumed. */
   initialAdd?: AddPrefill | null;
   onConsumeAdd?: () => void;
+  /** Fired when the Developer tab's dev-mode toggle commits, so dev-gated
+   * chrome elsewhere (the Floor Plan nav entry) updates live. */
+  onDevModeChange?: (on: boolean) => void;
 }
 
 type SettingsTab = "providers" | "voice" | "clients" | "appearance" | "developer";
@@ -95,7 +98,7 @@ const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
 const IS_KIOSK = /\bBifrostKiosk\//.test(navigator.userAgent);
 const VISIBLE_TABS = SETTINGS_TABS.filter((t) => t.id !== "clients" || !IS_KIOSK);
 
-export function SettingsPage({ onNavigate: _onNavigate, initialAdd, onConsumeAdd }: Props) {
+export function SettingsPage({ onNavigate: _onNavigate, initialAdd, onConsumeAdd, onDevModeChange }: Props) {
   const dialogs = useDialogs();
   const { isMobile } = useViewport();
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -336,7 +339,7 @@ export function SettingsPage({ onNavigate: _onNavigate, initialAdd, onConsumeAdd
         </div>
       )}
 
-      {tab === "developer" && <DeveloperTab />}
+      {tab === "developer" && <DeveloperTab onDevModeChange={onDevModeChange} />}
 
       {dialogs.element}
     </div>
@@ -532,7 +535,7 @@ function ExpandedLanSection() {
  * (provider debug, build info) — reachable from here AND directly over the API
  * (session or Bearer key) so tooling and the assistant can read it too.
  */
-function DeveloperTab() {
+function DeveloperTab({ onDevModeChange }: { onDevModeChange?: (on: boolean) => void }) {
   const [devMode, setDevMode] = useState<boolean | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -544,7 +547,10 @@ function DeveloperTab() {
     setSaving(true);
     const res = await updateSettings({ dev_mode: next });
     setSaving(false);
-    if (!("error" in res)) setDevMode(!!res.dev_mode);
+    if (!("error" in res)) {
+      setDevMode(!!res.dev_mode);
+      onDevModeChange?.(!!res.dev_mode);
+    }
   }
 
   return (

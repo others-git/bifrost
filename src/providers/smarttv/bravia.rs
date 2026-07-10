@@ -135,7 +135,16 @@ impl BraviaVendor {
             .await
             .map_err(|e| anyhow!("bravia {method}: bad response ({e})"))?;
         if let Some(err) = v.get("error") {
-            tracing::debug!(target: "bifrost::smarttv", method, %status, ?err, "bravia error response");
+            // Quiet snapshot reads hit EXPECTED error responses as a matter of
+            // course — getPlayingContentInfo answers an error whenever nothing
+            // is playing, and the demand poller asks every 5s — so they log at
+            // TRACE like the rest of the quiet path (a real fault still bubbles
+            // to the caller via the bail). Command writes keep DEBUG.
+            if quiet {
+                tracing::trace!(target: "bifrost::smarttv", method, %status, ?err, "bravia error response");
+            } else {
+                tracing::debug!(target: "bifrost::smarttv", method, %status, ?err, "bravia error response");
+            }
             bail!("bravia {method}: {err}");
         }
         if !status.is_success() {

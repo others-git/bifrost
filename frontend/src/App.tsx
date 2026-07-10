@@ -1,5 +1,5 @@
 import { useEffect, useState, type MouseEvent } from "react";
-import { getHealth, getLights, logout, getSetupStatus, kioskLogin, getKioskSelf, type Light } from "./api";
+import { getHealth, getLights, logout, getSetupStatus, kioskLogin, getKioskSelf, type Light, getSettings } from "./api";
 import { Glyph } from "./components/glyphs";
 import { SetupPage } from "./pages/Setup";
 import { LoginPage } from "./pages/Login";
@@ -79,6 +79,9 @@ export function App() {
   const [pendingAdd, setPendingAdd] = useState<AddPrefill | null>(null);
   const [lights, setLights] = useState<Light[]>([]);
   const [version, setVersion] = useState("");
+  // Dev mode gates dev-only surfaces (today: the tabled Floor Plan nav entry).
+  // Fetched post-auth; the Settings toggle updates it live via onDevModeChange.
+  const [devMode, setDevMode] = useState(false);
   const { isMobile, isCompact } = useViewport();
 
   // Kiosk self-update: reload when a new frontend build is deployed.
@@ -105,6 +108,7 @@ export function App() {
     const result = await lightsWithKioskAuth();
     if (result === "unauthorized") { setPage("login"); return; }
     setLights(result);
+    getSettings().then((st) => setDevMode(!!st.dev_mode));
     // A wall-tablet kiosk with an assigned board lands straight on Boards (which
     // then opens that board full-screen); otherwise the dashboard is home.
     if (IS_KIOSK && (await getKioskSelf())?.default_board_id) {
@@ -153,7 +157,7 @@ export function App() {
       {isCompact ? (
         <MobileTopBar version={version} page={page} onLogout={onLogout} />
       ) : (
-        <NavTray version={version} page={page} onNavigate={navigate} onLogout={onLogout} />
+        <NavTray version={version} page={page} showPlan={devMode} onNavigate={navigate} onLogout={onLogout} />
       )}
 
       <main
@@ -198,11 +202,12 @@ export function App() {
             onNavigate={(p) => setPage(p)}
             initialAdd={pendingAdd}
             onConsumeAdd={() => setPendingAdd(null)}
+            onDevModeChange={setDevMode}
           />
         )}
       </main>
 
-      {isCompact && <BottomNav page={page} onNavigate={navigate} showPlan={!isMobile} />}
+      {isCompact && <BottomNav page={page} onNavigate={navigate} showPlan={!isMobile && devMode} />}
 
       {/* Wake-word feedback overlay — driven by the kiosk app via
           window.bifrostVoice. Non-blocking; present on every signed-in page. */}
@@ -337,11 +342,14 @@ const NAV_COLLAPSED_KEY = "bifrost.nav.collapsed";
 function NavTray({
   version,
   page,
+  showPlan,
   onNavigate,
   onLogout,
 }: {
   version: string;
   page: Page;
+  /** Floor Plan is tabled — its nav entry is dev-mode only. */
+  showPlan: boolean;
   onNavigate: (p: NavPage) => void;
   onLogout: () => void;
 }) {
@@ -356,7 +364,7 @@ function NavTray({
     });
   }
 
-  const items = NAV_ITEMS;
+  const items = NAV_ITEMS.filter((i) => i.id !== "plan" || showPlan);
 
   return (
     <nav

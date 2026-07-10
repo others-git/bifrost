@@ -79,10 +79,12 @@ reverse proxy with TLS for remote access.
    directly-assigned devices. A Room aggregates any mix of lights, audio, and
    power devices and becomes the high-level control surface (power, brightness,
    volume/mute fan-out, quick-control buttons).
-4. **Scenes & floor plan.** Save **Scenes** (whole-home or room-scoped full-state
+4. **Scenes & boards.** Save **Scenes** (whole-home or room-scoped full-state
    snapshots — each light's color/temperature/effect plus every switch's on/off)
-   and restore them in one tap. On the **Floor Plan** page, paint a rough 2D
-   layout and place devices on it for an alternate live dashboard.
+   and restore them in one tap. Compose **Boards** — drag-resize dashboards of
+   room cards, device tiles, and now-playing widgets — for wall tablets and
+   day-to-day control. (A **Floor Plan** page — paint a rough 2D layout and
+   place devices on it — is available with dev mode enabled.)
 
 ## 4. Add providers
 

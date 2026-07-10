@@ -135,7 +135,16 @@ provider group plus any directly assigned.
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/v1/rooms` | All enabled rooms: `[{ id, name, light_ids, media_device_ids, power_device_ids }]` — `media_device_ids` / `power_device_ids` are the room's audio/power members; control each via the audio/power endpoints |
-| `PUT` | `/api/v1/rooms/{id}/state` | Apply a `LightState` to every member |
+| `PUT` | `/api/v1/rooms/{id}/state` | Room state patch — `on` optional (see below) |
+
+The room-state body is patch-shaped. An **explicit `on`** is power intent: the
+whole room takes the state, and a *pure* `{on}` (no other fields) also fans out
+to the room's speakers and switches. A patch **without `on`** (e.g.
+`{"brightness": 40}`) is an attribute-only cascade: it casts onto the room's
+**currently-lit lights only** — dimming or recolouring a room never wakes an
+off lamp. ("Turn the room on at 40%" is the explicit form:
+`{"on": true, "brightness": 40}`.)
+
 
 Room writes respond `200` with `{ "applied": N, "failed": M }` — per-light
 results, since a room can span providers and some members may be offline.

@@ -2598,6 +2598,195 @@ async fn set_room_state_fans_out_to_direct_members() {
 }
 
 #[tokio::test]
+async fn room_attribute_cascade_touches_lit_lights_only() {
+    // Dimming a room must dim what's shining and NEVER wake an off lamp — an
+    // attribute-only room patch (no `on`) casts onto lit members exclusively.
+    // Each light gets its own mock server so "the off light's provider was
+    // never called" is directly observable.
+    let mock_lit = wled_mock().await;
+    let mock_dark = wled_mock().await;
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    for (pid, lid, base, st) in [
+        (
+            "prov-lit",
+            "light-lit",
+            mock_lit.uri(),
+            r#"{"on":true,"brightness":80.0}"#,
+        ),
+        (
+            "prov-dark",
+            "light-dark",
+            mock_dark.uri(),
+            r#"{"on":false,"brightness":80.0}"#,
+        ),
+    ] {
+        let enc = state
+            .encrypt_credentials(&format!(r#"{{"device_ip":"{base}"}}"#))
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO providers (id, provider_type, name, credentials) VALUES (?, 'wled', ?, ?)",
+        )
+        .bind(pid)
+        .bind(pid)
+        .bind(&enc)
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO lights (id, provider_id, device_id, name, capabilities, last_state, last_seen)
+             VALUES (?, ?, 'main', ?, '{}', ?, datetime('now'))",
+        )
+        .bind(lid)
+        .bind(pid)
+        .bind(lid)
+        .bind(st)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/rooms",
+            &cookie,
+            r#"{"name":"R","light_ids":["light-lit","light-dark"]}"#,
+        ))
+        .await
+        .unwrap();
+    let room_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Attribute-only patch: the lit light dims, the dark one is untouched.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/state"),
+            &cookie,
+            r#"{"brightness":40}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let result = helpers::response_json(resp).await;
+    assert_eq!(result["applied"], 1, "only the lit member takes the cast");
+    assert!(
+        mock_dark.received_requests().await.unwrap().is_empty(),
+        "the off light's provider must not be called by a brightness cast"
+    );
+    assert!(
+        mock_lit
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.url.path() == "/json/state"),
+        "the lit light takes the brightness"
+    );
+    let lights = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/lights", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let by = |id: &str| {
+        lights
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["id"] == id)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(
+        by("light-dark")["last_state"]["on"],
+        false,
+        "off lamp stays off"
+    );
+    assert_eq!(by("light-lit")["last_state"]["brightness"], 40.0);
+
+    // An EXPLICIT `on` is power intent — "turn the room on at 55" wakes both.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/state"),
+            &cookie,
+            r#"{"on":true,"brightness":55}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(helpers::response_json(resp).await["applied"], 2);
+    assert!(
+        !mock_dark.received_requests().await.unwrap().is_empty(),
+        "explicit on powers the off member too"
+    );
+}
+
+#[tokio::test]
+async fn room_attribute_cascade_with_nothing_lit_is_a_no_op() {
+    // A brightness cast over an all-off room does nothing — and reports success
+    // (a 404 here would read as an error toast for a perfectly valid gesture).
+    let device = wled_mock().await;
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let enc = state
+        .encrypt_credentials(&format!(r#"{{"device_ip":"{}"}}"#, device.uri()))
+        .unwrap();
+    sqlx::query("INSERT INTO providers (id, provider_type, name, credentials) VALUES ('p1', 'wled', 'W', ?)")
+        .bind(&enc)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO lights (id, provider_id, device_id, name, capabilities, last_state, last_seen)
+         VALUES ('l1', 'p1', 'main', 'L', '{}', '{\"on\":false}', datetime('now'))",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/rooms",
+            &cookie,
+            r#"{"name":"R","light_ids":["l1"]}"#,
+        ))
+        .await
+        .unwrap();
+    let room_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/state"),
+            &cookie,
+            r#"{"brightness":40}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a no-op cast is not an error"
+    );
+    let result = helpers::response_json(resp).await;
+    assert_eq!(result["applied"], 0);
+    assert!(
+        device.received_requests().await.unwrap().is_empty(),
+        "nothing lit — no provider traffic"
+    );
+}
+
+#[tokio::test]
 async fn room_power_cycle_preserves_light_color() {
     // Regression: toggling a room off then on is a *pure power* command and must
     // not wipe the stored colour — the device keeps it across a power cycle, so

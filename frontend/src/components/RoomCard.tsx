@@ -39,6 +39,7 @@ import { DisableRow } from "./PowerFlyout";
 import { SceneButton, SceneModal } from "./scenes";
 import { type Dialogs } from "./dialogs";
 import { T, font, nicheStyle, radius } from "../theme";
+import { EFFECT_ACCENT, activeEffect, roomLightWrite } from "./lightControl";
 import { useViewport } from "../useViewport";
 
 /** The engraved room-card title — the Control page's header type. */
@@ -58,10 +59,11 @@ const ELLIPSIS: React.CSSProperties = {
 /** The lit member lights' colours — drives the card's filigree/dot/plate. */
 export function litHexes(lights: Light[]): string[] {
   return lights
-    .filter((l) => l.last_state?.on && l.last_state.color)
+    .filter((l) => l.last_state?.on && (l.last_state.color || activeEffect(l)))
     .map((l) => {
-      const c = l.last_state!.color!;
-      return rgbToHex(...xyToRgb(c.x, c.y, c.brightness));
+      const c = l.last_state!.color;
+      // Effect mode carries no colour (it IS the mode) — wear the effect base.
+      return c ? rgbToHex(...xyToRgb(c.x, c.y, c.brightness)) : EFFECT_ACCENT;
     });
 }
 
@@ -134,6 +136,7 @@ export function GlyphButton({
   offline,
   title,
   active,
+  effect,
   buttonRef,
   onClick,
   onLongPress,
@@ -145,6 +148,9 @@ export function GlyphButton({
   offline?: boolean;
   title: string;
   active: boolean;
+  /** A dynamic effect is running: the lit niche drifts through the hue wheel
+   * (glyph, border, and glow together) instead of wearing one static colour. */
+  effect?: boolean;
   buttonRef: React.Ref<HTMLButtonElement>;
   onClick: () => void;
   /** Press-and-hold (~500ms) action; suppresses the click that would follow.
@@ -180,6 +186,7 @@ export function GlyphButton({
   return (
     <button
       ref={buttonRef}
+      className={on && effect ? "bifrost-effect-drift" : undefined}
       onClick={handleClick}
       onPointerDown={startHold}
       onPointerUp={cancelHold}
@@ -223,7 +230,14 @@ export function LightButton({
   const isOn = light.last_state?.on ?? false;
   const offline = light.last_state?.reachable === false;
   const serverColor = light.last_state?.color;
-  const hex = serverColor ? rgbToHex(...xyToRgb(serverColor.x, serverColor.y, serverColor.brightness)) : "#ffb84d";
+  // A running effect owns the niche: it wears the effect base (the drift
+  // animation cycles it through the wheel) rather than a stale/fallback colour.
+  const fx = !!activeEffect(light);
+  const hex = fx
+    ? EFFECT_ACCENT
+    : serverColor
+      ? rgbToHex(...xyToRgb(serverColor.x, serverColor.y, serverColor.brightness))
+      : "#ffb84d";
 
   // Quick power toggle (long-press) — refreshes after, unlike the editor's
   // debounced live commits, so a power flip reconciles against the server.
@@ -244,8 +258,9 @@ export function LightButton({
         on={isOn}
         accent={isOn ? hex : "#ffb84d"}
         offline={offline}
-        title={light.name}
+        title={fx ? `${light.name} — playing ${light.last_state?.effect}` : light.name}
         active={editing}
+        effect={fx}
         buttonRef={ref}
         onClick={() => setEditing((v) => !v)}
         onLongPress={toggle}
@@ -646,8 +661,13 @@ export function RoomCard({
     // fan it out only to members whose catalog has it, each carrying just the
     // effect — see the shared `lightControl` rule (never a colour alongside it,
     // which the backend would resolve as colour-mode and drop the effect).
+    // A room-level cast touches LIT members only — dimming/recolouring the room
+    // must never wake an off lamp (turn-on-at-X is a different command: scenes,
+    // or the automation editor's "turn on and…").
     if (change.field === "effect") {
-      const ids = lights.filter((l) => lightSupports(change, l.capabilities)).map((l) => l.id);
+      const ids = lights
+        .filter((l) => l.last_state?.on && lightSupports(change, l.capabilities))
+        .map((l) => l.id);
       for (const l of lights) {
         if (ids.includes(l.id)) onLightUpdate(l.id, lightOptimistic(l.last_state, change));
       }
@@ -657,16 +677,17 @@ export function RoomCard({
       }, 200);
       return;
     }
-    // Adjust only the dimension the user moved. Optimistically resolve each
-    // member (keeping its untouched dimensions), then drive the whole room with a
-    // single minimal PUT — the backend merges it into each light's cached state.
+    // Adjust only the dimension the user moved. Optimistically resolve each LIT
+    // member (keeping its untouched dimensions), then drive the room with one
+    // minimal power-free PUT — the backend casts it onto lit members only.
     for (const l of lights) {
+      if (!l.last_state?.on) continue;
       const opt = lightSupports(change, l.capabilities)
         ? lightOptimistic(l.last_state, change)
-        : { ...(l.last_state ?? { on: true }), on: true };
+        : l.last_state;
       onLightUpdate(l.id, opt);
     }
-    const patch = lightWrite(change);
+    const patch = roomLightWrite(change);
     clearTimeout(commitTimer.current);
     commitTimer.current = setTimeout(() => { setRoomState(roomId, patch); }, 200);
   }

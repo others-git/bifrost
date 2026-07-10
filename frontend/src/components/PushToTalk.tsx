@@ -173,7 +173,10 @@ export function PushToTalk() {
         position: "fixed",
         right: 16,
         bottom: isCompact ? "calc(70px + env(safe-area-inset-bottom))" : 24,
-        zIndex: 85,
+        // Above page chrome (bottom tab bar: 40) but UNDER any expanded control
+        // (Flyout/bottom sheet: 60, modals: 100) — an open fly-out owns the
+        // corner; the mic must not float over the control you just opened.
+        zIndex: 50,
         width: 56,
         height: 56,
         borderRadius: "50%",

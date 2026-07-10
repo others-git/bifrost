@@ -50,6 +50,7 @@ import { AlbumArt, MediaEditor, fanMediaCommand } from "../components/MediaContr
 import { InlineSlider } from "../components/InlineSlider";
 import { RestoreHomeButton } from "./Dashboard";
 import { GlyphButton, RoomCard, RoomControlButton, litHexes, roomMembers } from "../components/RoomCard";
+import { EFFECT_ACCENT, activeEffect } from "../components/lightControl";
 import { OptionCheckList, deviceSelectOptions, type RoomedDevice } from "../components/deviceOptions";
 import { CornerFiligree } from "../components/ornament";
 import { Button, Segmented } from "../components/controls";
@@ -1283,7 +1284,8 @@ function DeviceTile({
   const on = !!(light?.last_state?.on ?? mediaDev?.state.power ?? powerDev?.state.on);
   const reachable =
     (light?.last_state?.reachable ?? mediaDev?.state.reachable ?? powerDev?.state.reachable) !== false;
-  const accent = light ? lightHex(light) : domain === "power" ? color.gold : color.violet;
+  const fx = !!light && !!activeEffect(light);
+  const accent = light ? (fx ? EFFECT_ACCENT : lightHex(light)) : domain === "power" ? color.gold : color.violet;
   const np = isNowPlaying ? mediaDev?.state.now_playing : undefined;
   const glyph = (dev as { glyph?: string | null }).glyph ?? (light ? "bulb" : powerDev ? "power" : "speaker");
 
@@ -1350,7 +1352,7 @@ function DeviceTile({
           <Glyph name={glyph} size={15} />
           <span style={{ ...TILE_LABEL, color: T.text }}>{name}</span>
         </button>
-        <GlyphButton on={on} accent={accent} title={on ? "Turn off" : "Turn on"} active={false} buttonRef={null} onClick={togglePower} size={54}>
+        <GlyphButton on={on} accent={accent} effect={fx} title={on ? "Turn off" : "Turn on"} active={false} buttonRef={null} onClick={togglePower} size={54}>
           <Glyph name="power" size={24} />
         </GlyphButton>
         <span style={{ position: "relative", fontSize: "0.7rem", color: on ? accent : T.faint }}>
@@ -1382,7 +1384,7 @@ function DeviceTile({
           <Glyph name={glyph} size={20} />
           <span style={{ ...TILE_LABEL, color: T.text }}>{name}</span>
         </button>
-        <GlyphButton on={on} accent={accent} title={on ? "Turn off" : "Turn on"} active={false} buttonRef={null} onClick={togglePower} size={30}>
+        <GlyphButton on={on} accent={accent} effect={fx} title={on ? "Turn off" : "Turn on"} active={false} buttonRef={null} onClick={togglePower} size={30}>
           <Glyph name="power" size={14} />
         </GlyphButton>
       </div>

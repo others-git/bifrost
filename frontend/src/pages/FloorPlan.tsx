@@ -34,11 +34,12 @@ import {
   type Scene,
 } from "../api";
 import { ColorWheel, hexToHs, hsvToRgb, LightEditor, type LightControlChange } from "../components/LightEditor";
-import {
+import { EFFECT_ACCENT,
   aggregateLightState,
   lightOptimistic,
   lightSupports,
   lightWrite,
+  roomLightWrite,
   type LightLike,
 } from "../components/lightControl";
 import { DeviceControl } from "../components/DeviceControl";
@@ -416,26 +417,28 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
     const room = allRooms.find((r) => r.id === target.roomId);
     if (!room) return;
     const capsOf = (id: string) => lights.find((l) => l.id === id)?.capabilities;
-    // For an effect, only members that support it take part.
-    const effectIds =
+    // A room-level cast touches LIT members only (dimming a room never wakes an
+    // off lamp); for an effect, only lit members that support it take part.
+    const litIds = room.light_ids.filter((id) => statesById.get(id)?.on);
+    const targetIds =
       change.field === "effect"
-        ? room.light_ids.filter((id) => {
+        ? litIds.filter((id) => {
             const c = capsOf(id);
             return c ? lightSupports(change, c) : false;
           })
-        : room.light_ids;
+        : litIds;
 
     setStatesById((prev) => {
       const next = new Map(prev);
-      for (const id of effectIds) next.set(id, lightOptimistic(prev.get(id), change));
+      for (const id of targetIds) next.set(id, lightOptimistic(prev.get(id), change));
       return next;
     });
     clearTimeout(editTimer.current);
     editTimer.current = setTimeout(() => {
       if (change.field === "effect") {
-        for (const id of effectIds) setLightState(id, lightWrite(change));
+        for (const id of targetIds) setLightState(id, lightWrite(change));
       } else {
-        setRoomState(room.id, lightWrite(change));
+        setRoomState(room.id, roomLightWrite(change));
       }
     }, 250);
   }
@@ -1063,12 +1066,16 @@ function RoomController({
       {bound.map(({ room, color }) => {
         const count = room.light_ids.length;
         const anyOn = room.light_ids.some((id) => statesById.get(id)?.on);
-        const litColor = room.light_ids
-          .map((id) => statesById.get(id))
-          .find((st) => st?.on && st.color)?.color;
+        const litStates = room.light_ids.map((id) => statesById.get(id));
+        const litColor = litStates.find((st) => st?.on && st.color)?.color;
+        // A lit member running an effect has no colour (effect IS its mode) —
+        // the dot wears the effect base, matching the room cards' litHexes.
+        const litEffect = litStates.some((st) => st?.on && st.effect);
         const dotHex = litColor
           ? rgbToHex(...xyToRgb(litColor.x, litColor.y, litColor.brightness))
-          : color;
+          : litEffect
+            ? EFFECT_ACCENT
+            : color;
         const tunable = count > 0;
         return (
           <div
