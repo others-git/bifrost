@@ -1839,10 +1839,9 @@ fn parse_relative(c: &str) -> Option<Command> {
         (RelDomain::Volume, false, h)
     } else if let Some(h) = suffix_word(s, "brighter") {
         (RelDomain::Brightness, true, h)
-    } else if let Some(h) = suffix_word(s, "dimmer").or_else(|| suffix_word(s, "darker")) {
-        (RelDomain::Brightness, false, h)
     } else {
-        return None;
+        let h = suffix_word(s, "dimmer").or_else(|| suffix_word(s, "darker"))?;
+        (RelDomain::Brightness, false, h)
     };
     let rest = strip_verb(rest);
     let target = if rest.is_empty() {
@@ -2030,14 +2029,13 @@ fn parse_scene(c: &str) -> Option<Command> {
     // Also handle "{name} scene in {room}" / "{name} scene everywhere".
     let (scene_part, target) = if kw {
         (head.to_string(), Target::Here)
-    } else if let Some(idx) = c.find(" scene ").or_else(|| c.find(" mode ")) {
+    } else {
+        let idx = c.find(" scene ").or_else(|| c.find(" mode "))?;
         let scene = c[..idx].to_string();
         let rest = c[idx..]
             .trim_start_matches(" scene ")
             .trim_start_matches(" mode ");
         (scene, target_from_rest(rest))
-    } else {
-        return None;
     };
     let scene = strip_articles(&scene_part);
     if scene.is_empty() {
@@ -2094,10 +2092,9 @@ fn parse_mute(c: &str) -> Option<Command> {
         (false, r)
     } else if c == "unmute" {
         (false, "")
-    } else if let Some(r) = c.strip_prefix("silence ") {
-        (true, r)
     } else {
-        return None;
+        let r = c.strip_prefix("silence ")?;
+        (true, r)
     };
     let target = if rest.trim().is_empty() {
         Target::Here
@@ -2172,10 +2169,9 @@ fn parse_power(c: &str) -> Option<Command> {
         // Suffix form: "X on" / "X off".
         if let Some(r) = c.strip_suffix(" on") {
             (true, r)
-        } else if let Some(r) = c.strip_suffix(" off") {
-            (false, r)
         } else {
-            return None;
+            let r = c.strip_suffix(" off")?;
+            (false, r)
         }
     };
     let (target, lights_only) = parse_target(rest);
