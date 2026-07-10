@@ -542,8 +542,12 @@ async fn onkyo_link_actor(
         // exhausted, init write failed) or a failed connect — either way the
         // receiver is unreachable right now; say so instead of going quiet.
         let _ = events.send((LINK_STATE.to_string(), "DOWN".to_string()));
-        // Backoff before reconnecting (capped); writes queued meanwhile flush on reconnect.
-        let delay = Duration::from_millis(250u64.saturating_mul(1 << attempt.min(6)).min(20_000));
+        // Backoff before reconnecting (capped); writes queued meanwhile flush on
+        // reconnect. Tests cap much lower: the 100ms test heartbeat tears the
+        // link readily under CI load, and a compounding backoff (1s, 2s, 4s…)
+        // outlasts any reasonable discovery-retry budget in the test suite.
+        let cap = if cfg!(test) { 500 } else { 20_000 };
+        let delay = Duration::from_millis(250u64.saturating_mul(1 << attempt.min(6)).min(cap));
         attempt = attempt.saturating_add(1);
         tokio::time::sleep(delay).await;
     }

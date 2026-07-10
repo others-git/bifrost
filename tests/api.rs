@@ -5097,7 +5097,11 @@ async fn add_onkyo_device(
     // a transient 502 against a healthy mock. Retry through the turbulence;
     // a real regression still fails after the deadline.
     let mut status = StatusCode::INTERNAL_SERVER_ERROR;
-    for _ in 0..8 {
+    // A generous ladder (~15s budget): a starved release runner (tests share
+    // the box with a Docker build) can stall the mock long enough for several
+    // heartbeat breaks in a row — each retry is cheap, and a real regression
+    // still fails once the ladder is exhausted.
+    for attempt in 0..20u32 {
         let resp = app
             .clone()
             .oneshot(helpers::authed_post(
@@ -5111,7 +5115,10 @@ async fn add_onkyo_device(
         if status == StatusCode::OK {
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(
+            250 + 50 * u64::from(attempt),
+        ))
+        .await;
     }
     assert_eq!(
         status,
