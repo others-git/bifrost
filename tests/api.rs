@@ -9332,6 +9332,36 @@ async fn remote_apps_pull_the_tvs_installed_catalog() {
         apps[0]["activity"],
         "com.netflix.ninja-com.netflix.ninja.MainActivity"
     );
+
+    // A row keyed by a full launch URI (minted by pre-normalization launch
+    // recording) merges into its bare-package row on the next sync — recency
+    // carried over, no duplicate tile.
+    sqlx::query(
+        "INSERT INTO remote_apps (remote_id, package, name, pinned, last_seen)
+         VALUES ('r1', 'com.plexapp.android-com.plexapp.plex.activities.SplashActivity', 'Plex', 0, datetime('now'))",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+    let apps = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/remote/devices/r1/apps", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let apps = apps.as_array().unwrap();
+    let plex: Vec<_> = apps.iter().filter(|a| a["name"] == "Plex").collect();
+    assert_eq!(
+        plex.len(),
+        1,
+        "launch-URI row merges, not duplicates: {apps:?}"
+    );
+    assert_eq!(plex[0]["package"], "com.plexapp.android");
+    assert!(
+        plex[0]["last_seen"].is_string(),
+        "the URI row's recency carries into the merged row"
+    );
 }
 
 #[tokio::test]

@@ -195,7 +195,13 @@ fn looks_like_package(activity: &str) -> bool {
 
 /// Record that `package` was seen foreground on `remote_id` (a "recent"). Upserts
 /// without disturbing an existing pin. No-op for non-package activities.
+/// A vendor launch URI (`<package>-<activity>`, what the catalog launches with)
+/// normalizes to its bare package — the identity every other source (ATV push,
+/// HA `current_activity`, the catalog itself) uses; recording the raw URI
+/// minted a second row per launched app (Plex twice: once from the catalog,
+/// once keyed by its launch URI).
 pub(crate) async fn record_app_seen(state: &AppState, remote_id: &str, package: &str) {
+    let package = package.split_once('-').map_or(package, |(p, _)| p);
     if !looks_like_package(package) {
         return;
     }
@@ -296,6 +302,45 @@ pub(crate) async fn sync_app_catalog(state: &AppState, remote_id: &str) {
         .bind(&app.activity)
         .execute(&state.db)
         .await;
+    }
+    // Sweep rows keyed by a launch URI (`<package>-<activity>`) into their
+    // bare-package row: carry the pin and freshest recency over, then drop the
+    // duplicate. Cleans up rows minted before launch recording normalized.
+    let rows = sqlx::query(
+        "SELECT package, pinned, last_seen FROM remote_apps WHERE remote_id = ? AND instr(package, '-') > 0",
+    )
+    .bind(remote_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    for row in rows {
+        let uri: String = row.get("package");
+        let Some((bare, _)) = uri.split_once('-') else {
+            continue;
+        };
+        let pinned: i64 = row.get("pinned");
+        let last_seen: Option<String> = row.get("last_seen");
+        let merged = sqlx::query(
+            "UPDATE remote_apps
+                SET pinned = MAX(pinned, ?),
+                    last_seen = COALESCE(MAX(last_seen, ?), last_seen, ?)
+              WHERE remote_id = ? AND package = ?",
+        )
+        .bind(pinned)
+        .bind(&last_seen)
+        .bind(&last_seen)
+        .bind(remote_id)
+        .bind(bare)
+        .execute(&state.db)
+        .await;
+        if matches!(merged, Ok(r) if r.rows_affected() > 0) {
+            let _ = sqlx::query("DELETE FROM remote_apps WHERE remote_id = ? AND package = ?")
+                .bind(remote_id)
+                .bind(&uri)
+                .execute(&state.db)
+                .await;
+            tracing::debug!(target: "bifrost::remote", remote = %remote_id, uri = %uri, into = %bare, "merged a launch-URI app row into its package row");
+        }
     }
     tracing::debug!(target: "bifrost::remote", remote = %remote_id, apps = apps.len(), "app catalog synced from the device");
 }
