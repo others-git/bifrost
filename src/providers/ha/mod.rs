@@ -694,7 +694,20 @@ fn parse_media_state(e: &HaEntity, base_url: &str) -> MediaState {
             artwork_url,
         })
     } else {
-        None
+        // Android/Google TV entities report the FOREGROUND APP (`app_id` /
+        // `app_name`) instead of track metadata — "Netflix is on screen" is
+        // this device's now-playing. `app_name` is often the raw package too,
+        // so both resolve through the shared brand naming; system surfaces
+        // (launcher, screensaver) aren't content and stay blank.
+        let app = attr_str(attrs, "app_id").or_else(|| attr_str(attrs, "app_name"));
+        app.filter(|a| power && !crate::models::remote::is_system_surface(a))
+            .map(|a| NowPlaying {
+                title: Some(crate::models::remote::app_display_name(&a)),
+                artist: None,
+                album: None,
+                play_state,
+                artwork_url,
+            })
     };
 
     MediaState {
@@ -721,7 +734,9 @@ fn media_capabilities(attrs: &Value) -> MediaCapabilities {
             || has(FEAT_PAUSE)
             || has(FEAT_NEXT_TRACK)
             || has(FEAT_PREVIOUS_TRACK),
-        now_playing: attrs.get("media_title").is_some(),
+        now_playing: attrs.get("media_title").is_some()
+            || attrs.get("app_id").is_some()
+            || attrs.get("app_name").is_some(),
         // browse_media exists but is richer than Bifrost "favorites"; map later.
         favorites: false,
         grouping: has(FEAT_GROUPING),
@@ -1915,6 +1930,40 @@ mod tests {
                 .as_str()
             )
         );
+    }
+
+    #[test]
+    fn atv_media_reports_the_foreground_app_as_now_playing() {
+        // An Android/Google TV media_player has no media_title — its content
+        // signal is the foreground app (app_id, often duplicated into a raw
+        // package app_name). That IS its now-playing.
+        let e = |state: &str, app: &str| {
+            serde_json::from_value::<HaEntity>(json!({
+                "entity_id": "media_player.bedroom_tv_2",
+                "state": state,
+                "last_changed": "2026-01-01T00:00:00Z",
+                "attributes": { "app_id": app, "app_name": app, "device_class": "tv" }
+            }))
+            .unwrap()
+        };
+        let st = parse_media_state(&e("on", "com.google.android.youtube.tv"), "http://ha");
+        assert_eq!(
+            st.now_playing.as_ref().and_then(|n| n.title.as_deref()),
+            Some("YouTube"),
+            "the foreground app resolves through the shared brand naming"
+        );
+
+        // The screensaver isn't content.
+        let st = parse_media_state(&e("on", "com.google.android.apps.tv.dreamx"), "http://ha");
+        assert!(st.now_playing.is_none(), "system surfaces stay blank");
+
+        // A powered-off TV's stale app attribute isn't content either.
+        let st = parse_media_state(&e("off", "com.google.android.youtube.tv"), "http://ha");
+        assert!(st.now_playing.is_none());
+
+        // And the capability flag recognises app-only entities.
+        let caps = media_capabilities(&json!({ "app_id": "com.netflix.ninja" }));
+        assert!(caps.now_playing);
     }
 
     #[test]

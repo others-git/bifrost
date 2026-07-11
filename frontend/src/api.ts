@@ -237,6 +237,8 @@ export interface Provider {
   /** User-controlled sort position on the Devices page (ascending). */
   display_order: number;
   created_at: string;
+  /** Smart-TV only: Android TV Remote pairing state. */
+  remote_paired?: boolean | null;
 }
 
 export interface CredentialField {
@@ -1507,6 +1509,20 @@ export async function setRoomPowerDevices(id: string, power_device_ids: string[]
 /** Room state is patch-shaped: an explicit `on` is power intent (whole room,
  * pure-power fan-out rules); a patch WITHOUT `on` is an attribute cascade the
  * backend casts onto lit lights only — dimming a room never wakes off lamps. */
+/** Speak a phrase into a TV's own voice assistant (Google Assistant on an
+ * Android/Google TV): Bifrost synthesizes it and streams it over the paired
+ * remote session, so the TV hears and acts on it. Needs a configured TTS
+ * endpoint + a paired remote. */
+export async function assistantSay(deviceId: string, text: string): Promise<string | null> {
+  const res = await fetch(`/api/media/devices/${deviceId}/assistant`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  if (res.ok) return null;
+  return (await res.text()) || `HTTP ${res.status}`;
+}
+
 export async function setRoomState(
   id: string,
   state: LightStatePatch,

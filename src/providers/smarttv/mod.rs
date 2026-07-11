@@ -19,6 +19,7 @@
 //! Nothing else in the framework changes — the two trait impls, the Bifrost
 //! device shapes, and the command routing are all vendor-neutral.
 
+mod androidtv;
 mod atv;
 mod bravia;
 
@@ -30,7 +31,10 @@ use crate::models::remote::{RemoteCommandInfo, RemoteDevice, RemoteKey, RemoteSt
 use crate::providers::{
     CredentialField, FieldKind, MediaProvider, MediaProviderFactory, RemoteProvider,
     RemoteProviderFactory,
-    discovery::{DeviceDiscovery, HttpSweepDiscovery, SsdpDiscovery, UnionDiscovery},
+    discovery::{
+        DeviceDiscovery, HttpSweepDiscovery, MdnsDiscovery, SsdpDiscovery, TcpPortSweepDiscovery,
+        UnionDiscovery,
+    },
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -116,6 +120,12 @@ pub(crate) trait SmartTvVendor: Send + Sync {
     async fn push_stream(&self) -> Result<tokio::sync::mpsc::Receiver<TvPush>> {
         anyhow::bail!("this TV has no push channel")
     }
+    /// Speak into the TV's own voice assistant — stream `pcm_8k` (8 kHz mono
+    /// 16-bit LE PCM) over the paired Android TV Remote session so the TV's
+    /// Assistant hears and acts on it. Default: no assistant channel.
+    async fn send_voice(&self, _pcm_8k: &[u8]) -> Result<()> {
+        anyhow::bail!("this TV has no voice-assistant channel")
+    }
     /// Invoke a native command by its token (from [`Self::commands`]). Default:
     /// unsupported.
     async fn send_command(&self, _token: &str) -> Result<()> {
@@ -129,6 +139,14 @@ pub(crate) trait SmartTvVendor: Send + Sync {
 struct SmartTvCreds {
     /// The TV's IP / host.
     host: String,
+    /// Display name stamped by discovery (mDNS) or the user — vendors whose
+    /// protocol has no name query (generic Android TV) surface this.
+    #[serde(default)]
+    name: Option<String>,
+    /// Normalized `mac:…` hardware id stamped by discovery (mDNS `bt` MAC),
+    /// for TV↔remote auto-pairing and cross-provider de-dup.
+    #[serde(default)]
+    hw_id: Option<String>,
     /// Which vendor adapter to use; defaults to the only one today (Bravia).
     /// Discovery stamps this so the user never picks it.
     #[serde(default)]
@@ -163,8 +181,46 @@ fn build_vendor(creds: &SmartTvCreds) -> Result<Box<dyn SmartTvVendor>> {
             creds.auth.clone(),
             atv,
         )?)),
+        // Generic Android/Google TV (dongles, boxes): pure ATV Remote v2 —
+        // no vendor HTTP API, state and control both ride the paired session.
+        Some("androidtv") => Ok(Box::new(androidtv::AndroidTvVendor::new(
+            &creds.host,
+            creds.name.clone(),
+            creds.hw_id.clone(),
+            atv,
+        )?)),
         Some(other) => Err(anyhow!("unknown smart-TV brand '{other}'")),
     }
+}
+
+/// Adapt the shared ATV link's broadcast into a vendor push stream — used by
+/// every vendor whose TV speaks ATV Remote v2 (Bravia, generic Android TV).
+pub(super) fn atv_push_stream(
+    ip: &str,
+    identity: &atv::crypto::Identity,
+) -> tokio::sync::mpsc::Receiver<TvPush> {
+    let mut rx = atv::client::subscribe(ip, identity);
+    let (tx, out) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(async move {
+        loop {
+            use atv::client::AtvEvent;
+            use tokio::sync::broadcast::error::RecvError;
+            let ev = match rx.recv().await {
+                Ok(e) => e,
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => return,
+            };
+            let push = match ev {
+                AtvEvent::CurrentApp(p) => TvPush::CurrentApp(p),
+                AtvEvent::Volume { level, max, muted } => TvPush::Volume { level, max, muted },
+                AtvEvent::Started(on) => TvPush::Screen(on),
+            };
+            if tx.send(push).await.is_err() {
+                return;
+            }
+        }
+    });
+    out
 }
 
 fn parse_creds(credentials_json: &str) -> Result<SmartTvCreds> {
@@ -310,6 +366,13 @@ fn smarttv_discoverer() -> Box<dyn DeviceDiscovery> {
     //    ones that answer `productCategory: tv`. Authoritative — it's the same
     //    endpoint the provider drives after pairing — and it works where SSDP
     //    physically can't.
+    // 3. mDNS: any Android/Google TV (dongles included) advertises
+    //    `_androidtvremote2._tcp` with its friendly name + Bluetooth MAC — the
+    //    painless way to find a dongle that has no HTTP API to sweep for.
+    // 4. TCP sweep on 6466 (the ATV remote port): the multicast-proof fallback
+    //    that finds an Android TV even where mDNS/SSDP physically can't.
+    // Union is first-leg-wins by host, so a Bravia matched by its ScalarWeb
+    // legs stays brand=bravia; pure Android devices fall through to 3/4.
     Box::new(UnionDiscovery::new(vec![
         Box::new(SsdpDiscovery::new(
             SONY_SCALARWEB_ST,
@@ -326,6 +389,11 @@ fn smarttv_discoverer() -> Box<dyn DeviceDiscovery> {
             )
             .post(BRAVIA_SWEEP_BODY),
         ),
+        Box::new(MdnsDiscovery::new(
+            "_androidtvremote2._tcp.local",
+            "androidtv",
+        )),
+        Box::new(TcpPortSweepDiscovery::new(6466, "Android TV", "androidtv")),
     ]))
 }
 
@@ -351,22 +419,6 @@ impl SmartTv {
     }
 }
 
-/// Foreground packages that aren't a user app on screen — the launcher, the
-/// screensaver, system chrome. Now-playing clears rather than naming them.
-fn is_system_surface(package: &str) -> bool {
-    let p = package.to_ascii_lowercase();
-    [
-        "launcher",
-        "dream",
-        "screensaver",
-        "backdrop",
-        "systemui",
-        "inputmethod",
-    ]
-    .iter()
-    .any(|kw| p.contains(kw))
-}
-
 /// Fold one TV push into the running media state. Pure — the shared logic the
 /// push stream applies, unit-tested without a TV. Any push proves the TV spoke
 /// to us, so reachability rides along.
@@ -378,7 +430,7 @@ fn apply_tv_push(
     state.reachable = Some(true);
     match push {
         TvPush::CurrentApp(pkg) => {
-            state.now_playing = if is_system_surface(pkg) {
+            state.now_playing = if crate::models::remote::is_system_surface(pkg) {
                 None
             } else {
                 let name = apps
@@ -436,6 +488,10 @@ const TV_CAPS: MediaCapabilities = MediaCapabilities {
 impl MediaProvider for SmartTv {
     fn name(&self) -> &str {
         self.vendor.brand()
+    }
+
+    async fn send_voice(&self, _device_id: &str, pcm_8k: &[u8]) -> Result<()> {
+        self.vendor.send_voice(pcm_8k).await
     }
 
     /// Live pushes from the TV itself (foreground app / volume / screen) when
@@ -809,6 +865,8 @@ mod tests {
     fn build_vendor_defaults_to_bravia() {
         let v = build_vendor(&SmartTvCreds {
             host: "192.168.1.40".into(),
+            name: None,
+            hw_id: None,
             brand: None,
             auth: Some("cookie".into()),
             atv_cert: None,
@@ -823,6 +881,8 @@ mod tests {
         let id = atv::crypto::Identity::generate().unwrap();
         let v = build_vendor(&SmartTvCreds {
             host: "192.168.1.40".into(),
+            name: None,
+            hw_id: None,
             brand: Some("bravia".into()),
             auth: None,
             atv_cert: Some(id.cert_pem),
@@ -833,9 +893,26 @@ mod tests {
     }
 
     #[test]
+    fn build_vendor_routes_androidtv() {
+        let v = build_vendor(&SmartTvCreds {
+            host: "192.168.1.31".into(),
+            name: Some("Bedroom dongle".into()),
+            hw_id: Some("mac:bcdf586107a7".into()),
+            brand: Some("androidtv".into()),
+            auth: None,
+            atv_cert: None,
+            atv_key: None,
+        })
+        .unwrap();
+        assert_eq!(v.brand(), "Android TV");
+    }
+
+    #[test]
     fn build_vendor_rejects_unknown_brand() {
         let result = build_vendor(&SmartTvCreds {
             host: "192.168.1.40".into(),
+            name: None,
+            hw_id: None,
             brand: Some("nosuchbrand".into()),
             auth: None,
             atv_cert: None,

@@ -190,6 +190,14 @@ pub trait MediaProvider: Send + Sync {
         Err(anyhow!("{} does not support push events", self.name()))
     }
 
+    /// Speak into the device's own voice assistant — stream `pcm_8k` (8 kHz
+    /// mono 16-bit LE PCM) so the device's assistant hears and acts on it.
+    /// Only smart TVs with a paired Android TV Remote implement it (the
+    /// synthesized-voice-command feature); default: unsupported.
+    async fn send_voice(&self, _device_id: &str, _pcm_8k: &[u8]) -> Result<()> {
+        anyhow::bail!("{} has no voice-assistant channel", self.name())
+    }
+
     /// List the provider's saved favorites/presets that can be started on this
     /// device (e.g. Sonos Favorites). Default: none — providers without a
     /// favorites concept (or where the protocol can't enumerate them, like

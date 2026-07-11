@@ -34,6 +34,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/devices/{id}/ungroup", post(ungroup_handler))
         .route("/devices/{id}/receiver", put(set_receiver_handler))
         .route("/devices/{id}/companion", put(set_companion_handler))
+        .route("/devices/{id}/assistant", post(assistant_say_handler))
         .route("/play-on", post(play_on_handler))
         .merge(crate::api::inventory_router(
             "/devices",
@@ -1663,6 +1664,55 @@ async fn lookup_media_provider(state: &AppState, id: &str) -> ProviderLookup {
     }
 }
 
+/// Speak a phrase into a TV's own voice assistant: synthesize `text` with the
+/// configured TTS endpoint, transcode to the ATV voice format (8 kHz mono
+/// 16-bit PCM), and stream it over the TV's paired Android TV Remote session —
+/// the TV's Assistant hears and acts on it. The one shared path behind the
+/// board voice-command widget and any future caller.
+pub(crate) async fn assistant_say(state: &AppState, id: &str, text: &str) -> SetMediaOutcome {
+    let text = text.trim();
+    if text.is_empty() {
+        return SetMediaOutcome::BadCommand("nothing to say".into());
+    }
+    let (device_id, provider) = match lookup_media_provider(state, id).await {
+        ProviderLookup::Found(d, p) => (d, p),
+        ProviderLookup::NotFound => return SetMediaOutcome::NotFound,
+        ProviderLookup::Db => return SetMediaOutcome::Db,
+    };
+    // Synthesize via the configured TTS endpoint (WAV — the header carries the
+    // sample rate, so we resample deterministically).
+    let Some(ep) = crate::api::ai_endpoints::endpoint_for(state, "tts").await else {
+        return SetMediaOutcome::BadCommand(
+            "no text-to-speech model is configured (set one under AI endpoints)".into(),
+        );
+    };
+    let wav = match crate::api::voice::synthesize(&ep, text, "alloy", "wav").await {
+        Ok((_ct, bytes)) => bytes,
+        Err(e) => {
+            tracing::error!(target: "bifrost::smarttv", "assistant say: TTS failed: {e}");
+            return SetMediaOutcome::ProviderError;
+        }
+    };
+    let pcm = match crate::audio::wav_to_atv_voice_pcm(&wav) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(target: "bifrost::smarttv", "assistant say: audio transcode failed: {e:#}");
+            return SetMediaOutcome::ProviderError;
+        }
+    };
+    tracing::debug!(target: "bifrost::smarttv", device = %id, text, pcm_bytes = pcm.len(), "assistant say: streaming voice to the TV");
+    match provider.send_voice(&device_id, &pcm).await {
+        Ok(()) => SetMediaOutcome::Ok,
+        Err(e) if e.to_string().contains("not paired") || e.to_string().contains("no voice") => {
+            SetMediaOutcome::BadCommand(e.to_string())
+        }
+        Err(e) => {
+            tracing::error!(target: "bifrost::smarttv", "assistant say: send failed: {e:#}");
+            SetMediaOutcome::ProviderError
+        }
+    }
+}
+
 /// Best-effort title resolution for the TV content resolver: search the device's
 /// libraries for `query` and start the top hit. `true` if something was found and
 /// played, `false` if the search matched nothing, the provider has no search, or
@@ -2062,6 +2112,21 @@ async fn set_device_handler(
     Json(cmd): Json<MediaCommand>,
 ) -> impl IntoResponse {
     set_media_status(apply_media_command(&state, &id, &cmd).await)
+}
+
+/// Body for speaking a phrase into a TV's own voice assistant.
+#[derive(serde::Deserialize)]
+pub(crate) struct AssistantSayRequest {
+    pub(crate) text: String,
+}
+
+async fn assistant_say_handler(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+    Json(req): Json<AssistantSayRequest>,
+) -> impl IntoResponse {
+    set_media_status(assistant_say(&state, &id, &req.text).await)
 }
 
 /// Body for casting content to a device (the casting seam). `content_type` is the

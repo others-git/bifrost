@@ -83,6 +83,24 @@ pub fn prettify_package(package: &str) -> String {
     }
 }
 
+/// Foreground packages that aren't a user app on screen — the launcher, the
+/// screensaver, system chrome. Now-playing clears rather than naming them.
+/// The one rule every foreground-app source shares (the ATV push channel,
+/// Home Assistant's `app_id`).
+pub fn is_system_surface(package: &str) -> bool {
+    let p = package.to_ascii_lowercase();
+    [
+        "launcher",
+        "dream",
+        "screensaver",
+        "backdrop",
+        "systemui",
+        "inputmethod",
+    ]
+    .iter()
+    .any(|kw| p.contains(kw))
+}
+
 /// One installed app from a TV's own catalog (`appControl.getApplicationList`):
 /// the bare package id (the cross-source identity — the ATV push channel and
 /// HA report foreground apps by package), the TV's display title, and the

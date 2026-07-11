@@ -6399,6 +6399,69 @@ async fn room_audio_link_requires_session() {
 }
 
 #[tokio::test]
+async fn room_media_membership_skips_disabled_devices() {
+    // A disabled media device is never a valid room member — the save guard
+    // drops it, so a stale disabled member (e.g. an HA duplicate later
+    // disabled) self-cleans on any room save instead of lingering.
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    sqlx::query("INSERT INTO providers (id, provider_type, name, credentials) VALUES ('p', 'ha', 'HA', 'x')")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    for (id, en) in [("enabled-tv", 1), ("disabled-dup", 0)] {
+        sqlx::query(
+            "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, enabled)
+             VALUES (?, 'p', ?, 'Bedroom TV', 'tv', '{}', '{}', ?)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(en)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/rooms",
+            &cookie,
+            r#"{"name":"Bedroom","light_ids":[]}"#,
+        ))
+        .await
+        .unwrap();
+    let room_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Try to add BOTH — the disabled one must be dropped.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/media"),
+            &cookie,
+            r#"{"devices":[{"media_device_id":"enabled-tv","volume_offset":0},{"media_device_id":"disabled-dup","volume_offset":0}]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let members: Vec<String> =
+        sqlx::query_scalar("SELECT media_device_id FROM room_media_devices WHERE room_id = ?")
+            .bind(&room_id)
+            .fetch_all(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(
+        members,
+        vec!["enabled-tv".to_string()],
+        "only the enabled device persists"
+    );
+}
+
+#[tokio::test]
 async fn room_audio_members_set_list_and_clear() {
     let (port, _) = audio_mock::spawn(audio_mock::receiver_state()).await;
     let app = helpers::test_app_with_password().await;
@@ -9245,6 +9308,136 @@ async fn shadowed_member_is_never_elected_surface() {
         "the visible member must be the surface"
     );
     assert_eq!(by("a_tv")["companion_of"], "b_spk");
+}
+
+#[tokio::test]
+async fn assistant_say_requires_auth_and_a_real_device() {
+    // The TV voice-command route: unauthenticated is 401; an unknown device is
+    // 404; a real smart-TV device with no TTS endpoint configured reports a
+    // clear bad-request rather than a mystery 502.
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Unauthenticated.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/media/devices/x/assistant")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"text":"hi"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Unknown device → 404.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/media/devices/nope/assistant",
+            &cookie,
+            r#"{"text":"hi"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // A real smart-TV device, but no TTS endpoint configured → a clear 400
+    // (bad command), not an opaque gateway error.
+    let enc = state
+        .encrypt_credentials(r#"{"host":"192.0.2.9","brand":"androidtv"}"#)
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO providers (id, provider_type, name, credentials) VALUES ('ptv', 'smarttv', 'TV', ?)",
+    )
+    .bind(&enc)
+    .execute(&state.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state)
+         VALUES ('tv1', 'ptv', '192.0.2.9', 'Bedroom TV', 'tv', '{}', '{}')",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/media/devices/tv1/assistant",
+            &cookie,
+            r#"{"text":"what is the weather"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "no TTS configured is a clear bad-command, not a 502"
+    );
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        body.contains("text-to-speech"),
+        "explains what's missing: {body}"
+    );
+
+    // Empty text is rejected before any provider work.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/media/devices/tv1/assistant",
+            &cookie,
+            r#"{"text":"   "}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn scan_filters_hosts_behind_configured_providers() {
+    // An already-added TV answers the Android-TV probes too — it must not be
+    // offered as addable next to itself. The per-type scan applies the same
+    // known-hosts filter as the all-types scan. (The discoverers probe the
+    // real network here and find nothing in CI; the seeded provider's host
+    // simply must never appear.)
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let enc = state
+        .encrypt_credentials(r#"{"host":"192.0.2.22","brand":"bravia"}"#)
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO providers (id, provider_type, name, credentials) VALUES ('ptv', 'smarttv', 'TV', ?)",
+    )
+    .bind(&enc)
+    .execute(&state.db)
+    .await
+    .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/providers/scan/smarttv",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let found = helpers::response_json(resp).await;
+    assert!(
+        found
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d["host"] != "192.0.2.22"),
+        "a configured host must be filtered from scan results: {found}"
+    );
 }
 
 #[tokio::test]

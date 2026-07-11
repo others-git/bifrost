@@ -43,8 +43,17 @@ impl Identity {
         let serial = SerialNumber::from(1u32);
         let validity = Validity::from_now(std::time::Duration::from_secs(20 * 365 * 24 * 3600))?;
         let subject = Name::from_str("CN=bifrost-atvremote")?;
+        // A self-signed LEAF, not a root: `Profile::Root` stamps a CA KeyUsage
+        // (keyCertSign|cRLSign) with no digitalSignature — invalid for TLS
+        // client-auth signing. Lax TLS 1.2 stacks (Bravia) never checked;
+        // BoringSSL under TLS 1.3 (Google TV dongles) rejects the handshake
+        // with IllegalParameter. A leaf profile carries digitalSignature.
         let builder = CertificateBuilder::new(
-            Profile::Root, // self-signed root (issuer = subject)
+            Profile::Leaf {
+                issuer: subject.clone(),
+                enable_key_agreement: false,
+                enable_key_encipherment: true,
+            },
             serial,
             validity,
             subject,
@@ -122,6 +131,35 @@ pub fn pairing_secret(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_cert_is_a_signing_leaf_not_a_ca() {
+        // TLS 1.3 client auth (Google TV dongles / BoringSSL) requires a
+        // KeyUsage carrying digitalSignature and rejects CA certs — the exact
+        // failure a Root-profile identity produced (IllegalParameter).
+        let id = Identity::generate().unwrap();
+        let cert = x509_cert::Certificate::from_pem(id.cert_pem.as_bytes()).unwrap();
+        let exts = cert.tbs_certificate.extensions.as_deref().unwrap_or(&[]);
+        let oid = |s: &str| s.parse::<x509_cert::spki::ObjectIdentifier>().unwrap();
+        let key_usage = exts
+            .iter()
+            .find(|e| e.extn_id == oid("2.5.29.15"))
+            .expect("KeyUsage present");
+        // BIT STRING: first content byte after the unused-bits count; bit 0
+        // (MSB) is digitalSignature.
+        let raw = key_usage.extn_value.as_bytes();
+        let bits = raw[raw.len() - 1];
+        assert!(bits & 0x80 != 0, "digitalSignature must be set: {raw:02x?}");
+        let bc = exts.iter().find(|e| e.extn_id == oid("2.5.29.19"));
+        // Leaf profile: either no BasicConstraints or CA:FALSE (empty SEQUENCE).
+        if let Some(bc) = bc {
+            assert!(
+                !bc.extn_value.as_bytes().contains(&0xFF),
+                "must not be a CA cert: {:02x?}",
+                bc.extn_value.as_bytes()
+            );
+        }
+    }
 
     #[test]
     fn generate_identity_roundtrips_to_der() {

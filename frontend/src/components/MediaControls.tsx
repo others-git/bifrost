@@ -15,7 +15,7 @@ import {
   type MediaFavorite,
 } from "../api";
 import { DisableRow } from "./PowerFlyout";
-import { useRemote, RemotePad, RemoteApps, ExpandedRemote, RemoteTextEntry } from "./BifrostRemote";
+import { useRemote, RemotePad, RemoteApps, ExpandedRemote, RemoteTextEntry, AssistantSay } from "./BifrostRemote";
 import { PowerToggle, Segmented } from "./controls";
 import { Flyout, FlyoutHeader } from "./Flyout";
 import { Select } from "./Select";
@@ -396,6 +396,7 @@ function TvAio({
           <FancyVolume device={device} onLocalPatch={onLocalPatch} />
           <RemotePad press={remote.press} />
           <RemoteTextEntry send={remote.send} />
+          <AssistantSay deviceId={device.id} />
           <ExpandedRemote remoteId={remoteId} send={remote.send} />
         </div>
       ) : (

@@ -469,7 +469,7 @@ fn content_type_for(format: &str) -> &'static str {
 /// seam — the `/speak` route calls it for a whole reply, and the streaming
 /// talk-back pipe (M24) calls it per sentence. Generous timeout: CPU-only
 /// synthesis can take a few seconds.
-async fn synthesize(
+pub(crate) async fn synthesize(
     ep: &AiEndpoint,
     text: &str,
     voice: &str,

@@ -110,8 +110,13 @@ export function RoomMediaEditor({
   async function save() {
     setSaving(true);
     try {
+      const ok = new Set(
+        devices
+          .filter((d) => d.enabled !== false && !d.shadowed_by && !d.companion_of)
+          .map((d) => d.id),
+      );
       const list = [...draft.entries()]
-        .filter(([, off]) => off !== undefined)
+        .filter(([id, off]) => off !== undefined && ok.has(id))
         .map(([id, off]) => ({ media_device_id: id, volume_offset: off as number }));
       await setRoomMediaDevices(room.id, list);
       onChanged();
@@ -120,13 +125,20 @@ export function RoomMediaEditor({
     }
   }
 
-  if (devices.length === 0) {
+  // Offer only controllable devices — enabled, not shadowed or merged. A
+  // disabled device is never a valid member; the backend save drops any stale
+  // disabled member too, so this can't strand one (control already ignores it).
+  const selectable = devices.filter(
+    (d) => d.enabled !== false && !d.shadowed_by && !d.companion_of,
+  );
+
+  if (selectable.length === 0) {
     return <span style={{ fontSize: "0.8rem", color: "var(--bf-faint)" }}>No audio devices discovered yet.</span>;
   }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
-      {devices.map((d) => {
+      {selectable.map((d) => {
         const off = draft.get(d.id);
         const isMember = off !== undefined;
         return (

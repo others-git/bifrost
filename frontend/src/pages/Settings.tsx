@@ -59,6 +59,11 @@ import {
   type DevEvent,
   type Provider,
   type ProviderType,
+  getLights,
+  getMediaDevices,
+  getPowerDevices,
+  getSensors,
+  type MediaDevice,
 } from "../api";
 import { QRCodeSVG } from "qrcode.react";
 import { useDialogs, type Dialogs, Modal } from "../components/dialogs";
@@ -103,6 +108,36 @@ export function SettingsPage({ onNavigate: _onNavigate, initialAdd, onConsumeAdd
   const { isMobile } = useViewport();
   const [providers, setProviders] = useState<Provider[]>([]);
   const [types, setTypes] = useState<ProviderType[]>([]);
+  // Per-provider inventory: a device count for every card, and the media rows
+  // device-centric providers (Smart TV) render as per-device rows.
+  const [inventory, setInventory] = useState<{
+    counts: Map<string, number>;
+    tvs: Map<string, MediaDevice[]>;
+  }>({ counts: new Map(), tvs: new Map() });
+  const loadInventory = useCallback(async () => {
+    const [lights, media, power, sensors] = await Promise.all([
+      getLights(),
+      getMediaDevices(),
+      getPowerDevices(),
+      getSensors(),
+    ]);
+    const counts = new Map<string, number>();
+    const bump = (pid: string) => counts.set(pid, (counts.get(pid) ?? 0) + 1);
+    if (lights !== "unauthorized") for (const l of lights) bump(l.provider_id);
+    const tvs = new Map<string, MediaDevice[]>();
+    for (const d of media) {
+      bump(d.provider_id);
+      const arr = tvs.get(d.provider_id) ?? [];
+      arr.push(d);
+      tvs.set(d.provider_id, arr);
+    }
+    for (const d of power) bump(d.provider_id);
+    for (const d of sensors) bump(d.provider_id);
+    setInventory({ counts, tvs });
+  }, []);
+  useEffect(() => {
+    loadInventory();
+  }, [loadInventory]);
   const [showAdd, setShowAdd] = useState(false);
   // When the user clicks "Add" on a found device, the add form opens pre-filled.
   const [prefill, setPrefill] = useState<AddPrefill | null>(null);
@@ -282,9 +317,34 @@ export function SettingsPage({ onNavigate: _onNavigate, initialAdd, onConsumeAdd
                 key={p.id}
                 provider={p}
                 types={types}
+                deviceCount={inventory.counts.get(p.id) ?? 0}
+                tvs={inventory.tvs.get(p.id) ?? []}
                 onCredentialsSaved={() => showToast("Credentials updated — reconnecting.")}
                 onRemove={() => handleRemove(p.id)}
                 onDiscover={() => handleDiscover(p.id)}
+                onPruneNow={async () => {
+                  const d = await discoverProvider(p.id, { prune: true });
+                  showToast(`Pruned ${d.pruned}, discovered ${d.discovered}.`);
+                  loadInventory();
+                }}
+                onAddFound={async (d) => {
+                  const creds = Object.fromEntries(
+                    Object.entries(d.credentials as Record<string, unknown>).map(([k, v]) => [
+                      k,
+                      String(v),
+                    ]),
+                  );
+                  const name = d.label ?? `TV (${d.host})`;
+                  const r = await addProvider(name, "smarttv", creds);
+                  if ("error" in r) {
+                    showToast(`Couldn't add ${name}: ${r.error}`);
+                    return;
+                  }
+                  await discoverProvider(r.id);
+                  await loadProviders();
+                  await loadInventory();
+                  showToast(`${name} added — pair its remote on the new card below.`);
+                }}
                 onSetPrune={async (prune) => {
                   await setProviderPrune(p.id, prune);
                   await loadProviders();
@@ -1095,21 +1155,34 @@ function PairDeviceModal({ onClose }: { onClose: () => void }) {
 function ProviderCard({
   provider,
   types,
+  deviceCount,
+  tvs,
   onCredentialsSaved,
   onRemove,
   onDiscover,
+  onPruneNow,
+  onAddFound,
   onImportGroups,
   onSetPrune,
 }: {
   provider: Provider;
   types: ProviderType[];
+  /** Devices this provider currently serves (all domains). */
+  deviceCount: number;
+  /** The provider's media rows — device-centric providers (Smart TV) render
+   * them as per-device rows carrying the remote-pairing action. */
+  tvs: MediaDevice[];
   onCredentialsSaved: () => void;
   onRemove: () => void;
   onDiscover: () => Promise<void>;
+  /** One-shot: discover with prune (remove devices no longer reported). */
+  onPruneNow: () => Promise<void>;
+  /** Add a found-nearby TV as a new provider (then pair from its new card). */
+  onAddFound: (d: DiscoveredDevice) => Promise<void>;
   onImportGroups: () => Promise<void>;
   onSetPrune: (prune: boolean) => Promise<void>;
 }) {
-  const { isMobile } = useViewport();
+  const { isCompact } = useViewport();
   const [status, setStatus] = useState<ConnectionStatus | null>(null);
   const [discovering, setDiscovering] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -1119,6 +1192,8 @@ function ProviderCard({
   const [pairCode, setPairCode] = useState("");
   const [pairBusy, setPairBusy] = useState(false);
   const [pairMsg, setPairMsg] = useState("");
+
+  const isTv = provider.provider_type === "smarttv";
 
   async function handlePairRemote() {
     setPairBusy(true);
@@ -1135,6 +1210,7 @@ function ProviderCard({
         setPairStep("idle");
         setPairCode("");
         setPairMsg("Remote paired ✓");
+        onCredentialsSaved();
       }
     } catch {
       setPairMsg("Pairing request failed.");
@@ -1149,10 +1225,31 @@ function ProviderCard({
     return () => clearInterval(id);
   }, [provider.id]);
 
+  // Found-but-unadded TVs from the network scan (the server already filters
+  // out hosts covered by configured providers) — rendered as addable rows.
+  const [foundNearby, setFoundNearby] = useState<DiscoveredDevice[]>([]);
+  const [addingHost, setAddingHost] = useState<string | null>(null);
+
   async function handleDiscover() {
     setDiscovering(true);
-    await onDiscover();
-    setDiscovering(false);
+    try {
+      await onDiscover();
+      // A TV provider's Discover also answers "what TVs are nearby?" — the
+      // question the button actually asks. New sets/dongles surface as rows.
+      if (isTv) setFoundNearby(await scanForDevices("smarttv"));
+    } finally {
+      setDiscovering(false);
+    }
+  }
+
+  async function addFound(d: DiscoveredDevice) {
+    setAddingHost(d.host);
+    try {
+      await onAddFound(d);
+      setFoundNearby((prev) => prev.filter((x) => x.host !== d.host));
+    } finally {
+      setAddingHost(null);
+    }
   }
 
   async function handleImport() {
@@ -1164,58 +1261,208 @@ function ProviderCard({
     }
   }
 
+  // Rare actions live behind one quiet menu — the routine pair (Discover/Sync)
+  // stays visible, Remove stops shouting from every card.
+  const menu = (v: string) => {
+    if (v === "edit") setEditingCreds((x) => !x);
+    else if (v === "prune-now") onPruneNow();
+    else if (v === "auto-prune") onSetPrune(!provider.prune);
+    else if (v === "remove") onRemove();
+  };
+
+  const healthy = !status || ["connected", "ok", "ready"].includes(status.state);
+
   return (
-    <div style={{ ...S.card, gap: "0.75rem" }}>
+    <div style={{ ...S.card, gap: "0.65rem" }}>
       <div
         style={{
           display: "flex",
-          flexDirection: isMobile ? "column" : "row",
-          alignItems: isMobile ? "stretch" : "center",
-          justifyContent: "space-between",
-          gap: isMobile ? "0.6rem" : "1rem",
+          alignItems: "center",
+          gap: "0.7rem",
+          flexWrap: "wrap",
         }}
       >
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontWeight: 600 }}>{provider.name}</div>
-          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.25rem" }}>
-            <span style={{ color: "var(--bf-dim)", fontSize: "0.8rem" }}>
-              {provider.type_name}
-              {provider.domain === "media" ? " · Audio" : ""}
-              {provider.domain === "integration" ? " · Integration" : ""}
+        {/* Identity block: engraved name, quiet type line. The status dot only
+            speaks (word + colour) when something needs attention. */}
+        <div style={{ minWidth: 0, flex: "1 1 180px" }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "0.5rem",
+              minWidth: 0,
+            }}
+          >
+            <span
+              style={{
+                fontWeight: 700,
+                letterSpacing: "0.05em",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {provider.name}
             </span>
-            {status && <StatusBadge state={status.state} />}
+            {healthy ? (
+              <span
+                title={status ? status.state : "checking…"}
+                style={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: "50%",
+                  background: "var(--bf-good)",
+                  boxShadow: "0 0 6px var(--bf-good)",
+                  flexShrink: 0,
+                }}
+              />
+            ) : (
+              status && <StatusBadge state={status.state} />
+            )}
+          </div>
+          <div style={{ color: "var(--bf-dim)", fontSize: "0.76rem", marginTop: 2 }}>
+            {provider.type_name}
+            {provider.domain === "media" ? " · Audio" : ""}
+            {provider.domain === "integration" ? " · Integration" : ""}
+            {deviceCount > 0 && (
+              <span style={{ color: "var(--bf-faint)" }}>
+                {" "}
+                · {deviceCount} device{deviceCount !== 1 ? "s" : ""}
+              </span>
+            )}
+            {provider.prune && (
+              <span title="Discover removes devices this provider no longer reports" style={{ color: ACCENT }}>
+                {" "}
+                · auto-prune
+              </span>
+            )}
           </div>
         </div>
-        <div style={{ display: "flex", gap: "0.5rem", flexShrink: 0, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: "0.45rem", flexShrink: 0, alignItems: "center" }}>
           <Button variant="ghost" onClick={handleDiscover} disabled={discovering}>
             {discovering ? "…" : "Discover"}
           </Button>
-          <Button variant="ghost"
+          <Button
+            variant="ghost"
             onClick={handleImport}
             disabled={importing}
             title="Sync this provider's rooms/zones into Bifrost Rooms"
           >
             {importing ? "…" : "Sync"}
           </Button>
-          {provider.provider_type === "smarttv" && (
-            <Button variant="ghost"
-              onClick={handlePairRemote}
-              disabled={pairBusy}
-              title="Pair the Android TV Remote so D-pad/nav keys work (Android/Google TV Bravias)"
-            >
-              {pairBusy ? "…" : pairStep === "code" ? "Confirm code" : "Pair remote"}
-            </Button>
-          )}
-          <Button variant="ghost"
-            onClick={() => setEditingCreds((v) => !v)}
-            title="Reconfigure this provider's IP and credentials"
-          >
-            {editingCreds ? "Close" : "Edit"}
-          </Button>
-          <Button variant="danger" onClick={onRemove}>Remove</Button>
+          <Select
+            options={[
+              { value: "edit", label: editingCreds ? "Close credentials" : "Edit credentials" },
+              { value: "prune-now", label: "Prune missing devices" },
+              {
+                value: "auto-prune",
+                label: provider.prune ? "Auto-prune on discover ✓" : "Auto-prune on discover",
+              },
+              { value: "remove", label: "Remove provider…" },
+            ]}
+            onChange={menu}
+            placeholder="⋯"
+            width={44}
+            title="More actions"
+          />
         </div>
       </div>
-      {provider.provider_type === "smarttv" && (pairStep === "code" || pairMsg) && (
+
+      {/* Device rows: a Smart TV provider IS its TV — surface it as a row with
+          the per-device actions (remote pairing lives with the device, not in
+          the header button strip). */}
+      {isTv &&
+        tvs.map((tv) => {
+          const paired = provider.remote_paired === true;
+          return (
+            <div
+              key={tv.id}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.6rem",
+                flexWrap: "wrap",
+                padding: isCompact ? "0.55rem 0.6rem" : "0.4rem 0.6rem",
+                borderRadius: 9,
+                border: "1px solid var(--bf-card-border, rgba(255,255,255,0.07))",
+                background: "rgba(0,0,0,0.22)",
+              }}
+            >
+              <Glyph name={tv.glyph ?? "tv"} size={16} />
+              <span style={{ fontWeight: 600, fontSize: "0.85rem", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {tv.name}
+              </span>
+              {tv.state.ip && (
+                <span style={{ color: "var(--bf-faint)", fontSize: "0.74rem", fontVariantNumeric: "tabular-nums" }}>
+                  {tv.state.ip}
+                </span>
+              )}
+              <span style={{ flex: 1 }} />
+              {paired ? (
+                <span
+                  title="Android TV Remote paired — keys, apps, and live state ride the native session"
+                  style={{ color: "var(--bf-good)", fontSize: "0.75rem", display: "inline-flex", alignItems: "center", gap: "0.3rem" }}
+                >
+                  <Glyph name="remote" size={13} /> remote paired
+                </span>
+              ) : (
+                <Button
+                  variant="ghost"
+                  onClick={handlePairRemote}
+                  disabled={pairBusy}
+                  title="Pair the Android TV Remote — keys, app launch, and live now-playing"
+                >
+                  {pairBusy ? "…" : pairStep === "code" ? "Confirm code" : "Pair remote"}
+                </Button>
+              )}
+              {paired && pairStep === "idle" && (
+                <Button variant="ghost" onClick={handlePairRemote} disabled={pairBusy} title="Re-pair (e.g. after a TV reset)">
+                  {pairBusy ? "…" : "Re-pair"}
+                </Button>
+              )}
+            </div>
+          );
+        })}
+      {isTv && tvs.length === 0 && (
+        <div style={{ color: "var(--bf-faint)", fontSize: "0.78rem" }}>
+          No TV imported yet — run Discover.
+        </div>
+      )}
+      {isTv &&
+        foundNearby.map((d) => (
+          <div
+            key={d.host}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "0.6rem",
+              flexWrap: "wrap",
+              padding: isCompact ? "0.55rem 0.6rem" : "0.4rem 0.6rem",
+              borderRadius: 9,
+              border: "1px dashed var(--bf-card-border, rgba(255,255,255,0.14))",
+              color: "var(--bf-dim)",
+            }}
+          >
+            <Glyph name="tv" size={16} />
+            <span style={{ fontWeight: 600, fontSize: "0.85rem" }}>
+              {d.label ?? "TV"}
+            </span>
+            <span style={{ color: "var(--bf-faint)", fontSize: "0.74rem", fontVariantNumeric: "tabular-nums" }}>
+              {d.host}
+            </span>
+            <span style={{ fontSize: "0.72rem", color: "var(--bf-faint)" }}>found nearby</span>
+            <span style={{ flex: 1 }} />
+            <Button
+              variant="ghost"
+              onClick={() => addFound(d)}
+              disabled={addingHost === d.host}
+              title="Add this TV as its own provider — then pair its remote from the new card"
+            >
+              {addingHost === d.host ? "Adding…" : "Add TV"}
+            </Button>
+          </div>
+        ))}
+      {isTv && (pairStep === "code" || pairMsg) && (
         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
           {pairStep === "code" && (
             <input
@@ -1227,28 +1474,16 @@ function ProviderCard({
               style={{ ...S.input, maxWidth: 200, fontFamily: "monospace", letterSpacing: "0.1em" }}
             />
           )}
+          {pairStep === "code" && (
+            <Button variant="primary" onClick={handlePairRemote} disabled={pairBusy || !pairCode.trim()}>
+              {pairBusy ? "…" : "Confirm code"}
+            </Button>
+          )}
           {pairMsg && (
             <span style={{ fontSize: "0.78rem", color: "var(--bf-dim)" }}>{pairMsg}</span>
           )}
         </div>
       )}
-      <label
-        style={{ display: "flex", alignItems: "flex-start", gap: "0.55rem", cursor: "pointer", color: "#9a9488", fontSize: "0.78rem" }}
-      >
-        <input
-          type="checkbox"
-          checked={provider.prune}
-          onChange={(e) => onSetPrune(e.target.checked)}
-          style={{ width: 16, height: 16, marginTop: 1, accentColor: ACCENT, flexShrink: 0, cursor: "pointer" }}
-        />
-        <span>
-          <strong style={{ color: provider.prune ? ACCENT : "var(--bf-dim)", fontWeight: 600 }}>Prune on discover</strong>
-          {" — "}
-          {provider.prune
-            ? "the next discover removes devices this provider no longer reports (and drops them from rooms)."
-            : "devices stay even if the provider stops reporting them. Enable to auto-remove them."}
-        </span>
-      </label>
 
       {editingCreds && (
         <EditCredentialsForm

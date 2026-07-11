@@ -424,30 +424,14 @@ impl SmartTvVendor for BraviaVendor {
         let Some(identity) = &self.atv else {
             anyhow::bail!("bravia: remote not paired (no ATV identity) — no push channel");
         };
-        let mut rx = super::atv::client::subscribe(&self.ip, identity);
-        let (tx, out) = tokio::sync::mpsc::channel(64);
-        tokio::spawn(async move {
-            loop {
-                use super::atv::client::AtvEvent;
-                use tokio::sync::broadcast::error::RecvError;
-                let ev = match rx.recv().await {
-                    Ok(e) => e,
-                    Err(RecvError::Lagged(_)) => continue,
-                    Err(RecvError::Closed) => return,
-                };
-                let push = match ev {
-                    AtvEvent::CurrentApp(p) => super::TvPush::CurrentApp(p),
-                    AtvEvent::Volume { level, max, muted } => {
-                        super::TvPush::Volume { level, max, muted }
-                    }
-                    AtvEvent::Started(on) => super::TvPush::Screen(on),
-                };
-                if tx.send(push).await.is_err() {
-                    return;
-                }
-            }
-        });
-        Ok(out)
+        Ok(super::atv_push_stream(&self.ip, identity))
+    }
+
+    async fn send_voice(&self, pcm_8k: &[u8]) -> Result<()> {
+        let Some(identity) = &self.atv else {
+            anyhow::bail!("bravia: remote not paired — pair it to use the TV assistant");
+        };
+        super::atv::client::send_voice(&self.ip, identity, pcm_8k).await
     }
 
     async fn apps(&self) -> Result<Vec<crate::models::remote::InstalledApp>> {

@@ -67,7 +67,16 @@ async fn scan_network(
     };
 
     match discoverer.scan(&opts).await {
-        Ok(devices) => Json(devices).into_response(),
+        Ok(devices) => {
+            // Only offer devices NOT already behind a configured provider —
+            // same rule as the all-types scan (`discover_all`).
+            let known = known_provider_hosts(&state).await;
+            let fresh: Vec<_> = devices
+                .into_iter()
+                .filter(|d| !known.contains(&d.host))
+                .collect();
+            Json(fresh).into_response()
+        }
         Err(e) => {
             tracing::warn!("network scan for '{provider_type}' could not probe: {e:#}");
             Json(Vec::<crate::providers::discovery::DiscoveredDevice>::new()).into_response()
@@ -107,16 +116,11 @@ fn hosts_from_credentials(json: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Scan **every** discoverable provider type at once and return the devices that
-/// aren't already configured — the one-button "find what's on my network" flow.
-/// Credential-free LAN discovery only (SSDP/eISCP/Govee-LAN), so it surfaces
-/// gear like Sonos and Onkyo without the user picking a type first. Like
-/// [`scan_network`], a probe that can't reach the network degrades to "found
-/// nothing" rather than erroring.
-async fn discover_all(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
-    // Addresses already behind a configured provider — so we only surface *new*
-    // devices. Decrypt each provider's creds and collect its host fields.
-    let mut known_hosts = std::collections::HashSet::new();
+/// Addresses already behind a configured provider — scans filter these out so
+/// only genuinely NEW devices are offered (an already-added TV answering the
+/// Android-TV probes must not show up as addable next to itself).
+async fn known_provider_hosts(state: &AppState) -> std::collections::HashSet<String> {
+    let mut known = std::collections::HashSet::new();
     if let Ok(rows) = sqlx::query("SELECT credentials FROM providers")
         .fetch_all(&state.db)
         .await
@@ -124,10 +128,21 @@ async fn discover_all(State(state): State<Arc<AppState>>, _: Session) -> impl In
         for row in &rows {
             let enc: String = row.get("credentials");
             if let Ok(json) = state.decrypt_credentials(&enc) {
-                known_hosts.extend(hosts_from_credentials(&json));
+                known.extend(hosts_from_credentials(&json));
             }
         }
     }
+    known
+}
+
+/// Scan **every** discoverable provider type at once and return the devices that
+/// aren't already configured — the one-button "find what's on my network" flow.
+/// Credential-free LAN discovery only (SSDP/eISCP/Govee-LAN), so it surfaces
+/// gear like Sonos and Onkyo without the user picking a type first. Like
+/// [`scan_network`], a probe that can't reach the network degrades to "found
+/// nothing" rather than erroring.
+async fn discover_all(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
+    let known_hosts = known_provider_hosts(&state).await;
 
     let extra_subnets = crate::api::settings::expanded_subnets(&state).await;
     let budget = if extra_subnets.is_empty() {
@@ -217,11 +232,15 @@ struct ProviderRow {
     /// User-controlled sort position on the Devices page (ascending).
     display_order: i64,
     created_at: String,
+    /// Smart-TV providers only: whether the Android TV Remote is paired
+    /// (`atv_cert` present in credentials) — drives the per-TV pairing chip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_paired: Option<bool>,
 }
 
 async fn list_providers(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
     match sqlx::query(
-        "SELECT id, provider_type, name, enabled, prune, display_order, created_at \
+        "SELECT id, provider_type, name, enabled, prune, display_order, created_at, credentials \
          FROM providers ORDER BY display_order, created_at",
     )
     .fetch_all(&state.db)
@@ -242,6 +261,14 @@ async fn list_providers(State(state): State<Arc<AppState>>, _: Session) -> impl 
                         _ => "light",
                     }
                     .to_string();
+                    // Pairing state for the per-TV row chip (smart-TV only).
+                    let remote_paired = (provider_type == "smarttv").then(|| {
+                        state
+                            .decrypt_credentials(&r.get::<String, _>("credentials"))
+                            .ok()
+                            .and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok())
+                            .is_some_and(|c| c.get("atv_cert").is_some_and(|v| v.is_string()))
+                    });
                     ProviderRow {
                         type_name,
                         domain,
@@ -252,6 +279,7 @@ async fn list_providers(State(state): State<Arc<AppState>>, _: Session) -> impl 
                         prune: r.get::<i64, _>("prune") != 0,
                         display_order: r.get("display_order"),
                         created_at: r.get("created_at"),
+                        remote_paired,
                     }
                 })
                 .collect::<Vec<_>>(),
@@ -1120,6 +1148,20 @@ async fn smarttv_pair_remote(
                     return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                 }
                 tracing::info!(target: "bifrost::smarttv", provider = %id, host = %host, "ATV remote paired");
+                // Restart the manager so the fresh pairing takes effect NOW —
+                // the ATV push channel (now-playing/volume/power) only attaches
+                // when the provider starts with a paired identity.
+                {
+                    let mut connections = state.connections.lock().await;
+                    connections.stop(&id);
+                    crate::start_manager_for(
+                        &mut connections,
+                        &state,
+                        &id,
+                        &provider_type,
+                        &creds_json,
+                    );
+                }
                 Json(serde_json::json!({ "status": "paired" })).into_response()
             }
             Err(e) => {

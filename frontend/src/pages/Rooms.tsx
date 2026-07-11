@@ -412,7 +412,14 @@ function RoomEditForm({
 
       <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
         <span style={{ fontSize: "0.875rem", color: "var(--bf-dim)" }}>Direct lights</span>
-        {lights.map((l) => {
+        {lights
+          .filter(
+            (l) =>
+              // Offer enabled lights; keep a light already in the room (direct
+              // or via a synced link) visible so it can still be removed.
+              l.enabled !== false || direct.has(l.id) || linkedLightIds.has(l.id),
+          )
+          .map((l) => {
           const viaLink = linkedLightIds.has(l.id);
           return (
             <SelectRow

@@ -410,6 +410,253 @@ impl DeviceDiscovery for HttpSweepDiscovery {
     }
 }
 
+// ── mDNS (one-shot) discovery ─────────────────────────────────────────────────
+
+const MDNS_TARGET: &str = "224.0.0.251:5353";
+
+/// One-shot mDNS service discovery: query a `_service._tcp.local` PTR with the
+/// QU (unicast-response) bit set, so answers come straight back to our probe
+/// socket — the same probe-and-listen pattern as SSDP, no group membership.
+/// Android/Google TVs (dongles included) advertise `_androidtvremote2._tcp`
+/// with the device's friendly name as the instance and its Bluetooth MAC in
+/// TXT `bt=` — a hardware id, which makes de-dup against an HA copy exact.
+pub struct MdnsDiscovery {
+    /// e.g. `"_androidtvremote2._tcp.local"`.
+    service: &'static str,
+    /// `brand` stamped into the credentials (routes `build_vendor`).
+    brand: &'static str,
+}
+
+impl MdnsDiscovery {
+    pub fn new(service: &'static str, brand: &'static str) -> Self {
+        Self { service, brand }
+    }
+}
+
+/// Encode a DNS name as length-prefixed labels.
+fn dns_name(name: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    for label in name.split('.').filter(|l| !l.is_empty()) {
+        out.push(label.len() as u8);
+        out.extend_from_slice(label.as_bytes());
+    }
+    out.push(0);
+    out
+}
+
+/// Read a (possibly compressed) DNS name at `pos`; returns the name and the
+/// position just after it in the *uncompressed* stream.
+fn read_dns_name(pkt: &[u8], mut pos: usize) -> Option<(String, usize)> {
+    let mut labels = Vec::new();
+    let mut jumped_end = None;
+    let mut hops = 0;
+    loop {
+        let len = *pkt.get(pos)? as usize;
+        if len == 0 {
+            pos += 1;
+            break;
+        }
+        if len & 0xC0 == 0xC0 {
+            // Compression pointer (2 bytes). Only the first jump sets the end.
+            let ptr = ((len & 0x3F) << 8) | *pkt.get(pos + 1)? as usize;
+            if jumped_end.is_none() {
+                jumped_end = Some(pos + 2);
+            }
+            pos = ptr;
+            hops += 1;
+            if hops > 16 {
+                return None; // pointer loop
+            }
+            continue;
+        }
+        labels.push(String::from_utf8_lossy(pkt.get(pos + 1..pos + 1 + len)?).into_owned());
+        pos += 1 + len;
+    }
+    Some((labels.join("."), jumped_end.unwrap_or(pos)))
+}
+
+/// Pull the instance label and the TXT `bt=` MAC (if any) out of one mDNS
+/// response to our service query. The responder's source IP is the host.
+fn parse_mdns_response(pkt: &[u8], service: &str) -> Option<(Option<String>, Option<String>)> {
+    if pkt.len() < 12 || pkt[2] & 0x80 == 0 {
+        return None; // not a DNS response
+    }
+    let counts: Vec<u16> = (0..4)
+        .map(|i| u16::from_be_bytes([pkt[4 + i * 2], pkt[5 + i * 2]]))
+        .collect();
+    let mut pos = 12;
+    // Skip questions.
+    for _ in 0..counts[0] {
+        let (_, next) = read_dns_name(pkt, pos)?;
+        pos = next + 4;
+    }
+    let mut instance: Option<String> = None;
+    let mut bt: Option<String> = None;
+    let service_l = service.to_ascii_lowercase();
+    for _ in 0..(counts[1] + counts[2] + counts[3]) {
+        let (name, next) = read_dns_name(pkt, pos)?;
+        let rtype = u16::from_be_bytes([*pkt.get(next)?, *pkt.get(next + 1)?]);
+        let rdlen = u16::from_be_bytes([*pkt.get(next + 8)?, *pkt.get(next + 9)?]) as usize;
+        let rdata_at = next + 10;
+        let rdata = pkt.get(rdata_at..rdata_at + rdlen)?;
+        match rtype {
+            12 if name.to_ascii_lowercase() == service_l => {
+                // PTR → "<Instance>.<service>": the first label is the name.
+                if let Some((target, _)) = read_dns_name(pkt, rdata_at) {
+                    instance = target.split('.').next().map(str::to_string);
+                }
+            }
+            16 => {
+                // TXT: length-prefixed strings; find bt=<mac>.
+                let mut t = 0;
+                while t < rdata.len() {
+                    let l = rdata[t] as usize;
+                    let kv = rdata.get(t + 1..t + 1 + l)?;
+                    if let Some(mac) = std::str::from_utf8(kv)
+                        .ok()
+                        .and_then(|s| s.strip_prefix("bt="))
+                    {
+                        bt = Some(mac.to_string());
+                    }
+                    t += 1 + l;
+                }
+            }
+            _ => {}
+        }
+        pos = rdata_at + rdlen;
+    }
+    Some((instance, bt))
+}
+
+#[async_trait]
+impl DeviceDiscovery for MdnsDiscovery {
+    async fn scan(&self, opts: &ScanOptions) -> Result<Vec<DiscoveredDevice>> {
+        // DNS query: id 0, no flags, one question: PTR IN + QU bit.
+        let mut q = vec![0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+        q.extend(dns_name(self.service));
+        q.extend_from_slice(&12u16.to_be_bytes()); // PTR
+        q.extend_from_slice(&0x8001u16.to_be_bytes()); // IN | QU (unicast reply)
+        let replies = udp_probe(MDNS_TARGET.parse()?, &q, opts.timeout).await?;
+        let mut out = Vec::new();
+        for (from, pkt) in &replies {
+            let Some((instance, bt)) = parse_mdns_response(pkt, self.service) else {
+                continue;
+            };
+            let host = from.ip().to_string();
+            let mut creds = serde_json::Map::new();
+            creds.insert("host".into(), host.clone().into());
+            creds.insert("brand".into(), self.brand.into());
+            if let Some(n) = &instance {
+                creds.insert("name".into(), n.clone().into());
+            }
+            if let Some(mac) = bt.as_deref().and_then(crate::providers::mac_hw_id) {
+                creds.insert("hw_id".into(), mac.into());
+            }
+            out.push(DiscoveredDevice {
+                host,
+                label: instance,
+                credentials: serde_json::Value::Object(creds),
+            });
+        }
+        tracing::debug!(
+            target: "bifrost::discover",
+            service = self.service,
+            replies = replies.len(),
+            matched = out.len(),
+            "mDNS scan",
+        );
+        Ok(out)
+    }
+}
+
+// ── TCP port sweep ────────────────────────────────────────────────────────────
+
+/// Find devices by an open TCP port — the multicast-proof fallback (WSL2,
+/// container bridges, mcast-dropping APs). An Android/Google TV is the only
+/// thing that listens on 6466, so a successful connect IS the signature.
+pub struct TcpPortSweepDiscovery {
+    port: u16,
+    label: &'static str,
+    brand: &'static str,
+    /// Injected in tests; `None` = derive the local /24 at runtime.
+    hosts: Option<Vec<String>>,
+}
+
+impl TcpPortSweepDiscovery {
+    pub fn new(port: u16, label: &'static str, brand: &'static str) -> Self {
+        Self {
+            port,
+            label,
+            brand,
+            hosts: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_hosts(mut self, hosts: Vec<String>) -> Self {
+        self.hosts = Some(hosts);
+        self
+    }
+}
+
+#[async_trait]
+impl DeviceDiscovery for TcpPortSweepDiscovery {
+    async fn scan(&self, opts: &ScanOptions) -> Result<Vec<DiscoveredDevice>> {
+        let mut hosts: Vec<String> = match &self.hosts {
+            Some(h) => h.clone(),
+            None => local_ipv4()
+                .map(subnet_bases)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|b| b.trim_start_matches("http://").to_string())
+                .collect(),
+        };
+        for subnet in &opts.extra_subnets {
+            for base in extra_subnet_bases(*subnet) {
+                let h = base.trim_start_matches("http://").to_string();
+                if !hosts.contains(&h) {
+                    hosts.push(h);
+                }
+            }
+        }
+        let per_host = opts.timeout.min(Duration::from_millis(500));
+        let port = self.port;
+        let probed = hosts.len();
+        let results = futures_util::stream::iter(hosts.into_iter().map(|h| async move {
+            let ok =
+                tokio::time::timeout(per_host, tokio::net::TcpStream::connect((h.as_str(), port)))
+                    .await
+                    .map(|r| r.is_ok())
+                    .unwrap_or(false);
+            ok.then_some(h)
+        }))
+        .buffer_unordered(64)
+        .filter_map(|h| async move { h })
+        .collect::<Vec<_>>()
+        .await;
+        tracing::debug!(
+            target: "bifrost::discover",
+            port,
+            probed,
+            matched = results.len(),
+            "tcp port sweep",
+        );
+        Ok(results
+            .into_iter()
+            .map(|host| {
+                let mut creds = serde_json::Map::new();
+                creds.insert("host".into(), host.clone().into());
+                creds.insert("brand".into(), self.brand.into());
+                DiscoveredDevice {
+                    label: Some(self.label.to_string()),
+                    credentials: serde_json::Value::Object(creds),
+                    host,
+                }
+            })
+            .collect())
+    }
+}
+
 // ── Union of discoverers ──────────────────────────────────────────────────────
 
 /// Run several discoverers concurrently and merge their results, deduped by
@@ -452,6 +699,80 @@ impl DeviceDiscovery for UnionDiscovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a plausible mDNS response for `_androidtvremote2._tcp.local`:
+    /// PTR (with a compression pointer back to the service name) + TXT bt=…
+    fn mdns_response() -> Vec<u8> {
+        let mut p = vec![0, 0, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 1];
+        let service_at = p.len() as u16; // name offset for compression
+        p.extend(dns_name("_androidtvremote2._tcp.local"));
+        p.extend_from_slice(&12u16.to_be_bytes()); // PTR
+        p.extend_from_slice(&1u16.to_be_bytes()); // IN
+        p.extend_from_slice(&120u32.to_be_bytes());
+        // rdata: "Bedroom dongle" + pointer to the service name.
+        let mut rdata = Vec::new();
+        rdata.push(14);
+        rdata.extend_from_slice(b"Bedroom dongle");
+        rdata.extend_from_slice(&(0xC000u16 | service_at).to_be_bytes());
+        p.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        let instance_at = p.len() as u16; // instance name lives inside rdata
+        p.extend(rdata);
+        // TXT for the instance (compressed name), bt=<mac>.
+        p.extend_from_slice(&(0xC000u16 | instance_at).to_be_bytes());
+        p.extend_from_slice(&16u16.to_be_bytes()); // TXT
+        p.extend_from_slice(&1u16.to_be_bytes());
+        p.extend_from_slice(&120u32.to_be_bytes());
+        let txt = b"bt=BC:DF:58:61:07:A7";
+        p.extend_from_slice(&((txt.len() + 1) as u16).to_be_bytes());
+        p.push(txt.len() as u8);
+        p.extend_from_slice(txt);
+        p
+    }
+
+    #[test]
+    fn mdns_response_parses_instance_and_bt_mac() {
+        let pkt = mdns_response();
+        let (instance, bt) =
+            parse_mdns_response(&pkt, "_androidtvremote2._tcp.local").expect("parses");
+        assert_eq!(instance.as_deref(), Some("Bedroom dongle"));
+        assert_eq!(bt.as_deref(), Some("BC:DF:58:61:07:A7"));
+        // Not-a-response (QR bit clear) is rejected.
+        let mut query = pkt.clone();
+        query[2] = 0;
+        assert!(parse_mdns_response(&query, "_androidtvremote2._tcp.local").is_none());
+    }
+
+    #[test]
+    fn dns_name_roundtrips_through_the_reader() {
+        let enc = dns_name("_androidtvremote2._tcp.local");
+        let (name, next) = read_dns_name(&enc, 0).unwrap();
+        assert_eq!(name, "_androidtvremote2._tcp.local");
+        assert_eq!(next, enc.len());
+        // A pointer loop is rejected rather than spinning.
+        let looped = vec![0xC0, 0x00];
+        assert!(read_dns_name(&looped, 0).is_none());
+    }
+
+    #[tokio::test]
+    async fn tcp_port_sweep_finds_an_open_port_and_skips_closed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let _ = listener.accept().await;
+            }
+        });
+        let sweep = TcpPortSweepDiscovery::new(port, "Android TV", "androidtv")
+            .with_hosts(vec!["127.0.0.1".into(), "127.6.6.6".into()]);
+        let found = sweep
+            .scan(&ScanOptions::new(Duration::from_millis(600)))
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].host, "127.0.0.1");
+        assert_eq!(found[0].credentials["brand"], "androidtv");
+    }
+
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 

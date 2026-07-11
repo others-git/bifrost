@@ -65,6 +65,48 @@ pub fn pairing_secret(secret: &[u8]) -> Vec<u8> {
     pairing_envelope(40, &body)
 }
 
+/// `RemoteVoiceBegin{session_id}` (field 30) — open a voice session; the TV
+/// pops its Assistant overlay and starts listening. `package_name` is only for
+/// the reverse direction (TV→device on KEYCODE_SEARCH), omitted when we send.
+pub fn remote_voice_begin(session_id: i32) -> Vec<u8> {
+    let mut inner = Vec::new();
+    wire::put_varint_field(&mut inner, 1, session_id as u64);
+    let mut m = Vec::new();
+    wire::put_bytes_field(&mut m, 30, &inner);
+    m
+}
+
+/// `RemoteVoicePayload{session_id, samples}` (field 31) — one chunk of audio
+/// (16-bit PCM, 8 kHz mono per the proto), ≤20 KB per message.
+pub fn remote_voice_payload(session_id: i32, samples: &[u8]) -> Vec<u8> {
+    let mut inner = Vec::new();
+    wire::put_varint_field(&mut inner, 1, session_id as u64);
+    wire::put_bytes_field(&mut inner, 2, samples);
+    let mut m = Vec::new();
+    wire::put_bytes_field(&mut m, 31, &inner);
+    m
+}
+
+/// `RemoteVoiceEnd{session_id}` (field 32) — close the voice session; the TV
+/// runs the utterance through its Assistant.
+pub fn remote_voice_end(session_id: i32) -> Vec<u8> {
+    let mut inner = Vec::new();
+    wire::put_varint_field(&mut inner, 1, session_id as u64);
+    let mut m = Vec::new();
+    wire::put_bytes_field(&mut m, 32, &inner);
+    m
+}
+
+/// A `RemoteAppLinkLaunchRequest{app_link}` (field 90) — opens an app by
+/// Play Store package id or deep link, the ATV-native launch path.
+pub fn remote_app_link_launch(app_link: &str) -> Vec<u8> {
+    let mut inner = Vec::new();
+    wire::put_bytes_field(&mut inner, 1, app_link.as_bytes());
+    let mut m = Vec::new();
+    wire::put_bytes_field(&mut m, 90, &inner);
+    m
+}
+
 /// The kind of pairing message the TV sent back, with its status code.
 #[derive(Debug, PartialEq)]
 pub enum PairingIn {
@@ -221,6 +263,25 @@ mod tests {
         let mut m = Vec::new();
         wire::put_bytes_field(&mut m, field, inner);
         m
+    }
+
+    #[test]
+    fn voice_messages_carry_session_and_samples() {
+        // begin: field 30 { session_id=1 }
+        let f = wire::parse_fields(&remote_voice_begin(7));
+        let begin = wire::field_bytes(&f, 30).expect("voice_begin");
+        assert_eq!(wire::field_varint(&wire::parse_fields(begin), 1), Some(7));
+
+        // payload: field 31 { session_id, samples }
+        let f = wire::parse_fields(&remote_voice_payload(7, &[1, 2, 3, 4]));
+        let pay = wire::parse_fields(wire::field_bytes(&f, 31).expect("voice_payload"));
+        assert_eq!(wire::field_varint(&pay, 1), Some(7));
+        assert_eq!(wire::field_bytes(&pay, 2), Some(&[1u8, 2, 3, 4][..]));
+
+        // end: field 32 { session_id }
+        let f = wire::parse_fields(&remote_voice_end(7));
+        let end = wire::field_bytes(&f, 32).expect("voice_end");
+        assert_eq!(wire::field_varint(&wire::parse_fields(end), 1), Some(7));
     }
 
     #[test]

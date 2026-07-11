@@ -646,13 +646,17 @@ async fn set_room_media_devices(
         .execute(&state.db)
         .await;
     for d in &req.devices {
+        // Guard: a disabled or shadowed device is not a valid room member —
+        // skip it, so any room save also cleans out stale members (e.g. an HA
+        // duplicate that was later disabled). Control already ignores them.
         let _ = sqlx::query(
             "INSERT OR REPLACE INTO room_media_devices (room_id, media_device_id, volume_offset)
-             VALUES (?, ?, ?)",
+             SELECT ?, id, ? FROM media_devices
+              WHERE id = ? AND enabled = 1 AND shadowed_by IS NULL",
         )
         .bind(&id)
-        .bind(&d.media_device_id)
         .bind(d.volume_offset)
+        .bind(&d.media_device_id)
         .execute(&state.db)
         .await;
     }

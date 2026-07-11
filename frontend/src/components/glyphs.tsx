@@ -206,6 +206,14 @@ const BODIES: Record<string, JSX.Element> = {
       <path d="M15.8 15.8 21 21" />
     </>
   ),
+  mic: (
+    // Microphone — capsule + stand.
+    <>
+      <rect x="9" y="3" width="6" height="11" rx="3" />
+      <path d="M5 11a7 7 0 0 0 14 0" />
+      <path d="M12 18v3" />
+    </>
+  ),
   gear: (
     // A cog — configure / settings.
     <>
@@ -519,6 +527,7 @@ export const ALL_GLYPH_OPTIONS: { name: string; label: string }[] = [
   { name: "restore", label: "Restore" },
   { name: "copy", label: "Copy" },
   { name: "search", label: "Search" },
+  { name: "mic", label: "Microphone" },
   { name: "play", label: "Play" },
   { name: "pause", label: "Pause" },
   { name: "play_pause", label: "Play / pause" },

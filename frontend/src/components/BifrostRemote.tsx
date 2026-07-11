@@ -17,6 +17,7 @@ import {
   type RemoteCommand,
   type RemoteCommandInfo,
   type RemoteKey,
+  assistantSay,
 } from "../api";
 import { T, ACCENT, alpha } from "../theme";
 import { Glyph } from "./glyphs";
@@ -174,6 +175,78 @@ export function RemoteTextEntry({ send }: { send: (cmd: RemoteCommand) => void }
       >
         <Glyph name="send" size={18} />
       </button>
+    </div>
+  );
+}
+
+/** Speak a phrase into the TV's own voice assistant — Bifrost synthesizes it
+ * and streams it to the TV, which hears and acts on it ("play Bob's Burgers",
+ * "what's the weather"). The whole Assistant, driven by text. */
+export function AssistantSay({ deviceId }: { deviceId: string }) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const submit = async () => {
+    const t = text.trim();
+    if (!t || busy) return;
+    setBusy(true);
+    setMsg("");
+    const err = await assistantSay(deviceId, t);
+    setBusy(false);
+    if (err) {
+      setMsg(err);
+    } else {
+      setMsg("Sent to the TV's assistant.");
+      setText("");
+    }
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
+      <span style={{ fontSize: "0.7rem", letterSpacing: "0.06em", textTransform: "uppercase", color: T.dim }}>
+        Ask the TV's assistant
+      </span>
+      <div style={{ display: "flex", gap: "0.5rem" }}>
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") submit();
+          }}
+          placeholder="e.g. play Bob's Burgers"
+          aria-label="Ask the TV's assistant"
+          style={{
+            flex: 1,
+            minHeight: 44,
+            padding: "0 0.8rem",
+            borderRadius: 11,
+            border: `1px solid ${T.border}`,
+            background: T.surface,
+            color: T.text,
+            fontSize: "0.85rem",
+            outline: "none",
+          }}
+        />
+        <button
+          onClick={submit}
+          disabled={!text.trim() || busy}
+          title="Speak to the TV's assistant"
+          aria-label="Speak to the TV's assistant"
+          style={{
+            width: 44,
+            minHeight: 44,
+            borderRadius: 11,
+            border: `1px solid ${alpha(ACCENT, 0.4)}`,
+            background: text.trim() && !busy ? alpha(ACCENT, 0.12) : T.surface,
+            color: text.trim() && !busy ? ACCENT : T.faint,
+            cursor: text.trim() && !busy ? "pointer" : "default",
+            display: "grid",
+            placeItems: "center",
+          }}
+        >
+          <Glyph name="mic" size={18} />
+        </button>
+      </div>
+      {msg && <span style={{ fontSize: "0.74rem", color: T.faint }}>{msg}</span>}
     </div>
   );
 }
