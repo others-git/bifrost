@@ -596,7 +596,9 @@ async fn conditions_hold(state: &AppState, rule: &Automation) -> bool {
             RuleCondition::SensorAbove { sensor_id, .. }
             | RuleCondition::SensorBelow { sensor_id, .. }
             | RuleCondition::SensorIs { sensor_id, .. } => cached_reading(state, sensor_id).await,
-            RuleCondition::TimeWindow { .. } | RuleCondition::RoomIs { .. } => None,
+            RuleCondition::TimeWindow { .. }
+            | RuleCondition::RoomIs { .. }
+            | RuleCondition::DeviceIs { .. } => None,
         };
         let occupancy = match cond {
             RuleCondition::RoomIs { room_id, .. } => {
@@ -604,7 +606,21 @@ async fn conditions_hold(state: &AppState, rule: &Automation) -> bool {
             }
             _ => None,
         };
-        if !cond.holds(now_min, now_day, |_| reading, |_| occupancy) {
+        // A device gate ("…unless the TV is on") reads the same cached power
+        // boolean the device triggers watch — fail closed on an unknown device.
+        let device_on = match cond {
+            RuleCondition::DeviceIs {
+                domain, device_id, ..
+            } => cached_device_on(state, *domain, device_id).await,
+            _ => None,
+        };
+        if !cond.holds(
+            now_min,
+            now_day,
+            |_| reading,
+            |_| occupancy,
+            |_, _| device_on,
+        ) {
             tracing::debug!(target: "bifrost::automation", rule = %rule.id, ?cond, "rule skipped: condition not met");
             return false;
         }
@@ -1715,6 +1731,64 @@ mod tests {
             .await
             .unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn unless_device_gate_blocks_while_the_device_is_on() {
+        // "if motion detected … unless the TV is on": a device_is{on:false}
+        // condition holds only while the TV is off — the "unless" clause.
+        let state = test_state().await;
+        seed_sensor(
+            &state,
+            "s1",
+            "motion",
+            r#"{"reading":{"bool":false},"reachable":true}"#,
+        )
+        .await;
+        sqlx::query(
+            r#"INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state)
+               VALUES ('tv1', 'p', 'tv-1', 'TV', 'tv', '{}', '{"power":true,"volume":0,"mute":false}')"#,
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        seed_rule(
+            &state,
+            "r1",
+            "s1",
+            r#"{"kind":"became_true"}"#,
+            r#"[{"kind":"device_is","domain":"media","device_id":"tv1","on":false}]"#,
+        )
+        .await;
+        let mut engine = EngineState::default();
+        seed_engine(&state, &mut engine).await;
+
+        // Motion while the TV is ON → the unless clause blocks the fire.
+        let ev = |b: bool| SensorEvent {
+            device_id: "s1".into(),
+            state: crate::models::sensor::SensorState {
+                reading: Some(crate::models::sensor::SensorReading::Bool(b)),
+                reachable: Some(true),
+                changed_at: None,
+            },
+        };
+        process_sensor_event(&state, &mut engine, "p", &ev(true)).await;
+        assert!(
+            !fired(&state, "r1").await,
+            "TV on — the unless clause must block"
+        );
+
+        // TV goes off; the next motion edge fires.
+        sqlx::query(r#"UPDATE media_devices SET last_state = '{"power":false,"volume":0,"mute":false}' WHERE id = 'tv1'"#)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        process_sensor_event(&state, &mut engine, "p", &ev(false)).await;
+        process_sensor_event(&state, &mut engine, "p", &ev(true)).await;
+        assert!(
+            fired(&state, "r1").await,
+            "TV off — the rule fires normally"
+        );
     }
 
     async fn fired(state: &AppState, rule: &str) -> bool {

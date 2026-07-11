@@ -986,7 +986,9 @@ export type RuleCondition =
   | { kind: "sensor_above"; sensor_id: string; value: number }
   | { kind: "sensor_below"; sensor_id: string; value: number }
   | { kind: "sensor_is"; sensor_id: string; on: boolean }
-  | { kind: "room_is"; room_id: string; occupied: boolean };
+  | { kind: "room_is"; room_id: string; occupied: boolean }
+  /** A device's power boolean — `on: false` is the "unless it's on" clause. */
+  | { kind: "device_is"; domain: TriggerDeviceDomain; device_id: string; on: boolean };
 
 /** One thing the rule does — each maps to a shared service-layer call. */
 export type RuleAction =

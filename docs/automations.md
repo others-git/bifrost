@@ -69,6 +69,11 @@ Conditions are checked at the moment the trigger fires; all must hold.
   "only while the door sensor is closed". An unknown reading never satisfies
   a condition: a rule would rather skip than fire blind.
 - **Another room's occupancy** — "only while the living room is empty".
+- **A device's power** — gate on a light, speaker/TV, or switch being on or
+  off. The off-polarity is the natural **"unless"** clause: *"between 20:00
+  and 07:00, if motion detected, set brightness to 45% — **unless the TV is
+  on**"* is a time window + a motion trigger + a device gate reading "unless
+  it's on". Like every gate, an unknown device fails closed.
 
 ---
 

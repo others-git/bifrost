@@ -181,6 +181,11 @@ function conditionText(
       return `${sensorName(c.sensor_id)} is ${c.on ? "on" : "off"}`;
     case "room_is":
       return `${names.room.get(c.room_id) ?? "room"} is ${c.occupied ? "occupied" : "empty"}`;
+    case "device_is": {
+      const name = names[c.domain].get(c.device_id) ?? "device";
+      // on:false gates on the device being off — the "unless" reading.
+      return c.on ? `only while ${name} is on` : `unless ${name} is on`;
+    }
   }
 }
 
@@ -698,6 +703,9 @@ function AutomationEditor({
         gateSensors={gateSensors}
         gateRooms={gateRooms}
         allRooms={rooms}
+        lights={lights}
+        media={media}
+        power={power}
         onChange={setConditions}
       />
 
@@ -778,6 +786,9 @@ function ConditionList({
   gateSensors,
   gateRooms,
   allRooms,
+  lights,
+  media,
+  power,
   onChange,
 }: {
   conditions: RuleCondition[];
@@ -786,6 +797,10 @@ function ConditionList({
   gateRooms: Room[];
   /** Every room — for grouping sensors under their room header. */
   allRooms: Room[];
+  /** Devices offered as power gates ("…unless the TV is on"). */
+  lights: Light[];
+  media: MediaDevice[];
+  power: PowerDevice[];
   onChange: (c: RuleCondition[]) => void;
 }) {
   const set = (i: number, c: RuleCondition) => onChange(conditions.map((x, j) => (j === i ? c : x)));
@@ -807,6 +822,16 @@ function ConditionList({
       gateSensors.map((s) => ({ ...s, id: `sensor:${s.id}` })),
       allRooms,
     ),
+    // Device power gates ("…unless the TV is on") — grouped after the sensors,
+    // with a suffixed header so a room's sensors and devices don't interleave.
+    ...deviceSelectOptions(
+      [
+        ...media.filter((d) => d.enabled !== false).map((d) => ({ ...d, id: `device:media:${d.id}` })),
+        ...power.filter((d) => d.enabled !== false).map((d) => ({ ...d, id: `device:power:${d.id}` })),
+        ...lights.filter((l) => l.enabled !== false).map((l) => ({ ...l, id: `device:light:${l.id}` })),
+      ],
+      allRooms,
+    ).map((o) => ({ ...o, group: `${o.group} · devices` })),
   ];
   const numericGate = (id: string) => {
     const k = gateSensors.find((s) => s.id === id)?.kind;
@@ -815,6 +840,12 @@ function ConditionList({
   /** The stored condition for a newly picked gate subject, keeping what carries over. */
   const forGate = (key: string, prev: RuleCondition): RuleCondition => {
     if (key.startsWith("room:")) return { kind: "room_is", room_id: key.slice(5), occupied: true };
+    if (key.startsWith("device:")) {
+      const [, domain, id] = key.split(":");
+      // "unless it's on" is the headline use — the default polarity.
+      const on = prev.kind === "device_is" ? prev.on : false;
+      return { kind: "device_is", domain: domain as TriggerDeviceDomain, device_id: id, on };
+    }
     const id = key.slice(7);
     if (numericGate(id)) {
       const value = prev.kind === "sensor_above" || prev.kind === "sensor_below" ? prev.value : 20;
@@ -829,9 +860,11 @@ function ConditionList({
   const gateValue = (c: RuleCondition) =>
     c.kind === "room_is"
       ? `room:${c.room_id}`
-      : c.kind === "time_window"
-        ? ""
-        : `sensor:${c.sensor_id}`;
+      : c.kind === "device_is"
+        ? `device:${c.domain}:${c.device_id}`
+        : c.kind === "time_window"
+          ? ""
+          : `sensor:${c.sensor_id}`;
 
   /** Weekday chips: no selection = every day; toggling curates the list. */
   const toggleDay = (c: Extract<RuleCondition, { kind: "time_window" }>, i: number, d: number) => {
@@ -934,6 +967,18 @@ function ConditionList({
                   ]}
                   onChange={(v) => set(i, { ...c, occupied: v === "occupied" })}
                   width={140}
+                />
+              )}
+              {c.kind === "device_is" && (
+                <Select
+                  value={c.on ? "only_on" : "unless_on"}
+                  options={[
+                    // on:false gates on the device being off — "unless it's on".
+                    { value: "unless_on", label: "unless it's on" },
+                    { value: "only_on", label: "only while it's on" },
+                  ]}
+                  onChange={(v) => set(i, { ...c, on: v === "only_on" })}
+                  width={170}
                 />
               )}
             </>

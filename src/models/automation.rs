@@ -118,6 +118,14 @@ pub enum RuleCondition {
     SensorBelow { sensor_id: String, value: f64 },
     /// Another boolean sensor currently reads `on`.
     SensorIs { sensor_id: String, on: bool },
+    /// A device's power boolean currently reads `on` — the gate analog of the
+    /// device trigger. With `on: false` it's the natural **"unless"** clause:
+    /// "…unless the TV is on" gates the rule on the TV being off.
+    DeviceIs {
+        domain: TriggerDeviceDomain,
+        device_id: String,
+        on: bool,
+    },
 }
 
 /// Parse `"HH:MM"` into minutes-since-midnight. `None` for malformed input.
@@ -153,6 +161,7 @@ impl RuleCondition {
         now_day: u8,
         reading_of: impl Fn(&str) -> Option<SensorReading>,
         occupancy_of: impl Fn(&str) -> Option<bool>,
+        device_on_of: impl Fn(TriggerDeviceDomain, &str) -> Option<bool>,
     ) -> bool {
         match self {
             RuleCondition::TimeWindow { start, end, days } => {
@@ -186,6 +195,11 @@ impl RuleCondition {
             RuleCondition::SensorIs { sensor_id, on } => reading_of(sensor_id)
                 .and_then(SensorReading::as_bool)
                 .is_some_and(|b| b == *on),
+            RuleCondition::DeviceIs {
+                domain,
+                device_id,
+                on,
+            } => device_on_of(*domain, device_id).is_some_and(|b| b == *on),
         }
     }
 }
@@ -427,15 +441,15 @@ mod tests {
             sensor_id: "lux".into(),
             value: 20.0,
         };
-        assert!(cond.holds(0, 0, |_| Some(n(5.0)), |_| None));
-        assert!(!cond.holds(0, 0, |_| Some(n(50.0)), |_| None));
-        assert!(!cond.holds(0, 0, |_| None, |_| None)); // unknown reading never satisfies
+        assert!(cond.holds(0, 0, |_| Some(n(5.0)), |_| None, |_, _| None));
+        assert!(!cond.holds(0, 0, |_| Some(n(50.0)), |_| None, |_, _| None));
+        assert!(!cond.holds(0, 0, |_| None, |_| None, |_, _| None)); // unknown reading never satisfies
         let is = RuleCondition::SensorIs {
             sensor_id: "door".into(),
             on: true,
         };
-        assert!(is.holds(0, 0, |_| Some(b(true)), |_| None));
-        assert!(!is.holds(0, 0, |_| Some(n(3.0)), |_| None)); // numeric is not a boolean
+        assert!(is.holds(0, 0, |_| Some(b(true)), |_| None, |_, _| None));
+        assert!(!is.holds(0, 0, |_| Some(n(3.0)), |_| None, |_, _| None)); // numeric is not a boolean
     }
 
     #[test]
@@ -444,9 +458,47 @@ mod tests {
             room_id: "r1".into(),
             occupied: false,
         };
-        assert!(cond.holds(0, 0, |_| None, |_| Some(false)));
-        assert!(!cond.holds(0, 0, |_| None, |_| Some(true)));
-        assert!(!cond.holds(0, 0, |_| None, |_| None)); // no presence sensors → unknown
+        assert!(cond.holds(0, 0, |_| None, |_| Some(false), |_, _| None));
+        assert!(!cond.holds(0, 0, |_| None, |_| Some(true), |_, _| None));
+        assert!(!cond.holds(0, 0, |_| None, |_| None, |_, _| None)); // no presence sensors → unknown
+    }
+
+    #[test]
+    fn device_is_gates_on_the_power_boolean_and_fails_closed() {
+        let unless_tv_on = RuleCondition::DeviceIs {
+            domain: TriggerDeviceDomain::Media,
+            device_id: "tv1".into(),
+            on: false,
+        };
+        // "…unless the TV is on": holds while the TV is off…
+        assert!(unless_tv_on.holds(0, 0, |_| None, |_| None, |_, _| Some(false)));
+        // …blocks while it's on…
+        assert!(!unless_tv_on.holds(0, 0, |_| None, |_| None, |_, _| Some(true)));
+        // …and an unknown device fails closed.
+        assert!(!unless_tv_on.holds(0, 0, |_| None, |_| None, |_, _| None));
+
+        let only_if_on = RuleCondition::DeviceIs {
+            domain: TriggerDeviceDomain::Light,
+            device_id: "l1".into(),
+            on: true,
+        };
+        assert!(only_if_on.holds(0, 0, |_| None, |_| None, |_, _| Some(true)));
+        assert!(!only_if_on.holds(0, 0, |_| None, |_| None, |_, _| Some(false)));
+    }
+
+    #[test]
+    fn device_is_roundtrips_serde() {
+        let c = RuleCondition::DeviceIs {
+            domain: TriggerDeviceDomain::Media,
+            device_id: "tv1".into(),
+            on: false,
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("device_is"), "{json}");
+        let back: RuleCondition = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(back, RuleCondition::DeviceIs { ref device_id, on: false, domain: TriggerDeviceDomain::Media } if device_id == "tv1")
+        );
     }
 
     #[test]
@@ -456,7 +508,7 @@ mod tests {
             end: "17:00".into(),
             days: None,
         };
-        assert!(cond.holds(0, 0, |_| None, |_| None));
+        assert!(cond.holds(0, 0, |_| None, |_| None, |_, _| None));
     }
 
     #[test]
@@ -467,20 +519,20 @@ mod tests {
             days: Some(vec![5, 6]), // Sat, Sun
         };
         // Saturday 23:00 — inside.
-        assert!(weekend_evening.holds(23 * 60, 5, |_| None, |_| None));
+        assert!(weekend_evening.holds(23 * 60, 5, |_| None, |_| None, |_, _| None));
         // Sunday 02:00 — still Saturday's window (it started yesterday).
-        assert!(weekend_evening.holds(2 * 60, 6, |_| None, |_| None));
+        assert!(weekend_evening.holds(2 * 60, 6, |_| None, |_| None, |_, _| None));
         // Monday 02:00 — Sunday's window, still allowed (Sunday is listed).
-        assert!(weekend_evening.holds(2 * 60, 0, |_| None, |_| None));
+        assert!(weekend_evening.holds(2 * 60, 0, |_| None, |_| None, |_, _| None));
         // Wednesday 23:00 — right time, wrong day.
-        assert!(!weekend_evening.holds(23 * 60, 2, |_| None, |_| None));
+        assert!(!weekend_evening.holds(23 * 60, 2, |_| None, |_| None, |_, _| None));
         // An empty day list means every day.
         let daily = RuleCondition::TimeWindow {
             start: "08:00".into(),
             end: "17:00".into(),
             days: Some(vec![]),
         };
-        assert!(daily.holds(9 * 60, 3, |_| None, |_| None));
+        assert!(daily.holds(9 * 60, 3, |_| None, |_| None, |_, _| None));
     }
 
     #[test]
