@@ -64,7 +64,7 @@ All tools below are served natively from `src/api/mcp.rs`.
 | `list_remotes` | `list_remotes` | TVs / streamers with on state + current foreground app |
 | `press_remote_key` | `apply_remote_command` (key) | press a canonical key (up/down/…/select/back/home/play_pause/power), by id or name. *"go back on the bedroom TV."* |
 | `launch_app` | `apply_remote_command` (launch_app) | open an app by Play Store package id or deep-link URL. *"open Netflix on the bedroom TV."* |
-| `play_on` | `resolve_and_play` | open an app or play something on a TV **by name**. Resolves the device (TV or its remote); `"open <app>"` launches it from the catalog, `"play <title>"` searches the TV's libraries and plays the best match, falling back to opening the TV's **last-used app** when nothing matches. *"open Netflix / play Bob's Burgers on the bedroom TV."* Prefer over `launch_app` for natural requests. |
+| `play_on` | `resolve_and_play` | open an app or play something on a TV **by name**. Resolves the device (TV or its remote); `"open <app>"` launches it from the catalog, `"play <title>"` searches the TV's libraries and plays the best match; `"play <title> on <app>"` pins the app and **opens its search results for the title** (deep-link registry over the paired Android TV Remote session). A bare title with no library match falls back to the **preferred app**, deep-linked to the title when that app has a search template. *"open Netflix / play Bob's Burgers on the bedroom TV."* Prefer over `launch_app` for natural requests. |
 
 ## Target tools — not yet built
 

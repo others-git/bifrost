@@ -697,16 +697,18 @@ async fn tv_play_fallback(state: &AppState, heard: &str) -> Option<ClauseResult>
     // "<query> on/in <device>" — split on the LAST " on "/" in ".
     let (query, device) = c.rsplit_once(" on ").or_else(|| c.rsplit_once(" in "))?;
     use crate::api::remote::ResolveOutcome;
-    let (said, ok) =
-        match crate::api::remote::resolve_and_play(state, device.trim(), query.trim()).await {
-            ResolveOutcome::Played(title) => (format!("Playing {title}."), true),
-            ResolveOutcome::Launched(name) | ResolveOutcome::OpenedPreferred(name) => {
-                (format!("Opened {name}."), true)
-            }
-            ResolveOutcome::Failed => ("I couldn't reach that TV.".to_string(), false),
-            // Not a TV we know, or nothing matched → let the LLM / HA Assist try.
-            ResolveOutcome::NoRemote | ResolveOutcome::NoMatch => return None,
-        };
+    let (said, ok) = match crate::api::remote::resolve_and_play(state, device.trim(), query.trim())
+        .await
+    {
+        ResolveOutcome::Played(title) => (format!("Playing {title}."), true),
+        ResolveOutcome::SearchedIn(title, app) => (format!("Searching {app} for {title}."), true),
+        ResolveOutcome::Launched(name) | ResolveOutcome::OpenedPreferred(name) => {
+            (format!("Opened {name}."), true)
+        }
+        ResolveOutcome::Failed => ("I couldn't reach that TV.".to_string(), false),
+        // Not a TV we know, or nothing matched → let the LLM / HA Assist try.
+        ResolveOutcome::NoRemote | ResolveOutcome::NoMatch => return None,
+    };
     tracing::debug!(target: "bifrost::voice", path = "tv_resolver", heard = %c, ok, "clause resolved by TV content resolver");
     Some(ClauseResult {
         heard: c.to_string(),

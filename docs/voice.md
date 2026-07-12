@@ -18,9 +18,14 @@ they can run entirely on your own hardware, or not at all.
      color, color-temperature, volume, mute, transport, scenes, and relative
      nudges, resolves targets by room/device name, and handles compound commands
      ("dim the office and pause the kitchen"). Fast and offline.
-   - **TV content** — "open Netflix on the bedroom TV" / "play Bob's Burgers on the
-     living room TV" resolves to an app launch on that TV (matched by name; a title
-     with no matching app opens the TV's last-used app as the best guess).
+   - **TV content** — "open Netflix on the bedroom TV" launches the app by name
+     from the TV's catalog. "play Bob's Burgers on Hulu on the living room TV"
+     pins the app and **opens its search results for the title** via a deep link
+     (a per-app search-URL registry covering the major streaming apps, launched
+     over the paired Android TV Remote session). A bare title first tries the
+     TV's own media search (Home Assistant `search_media`, where available),
+     then falls back to the preferred app — with the title deep-linked into it
+     when that app has a search template, else just opened.
    - **LLM fallback** — anything still unparsed is handed to the *chat* model
      (OpenAI-compatible tool-calling), which maps it to the **same** internal
      command and dispatches it the same way.

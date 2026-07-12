@@ -699,6 +699,9 @@ impl BifrostMcp {
     ) -> Result<CallToolResult, ErrorData> {
         match resolve_and_play(&self.state, &req.device, &req.query).await {
             ResolveOutcome::Played(title) => Ok(ok_text(format!("Playing {title}."))),
+            ResolveOutcome::SearchedIn(title, app) => {
+                Ok(ok_text(format!("Opened {app} search for {title}.")))
+            }
             ResolveOutcome::Launched(name) => Ok(ok_text(format!("Opened {name}."))),
             ResolveOutcome::OpenedPreferred(name) => Ok(ok_text(format!(
                 "Opened {name} (the last app used) — look there for what you asked for."

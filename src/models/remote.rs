@@ -83,6 +83,70 @@ pub fn prettify_package(package: &str) -> String {
     }
 }
 
+/// Percent-encode a string for use as a URL query component (RFC 3986
+/// unreserved characters kept, spaces and everything else escaped).
+pub fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// A deep link that opens the app's own **search results for `query`** — the
+/// native path from "(app, title)" to content on screen, with no per-app API
+/// integration. Android App Links route these https URLs straight into the
+/// installed app (`RemoteAppLinkLaunchRequest` / HA `remote.turn_on activity`
+/// both accept them). Keyed by the same brand keywords as
+/// [`app_display_name`], so any package variant of an app resolves. `None` =
+/// no known template; callers fall back to opening the app.
+pub fn app_search_deep_link(package: &str, query: &str) -> Option<String> {
+    let p = package.to_ascii_lowercase();
+    let q = url_encode(query.trim());
+    // (keyword, template) — checked in order; more specific keywords first.
+    const LINKS: &[(&str, &str)] = &[
+        ("youtube.tvmusic", "https://music.youtube.com/search?q={q}"),
+        (
+            "youtube",
+            "https://www.youtube.com/results?search_query={q}",
+        ),
+        ("netflix", "https://www.netflix.com/search?q={q}"),
+        ("hulu", "https://www.hulu.com/search?q={q}"),
+        (
+            "amazonvideo",
+            "https://www.primevideo.com/search?phrase={q}",
+        ),
+        (
+            "amazon.avod",
+            "https://www.primevideo.com/search?phrase={q}",
+        ),
+        ("primevideo", "https://www.primevideo.com/search?phrase={q}"),
+        ("disneyplus", "https://www.disneyplus.com/search?q={q}"),
+        ("hbo", "https://play.max.com/search?q={q}"),
+        ("wbd.stream", "https://play.max.com/search?q={q}"),
+        ("spotify", "https://open.spotify.com/search/{q}"),
+        ("plexapp", "https://watch.plex.tv/search?query={q}"),
+        ("twitch", "https://www.twitch.tv/search?term={q}"),
+        ("appletv", "https://tv.apple.com/search?term={q}"),
+        ("apple.atve", "https://tv.apple.com/search?term={q}"),
+        ("peacock", "https://www.peacocktv.com/search?q={q}"),
+        ("paramount", "https://www.paramountplus.com/search/?q={q}"),
+        ("crunchyroll", "https://www.crunchyroll.com/search?q={q}"),
+        ("tubitv", "https://tubitv.com/search/{q}"),
+    ];
+    for (kw, template) in LINKS {
+        if p.contains(kw) {
+            return Some(template.replace("{q}", &q));
+        }
+    }
+    None
+}
+
 /// Foreground packages that aren't a user app on screen — the launcher, the
 /// screensaver, system chrome. Now-playing clears rather than naming them.
 /// The one rule every foreground-app source shares (the ATV push channel,
@@ -215,6 +279,34 @@ pub struct RemoteCommandInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deep_links_resolve_by_brand_keyword_and_encode_the_title() {
+        let link = app_search_deep_link("com.netflix.ninja", "bob's burgers").unwrap();
+        assert_eq!(link, "https://www.netflix.com/search?q=bob%27s%20burgers");
+        // Any package variant of the brand resolves (same rule as naming).
+        assert!(
+            app_search_deep_link("com.hulu.livingroomplus", "x")
+                .unwrap()
+                .starts_with("https://www.hulu.com/search")
+        );
+        assert!(
+            app_search_deep_link("com.google.android.youtube.tv", "lofi beats")
+                .unwrap()
+                .contains("search_query=lofi%20beats")
+        );
+        // Unknown app → no template (caller opens the app instead).
+        assert!(app_search_deep_link("com.example.obscure", "x").is_none());
+    }
+
+    #[test]
+    fn url_encode_keeps_unreserved_and_escapes_the_rest() {
+        assert_eq!(
+            url_encode("Bob's Burgers & fries"),
+            "Bob%27s%20Burgers%20%26%20fries"
+        );
+        assert_eq!(url_encode("plain-safe_1.0~x"), "plain-safe_1.0~x");
+    }
 
     #[test]
     fn remote_key_serializes_snake_case() {

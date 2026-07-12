@@ -465,6 +465,21 @@ impl SmartTvVendor for BraviaVendor {
     }
 
     async fn launch_app(&self, app: &str) -> Result<()> {
+        // A deep LINK (https://… / scheme://…) can't go through ScalarWeb —
+        // setActiveApp only takes app URIs. The paired ATV session's app-link
+        // launch opens links natively (same path the generic Android TV uses).
+        if app.contains("://") {
+            let Some(identity) = &self.atv else {
+                anyhow::bail!(
+                    "bravia: launching a content link needs the paired Android TV Remote"
+                );
+            };
+            return super::atv::client::send_message(
+                &self.ip,
+                identity,
+                super::atv::messages::remote_app_link_launch(app),
+            );
+        }
         self.scalar("appControl", "setActiveApp", "1.0", json!([{ "uri": app }]))
             .await
             .map(|_| ())
@@ -729,6 +744,26 @@ mod tests {
         let id = v.identity().await.unwrap();
         assert_eq!(id.name, "BRAVIA");
         assert_eq!(id.hw_id.as_deref(), Some("mac:aabbccddeeff"));
+    }
+
+    #[tokio::test]
+    async fn launch_app_routes_links_to_atv_and_uris_to_scalar() {
+        // A deep link goes over the paired ATV session (queued on its link) —
+        // no ScalarWeb call at all, so no mock is needed and none is hit.
+        let id = crate::providers::smarttv::atv::crypto::Identity::generate().unwrap();
+        let v = BraviaVendor::new("192.0.2.7", None, Some(id)).unwrap();
+        v.launch_app("https://www.netflix.com/search?q=x")
+            .await
+            .expect("link launch queues on the ATV session");
+
+        // Without a pairing, a link launch refuses with a clear message.
+        let v = BraviaVendor::new("192.0.2.7", None, None).unwrap();
+        let e = v
+            .launch_app("https://www.netflix.com/search?q=x")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("paired"), "{e}");
     }
 
     #[tokio::test]

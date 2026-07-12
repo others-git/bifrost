@@ -749,6 +749,10 @@ pub(crate) enum ResolveOutcome {
     /// Resolved a title to actual content and started playing it (the title we
     /// were asked for) — the TV's media search found and cast a match.
     Played(String),
+    /// Opened the target app directly onto its search results for the title
+    /// (deep link): `(title, app friendly name)` — the native "(app, title)"
+    /// path when no richer content search exists.
+    SearchedIn(String, String),
     /// Title intent we couldn't map to an app or resolve to content — opened the
     /// TV's last-used app as the best guess for where the title lives (its
     /// friendly name). Callers may add an HA-Assist fallback.
@@ -812,6 +816,43 @@ async fn launch(state: &AppState, remote_id: &str, app: &RemoteApp) -> ResolveOu
 /// we can't map to an app opens the device's **last-used app** as the best guess
 /// for where it lives — the preferred-app fast path. (True in-app/title search is
 /// the next step; for now the caller can fall back to HA Assist for the title.)
+/// Split a `"TITLE on APP"` phrase when the suffix names a catalog app
+/// ("bob's burgers on hulu" → ("bob's burgers", Hulu)). Splits at the LAST
+/// ` on ` whose suffix matches, so a title containing "on" survives
+/// ("carry on on hulu"). `None` when no suffix names an app.
+fn split_title_on_app<'a>(q: &str, apps: &'a [RemoteApp]) -> Option<(String, &'a RemoteApp)> {
+    let lower = q.to_ascii_lowercase();
+    let mut at = lower.len();
+    while let Some(i) = lower[..at].rfind(" on ") {
+        let (head, tail) = (q[..i].trim(), q[i + 4..].trim());
+        if !head.is_empty()
+            && let Some(app) = match_app(tail, apps)
+        {
+            return Some((head.to_string(), app));
+        }
+        at = i;
+    }
+    None
+}
+
+/// Open `app` directly onto its search results for `title` when a deep-link
+/// template exists; else just launch the app. The native "(app, title)" path.
+async fn launch_for_title(
+    state: &AppState,
+    remote_id: &str,
+    app: &RemoteApp,
+    title: &str,
+) -> ResolveOutcome {
+    if let Some(link) = crate::models::remote::app_search_deep_link(&app.package, title) {
+        let cmd = RemoteCommand::LaunchApp { activity: link };
+        return match apply_remote_command(state, remote_id, &cmd).await {
+            RemoteOutcome::Ok => ResolveOutcome::SearchedIn(title.to_string(), app.name.clone()),
+            _ => ResolveOutcome::Failed,
+        };
+    }
+    launch(state, remote_id, app).await
+}
+
 pub(crate) async fn resolve_and_play(
     state: &AppState,
     device: &str,
@@ -844,6 +885,11 @@ pub(crate) async fn resolve_and_play(
     if let Some(app) = match_app(title, &apps) {
         return launch(state, &remote_id, app).await;
     }
+    // "TITLE on APP" pins the target: open that app straight onto its search
+    // for the title (deep link) — deterministic, no assistant in the loop.
+    if let Some((t, app)) = split_title_on_app(title, &apps) {
+        return launch_for_title(state, &remote_id, app, &t).await;
+    }
     // A real title: try to resolve it to actual content and play it on the TV
     // (its paired media device's search). Only if that finds nothing do we fall
     // back to opening the last-used app as the best guess for where it lives.
@@ -854,7 +900,9 @@ pub(crate) async fn resolve_and_play(
         return ResolveOutcome::Played(title.to_string());
     }
     match preferred_app(&apps) {
-        Some(app) => match launch(state, &remote_id, app).await {
+        // Best guess = the last-used app; when we know its search deep link,
+        // land on the title's results there rather than just its home screen.
+        Some(app) => match launch_for_title(state, &remote_id, app, title).await {
             ResolveOutcome::Launched(n) => ResolveOutcome::OpenedPreferred(n),
             other => other,
         },
@@ -888,6 +936,11 @@ pub(crate) async fn play_on_response(
 ) -> impl IntoResponse {
     let (status, ok, said) = match resolve_and_play(state, device, query).await {
         ResolveOutcome::Played(title) => (StatusCode::OK, true, format!("Playing {title}.")),
+        ResolveOutcome::SearchedIn(title, app) => (
+            StatusCode::OK,
+            true,
+            format!("Opened {app} search for {title}."),
+        ),
         ResolveOutcome::Launched(name) => (StatusCode::OK, true, format!("Opened {name}.")),
         ResolveOutcome::OpenedPreferred(name) => (
             StatusCode::OK,
@@ -935,7 +988,7 @@ async fn paired_media_id(state: &AppState, remote_id: &str) -> Option<String> {
 mod tests {
     use super::{
         RemoteApp, RemoteCommandInfo, app_display_name, is_launchable_app, match_app, overlay_pins,
-        preferred_app,
+        preferred_app, split_title_on_app,
     };
     use crate::models::remote::prettify_package;
 
@@ -989,6 +1042,23 @@ mod tests {
             last_seen: last_seen.map(str::to_string),
             activity: None,
         }
+    }
+
+    #[test]
+    fn split_title_on_app_pins_the_target() {
+        let apps = vec![app("com.hulu.plus", None), app("com.netflix.ninja", None)];
+        // Basic: "TITLE on APP".
+        let (t, a) = split_title_on_app("bob's burgers on hulu", &apps).unwrap();
+        assert_eq!(t, "bob's burgers");
+        assert_eq!(a.package, "com.hulu.plus");
+        // A title containing "on" splits at the LAST matching " on ".
+        let (t, a) = split_title_on_app("carry on on netflix", &apps).unwrap();
+        assert_eq!(t, "carry on");
+        assert_eq!(a.package, "com.netflix.ninja");
+        // Suffix that names no app → not a pinned target.
+        assert!(split_title_on_app("planet earth on bluray", &apps).is_none());
+        // No bare "on APP" with an empty title.
+        assert!(split_title_on_app(" on hulu", &apps).is_none());
     }
 
     #[test]
