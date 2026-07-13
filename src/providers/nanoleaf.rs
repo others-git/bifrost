@@ -20,6 +20,9 @@ use crate::models::{
     Color, Light, LightCapabilities, LightState, Provider, is_clear_effect, kelvin_to_mirek,
     mirek_to_kelvin,
 };
+use crate::providers::discovery::{
+    DeviceDiscovery, MdnsDiscovery, TcpPortSweepDiscovery, UnionDiscovery,
+};
 use crate::providers::{
     CredentialField, FieldKind, LightProvider, ProviderFactory, base_url, cached_client,
     hsv_to_rgb, rgb_to_hs,
@@ -408,6 +411,17 @@ impl ProviderFactory for NanoleafProviderFactory {
         )?))
     }
 
+    /// mDNS `_nanoleafapi._tcp` (the controller advertises its instance
+    /// name) unioned with a TCP :16021 sweep — the multicast-proof fallback
+    /// for networks that drop mDNS (and the only leg that works from WSL2's
+    /// NAT). First leg to answer wins per host.
+    fn discoverer(&self) -> Option<Box<dyn DeviceDiscovery>> {
+        Some(Box::new(UnionDiscovery::new(vec![
+            Box::new(MdnsDiscovery::new("_nanoleafapi._tcp.local", "")),
+            Box::new(TcpPortSweepDiscovery::new(16021, "Nanoleaf", "")),
+        ])))
+    }
+
     fn credentials_schema(&self) -> &'static [CredentialField] {
         &[
             CredentialField {
@@ -416,7 +430,7 @@ impl ProviderFactory for NanoleafProviderFactory {
                 kind: FieldKind::IpAddress,
                 required: true,
                 hint: Some(
-                    "IP of the Nanoleaf controller on your LAN (e.g. 192.168.1.100). Enter it manually — mDNS auto-discovery does not cross the WSL2 network boundary.",
+                    "IP of the Nanoleaf controller on your LAN — use \"Scan network\" above, or enter it manually.",
                 ),
             },
             CredentialField {
@@ -463,6 +477,31 @@ mod tests {
     }
 
     // ── Pure conversion helpers ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn factory_scan_finds_a_controller_by_its_open_port() {
+        // supports_discovery gates the UI's "Scan network" button.
+        let f = NanoleafProviderFactory;
+        let disc = f.discoverer().expect("nanoleaf advertises a discoverer");
+        // A live TCP listener stands in for the controller's :16021 — probe it
+        // directly through the sweep leg (the union's mDNS leg finds nothing).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sweep = TcpPortSweepDiscovery::new(addr.port(), "Nanoleaf", "")
+            .with_hosts(vec!["127.0.0.1".into()]);
+        let found = sweep
+            .scan(&crate::providers::discovery::ScanOptions::new(
+                std::time::Duration::from_secs(1),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].host, "127.0.0.1");
+        assert_eq!(found[0].label.as_deref(), Some("Nanoleaf"));
+        // No vendor routing for a single-vendor provider: no stray brand key.
+        assert!(found[0].credentials.get("brand").is_none());
+        drop(disc);
+    }
 
     #[test]
     fn hs_to_color_and_back_roundtrips() {

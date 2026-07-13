@@ -545,7 +545,11 @@ impl DeviceDiscovery for MdnsDiscovery {
             let host = from.ip().to_string();
             let mut creds = serde_json::Map::new();
             creds.insert("host".into(), host.clone().into());
-            creds.insert("brand".into(), self.brand.into());
+            // An empty brand = a single-vendor provider (no `build_vendor`
+            // routing, e.g. Nanoleaf) — don't stamp a meaningless key.
+            if !self.brand.is_empty() {
+                creds.insert("brand".into(), self.brand.into());
+            }
             if let Some(n) = &instance {
                 creds.insert("name".into(), n.clone().into());
             }
@@ -646,7 +650,9 @@ impl DeviceDiscovery for TcpPortSweepDiscovery {
             .map(|host| {
                 let mut creds = serde_json::Map::new();
                 creds.insert("host".into(), host.clone().into());
-                creds.insert("brand".into(), self.brand.into());
+                if !self.brand.is_empty() {
+                    creds.insert("brand".into(), self.brand.into());
+                }
                 DiscoveredDevice {
                     label: Some(self.label.to_string()),
                     credentials: serde_json::Value::Object(creds),

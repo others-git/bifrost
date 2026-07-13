@@ -50,7 +50,7 @@ fan-outs don't drop commands.
 ## Nanoleaf
 
 - **Category** Light · **Transport** LAN, the Nanoleaf **Open API** (HTTP on port 16021) · **Live** polling.
-- **Setup** Enter the controller's **IP address** (find it in the Nanoleaf app, or on your router). Auto-discovery is manual on WSL2 — mDNS doesn't cross the WSL network boundary — so type the IP in. Then **pair**: hold the controller's **power button for ~5–7 seconds** until the LED starts flashing, and pair (the same "press the button" flow as a Hue bridge). Pairing mints an **auth token** stored as the provider's credential; you can also paste a token you already have.
+- **Setup** Click **Scan network** — the controller answers over mDNS (with its name) or the port sweep — or enter its **IP address** manually (find it in the Nanoleaf app, or on your router). Then **pair**: hold the controller's **power button for ~5–7 seconds** until the LED starts flashing, and pair (the same "press the button" flow as a Hue bridge). Pairing mints an **auth token** stored as the provider's credential; you can also paste a token you already have.
 - **Capabilities** RGB color (hue/saturation), color temperature (1200–6500 K), brightness, and **effects** — the controller's own effect list (e.g. "Northern Lights", "Windmill"). An effect is Bifrost's third light mode; **brightness stays live while an effect plays** (a brightness change never cancels the running effect). No native rooms.
 - **De-dup** The Open API exposes no MAC (only a serial), so a Home Assistant copy of the same panels **isn't shadowed automatically** (auto-shadowing is exact-MAC only) — shadow the HA duplicate manually from the Devices page if you run both.
 
