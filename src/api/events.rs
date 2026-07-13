@@ -109,6 +109,19 @@ async fn sse_events(
         );
     }
 
+    // Inventory changes (rename/glyph/enable/room/shadow): one app-wide channel,
+    // so device lists refresh live on every surface and every client.
+    streams.push(
+        BroadcastStream::new(state.inventory_events.subscribe())
+            .filter_map(|r| std::future::ready(r.ok()))
+            .map(|table: String| {
+                let data = serde_json::to_string(&serde_json::json!({ "table": table }))
+                    .unwrap_or_default();
+                Ok::<Event, Infallible>(Event::default().event("inventory").data(data))
+            })
+            .boxed(),
+    );
+
     // A pending stream prevents select_all from terminating when there are no providers.
     streams.push(stream::pending().boxed());
 

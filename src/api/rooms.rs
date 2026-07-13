@@ -347,6 +347,7 @@ pub(crate) async fn set_device_room(
     }
 
     let Some(room_id) = room_id else {
+        crate::api::notify_inventory(state, device_table);
         return StatusCode::NO_CONTENT; // unassigned
     };
 
@@ -358,7 +359,10 @@ pub(crate) async fn set_device_room(
     .execute(&state.db)
     .await
     {
-        Ok(_) => StatusCode::NO_CONTENT,
+        Ok(_) => {
+            crate::api::notify_inventory(state, device_table);
+            StatusCode::NO_CONTENT
+        }
         Err(e) => {
             tracing::error!("db error assigning {device_id} to room {room_id}: {e}");
             StatusCode::INTERNAL_SERVER_ERROR

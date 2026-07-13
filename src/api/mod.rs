@@ -102,13 +102,22 @@ pub(crate) async fn set_device_glyph(
         .execute(&state.db)
         .await
     {
-        Ok(r) if r.rows_affected() > 0 => StatusCode::NO_CONTENT,
+        Ok(r) if r.rows_affected() > 0 => {
+            notify_inventory(state, table);
+            StatusCode::NO_CONTENT
+        }
         Ok(_) => StatusCode::NOT_FOUND,
         Err(e) => {
             tracing::error!("db error setting {table} glyph: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
+}
+
+/// Announce an inventory change (rename/glyph/enable/room/shadow) on the SSE
+/// stream so every surface and client refreshes its device lists live.
+pub(crate) fn notify_inventory(state: &AppState, table: &str) {
+    let _ = state.inventory_events.send(table.to_string());
 }
 
 /// Normalize a friendly-name request: trim whitespace, and treat an empty string
@@ -136,7 +145,10 @@ pub(crate) async fn set_device_name(
         query = query.bind(n);
     }
     match query.bind(id).execute(&state.db).await {
-        Ok(r) if r.rows_affected() > 0 => StatusCode::NO_CONTENT,
+        Ok(r) if r.rows_affected() > 0 => {
+            notify_inventory(state, table);
+            StatusCode::NO_CONTENT
+        }
         Ok(_) => StatusCode::NOT_FOUND,
         Err(e) => {
             tracing::error!("db error setting {table} name: {e}");
@@ -245,7 +257,10 @@ pub(crate) async fn set_device_enabled(
         .execute(&state.db)
         .await
     {
-        Ok(r) if r.rows_affected() > 0 => StatusCode::NO_CONTENT,
+        Ok(r) if r.rows_affected() > 0 => {
+            notify_inventory(state, table);
+            StatusCode::NO_CONTENT
+        }
         Ok(_) => StatusCode::NOT_FOUND,
         Err(e) => {
             tracing::error!("db error setting {table} enabled: {e}");

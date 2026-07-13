@@ -43,6 +43,12 @@ pub struct AppState {
     /// hold: a manual change to one releases it from the hold instead of
     /// being clobbered at restore time.
     pub hold_watch: api::automations::HoldWatch,
+    /// Fired whenever device inventory changes outside device state — rename,
+    /// glyph, enable/disable, room assignment, manual shadow. Rides the
+    /// `/api/events` SSE stream as an `inventory` event so every surface (and
+    /// every other client — the wall kiosk) refreshes its device lists live
+    /// instead of waiting for a reload. Payload = the changed table.
+    pub inventory_events: tokio::sync::broadcast::Sender<String>,
     cipher: Aes256Gcm,
     /// Non-reversible fingerprint of the derived credential key — for the startup
     /// diagnostic that catches a silently-changed `BIFROST_SECRET`.
@@ -62,6 +68,7 @@ impl AppState {
             kiosk_commands: tokio::sync::broadcast::channel(64).0,
             automations_changed: std::sync::Arc::new(tokio::sync::Notify::new()),
             hold_watch: api::automations::HoldWatch::default(),
+            inventory_events: tokio::sync::broadcast::channel(64).0,
         }
     }
 

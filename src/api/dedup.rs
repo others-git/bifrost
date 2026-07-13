@@ -130,6 +130,7 @@ pub(crate) async fn set_device_shadow(
             if table == "media_devices" && shadowed_by.is_some() {
                 crate::api::media::enforce_shadow_group_exclusion(state).await;
             }
+            crate::api::notify_inventory(state, table);
             StatusCode::NO_CONTENT
         }
         Ok(_) => StatusCode::NOT_FOUND,

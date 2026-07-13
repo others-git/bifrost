@@ -210,6 +210,9 @@ export function BoardsPage() {
   // aren't pushed. Keeps an always-on wall display current without stale lag.
   useEffect(() => {
     const es = new EventSource("/api/events");
+    // Inventory changes (rename/glyph/room/enable) refetch the device lists so
+    // widget labels stay current without a reload.
+    es.addEventListener("inventory", () => { reloadDevices(); });
     es.addEventListener("light_state", (raw) => {
       const { device_id, patch } = JSON.parse((raw as MessageEvent).data) as {
         device_id: string;

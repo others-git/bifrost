@@ -8675,6 +8675,65 @@ async fn dev_composite_routing_404_when_dev_mode_off() {
 }
 
 #[tokio::test]
+async fn inventory_mutations_announce_on_the_sse_channel() {
+    // A rename (and glyph/enable/room/shadow) must fire the app-wide
+    // `inventory` broadcast, so Control / Boards / other clients refresh their
+    // device lists live instead of showing the old name until a reload.
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    sqlx::query(
+        "INSERT INTO providers (id, name, provider_type, credentials) VALUES ('p1','P','wled','x')",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO lights (id, provider_id, device_id, name, provider_name, capabilities, last_state)
+         VALUES ('l1','p1','d1','Nanoleaf Light Panels','Nanoleaf Light Panels','{}','{}')",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let mut rx = state.inventory_events.subscribe();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/lights/l1/name")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, &cookie)
+                .body(Body::from(r#"{"name":"Wall Panel"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        rx.try_recv().expect("rename announces an inventory event"),
+        "lights"
+    );
+
+    // A failed mutation (unknown id) stays silent.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/lights/nope/name")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, &cookie)
+                .body(Body::from(r#"{"name":"X"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert!(rx.try_recv().is_err(), "a 404 must not announce");
+}
+
+#[tokio::test]
 async fn friendly_name_sticks_and_reverts() {
     let ha = ha_remote_mock().await;
     let (app, prov_id, db) = helpers::test_app_with_ha_db(&ha.uri()).await;

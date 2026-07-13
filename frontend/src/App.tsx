@@ -120,6 +120,18 @@ export function App() {
 
   useEffect(() => { init(); }, []);
 
+  // Inventory changes (rename/glyph/enable/room/shadow) announce themselves on
+  // the SSE stream — refresh the app-level lights list live, so a rename made
+  // on the Devices page (or on another client entirely) shows on Control /
+  // Floor Plan without a reload.
+  useEffect(() => {
+    if (page === "loading" || page === "setup" || page === "login") return;
+    const es = new EventSource("/api/events");
+    es.addEventListener("inventory", () => { refreshLights(); });
+    return () => es.close();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page === "loading" || page === "setup" || page === "login"]);
+
   async function refreshLights() {
     const result = await lightsWithKioskAuth();
     if (result === "unauthorized") { setPage("login"); return; }
