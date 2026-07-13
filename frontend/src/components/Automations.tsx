@@ -206,6 +206,10 @@ const ICON_BTN: React.CSSProperties = {
   color: "inherit",
   cursor: "pointer",
   padding: "0.2rem",
+  minWidth: 40,
+  minHeight: 40,
+  display: "grid",
+  placeItems: "center",
   fontSize: "0.85rem",
   lineHeight: 1,
   opacity: 0.75,
@@ -1110,11 +1114,11 @@ function ActionList({
   // until its first target is picked, then materializes as a real row.
   const [draft, setDraft] = useState<Omit<ActionRow, "targets"> | null>(null);
   const [openPicker, setOpenPicker] = useState<number | null>(null);
-  const numInput: React.CSSProperties = { ...S.input, width: 64, padding: "0.35rem 0.5rem" };
+  const numInput: React.CSSProperties = { ...S.input, width: 64, padding: "0.35rem 0.5rem", minHeight: 38 };
   const conj: React.CSSProperties = { color: T.dim, fontSize: "0.8rem", whiteSpace: "nowrap" };
   const swatch: React.CSSProperties = {
-    width: 40,
-    height: 30,
+    width: 48,
+    height: 38,
     padding: 2,
     cursor: "pointer",
     border: `1px solid ${alpha(color.text, 0.2)}`,

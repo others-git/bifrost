@@ -17,10 +17,11 @@ import {
 import { DisableRow } from "./PowerFlyout";
 import { useRemote, RemotePad, RemoteApps, ExpandedRemote, RemoteTextEntry, AssistantSay } from "./BifrostRemote";
 import { PowerToggle, Segmented } from "./controls";
+import { useSwipeTabs } from "./useSwipeTabs";
 import { Flyout, FlyoutHeader } from "./Flyout";
 import { Select } from "./Select";
 import { Glyph } from "./glyphs";
-import { T, domain, color, alpha, labelType } from "../theme";
+import { T, domain, color, alpha, hitHalo, labelType } from "../theme";
 
 const ACCENT = domain.media; // violet — audio's accent
 
@@ -162,7 +163,7 @@ export function MediaControls({
           <button
             onClick={toggleMute}
             title={s.mute ? "Unmute" : "Mute"}
-            style={{ background: "none", border: "none", cursor: "pointer", padding: 0, color: T.text, display: "grid", placeItems: "center", opacity: s.mute ? 1 : 0.6 }}
+            style={{ ...hitHalo(18, 18), background: "none", border: "none", cursor: "pointer", color: T.text, display: "grid", placeItems: "center", opacity: s.mute ? 1 : 0.6 }}
           >
             <Glyph name={s.mute ? "mute" : "volume"} size={18} />
           </button>
@@ -172,7 +173,7 @@ export function MediaControls({
             max={100}
             value={s.volume}
             onChange={(e) => setVolume(Number(e.target.value))}
-            style={{ flex: 1, accentColor: ACCENT }}
+            style={{ flex: 1, accentColor: ACCENT, height: compact ? 40 : undefined, margin: compact ? "-8px 0" : undefined }}
           />
           <span style={{ fontSize: "0.78rem", color: T.dim, width: 30, textAlign: "right" }}>{s.volume}</span>
         </div>
@@ -206,7 +207,7 @@ export function MediaControls({
         <div style={{ borderTop: `1px solid ${color.hairline}`, paddingTop: "0.6rem" }}>
           <button
             onClick={toggleFavorites}
-            style={{ ...labelType, background: "none", border: "none", color: T.dim, cursor: "pointer", fontSize: "0.62rem", padding: 0, display: "flex", alignItems: "center", gap: "0.4rem" }}
+            style={{ ...labelType, background: "none", border: "none", color: T.dim, cursor: "pointer", fontSize: "0.62rem", padding: "0.5rem 0", margin: "-0.5rem 0", display: "flex", alignItems: "center", gap: "0.4rem" }}
           >
             <Glyph name="favorite" size={13} /> Favorites
             <span style={{ display: "grid", transform: favOpen ? "rotate(180deg)" : "none" }}>
@@ -223,7 +224,7 @@ export function MediaControls({
                     key={f.id}
                     onClick={() => playFav(f)}
                     title={`Play "${f.title}"`}
-                    style={{ textAlign: "left", background: "rgba(255,255,255,0.03)", border: `1px solid ${T.cardBorder}`, borderRadius: 8, color: T.text, cursor: "pointer", padding: "0.4rem 0.6rem", display: "flex", alignItems: "center", gap: "0.5rem" }}
+                    style={{ textAlign: "left", background: "rgba(255,255,255,0.03)", border: `1px solid ${T.cardBorder}`, borderRadius: 8, color: T.text, cursor: "pointer", padding: "0.4rem 0.6rem", minHeight: compact ? 44 : undefined, display: "flex", alignItems: "center", gap: "0.5rem" }}
                   >
                     <span style={{ color: ACCENT, display: "grid", placeItems: "center" }}><Glyph name="play" size={13} /></span>
                     <span style={{ minWidth: 0, flex: 1 }}>
@@ -258,7 +259,7 @@ export function TransportButton({
   big?: boolean;
   compact?: boolean;
 }) {
-  const size = big ? (compact ? 38 : 48) : compact ? 32 : 40;
+  const size = big ? (compact ? 52 : 48) : compact ? 44 : 40;
   return (
     <button
       onClick={onClick}
@@ -276,7 +277,7 @@ export function TransportButton({
         flexShrink: 0,
       }}
     >
-      <Glyph name={glyph} size={big ? (compact ? 18 : 22) : compact ? 16 : 18} />
+      <Glyph name={glyph} size={big ? (compact ? 24 : 22) : compact ? 20 : 18} />
     </button>
   );
 }
@@ -376,9 +377,11 @@ function TvAio({
 }) {
   const remote = useRemote(remoteId);
   const [tab, setTab] = useState<"remote" | "apps">("remote");
+  // A horizontal swipe anywhere on the panel body flips Remote ⇄ Apps.
+  const swipe = useSwipeTabs(tab, ["remote", "apps"] as const, setTab);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "0.9rem" }}>
+    <div {...swipe.handlers} style={{ display: "flex", flexDirection: "column", gap: "0.9rem", touchAction: "pan-y" }}>
       <Segmented
         value={tab}
         onChange={setTab}
@@ -389,6 +392,7 @@ function TvAio({
           { value: "apps", label: "Apps" },
         ]}
       />
+      <div ref={swipe.contentRef} key={swipe.key} className={swipe.className} style={{ display: "flex", flexDirection: "column", gap: "0.9rem", ...swipe.style }}>
       {tab === "remote" ? (
         <div style={{ display: "flex", flexDirection: "column", gap: "0.9rem" }}>
           {/* What's on + volume sit above the keypad — the old "Watch" tab, folded in. */}
@@ -407,6 +411,7 @@ function TvAio({
           onPin={remote.togglePin}
         />
       )}
+      </div>
     </div>
   );
 }
@@ -525,13 +530,17 @@ function FancyVolume({
         <button
           onClick={toggleMute}
           title={muted ? "Unmute" : "Mute"}
-          style={{ background: "none", border: "none", cursor: "pointer", padding: 0, color: muted ? color.violet : T.text, display: "grid", placeItems: "center" }}
+          style={{ ...hitHalo(18, 18), background: "none", border: "none", cursor: "pointer", color: muted ? color.violet : T.text, display: "grid", placeItems: "center" }}
         >
           <Glyph name={muted ? "mute" : "volume"} size={18} />
         </button>
+        {/* The slim track keeps its look; the halo wrapper is the grab target,
+            and it owns the drag (stopPropagation) so a volume swipe never reads
+            as a tab swipe. */}
         <div
-          ref={trackRef}
+          data-swipe-ignore
           onPointerDown={(e) => {
+            e.stopPropagation();
             e.currentTarget.setPointerCapture(e.pointerId);
             fromPointer(e.clientX);
           }}
@@ -539,14 +548,22 @@ function FancyVolume({
             if (e.buttons === 1) fromPointer(e.clientX);
           }}
           style={{
-            position: "relative",
             flex: 1,
+            padding: "17px 0",
+            margin: "-17px 0",
+            touchAction: "none",
+            cursor: "pointer",
+            boxSizing: "content-box",
+          }}
+        >
+        <div
+          ref={trackRef}
+          style={{
+            position: "relative",
             height: 10,
             borderRadius: 999,
-            cursor: "pointer",
             background: alpha(color.text, 0.1),
             boxShadow: "inset 0 1px 2px rgba(0,0,0,0.45)",
-            touchAction: "none",
           }}
         >
           <div
@@ -576,6 +593,7 @@ function FancyVolume({
               transition: "left 0.08s",
             }}
           />
+        </div>
         </div>
         <span style={{ fontSize: "0.8rem", color: T.dim, width: 28, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
           {volume}

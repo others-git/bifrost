@@ -26,7 +26,7 @@ export function SelectRow({
         gap: "0.6rem",
         padding: "0.55rem 0.6rem",
         borderRadius: radius.sm,
-        minHeight: 42,
+        minHeight: 44,
         border: `1px solid ${checked ? accent : "transparent"}`,
         background: checked ? `${alpha(accent, 0.13)}` : color.surfaceOff,
         color: disabled ? color.faint : color.text,

@@ -1972,6 +1972,21 @@ export async function pairHueBridge(bridgeIp: string): Promise<HuePairResult> {
   return res.json();
 }
 
+export type NanoleafPairResult =
+  | { auth_token: string }
+  | { error: "not_in_pairing_mode" | "controller_unreachable"; message: string };
+
+/** One Nanoleaf pairing attempt. 409 means the controller isn't in pairing
+ * mode yet (hold its power button ~5-7s until the LED flashes). */
+export async function pairNanoleaf(host: string): Promise<NanoleafPairResult> {
+  const res = await fetch("/api/providers/nanoleaf/pair", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ host }),
+  });
+  return res.json();
+}
+
 export type SmartTvPairResult =
   | { status: "pin_displayed"; message: string }
   | { status: "paired"; auth: string }

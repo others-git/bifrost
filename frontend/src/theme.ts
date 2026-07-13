@@ -86,6 +86,23 @@ export const nicheStyle = (accent: string, on: boolean, active = false) => ({
 /** Spacing scale (px). */
 export const space = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32 } as const;
 
+/** The minimum comfortable touch target (px) — every interactive element on a
+ * compact viewport must reach it, either by actually being this big or by
+ * wearing a `hitHalo`. */
+export const TOUCH = 44;
+
+/** Invisible touch halo: grows a control's hit box to at least `target`×`target`
+ * px without moving anything on screen — transparent padding compensated by
+ * negative margin. Apply to the OUTER interactive element (with `background:
+ * "none"`/`border: "none"`) and paint the visual chrome on an inner span, so a
+ * 24px close ×, a slim switch pill, or a thin slider keeps its designed size
+ * while the finger gets the full square. */
+export function hitHalo(w: number, h: number, target = TOUCH) {
+  const px = Math.max(0, Math.round((target - w) / 2));
+  const py = Math.max(0, Math.round((target - h) / 2));
+  return { padding: `${py}px ${px}px`, margin: `${-py}px ${-px}px` } as const;
+}
+
 /** Corner radii (px). Two languages on purpose: **framed surfaces are angular**
  * (`frame` ≈ square — cards/sheets/modals, so the gold corner filigree reads as
  * an engraved plate), while **controls stay round** (`sm`/`md` buttons, `pill`

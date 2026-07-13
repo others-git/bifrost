@@ -21,6 +21,7 @@ export function SceneButton({ onClick }: { onClick: () => void }) {
         width: "100%",
         marginTop: "0.1rem",
         padding: "0.5rem",
+        minHeight: 44,
         borderRadius: 10,
         border: "1px solid rgba(255,255,255,0.12)",
         color: "#f4ecda",

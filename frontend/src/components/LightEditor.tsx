@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { rgbToHex } from "../api";
 import { useViewport } from "../useViewport";
 import { color, glow, alpha } from "../theme";
+import { useSwipeTabs } from "./useSwipeTabs";
 import { Segmented, PowerToggle } from "./controls";
 import { Flyout, FlyoutHeader } from "./Flyout";
 
@@ -267,9 +268,10 @@ export function BrightnessSlider({
       <div style={{ display: "flex", alignItems: "center", gap: compact ? 12 : 9 }}>
         <SunGlyph size={compact ? 19 : 15} tint={color.dim} />
         <div
-          ref={trackRef}
+          data-swipe-ignore
           title={`${Math.round(value)}%`}
           onPointerDown={(e) => {
+            e.stopPropagation();
             dragging.current = true;
             e.currentTarget.setPointerCapture(e.pointerId);
             pick(e);
@@ -281,17 +283,26 @@ export function BrightnessSlider({
             dragging.current = false;
           }}
           style={{
-            position: "relative",
             flex: 1,
-            height: h,
-            borderRadius: h / 2,
-            border: `1px solid ${color.hairline}`,
-            background: `linear-gradient(to right, ${color.surfaceOff}, ${hex})`,
-            boxShadow: "inset 0 0 14px -8px #000",
+            padding: `${Math.max(0, Math.round((44 - h) / 2))}px 0`,
+            margin: `${-Math.max(0, Math.round((44 - h) / 2))}px 0`,
             touchAction: "none",
             cursor: "pointer",
+            boxSizing: "content-box",
           }}
         >
+          <div
+            ref={trackRef}
+            style={{
+              position: "relative",
+              height: h,
+              borderRadius: h / 2,
+              border: `1px solid ${color.hairline}`,
+              background: `linear-gradient(to right, ${color.surfaceOff}, ${hex})`,
+              boxShadow: "inset 0 0 14px -8px #000",
+              boxSizing: "border-box",
+            }}
+          >
           <div
             style={{
               position: "absolute",
@@ -306,6 +317,7 @@ export function BrightnessSlider({
               pointerEvents: "none",
             }}
           />
+          </div>
         </div>
         <span
           style={{
@@ -585,7 +597,7 @@ function EffectsPanel({
               style={{
                 flexShrink: 0,
                 padding: compact ? "0.35rem 0.7rem" : "0.2rem 0.55rem",
-                minHeight: compact ? 32 : undefined,
+                minHeight: compact ? 44 : undefined,
                 borderRadius: 999,
                 fontSize: compact ? "0.78rem" : "0.7rem",
                 fontWeight: 600,
@@ -1059,8 +1071,8 @@ function SegmentEditor({
             onClick={() => applyColor(c, true)}
             title={c}
             style={{
-              width: compact ? 38 : 26,
-              height: compact ? 38 : 26,
+              width: compact ? 44 : 26,
+              height: compact ? 44 : 26,
               borderRadius: 8,
               border: `1px solid ${alpha(color.text, 0.22)}`,
               background: c,
@@ -1073,8 +1085,8 @@ function SegmentEditor({
           onClick={clearSelected}
           title="Clear colour"
           style={{
-            width: compact ? 38 : 26,
-            height: compact ? 38 : 26,
+            width: compact ? 44 : 26,
+            height: compact ? 44 : 26,
             borderRadius: 8,
             border: `1px solid ${alpha(color.text, 0.22)}`,
             background: `linear-gradient(135deg, transparent 47%, #e0506a 47%, #e0506a 53%, transparent 53%), ${color.surfaceOff}`,
@@ -1182,6 +1194,7 @@ export function LightEditor({
   const [mode, setMode] = useState<EditorMode>(
     () => initialMode ?? (showColor ? "color" : showWhite ? "white" : "effects"),
   );
+  const swipe = useSwipeTabs(mode, availableModes, setMode);
   const hex = rgbToHex(...hsvToRgb(hue, sat, 1));
 
   function applyColor(h: number, s: number) {
@@ -1236,6 +1249,14 @@ export function LightEditor({
         <ModeToggle mode={mode} modes={availableModes} onChange={setMode} compact={isCompact} />
       )}
 
+      {/* A horizontal swipe on the editor body walks the mode tabs. */}
+      <div
+        {...swipe.handlers}
+        ref={swipe.contentRef}
+        key={swipe.key}
+        className={swipe.className}
+        style={{ display: "flex", flexDirection: "column", gap: "0.7rem", touchAction: "pan-y", ...swipe.style }}
+      >
       {/* Brightness lives next to the tab selector and persists across every mode
           (Color / White / Effects), since it's an independent dimension. */}
       {showBrightness && (
@@ -1310,6 +1331,7 @@ export function LightEditor({
           )}
         </>
       )}
+      </div>
 
       {children}
     </Flyout>

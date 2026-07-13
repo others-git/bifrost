@@ -4,6 +4,7 @@ pub mod govee_lan;
 pub mod ha;
 pub mod hue;
 pub mod lifx;
+pub mod nanoleaf;
 pub mod onkyo;
 pub mod shelly;
 pub mod smarttv;
@@ -39,6 +40,49 @@ pub fn mac_hw_id(raw: &str) -> Option<String> {
         .collect();
     // 12 hex = MAC-48 (Govee, Sonos, most Wi-Fi gear); 16 = EUI-64 (Zigbee/Hue).
     (hex.len() == 12 || hex.len() == 16).then(|| format!("mac:{hex}"))
+}
+
+/// HSV (h 0–360, s/v 0–1) → sRGB. Shared by the providers that drive colour by
+/// hue+saturation (LIFX, Nanoleaf) rather than by CIE xy — Bifrost's [`crate::models::Color`]
+/// is xy, so a provider converts through RGB. Value (`v`) carries brightness; the
+/// callers pass `v = 1.0` because brightness is a separate channel on the wire
+/// (an `rgb:`-magnitude approach would leak brightness into the colour).
+pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
+    let c = v * s;
+    let hp = (h.rem_euclid(360.0)) / 60.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r1, g1, b1) = match hp as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    let to = |f: f32| ((f + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    (to(r1), to(g1), to(b1))
+}
+
+/// sRGB → (hue 0–360, saturation 0–1). The inverse of [`hsv_to_rgb`]'s hue/sat,
+/// used to drive a hue+saturation device from a Bifrost RGB colour. Brightness is
+/// carried separately, so a dim-but-saturated value still reports full saturation.
+pub fn rgb_to_hs(r: u8, g: u8, b: u8) -> (f32, f32) {
+    let (rf, gf, bf) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+    let max = rf.max(gf).max(bf);
+    let min = rf.min(gf).min(bf);
+    let delta = max - min;
+    let hue = if delta == 0.0 {
+        0.0
+    } else if max == rf {
+        60.0 * ((gf - bf) / delta).rem_euclid(6.0)
+    } else if max == gf {
+        60.0 * ((bf - rf) / delta + 2.0)
+    } else {
+        60.0 * ((rf - gf) / delta + 4.0)
+    };
+    let sat = if max == 0.0 { 0.0 } else { delta / max };
+    (hue, sat)
 }
 
 /// Normalize a user-entered host into a base URL. If it already carries an
@@ -845,6 +889,7 @@ pub fn default_registry() -> ProviderRegistry {
     r.register_sensor(hue::HueSensorFactory);
     r.register(govee::GoveeProviderFactory);
     r.register(lifx::LifxProviderFactory);
+    r.register(nanoleaf::NanoleafProviderFactory);
     // Home Assistant serves multiple device domains from one provider row:
     // lights, power (switch/fan/plug), and media (media_player — TVs, speakers).
     // It appears once in the add-provider menu as an "Integration" (its light

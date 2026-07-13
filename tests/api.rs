@@ -845,6 +845,103 @@ async fn hue_pair_returns_502_when_bridge_unreachable() {
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 }
 
+#[tokio::test]
+async fn nanoleaf_pair_without_session_returns_401() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers/nanoleaf/pair")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"host":"192.168.1.20"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn nanoleaf_pair_returns_token_when_in_pairing_mode() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let controller = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/new"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "auth_token": "nl-tok" })),
+        )
+        .mount(&controller)
+        .await;
+
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let body = format!(r#"{{"host":"{}"}}"#, controller.uri());
+    let resp = app
+        .oneshot(helpers::authed_post(
+            "/api/providers/nanoleaf/pair",
+            &cookie,
+            &body,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["auth_token"], "nl-tok");
+}
+
+#[tokio::test]
+async fn nanoleaf_pair_returns_409_when_not_in_pairing_mode() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let controller = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/new"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&controller)
+        .await;
+
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let body = format!(r#"{{"host":"{}"}}"#, controller.uri());
+    let resp = app
+        .oneshot(helpers::authed_post(
+            "/api/providers/nanoleaf/pair",
+            &cookie,
+            &body,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["error"], "not_in_pairing_mode");
+}
+
+#[tokio::test]
+async fn nanoleaf_pair_returns_502_when_controller_unreachable() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Nothing listens on port 9.
+    let resp = app
+        .oneshot(helpers::authed_post(
+            "/api/providers/nanoleaf/pair",
+            &cookie,
+            r#"{"host":"127.0.0.1:9"}"#,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+}
+
 // ── Scenes ───────────────────────────────────────────────────────────────────
 
 async fn wled_mock() -> wiremock::MockServer {

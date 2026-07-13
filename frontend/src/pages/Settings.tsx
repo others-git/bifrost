@@ -9,6 +9,7 @@ import {
   setProviderPrune,
   syncProviderGroups,
   pairHueBridge,
+  pairNanoleaf,
   pairSmartTv,
   pairSmartTvRemote,
   scanForDevices,
@@ -1554,6 +1555,21 @@ function EditCredentialsForm({
     }
   }
 
+  async function handleNanoleafRePair() {
+    setPairing(true);
+    setPairMsg("");
+    const result = await pairNanoleaf(credentials.host ?? "");
+    setPairing(false);
+    if ("auth_token" in result) {
+      setField("auth_token", result.auth_token);
+      setPairMsg("✓ Paired with the controller.");
+    } else if (result.error === "not_in_pairing_mode") {
+      setPairMsg("Hold the controller's power button ~5-7s until the LED flashes, then click Pair again.");
+    } else {
+      setPairMsg(`Could not reach the controller: ${result.message}`);
+    }
+  }
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setError("");
@@ -1574,6 +1590,7 @@ function EditCredentialsForm({
       )}
       {schema.map((field) => {
         const isHueAppKey = provider.provider_type === "hue" && field.name === "app_key";
+        const isNanoleafToken = provider.provider_type === "nanoleaf" && field.name === "auth_token";
         const isSecret = field.kind === "password";
         // Secret fields keep their stored value when left blank, so they're
         // only required when we couldn't decrypt the existing credentials.
@@ -1603,8 +1620,17 @@ function EditCredentialsForm({
                   {pairing ? "Pairing…" : "Pair"}
                 </Button>
               )}
+              {isNanoleafToken && (
+                <Button variant="ghost"
+                  type="button"
+                  onClick={handleNanoleafRePair}
+                  disabled={pairing || !(credentials.host ?? "").trim()}
+                >
+                  {pairing ? "Pairing…" : "Pair"}
+                </Button>
+              )}
             </div>
-            {isHueAppKey && pairMsg && (
+            {(isHueAppKey || isNanoleafToken) && pairMsg && (
               <span style={{ fontSize: "0.78rem", color: pairMsg.startsWith("✓") ? "var(--bf-good)" : "#fa0" }}>
                 {pairMsg}
               </span>
@@ -1758,6 +1784,22 @@ function AddProviderForm({
     }
   }
 
+  // Nanoleaf pairing: the controller mints the token while its LED flashes.
+  async function handleNanoleafPair() {
+    setPairing(true);
+    setPairMsg("");
+    const result = await pairNanoleaf(credentials.host ?? "");
+    setPairing(false);
+    if ("auth_token" in result) {
+      setField("auth_token", result.auth_token);
+      setPairMsg("✓ Paired with the controller.");
+    } else if (result.error === "not_in_pairing_mode") {
+      setPairMsg("Hold the controller's power button ~5-7s until the LED flashes, then click Pair again.");
+    } else {
+      setPairMsg(`Could not reach the controller: ${result.message}`);
+    }
+  }
+
   // Smart-TV (Bravia) PIN pairing — two steps: first call makes the TV show a
   // PIN; the second submits it and stores the returned auth token.
   async function handleTvPair() {
@@ -1854,14 +1896,21 @@ function AddProviderForm({
         const isHueAppKey = selectedType === "hue" && field.name === "app_key";
         // A Smart TV's auth token comes from PIN pairing, not manual entry.
         const isTvAuth = selectedType === "smarttv" && field.name === "auth";
+        // A Nanoleaf token comes from power-button pairing, not manual entry.
+        const isNanoleafToken = selectedType === "nanoleaf" && field.name === "auth_token";
         return (
           <label key={field.name} style={labelStyle}>
             <span>
               {field.label}
               {field.required && <span style={{ color: ACCENT }}> *</span>}
             </span>
-            {!isHueAppKey && !isTvAuth && field.hint && (
+            {!isHueAppKey && !isTvAuth && !isNanoleafToken && field.hint && (
               <span style={{ color: "var(--bf-faint)", fontSize: "0.78rem" }}>{field.hint}</span>
+            )}
+            {isNanoleafToken && (
+              <span style={{ color: "var(--bf-faint)", fontSize: "0.78rem" }}>
+                Hold the controller's power button ~5-7s until the LED flashes, then click Pair — or paste a token manually.
+              </span>
             )}
             {isHueAppKey && (
               <span style={{ color: "var(--bf-faint)", fontSize: "0.78rem" }}>
@@ -1901,6 +1950,16 @@ function AddProviderForm({
                   {pairing ? "Pairing…" : "Pair"}
                 </Button>
               )}
+              {isNanoleafToken && (
+                <Button
+                  variant="ghost"
+                  type="button"
+                  onClick={handleNanoleafPair}
+                  disabled={pairing || !(credentials.host ?? "").trim()}
+                >
+                  {pairing ? "Pairing…" : "Pair"}
+                </Button>
+              )}
             </div>
             {isTvAuth && tvPinStep && (
               <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.4rem" }}>
@@ -1921,7 +1980,7 @@ function AddProviderForm({
                 </Button>
               </div>
             )}
-            {(isHueAppKey || isTvAuth) && pairMsg && (
+            {(isHueAppKey || isTvAuth || isNanoleafToken) && pairMsg && (
               <span
                 style={{
                   fontSize: "0.78rem",

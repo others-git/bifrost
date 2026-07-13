@@ -34,6 +34,7 @@ pub enum Provider {
     Hue,
     Govee,
     Lifx,
+    Nanoleaf,
     Wled,
     Tasmota,
     Shelly,

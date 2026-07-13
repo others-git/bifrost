@@ -239,43 +239,9 @@ fn lifx_effect_body(effect: &str, state: &LightState) -> Option<serde_json::Valu
     }
 }
 
-/// HSV (h 0–360, s/v 0–1) → sRGB, for mapping a LIFX colour to Bifrost's `Color`.
-fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
-    let c = v * s;
-    let hp = (h.rem_euclid(360.0)) / 60.0;
-    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
-    let (r1, g1, b1) = match hp as u32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    let m = v - c;
-    let to = |f: f32| ((f + m) * 255.0).round().clamp(0.0, 255.0) as u8;
-    (to(r1), to(g1), to(b1))
-}
-
-/// sRGB → (hue 0–360, saturation 0–1). The inverse of [`hsv_to_rgb`]'s hue/sat,
-/// used to drive LIFX colour by hue+saturation only (see [`state_to_body`]).
-fn rgb_to_hs(r: u8, g: u8, b: u8) -> (f32, f32) {
-    let (rf, gf, bf) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
-    let max = rf.max(gf).max(bf);
-    let min = rf.min(gf).min(bf);
-    let delta = max - min;
-    let hue = if delta == 0.0 {
-        0.0
-    } else if max == rf {
-        60.0 * ((gf - bf) / delta).rem_euclid(6.0)
-    } else if max == gf {
-        60.0 * ((bf - rf) / delta + 2.0)
-    } else {
-        60.0 * ((rf - gf) / delta + 4.0)
-    };
-    let sat = if max == 0.0 { 0.0 } else { delta / max };
-    (hue, sat)
-}
+// LIFX drives colour by hue+saturation; the HSV⇄RGB conversion lives in the
+// shared `providers` module (reused by Nanoleaf) so there's one implementation.
+use crate::providers::{hsv_to_rgb, rgb_to_hs};
 
 /// Build the LIFX state PUT body (power + brightness + colour) from a Bifrost
 /// state. Colour and colour temperature are mutually exclusive — a `color` wins

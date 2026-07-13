@@ -4,8 +4,9 @@
 // Color/White segmented control.
 
 import { useState, type ButtonHTMLAttributes, type CSSProperties, type ReactNode } from "react";
-import { color, alpha, glow, radius } from "../theme";
+import { color, alpha, glow, hitHalo, radius } from "../theme";
 import { Glyph } from "./glyphs";
+import { useViewport } from "../useViewport";
 
 // ── Button ───────────────────────────────────────────────────────────────────
 
@@ -45,6 +46,7 @@ export function Button({
   ...rest
 }: { variant?: ButtonVariant } & ButtonHTMLAttributes<HTMLButtonElement>) {
   const [hover, setHover] = useState(false);
+  const { isCompact } = useViewport();
   return (
     <button
       {...rest}
@@ -53,6 +55,9 @@ export function Button({
       onMouseLeave={() => setHover(false)}
       style={{
         ...buttonStyle(variant),
+        // Touch-sized on compact; `subtle` is an inline row action, so it gets
+        // a lighter bump rather than inflating dense rows.
+        minHeight: isCompact ? (variant === "subtle" ? 36 : 44) : undefined,
         opacity: disabled ? 0.5 : 1,
         cursor: disabled ? "default" : "pointer",
         filter: hover && !disabled ? "brightness(1.12)" : undefined,
@@ -94,6 +99,8 @@ export function Switch({
     : { top: PAD, left: on ? onEnd : PAD };
 
   return (
+    // The slim pill is the visual; the button around it is an invisible ≥44px
+    // touch halo so the switch is tappable without fattening the design.
     <button
       onClick={(e) => {
         e.stopPropagation();
@@ -104,40 +111,52 @@ export function Switch({
       aria-checked={on}
       aria-label={on ? "Turn off" : "Turn on"}
       style={{
+        ...hitHalo(w, h),
         flexShrink: 0,
-        position: "relative",
-        width: w,
-        height: h,
-        borderRadius: 999,
-        border: `1px solid ${on ? alpha(accent, 0.55) : color.border}`,
+        background: "none",
+        border: "none",
+        display: "grid",
+        placeItems: "center",
         cursor: disabled ? "default" : "pointer",
-        background: on
-          ? `linear-gradient(${vertical ? 180 : 90}deg, ${alpha(accent, 0.45)}, ${alpha(accent, 0.12)} 70%), ${color.surfaceOff}`
-          : alpha(color.text, 0.05),
-        boxShadow: on
-          ? `${glow(accent, 16)}, inset 0 1px 0 ${alpha(color.text, 0.22)}`
-          : `inset 0 1px 0 ${alpha(color.text, 0.06)}`,
-        backdropFilter: "blur(4px)",
-        WebkitBackdropFilter: "blur(4px)",
         opacity: disabled ? 0.5 : 1,
-        transition: "background 0.2s, box-shadow 0.2s, border-color 0.2s",
       }}
     >
       <span
         aria-hidden
         style={{
-          position: "absolute",
-          ...knobPos,
-          width: KNOB,
-          height: KNOB,
-          borderRadius: "50%",
-          background: on ? color.text : alpha(color.text, 0.4),
+          position: "relative",
+          display: "block",
+          width: w,
+          height: h,
+          borderRadius: 999,
+          border: `1px solid ${on ? alpha(accent, 0.55) : color.border}`,
+          background: on
+            ? `linear-gradient(${vertical ? 180 : 90}deg, ${alpha(accent, 0.45)}, ${alpha(accent, 0.12)} 70%), ${color.surfaceOff}`
+            : alpha(color.text, 0.05),
           boxShadow: on
-            ? `0 0 8px ${alpha(accent, 0.9)}, 0 1px 2px rgba(0,0,0,0.45)`
-            : "0 1px 2px rgba(0,0,0,0.35)",
-          transition: "top 0.2s, left 0.2s, background 0.2s, box-shadow 0.2s",
+            ? `${glow(accent, 16)}, inset 0 1px 0 ${alpha(color.text, 0.22)}`
+            : `inset 0 1px 0 ${alpha(color.text, 0.06)}`,
+          backdropFilter: "blur(4px)",
+          WebkitBackdropFilter: "blur(4px)",
+          transition: "background 0.2s, box-shadow 0.2s, border-color 0.2s",
+          boxSizing: "border-box",
         }}
-      />
+      >
+        <span
+          style={{
+            position: "absolute",
+            ...knobPos,
+            width: KNOB,
+            height: KNOB,
+            borderRadius: "50%",
+            background: on ? color.text : alpha(color.text, 0.4),
+            boxShadow: on
+              ? `0 0 8px ${alpha(accent, 0.9)}, 0 1px 2px rgba(0,0,0,0.45)`
+              : "0 1px 2px rgba(0,0,0,0.35)",
+            transition: "top 0.2s, left 0.2s, background 0.2s, box-shadow 0.2s",
+          }}
+        />
+      </span>
     </button>
   );
 }
@@ -183,7 +202,7 @@ export function Segmented<T extends string>({
             style={{
               flex: 1,
               padding: compact ? "0.55rem 0.4rem" : "0.3rem 0.4rem",
-              minHeight: compact ? 40 : undefined,
+              minHeight: compact ? 44 : undefined,
               fontSize: compact ? "0.9rem" : "0.78rem",
               fontWeight: 600,
               letterSpacing: "0.02em",
@@ -230,7 +249,9 @@ export function PowerToggle({
   disabled?: boolean;
   size?: number;
 }) {
-  // Default sized a touch larger than the close button — it's the primary control.
+  // Default sized a touch larger than the close button — it's the primary
+  // control. The painted ring keeps its designed size; the button around it is
+  // an invisible ≥44px touch halo.
   return (
     <button
       onClick={() => !disabled && onToggle()}
@@ -239,22 +260,32 @@ export function PowerToggle({
       aria-pressed={on}
       title="Power"
       style={{
+        ...hitHalo(size, size),
         display: "grid",
         placeItems: "center",
-        width: size,
-        height: size,
         flexShrink: 0,
-        borderRadius: "50%",
-        background: on ? alpha(accent, 0.16) : "transparent",
-        border: `1px solid ${on ? accent : color.hairline}`,
-        color: on ? accent : color.faint,
-        boxShadow: on ? glow(accent, 10) : "none",
+        background: "none",
+        border: "none",
         cursor: disabled ? "not-allowed" : "pointer",
         opacity: disabled ? 0.5 : 1,
-        padding: 0,
       }}
     >
-      <Glyph name="power" size={Math.round(size * 0.54)} />
+      <span
+        style={{
+          display: "grid",
+          placeItems: "center",
+          width: size,
+          height: size,
+          borderRadius: "50%",
+          background: on ? alpha(accent, 0.16) : "transparent",
+          border: `1px solid ${on ? accent : color.hairline}`,
+          color: on ? accent : color.faint,
+          boxShadow: on ? glow(accent, 10) : "none",
+          boxSizing: "border-box",
+        }}
+      >
+        <Glyph name="power" size={Math.round(size * 0.54)} />
+      </span>
     </button>
   );
 }

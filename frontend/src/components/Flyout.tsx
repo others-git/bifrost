@@ -13,7 +13,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "re
 import { createPortal } from "react-dom";
 import { useViewport } from "../useViewport";
 import { sheetStyle } from "./sheet";
-import { color, radius, alpha, gildedRule, labelType } from "../theme";
+import { color, radius, alpha, gildedRule, hitHalo, labelType } from "../theme";
 
 export function Flyout({
   anchor,
@@ -248,26 +248,36 @@ export function FlyoutHeader({
           )}
         </div>
         {actions}
+        {/* The small ring is the visual; the halo makes it a full-size target. */}
         <button
           onClick={onClose}
           aria-label="Close"
           style={{
+            ...hitHalo(24, 24),
             display: "grid",
             placeItems: "center",
-            width: 24,
-            height: 24,
             flexShrink: 0,
-            borderRadius: "50%",
             background: "none",
-            border: `1px solid ${color.hairline}`,
-            color: color.faint,
+            border: "none",
             cursor: "pointer",
-            fontSize: "1rem",
-            lineHeight: 1,
-            padding: 0,
           }}
         >
-          ×
+          <span
+            style={{
+              display: "grid",
+              placeItems: "center",
+              width: 24,
+              height: 24,
+              borderRadius: "50%",
+              border: `1px solid ${color.hairline}`,
+              color: color.faint,
+              fontSize: "1rem",
+              lineHeight: 1,
+              boxSizing: "border-box",
+            }}
+          >
+            ×
+          </span>
         </button>
       </div>
       <div aria-hidden style={{ height: 1, background: gildedRule, opacity: 0.7 }} />

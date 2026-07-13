@@ -22,6 +22,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/scan/{provider_type}", post(scan_network))
         .route("/discover-all", get(discover_all))
         .route("/hue/pair", post(hue_pair))
+        .route("/nanoleaf/pair", post(nanoleaf_pair))
         .route("/smarttv/pair", post(smarttv_pair))
         .route("/{id}", delete(remove_provider))
         .route("/{id}/config", get(provider_config))
@@ -1019,6 +1020,42 @@ async fn hue_pair(_: Session, Json(req): Json<HuePairRequest>) -> impl IntoRespo
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({ "error": "bridge_unreachable", "message": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+// ── Nanoleaf power-button pairing ────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct NanoleafPairRequest {
+    /// The controller's IP / host (or a full base URL in tests).
+    host: String,
+}
+
+/// One-shot Nanoleaf pairing: the user holds the controller's power button until
+/// the LED flashes, then this `POST /api/v1/new` returns the `auth_token` to
+/// store as the provider's credential alongside `host` (mirrors the Hue link
+/// button). Not in pairing mode → 409 with an actionable message.
+async fn nanoleaf_pair(_: Session, Json(req): Json<NanoleafPairRequest>) -> impl IntoResponse {
+    use crate::providers::nanoleaf::{self, PairOutcome};
+
+    let base = crate::providers::base_url(&req.host, "http", Some(16021));
+    match nanoleaf::pair(&base).await {
+        Ok(PairOutcome::Paired { auth_token }) => {
+            Json(serde_json::json!({ "auth_token": auth_token })).into_response()
+        }
+        Ok(PairOutcome::NotInPairingMode) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "not_in_pairing_mode",
+                "message": "Hold the Nanoleaf controller's power button for about 5-7 seconds until the LED flashes, then try again."
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": "controller_unreachable", "message": e.to_string() })),
         )
             .into_response(),
     }

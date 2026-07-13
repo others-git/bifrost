@@ -131,9 +131,15 @@ to [`PUT /audio/devices/{id}/receiver`](api.md#bind-a-source-to-a-receiver).
 
 ### TVs & the on-screen remote
 
-A TV/streamer can expose a **virtual remote** — a D-pad, navigation, volume,
-transport, and app-launch tiles — opened from the **Remote** button on the TV's
-audio fly-out. The remote **auto-pairs** to its TV: when a `remote` entity and a
+A TV/streamer can expose a **virtual remote** — opened from the **Remote**
+button on the TV's audio fly-out. Navigation has two forms, remembered per
+client: the **Scrying Glass**, a gesture slab you use with your eyes on the TV
+(flick anywhere = one arrow press, drag-and-hold = auto-repeat for long rails,
+tap = OK, two-finger tap = back, with haptic ticks where the device supports
+them), and a classic **Keys** cross for those who want targets — plus discrete
+Back/Home/Menu, transport, volume, text entry, and app-launch tiles. On a
+desktop, the physical keyboard drives it too (arrows / Enter / Backspace)
+while the remote is open. The remote **auto-pairs** to its TV: when a `remote` entity and a
 `media_player` share a hardware id (Home Assistant commonly exposes both for one
 TV), Bifrost links them during discovery — no manual step. The app tiles are the
 TV's **own installed catalog** when the vendor can enumerate it (a Bravia's app

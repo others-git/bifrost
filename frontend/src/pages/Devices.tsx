@@ -65,6 +65,7 @@ import type { AddPrefill } from "./Settings";
 import { MenuItem } from "../components/Select";
 import { AnchoredPanel } from "../components/AnchoredPanel";
 import { useViewport } from "../useViewport";
+import { useSwipeTabs } from "../components/useSwipeTabs";
 import { T, ACCENT, alpha } from "../theme";
 
 type Domain = "light" | "media" | "power" | "sensor";
@@ -1324,6 +1325,8 @@ function buildComposites(
 
 export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill) => void }) {
   const [tab, setTab] = useState<"controlled" | "detected">("controlled");
+  // Swiping the page body flips Controlled ⇄ Detected (the shared tab gesture).
+  const swipe = useSwipeTabs(tab, ["controlled", "detected"] as const, setTab);
   const [query, setQuery] = useState("");
   const [items, setItems] = useState<Item[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
@@ -1687,7 +1690,10 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
   }
 
   return (
-    <div style={{ padding: isMobile ? "1.2rem 1rem 2rem" : "2rem 2.5rem" }}>
+    <div
+      {...swipe.handlers}
+      style={{ padding: isMobile ? "1.2rem 1rem 2rem" : "2rem 2.5rem", touchAction: "pan-y" }}
+    >
       <PageHeader
         title="Devices"
         description="Every device Bifrost has imported, grouped by the provider it came from. This is where you enable/disable a device and pin a glyph (click its icon). Live control lives on the Control, Audio, and Rooms pages."
@@ -1755,6 +1761,7 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
         )}
       </div>
 
+      <div ref={swipe.contentRef} key={swipe.key} className={swipe.className} style={swipe.style}>
       {tab === "detected" ? (
         <DetectedDevices onAdd={onAddDetected} />
       ) : (
@@ -1921,6 +1928,7 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
           <GenericDevicesSection />
         </>
       )}
+      </div>
     </div>
   );
 }

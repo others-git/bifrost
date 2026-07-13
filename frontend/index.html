@@ -229,9 +229,57 @@
       }
       .bifrost-effect-drift { animation: bifrost-effect-drift 8s linear infinite; }
 
+      /* Swiped tab panels: the incoming content slides in from the direction
+         of the swipe (see useSwipeTabs) — confirms the gesture landed. */
+      @keyframes bifrost-tab-enter-right {
+        from { opacity: 0.3; transform: translateX(32px); }
+        to   { opacity: 1; transform: none; }
+      }
+      @keyframes bifrost-tab-enter-left {
+        from { opacity: 0.3; transform: translateX(-32px); }
+        to   { opacity: 1; transform: none; }
+      }
+      .bifrost-tab-enter-right { animation: bifrost-tab-enter-right 0.22s cubic-bezier(0.22, 1, 0.36, 1) both; }
+      .bifrost-tab-enter-left  { animation: bifrost-tab-enter-left 0.22s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+      /* The Scrying Glass (gesture remote). All of these are working feedback:
+         the ember trail follows the finger, the ripple confirms a tap (OK),
+         an edge tick flares gold when its direction fires, and the slab's
+         inner glow wakes while touched. */
+      @keyframes bifrost-scry-ember {
+        from { opacity: 0.8; transform: translate(-50%, -50%) scale(1); }
+        to   { opacity: 0; transform: translate(-50%, -50%) scale(0.35); }
+      }
+      .bifrost-scry-ember {
+        border-radius: 50%;
+        background: radial-gradient(circle, rgba(196, 181, 253, 0.9) 0%, rgba(139, 92, 246, 0.5) 45%, transparent 70%);
+        animation: bifrost-scry-ember 0.7s ease-out both;
+      }
+      @keyframes bifrost-scry-ripple {
+        from { opacity: 0.85; transform: translate(-50%, -50%) scale(0.4); }
+        to   { opacity: 0; transform: translate(-50%, -50%) scale(3.4); }
+      }
+      .bifrost-scry-ripple {
+        border-radius: 50%;
+        border: 2px solid var(--bf-violet, #8b5cf6);
+        box-shadow: 0 0 12px var(--bf-violet, #8b5cf6);
+        animation: bifrost-scry-ripple 0.5s ease-out both;
+      }
+      @keyframes bifrost-scry-flare {
+        0%   { color: var(--bf-goldBright, #d8b15a); filter: drop-shadow(0 0 6px var(--bf-goldBright, #d8b15a)); }
+        100% { color: inherit; filter: none; }
+      }
+      .bifrost-scry-flare { animation: bifrost-scry-flare 0.35s ease-out both; }
+      .bifrost-scry-awake {
+        box-shadow: inset 0 2px 16px rgba(0, 0, 0, 0.85),
+          inset 0 0 90px -26px color-mix(in srgb, var(--bf-violet, #8b5cf6) 65%, transparent) !important;
+      }
+
       @media (prefers-reduced-motion: reduce) {
         .bifrost-aurora, .bifrost-brand, .bifrost-card { animation: none; }
         .bifrost-effect-drift { animation: none; }
+        .bifrost-tab-enter-right, .bifrost-tab-enter-left { animation: none; }
+        .bifrost-scry-ember, .bifrost-scry-ripple, .bifrost-scry-flare { animation: none; opacity: 0; }
         .bifrost-brand { transition: none; }
         .bifrost-voice-pulse, .bifrost-voice-edge { animation: none; }
         .bifrost-seal-breathe, .bifrost-seal-spin { animation: none; }

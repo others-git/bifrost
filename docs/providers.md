@@ -16,6 +16,7 @@ The table below is the **full set of supported devices** and how each connects.
 | Philips Hue | Light | Lights + motion accessories (motion/light/temperature sensors) | LAN (CLIP v2) | SSE push | Bridge IP + link-button app key |
 | Govee | Light | Lights | Cloud API + LAN (UDP) | Poll (≈2 min) | API key and/or LAN interface |
 | LIFX | Light | Lights | Cloud API + LAN (UDP) | Poll (≈2 min) | Account token and/or LAN interface |
+| Nanoleaf | Light | Panels (Shapes, Canvas, Light Panels) | LAN (Open API, HTTP) | Poll (≈2 min) | Controller IP + power-button token |
 | Onkyo / Integra | Media | Receivers + zones | LAN (eISCP) | Push | Receiver IP |
 | Sonos | Media | Speakers | LAN (UPnP) | Push (events + poll) | Any player's IP |
 | Smart TV | Media + Remote | TVs (Sony Bravia) | LAN (vendor HTTP API) | Poll | Auto-discovered IP + PIN pairing |
@@ -45,6 +46,13 @@ fan-outs don't drop commands.
 - **Setup** Supply your **access token** ([cloud.lifx.com/settings](https://cloud.lifx.com/settings)). **Local LAN control is on by default** (LIFX LAN is on by default on the bulbs — no per-device toggle needed). (The LAN-interface field is advanced: blank = all interfaces / `0.0.0.0`.)
 - **LAN-preferred control** — plain colour/brightness/power goes over your **local network** whenever a bulb is reachable (faster, no quota, works during a cloud outage), falling back to the **cloud** for any bulb that isn't, and for **effects** (effects run via the cloud). The Devices page shows each bulb's `LAN`/`Cloud` connection. A host that can't reach the LAN (or has no token) still works on whichever transport is available.
 - **Capabilities** RGB color, color temperature, brightness, and **firmware effects** — `off`/`breathe`/`pulse` on every color bulb, `move` on multizone strips (Z/Beam), and `morph`/`flame` on matrix bulbs (Tile/Candle). **LIFX groups import as Bifrost Rooms** with one-call group control (cloud).
+
+## Nanoleaf
+
+- **Category** Light · **Transport** LAN, the Nanoleaf **Open API** (HTTP on port 16021) · **Live** polling.
+- **Setup** Enter the controller's **IP address** (find it in the Nanoleaf app, or on your router). Auto-discovery is manual on WSL2 — mDNS doesn't cross the WSL network boundary — so type the IP in. Then **pair**: hold the controller's **power button for ~5–7 seconds** until the LED starts flashing, and pair (the same "press the button" flow as a Hue bridge). Pairing mints an **auth token** stored as the provider's credential; you can also paste a token you already have.
+- **Capabilities** RGB color (hue/saturation), color temperature (1200–6500 K), brightness, and **effects** — the controller's own effect list (e.g. "Northern Lights", "Windmill"). An effect is Bifrost's third light mode; **brightness stays live while an effect plays** (a brightness change never cancels the running effect). No native rooms.
+- **De-dup** The Open API exposes no MAC (only a serial), so a Home Assistant copy of the same panels **isn't shadowed automatically** (auto-shadowing is exact-MAC only) — shadow the HA duplicate manually from the Devices page if you run both.
 
 ## Onkyo / Integra
 
