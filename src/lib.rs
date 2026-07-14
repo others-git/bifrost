@@ -289,7 +289,12 @@ pub fn start_manager_for(
             match providers::hue::HueProvider::from_credentials(creds_json) {
                 Ok(provider) => {
                     tracing::info!("starting SSE connection manager for provider {provider_id}");
-                    connections.start_sse(provider_id.to_string(), provider, state.db.clone());
+                    connections.start_sse(
+                        provider_id.to_string(),
+                        provider,
+                        state.db.clone(),
+                        state.inventory_events.clone(),
+                    );
                 }
                 Err(e) => tracing::error!("failed to build provider {provider_id}: {e:#}"),
             }
@@ -301,7 +306,12 @@ pub fn start_manager_for(
             match providers::ha::HaProvider::from_credentials(creds_json) {
                 Ok(provider) => {
                     tracing::info!("starting HA push manager for provider {provider_id}");
-                    connections.start_ha_push(provider_id.to_string(), provider, state.db.clone());
+                    connections.start_ha_push(
+                        provider_id.to_string(),
+                        provider,
+                        state.db.clone(),
+                        state.inventory_events.clone(),
+                    );
                 }
                 Err(e) => tracing::error!("failed to build HA provider {provider_id}: {e:#}"),
             }
@@ -317,6 +327,7 @@ pub fn start_manager_for(
                         provider,
                         std::time::Duration::from_secs(interval_secs),
                         state.db.clone(),
+                        state.inventory_events.clone(),
                     );
                 }
                 Err(e) => tracing::error!("failed to build provider {provider_id}: {e:#}"),

@@ -707,14 +707,20 @@ impl ConnectionRegistry {
     }
 
     /// Spawn the Hue SSE loop and a DB writer task for the given provider.
-    pub fn start_sse(&mut self, provider_id: String, provider: HueProvider, db: SqlitePool) {
+    pub fn start_sse(
+        &mut self,
+        provider_id: String,
+        provider: HueProvider,
+        db: SqlitePool,
+        inventory: broadcast::Sender<String>,
+    ) {
         let (mgr, rx) = HueConnectionManager::new(provider);
         let mgr = Arc::new(mgr);
         let state = Arc::clone(&mgr.state);
         let events = mgr.events.clone();
         let sensor_events = mgr.sensor_events.clone();
         let sse_task = tokio::spawn(Arc::clone(&mgr).run());
-        let db_task = tokio::spawn(db_writer_task(rx, db.clone()));
+        let db_task = tokio::spawn(db_writer_task(rx, db.clone(), inventory));
         let sensor_db = tokio::spawn(sensor_db_writer_task(
             sensor_events.subscribe(),
             provider_id.clone(),
@@ -740,13 +746,14 @@ impl ConnectionRegistry {
         provider: Box<dyn LightProvider>,
         interval: Duration,
         db: SqlitePool,
+        inventory: broadcast::Sender<String>,
     ) {
         let (mgr, rx) = PollingManager::new(provider, interval);
         let mgr = Arc::new(mgr);
         let state = Arc::clone(&mgr.state);
         let events = mgr.events.clone();
         let poll_task = tokio::spawn(Arc::clone(&mgr).run());
-        let db_task = tokio::spawn(db_writer_task(rx, db));
+        let db_task = tokio::spawn(db_writer_task(rx, db, inventory));
         self.entries.insert(
             provider_id,
             ConnectionEntry {
@@ -869,7 +876,13 @@ impl ConnectionRegistry {
     /// Spawn the HA multi-domain push loop and a DB writer per domain (light /
     /// media / power) for the given provider. One WebSocket keeps every HA device
     /// domain live, so this entry carries the light, media, **and** power channels.
-    pub fn start_ha_push(&mut self, provider_id: String, provider: HaProvider, db: SqlitePool) {
+    pub fn start_ha_push(
+        &mut self,
+        provider_id: String,
+        provider: HaProvider,
+        db: SqlitePool,
+        inventory: broadcast::Sender<String>,
+    ) {
         let mgr = Arc::new(HaPushManager::new(provider));
         let state = Arc::clone(&mgr.state);
         let events = mgr.light_events.clone();
@@ -878,7 +891,7 @@ impl ConnectionRegistry {
         let sensor_events = mgr.sensor_events.clone();
 
         let push_task = tokio::spawn(Arc::clone(&mgr).run());
-        let light_db = tokio::spawn(db_writer_task(events.subscribe(), db.clone()));
+        let light_db = tokio::spawn(db_writer_task(events.subscribe(), db.clone(), inventory));
         let media_db = tokio::spawn(media_db_writer_task(
             media_events.subscribe(),
             provider_id.clone(),
@@ -1079,14 +1092,22 @@ fn journal_state_push(
 }
 
 /// Writes incoming light events to the DB. Runs as a background task alongside each manager.
-async fn db_writer_task(mut rx: broadcast::Receiver<LightEvent>, db: SqlitePool) {
+async fn db_writer_task(
+    mut rx: broadcast::Receiver<LightEvent>,
+    db: SqlitePool,
+    inventory: broadcast::Sender<String>,
+) {
     let mut last_logged = std::collections::HashMap::new();
     loop {
         match rx.recv().await {
             Ok(event) => {
                 let payload = serde_json::to_string(&event.patch).unwrap_or_default();
                 journal_state_push(&mut last_logged, "light", &event.device_id, payload);
-                apply_event_to_db(&event, &db).await;
+                if apply_event_to_db(&event, &db).await {
+                    // Capabilities genuinely changed (e.g. a new Nanoleaf scene
+                    // in its effects list) — nudge clients to refetch inventory.
+                    let _ = inventory.send("lights".to_string());
+                }
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 warn!("light event db writer lagged by {n} events");
@@ -1098,15 +1119,20 @@ async fn db_writer_task(mut rx: broadcast::Receiver<LightEvent>, db: SqlitePool)
 
 /// Merge an event's patch into the stored `last_state`. Events are partial —
 /// overwriting would reset fields the event didn't mention.
-async fn apply_event_to_db(event: &LightEvent, db: &SqlitePool) {
+///
+/// Returns `true` when the event carried capabilities that DIFFER from the
+/// stored ones (a new effect appeared in a poll, a flag self-healed) — the
+/// caller announces those on the inventory channel, changed-only, so a steady
+/// 2-minute poll never spams clients into refetching.
+async fn apply_event_to_db(event: &LightEvent, db: &SqlitePool) -> bool {
     use sqlx::Row;
 
-    let row = sqlx::query("SELECT last_state FROM lights WHERE device_id = ?")
+    let row = sqlx::query("SELECT last_state, capabilities FROM lights WHERE device_id = ?")
         .bind(&event.device_id)
         .fetch_optional(db)
         .await;
 
-    let Ok(Some(row)) = row else { return }; // unknown device or db error
+    let Ok(Some(row)) = row else { return false }; // unknown device or db error
 
     let mut state: LightState = row
         .get::<Option<String>, _>("last_state")
@@ -1121,6 +1147,8 @@ async fn apply_event_to_db(event: &LightEvent, db: &SqlitePool) {
     // capabilities, so the stored value is left untouched.
     if let Some(caps) = &event.capabilities {
         let caps_json = serde_json::to_string(caps).unwrap_or_default();
+        let stored_caps: Option<String> = row.get("capabilities");
+        let changed = stored_caps.as_deref() != Some(caps_json.as_str());
         let _ = sqlx::query(
             "UPDATE lights SET last_state = ?, capabilities = ?, last_seen = datetime('now') WHERE device_id = ?",
         )
@@ -1129,6 +1157,7 @@ async fn apply_event_to_db(event: &LightEvent, db: &SqlitePool) {
         .bind(&event.device_id)
         .execute(db)
         .await;
+        changed
     } else {
         let _ = sqlx::query(
             "UPDATE lights SET last_state = ?, last_seen = datetime('now') WHERE device_id = ?",
@@ -1137,6 +1166,7 @@ async fn apply_event_to_db(event: &LightEvent, db: &SqlitePool) {
         .bind(&event.device_id)
         .execute(db)
         .await;
+        false
     }
 }
 
@@ -1399,7 +1429,10 @@ mod tests {
                 segments: None,
             }),
         };
-        apply_event_to_db(&event, &db).await;
+        assert!(
+            apply_event_to_db(&event, &db).await,
+            "changed capabilities must report true (clients refetch on it)"
+        );
 
         let row = sqlx::query("SELECT capabilities FROM lights WHERE device_id = 'dev-1'")
             .fetch_one(&db)
@@ -1409,6 +1442,23 @@ mod tests {
             serde_json::from_str(&row.get::<String, _>("capabilities")).unwrap();
         assert!(caps.color_rgb, "poll must refresh stale color_rgb to true");
         assert_eq!(caps.hue_gamut, Some(crate::models::HueGamut::C));
+
+        // The very next identical poll is silent — changed-only, so a steady
+        // 2-minute cycle never spams clients into refetching. And a bare state
+        // patch (no capabilities: SSE pushes) never reports a change at all.
+        assert!(
+            !apply_event_to_db(&event, &db).await,
+            "an unchanged capabilities write must stay silent"
+        );
+        let patch_only = LightEvent {
+            device_id: "dev-1".into(),
+            patch: LightStatePatch {
+                on: Some(false),
+                ..Default::default()
+            },
+            capabilities: None,
+        };
+        assert!(!apply_event_to_db(&patch_only, &db).await);
     }
 
     // ── Media push manager ───────────────────────────────────────────────────

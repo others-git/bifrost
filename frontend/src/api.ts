@@ -2040,9 +2040,27 @@ export function rgbToXy(r: number, g: number, b: number): { x: number; y: number
 
 /** A light's current colour as a hex, or a warm-white fallback when it's on
  * without a colour (so a lit surface always has a glow colour to wear). */
+/** A lamp's pure CHROMA — its hue at full charge, no luminance baked in.
+ * For plate/filigree/bloom accents, where intensity is carried separately by
+ * the charge alpha: baking luminance into the hex double-dims desaturated
+ * colours (dark hex × alpha) while saturated chromas stay vivid at any
+ * luminance (the xy→RGB normalization), so plates could never look uniform. */
+export function lightChromaHex(l: Light): string {
+  const c = l.last_state?.color;
+  return c ? rgbToHex(...xyToRgb(c.x, c.y, 1)) : "#ffb84d";
+}
+
 export function lightHex(l: Light): string {
   const c = l.last_state?.color;
-  return c ? rgbToHex(...xyToRgb(c.x, c.y, c.brightness)) : "#ffb84d";
+  if (!c) return "#ffb84d";
+  // The accent tracks what the lamp actually CASTS: chroma × the dimmer level.
+  // Some providers (HA) keep color.brightness pinned high while the state
+  // brightness sits at 1% — trusting it made a barely-lit strip wear a
+  // full-charge plate. The floor keeps the hue legible on dark plates when a
+  // lamp is very dim (a lit device should never render near-black).
+  const dimmer = (l.last_state?.brightness ?? c.brightness * 100) / 100;
+  const b = Math.max(0.22, Math.min(c.brightness, dimmer));
+  return rgbToHex(...xyToRgb(c.x, c.y, b));
 }
 
 /** Sync the provider's rooms/zones into mirrors and keep Rooms in step. */

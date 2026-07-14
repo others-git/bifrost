@@ -18,7 +18,7 @@ import {
   getPowerDevices,
   getRooms,
   getScenes,
-  lightHex,
+  lightChromaHex,
   mergePatch,
   restoreDefaultHome,
   setLightState,
@@ -60,7 +60,7 @@ import { CONTROL_GLYPH_OPTIONS, Glyph, GlyphGrid, weatherGlyph, weatherLabel } f
 import { PageHeader } from "../components/PageHeader";
 import { useViewport } from "../useViewport";
 import { S } from "../styles";
-import { alpha, color, glow, labelType, radius, T } from "../theme";
+import { alpha, color, font, glow, labelType, radius, T } from "../theme";
 
 /** The full-cell "lit niche" plate every Boards widget wears — the same recessed,
  * device-lit surface as the Control room cards' `GlyphButton`s — but retuned for
@@ -68,51 +68,106 @@ import { alpha, color, glow, labelType, radius, T } from "../theme";
  * rectangle that fights the corner filigree, so the frame stays a whisper
  * (hairline + faint accent) and the accent lives in the top-light, the outer
  * bloom, and the filigree. Angular (`radius.frame`), never a rounded card. */
-const widgetPlate = (accent: string, on: boolean): React.CSSProperties => ({
-  position: "relative",
-  width: "100%",
-  height: "100%",
-  borderRadius: radius.frame,
-  overflow: "hidden",
-  color: on ? accent : color.dim,
-  background: on
-    ? `radial-gradient(120% 95% at 50% 0%, ${alpha(accent, 0.13)}, transparent 60%), ${color.surface}`
-    : color.surfaceOff,
-  border: `1px solid ${on ? alpha(accent, 0.22) : color.hairline}`,
-  boxShadow: on
-    ? `${glow(accent, 26)}, inset 0 0 26px -16px ${accent}`
-    : "inset 0 1px 0 rgba(236,230,240,0.04), inset 0 0 18px -13px #000",
-});
+// A plate's bloom carries a CHARGE — opacity tracking the lamp's actual dimmer
+// (the xy→RGB pipeline normalizes saturated chromas toward vivid, so the hex
+// alone can't say "1%"; a barely-lit strip must smoulder, not blaze). Floor 0.3
+// keeps a lit plate readable as an ember.
+const plateCharge = (charge: number) => 0.3 + 0.6 * Math.max(0, Math.min(1, charge));
 
-/** Content inset for widget plates — clears the corner filigree so a header's
- * dot/name never crowds the engraved frame. */
-const PLATE_PAD = "0.7rem 0.85rem";
-
-/** A group widget's plate: like `widgetPlate`, but a **device box tracks its one
- * light's colour** while a **group box blends ALL its lit members' colours into a
- * gradient** (border, top tint, and glow). Falls back to the single-accent plate
- * when off or given one colour. */
-const widgetPlateMulti = (accents: string[], on: boolean): React.CSSProperties => {
-  if (!on || accents.length <= 1) {
-    return widgetPlate(accents[0] ?? T.accent, on);
-  }
-  const border = `linear-gradient(120deg, ${accents.map((c) => alpha(c, 0.3)).join(", ")})`;
-  const tint = `linear-gradient(120deg, ${accents.map((c) => alpha(c, 0.11)).join(", ")})`;
+const widgetPlateMulti = (
+  accents: string[],
+  on: boolean,
+  charge = 1,
+): React.CSSProperties => {
+  const cc = plateCharge(charge);
   return {
     position: "relative",
     width: "100%",
     height: "100%",
     borderRadius: radius.frame,
     overflow: "hidden",
-    color: T.text,
-    // Gradient border via the transparent-border + dual background-clip trick:
-    // the tint+surface fill the interior (padding-box), the colour sweep shows
-    // through the 1px transparent border (border-box).
-    border: "1px solid transparent",
-    background: `${tint} padding-box, ${color.surface} padding-box, ${border} border-box`,
-    boxShadow: `${glow(accents[0], 26)}, ${glow(accents[accents.length - 1], 26)}, inset 0 0 26px -16px ${accents[0]}`,
+    color: on ? accents[0] : color.dim,
+    // NO background layers, ever — the board shows through in every state.
+    // The thin border is a masked ring overlay in `Plate` (painting a border
+    // via layered backgrounds is exactly what once washed whole plates).
+    background: "transparent",
+    boxShadow: on
+      ? accents.length > 1
+        ? `${glow(alpha(accents[0], cc), 22)}, ${glow(alpha(accents[accents.length - 1], cc), 22)}`
+        : glow(alpha(accents[0], cc), 22)
+      : "none",
   };
 };
+
+/** Content inset for widget plates — clears the corner filigree so a header's
+ * dot/name never crowds the engraved frame. */
+const PLATE_PAD = "0.7rem 0.85rem";
+
+/** THE widget plate — the single element every plated board widget renders.
+ * One material (surface + neutral hairline), one accent voice (corner
+ * filigree + charge-scaled bloom), one content inset. Widgets differ only in
+ * their content and layout `style` (gap/align), never in plate treatment —
+ * so no tile can look "randomly different" again. `as="button"` for plates
+ * that are themselves the control (scene). */
+function Plate({
+  accents,
+  on = false,
+  charge = 1,
+  as = "div",
+  style,
+  children,
+  ...rest
+}: {
+  accents?: string[];
+  on?: boolean;
+  charge?: number;
+  as?: "div" | "button";
+  style?: React.CSSProperties;
+  children: React.ReactNode;
+} & Omit<React.HTMLAttributes<HTMLElement>, "style"> & { disabled?: boolean; title?: string }) {
+  const hexes = accents && accents.length ? accents : [T.accent];
+  const Tag = as as React.ElementType;
+  return (
+    <Tag
+      {...rest}
+      style={{
+        ...widgetPlateMulti(hexes, on, charge),
+        display: "flex",
+        flexDirection: "column",
+        padding: PLATE_PAD,
+        ...style,
+      }}
+    >
+      {/* The thin border: a masked 1px ring — structurally incapable of
+          painting the interior (the mask XORs the content-box away), unlike a
+          border-box background layer. Accent sweep when lit, hairline when
+          not; weight scales with the charge.
+          INSET so it meets the corner filigree's INNER pixel (the brackets sit
+          2px in with ~2.5px arms → ring at 3.5px overlaps their inner edge):
+          the arms jut past the line at each corner — the "spiked corner". */}
+      <span
+        aria-hidden
+        style={{
+          position: "absolute",
+          inset: 3.5,
+          borderRadius: radius.frame,
+          padding: 1,
+          background: on
+            ? hexes.length > 1
+              ? `linear-gradient(120deg, ${hexes.map((h) => alpha(h, 0.28 * plateCharge(charge))).join(", ")})`
+              : alpha(hexes[0], 0.28 * plateCharge(charge))
+            : color.hairline,
+          WebkitMask: "linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)",
+          WebkitMaskComposite: "xor",
+          maskComposite: "exclude",
+          pointerEvents: "none",
+        }}
+      />
+      <CornerFiligree colors={on ? hexes : undefined} />
+      {children}
+    </Tag>
+  );
+}
 
 // A fixed-ratio grid: 24 columns × 14 rows, both axes scaled to the board's
 // actual size. A layout is therefore device-independent — the same board fills a
@@ -1040,7 +1095,11 @@ function WidgetBox({
         style={{
           width: "100%",
           height: "100%",
-          overflow: "hidden",
+          // Plate widgets clip at the frame's own corners (a square clip behind
+          // a rounded child reads as a ghost box); bare controls (button, label)
+          // aren't clipped at all, so their glow blooms like every other niche.
+          overflow: w.type === "button" || w.type === "label" ? "visible" : "hidden",
+          borderRadius: radius.frame,
           // None while editing (so the box drags). A label is also click-through in
           // view mode — both the outer box and this content must be `none`, or a
           // child's `auto` re-captures clicks meant for a button under it.
@@ -1176,7 +1235,7 @@ function WidgetContent({
           size={44}
         />
         {((cfg.name as string) || control.label) && (
-          <span style={TILE_LABEL}>{(cfg.name as string) || control.label}</span>
+          <span style={{ ...TILE_LABEL, color: T.text }}>{(cfg.name as string) || control.label}</span>
         )}
       </div>
     );
@@ -1200,27 +1259,20 @@ function WidgetContent({
     const scene = scenes.find((s) => s.id === cfg.scene_id);
     const label = (cfg.name as string) || (scene?.name ?? "Scene");
     return (
-      <button
+      <Plate
+        as="button"
+        accents={[color.gold]}
+        on
         disabled={edit}
         onClick={async () => { if (scene) await activateScene(scene.id); }}
         title={label}
-        style={{
-          ...widgetPlate(color.gold, true),
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: "0.45rem",
-          padding: PLATE_PAD,
-          cursor: edit ? "default" : "pointer",
-        }}
+        style={{ alignItems: "center", justifyContent: "center", gap: "0.45rem", cursor: edit ? "default" : "pointer" }}
       >
-        <CornerFiligree colors={[color.gold]} />
         <Glyph name="scene" size={24} />
         <span style={{ ...labelType, position: "relative", fontSize: "0.74rem", color: color.textAccent, ...ELLIPSIS, maxWidth: "100%" }}>
           {label}
         </span>
-      </button>
+      </Plate>
     );
   }
 
@@ -1288,7 +1340,10 @@ function DeviceTile({
   const reachable =
     (light?.last_state?.reachable ?? mediaDev?.state.reachable ?? powerDev?.state.reachable) !== false;
   const fx = !!light && !!activeEffect(light);
-  const accent = light ? (fx ? EFFECT_ACCENT : lightHex(light)) : domain === "power" ? color.gold : color.violet;
+  const accent = light ? (fx ? EFFECT_ACCENT : lightChromaHex(light)) : domain === "power" ? color.gold : color.violet;
+  // The plate smoulders or blazes with the actual dimmer level (lights only —
+  // media/power have no meaningful "how lit" dimension).
+  const charge = light && on ? ((light.last_state?.brightness ?? 100) as number) / 100 : 1;
   const np = isNowPlaying ? mediaDev?.state.now_playing : undefined;
   const glyph = (dev as { glyph?: string | null }).glyph ?? (light ? "bulb" : powerDev ? "power" : "speaker");
 
@@ -1333,19 +1388,12 @@ function DeviceTile({
   // button (like its fly-out), with the name as a caption that opens the fly-out.
   if (powerDev) {
     return (
-      <div
-        style={{
-          ...widgetPlate(accent, on),
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: "0.5rem",
-          padding: PLATE_PAD,
-          opacity: reachable ? 1 : 0.45,
-        }}
+      <Plate
+        accents={[accent]}
+        on={on}
+        charge={charge}
+        style={{ alignItems: "center", justifyContent: "center", gap: "0.5rem", opacity: reachable ? 1 : 0.45 }}
       >
-        <CornerFiligree colors={on ? [accent] : undefined} />
         <button
           disabled={edit}
           onClick={(e) => onOpenFlyout(e.currentTarget)}
@@ -1361,22 +1409,17 @@ function DeviceTile({
         <span style={{ position: "relative", fontSize: "0.7rem", color: on ? accent : T.faint }}>
           {reachable ? (on ? "On" : "Off") : "Offline"}
         </span>
-      </div>
+      </Plate>
     );
   }
 
   return (
-    <div
-      style={{
-        ...widgetPlate(accent, on),
-        display: "flex",
-        flexDirection: "column",
-        padding: PLATE_PAD,
-        gap: "0.4rem",
-        opacity: reachable ? 1 : 0.45,
-      }}
+    <Plate
+      accents={[accent]}
+      on={on}
+      charge={charge}
+      style={{ gap: "0.4rem", opacity: reachable ? 1 : 0.45 }}
     >
-      <CornerFiligree colors={on ? [accent] : undefined} />
       <div style={{ position: "relative", display: "flex", alignItems: "center", gap: "0.45rem" }}>
         <button
           disabled={edit}
@@ -1418,7 +1461,7 @@ function DeviceTile({
           </div>
         )}
       </div>
-    </div>
+    </Plate>
   );
 }
 
@@ -1462,11 +1505,10 @@ function ClockWidget({ cfg }: { cfg: Record<string, unknown> }) {
   const time = now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: !h24 });
   const date = now.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
   return (
-    <div style={{ ...widgetPlate(color.gold, false), display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "0.15rem", padding: PLATE_PAD }}>
-      <CornerFiligree />
-      <div style={{ fontSize: `clamp(1rem, ${26 * scale}cqmin, ${5 * scale}rem)`, fontWeight: 600, color: T.text, fontVariantNumeric: "tabular-nums", letterSpacing: "0.02em", lineHeight: 1.05 }}>{time}</div>
-      <div style={{ fontSize: `clamp(0.65rem, ${8 * scale}cqmin, ${1.4 * scale}rem)`, color: T.dim }}>{date}</div>
-    </div>
+    <Plate accents={[color.gold]} style={{ alignItems: "center", justifyContent: "center", gap: "0.15rem" }}>
+      <div style={{ fontFamily: font.display, fontSize: `clamp(1rem, ${26 * scale}cqmin, ${5 * scale}rem)`, fontWeight: 700, color: T.text, fontVariantNumeric: "tabular-nums", letterSpacing: "0.04em", lineHeight: 1.05 }}>{time}</div>
+      <div style={{ ...labelType, fontSize: `clamp(0.65rem, ${8 * scale}cqmin, ${1.4 * scale}rem)`, color: T.dim }}>{date}</div>
+    </Plate>
   );
 }
 
@@ -1627,7 +1669,11 @@ function GroupWidget({
     }, 300);
   };
 
-  const litHexes = anyOn ? (domain === "light" && lit.length ? lit.map(lightHex) : [accent]) : undefined;
+  const litHexes = anyOn ? (domain === "light" && lit.length ? lit.map(lightChromaHex) : [accent]) : undefined;
+  // Same charge rule as the room plate: blaze with the brightest lit member.
+  const groupCharge = lit.length
+    ? Math.max(...lit.map((l) => ((l.last_state?.brightness ?? 100) as number) / 100))
+    : 1;
   const dotColor = litHexes?.[0] ?? accent;
   const buttonAccent = domain === "light" ? dotColor : accent;
 
@@ -1691,16 +1737,7 @@ function GroupWidget({
   }
 
   return (
-    <div
-      style={{
-        ...widgetPlateMulti(litHexes ?? [accent], anyOn),
-        display: "flex",
-        flexDirection: "column",
-        padding: PLATE_PAD,
-        gap: "0.4rem",
-      }}
-    >
-      <CornerFiligree colors={litHexes} />
+    <Plate accents={litHexes ?? [accent]} on={anyOn} charge={groupCharge} style={{ gap: "0.4rem" }}>
       <div style={{ position: "relative", display: "flex", alignItems: "center", gap: "0.5rem" }}>
         <span
           aria-hidden
@@ -1754,7 +1791,7 @@ function GroupWidget({
         )}
       </div>
       {editors}
-    </div>
+    </Plate>
   );
 }
 
@@ -1799,18 +1836,15 @@ function RoomWidget({
     members.audio.some((d) => d.state.power);
   const hexes = litHexes(members.lights);
   const plateHexes = hexes.length ? hexes : anyOn ? [T.accent] : undefined;
+  // The room plate blazes with its brightest lit lamp (switch/speaker-only
+  // rooms have no dimmer dimension — full charge).
+  const litBris = members.lights
+    .filter((l) => l.last_state?.on)
+    .map((l) => ((l.last_state?.brightness ?? 100) as number) / 100);
+  const charge = litBris.length ? Math.max(...litBris) : 1;
 
   return (
-    <div
-      style={{
-        ...widgetPlateMulti(plateHexes ?? [T.accent], anyOn),
-        display: "flex",
-        flexDirection: "column",
-        padding: PLATE_PAD,
-        gap: "0.4rem",
-      }}
-    >
-      <CornerFiligree colors={plateHexes} />
+    <Plate accents={plateHexes ?? [T.accent]} on={anyOn} charge={charge} style={{ gap: "0.4rem" }}>
       <RoomCard
         variant="widget"
         name={cfg.name || room.name}
@@ -1828,7 +1862,7 @@ function RoomWidget({
         onPowerToggle={onPowerToggle}
         onChanged={onChanged}
       />
-    </div>
+    </Plate>
   );
 }
 
@@ -1842,14 +1876,13 @@ function SensorWidget({ cfg, generic }: { cfg: Record<string, unknown>; generic:
   const v = ctrl?.value;
   const display = v === undefined || v === null ? "—" : typeof v === "boolean" ? (v ? "On" : "Off") : String(v);
   return (
-    <div style={{ ...widgetPlate(color.gold, false), display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "0.1rem", padding: PLATE_PAD }}>
-      <CornerFiligree />
+    <Plate accents={[color.gold]} style={{ alignItems: "center", justifyContent: "center", gap: "0.1rem" }}>
       <div style={{ fontSize: "clamp(1.3rem, 24cqmin, 4rem)", fontWeight: 600, color: T.text, fontVariantNumeric: "tabular-nums", lineHeight: 1.1 }}>
         {display}
         {ctrl?.unit && <span style={{ fontSize: "0.5em", color: T.dim, marginLeft: 2 }}>{ctrl.unit}</span>}
       </div>
       <div style={{ ...ELLIPSIS, maxWidth: "100%", fontSize: "clamp(0.68rem, 7cqmin, 1.2rem)", color: T.dim }}>{label}</div>
-    </div>
+    </Plate>
   );
 }
 
@@ -1867,17 +1900,11 @@ function WeatherWidget({ cfg, generic }: { cfg: Record<string, unknown>; generic
   const humidity = readout("humidity");
   const place = (cfg.name as string) || dev?.name || "Weather";
   return (
-    <div
-      style={{
-        ...widgetPlate(color.gold, true),
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: "0.7rem",
-        padding: PLATE_PAD,
-      }}
+    <Plate
+      accents={[color.gold]}
+      on
+      style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: "0.7rem" }}
     >
-      <CornerFiligree colors={[color.gold]} />
       <div style={{ position: "relative", color: color.textAccent, flexShrink: 0, fontSize: "clamp(34px, 30cqmin, 96px)", lineHeight: 0 }}>
         <Glyph name={weatherGlyph(condition)} size="1em" />
       </div>
@@ -1894,7 +1921,7 @@ function WeatherWidget({ cfg, generic }: { cfg: Record<string, unknown>; generic
           {humidity ? ` · ${String(humidity.value)}${humidity.unit ?? "%"}` : ""}
         </div>
       </div>
-    </div>
+    </Plate>
   );
 }
 
@@ -2530,7 +2557,17 @@ const CENTER: React.CSSProperties = {
   justifyContent: "center",
   gap: "0.4rem",
 };
-const TILE_LABEL: React.CSSProperties = { fontSize: "0.82rem", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "100%" };
+const TILE_LABEL: React.CSSProperties = {
+  fontFamily: font.display,
+  textTransform: "uppercase",
+  letterSpacing: "0.1em",
+  fontSize: "0.78rem",
+  fontWeight: 700,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  maxWidth: "100%",
+};
 const ELLIPSIS: React.CSSProperties = { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 const CORNER_BTN = (top: number, right: number): React.CSSProperties => ({
   position: "absolute",

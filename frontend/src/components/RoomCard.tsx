@@ -10,12 +10,12 @@ import { useRef, useState } from "react";
 import {
   activateScene,
   createScene,
+  lightChromaHex,
+  lightHex,
   removeScene,
-  rgbToHex,
   setLightState,
   setMediaState,
   setRoomState,
-  xyToRgb,
   type ControlTarget,
   type Light,
   type LightState,
@@ -60,11 +60,12 @@ const ELLIPSIS: React.CSSProperties = {
 export function litHexes(lights: Light[]): string[] {
   return lights
     .filter((l) => l.last_state?.on && (l.last_state.color || activeEffect(l)))
-    .map((l) => {
-      const c = l.last_state!.color;
-      // Effect mode carries no colour (it IS the mode) — wear the effect base.
-      return c ? rgbToHex(...xyToRgb(c.x, c.y, c.brightness)) : EFFECT_ACCENT;
-    });
+    // Effect mode carries no colour (it IS the mode) — wear the effect base.
+    // Everything else is the lamp's pure CHROMA (`lightChromaHex`): plates,
+    // filigree, and dots say the HUE, while intensity is carried by the
+    // plate's charge — so saturated and pastel lamps read as the same
+    // material at the same dimmer level.
+    .map((l) => (l.last_state!.color ? lightChromaHex(l) : EFFECT_ACCENT));
 }
 
 /** A room's controllable members, by the one shared rule: disabled devices drop
@@ -229,15 +230,10 @@ export function LightButton({
   const [editing, setEditing] = useState(false);
   const isOn = light.last_state?.on ?? false;
   const offline = light.last_state?.reachable === false;
-  const serverColor = light.last_state?.color;
   // A running effect owns the niche: it wears the effect base (the drift
   // animation cycles it through the wheel) rather than a stale/fallback colour.
   const fx = !!activeEffect(light);
-  const hex = fx
-    ? EFFECT_ACCENT
-    : serverColor
-      ? rgbToHex(...xyToRgb(serverColor.x, serverColor.y, serverColor.brightness))
-      : "#ffb84d";
+  const hex = fx ? EFFECT_ACCENT : lightHex(light);
 
   // Quick power toggle (long-press) — refreshes after, unlike the editor's
   // debounced live commits, so a power flip reconciles against the server.
@@ -626,7 +622,12 @@ export function RoomCard({
         headerGap: "0.5rem",
         headerPad: 0,
         bodyGap: "0.4rem",
-        bodyPad: 0,
+        // The widget body is a scroll container, so its padding box CLIPS —
+        // zero padding sheared the buttons' neon glows flat at the top row
+        // (the Control card's padded body never shows this). The padding gives
+        // the glow room to bloom; the matching negative margin hands the space
+        // back so the layout sits exactly where it did.
+        bodyPad: 10,
       };
 
   const lit = lights.filter((l) => l.last_state?.on);
@@ -778,7 +779,7 @@ export function RoomCard({
           />
         )}
         <div style={{ minWidth: 0, flex: 1, display: "flex", flexDirection: "column" }}>
-          <span style={{ ...titleType, fontSize: sz.title, color: roomId ? "#d8cfba" : T.faint, ...ELLIPSIS }}>
+          <span style={{ ...titleType, fontSize: sz.title, color: roomId ? T.text : T.faint, ...ELLIPSIS }}>
             {name}
           </span>
           <span style={{ fontSize: sz.sub, color: T.faint, ...ELLIPSIS }}>{subtitle}</span>
@@ -833,7 +834,9 @@ export function RoomCard({
             flexWrap: "wrap",
             gap: sz.bodyGap,
             padding: sz.bodyPad,
-            ...(page ? {} : { flex: 1, minHeight: 0, overflowY: "auto", alignContent: "flex-start" }),
+            ...(page
+              ? {}
+              : { flex: 1, minHeight: 0, overflowY: "auto", alignContent: "flex-start", margin: -10 }),
           }}
         >
           {lights.map((l) => (
