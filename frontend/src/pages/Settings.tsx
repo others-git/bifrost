@@ -2406,10 +2406,12 @@ function KioskSchedule({
   );
 }
 
-/** Per-kiosk presence-driven display (power saving): blank the screen while the
- * kiosk's assigned Room is unoccupied, wake on motion. Uses the room's presence
- * sensors (Hue motion / HA), so it needs a room with sensors; the no-motion grace
- * is editable in minutes. Quiet hours still wins overnight. */
+/** Per-kiosk presence-aware display: the screen follows the assigned Room's
+ * occupancy — wakes the moment motion is detected, turns off after the room
+ * has been empty for the screen-off timer. Uses the room's presence sensors
+ * (Hue motion / HA), so it needs a room with sensors. Quiet hours still wins
+ * overnight. Presented as ONE "presence aware" switch + timer: blanking and
+ * waking are the same policy, not two features. */
 function KioskPresence({
   k,
   dialogs,
@@ -2465,8 +2467,11 @@ function KioskPresence({
         paddingTop: "0.4rem",
       }}
     >
-      <span style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem", color: "var(--bf-dim)" }}>
-        <Glyph name="motion" size={15} /> Presence blanking
+      <span
+        title="The screen follows the room: wakes on motion, turns off once the room has been empty for the timer"
+        style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem", color: "var(--bf-dim)" }}
+      >
+        <Glyph name="motion" size={15} /> Presence aware
       </span>
       <Switch
         on={enabled}
@@ -2477,7 +2482,7 @@ function KioskPresence({
         }}
       />
       <span style={{ opacity: enabled ? 1 : 0.55, display: "inline-flex", alignItems: "center", gap: "0.35rem" }}>
-        sleep after
+        wakes on motion · screen off after
         <input
           type="number"
           min={1}
@@ -2488,7 +2493,7 @@ function KioskPresence({
           onBlur={() => save({ enabled, timeout_secs: mins * 60 })}
           style={numInput}
         />
-        min of no motion
+        min empty
       </span>
       {enabled && !k.room_id && (
         <span style={{ color: "var(--bf-rose, #e57)" }}>

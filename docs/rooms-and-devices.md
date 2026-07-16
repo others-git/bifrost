@@ -63,8 +63,9 @@ A room with **motion or occupancy sensors** among its members gets a live,
 provider-agnostic **occupancy** state — a Hue motion accessory and a Home
 Assistant `binary_sensor` are interchangeable presence inputs. Presence-driven
 behaviour reads this room-level state rather than any one sensor; the first
-consumer is the wall tablet's display power saving (blank while the room is
-empty, wake on motion — see [Kiosk control](api.md#kiosk-control-apikiosks)).
+consumer is the wall tablet's **presence-aware display**: the screen follows
+the room — wakes on motion, turns off after the room has been empty for the
+screen-off timer (see [Kiosk control](api.md#kiosk-control-apikiosks)).
 
 **Which sensors count is configurable.** Every enabled presence sensor in the
 room counts by default — including sensors that arrive later via a provider

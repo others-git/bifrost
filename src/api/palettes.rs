@@ -58,9 +58,11 @@ pub(crate) async fn list_palettes(state: &AppState) -> Vec<Palette> {
         .collect()
 }
 
-/// Pull every enabled provider's stored scenes in as palettes, upserting by
-/// `(source, source_id)` so a re-import refreshes in place. Returns how many
-/// palettes were imported/updated.
+/// Pull every enabled provider's stored scenes in as palettes: de-duplicated by
+/// name (see [`dedupe_palettes`]), upserted by `(source, source_id)`, and —
+/// when the source's discovery completed — pruned, so per-room scene copies and
+/// scenes deleted on the provider disappear on the next import instead of
+/// accumulating. Returns how many palettes were imported/updated.
 pub(crate) async fn import_palettes(state: &AppState) -> usize {
     let providers =
         sqlx::query("SELECT provider_type, credentials FROM providers WHERE enabled = 1")
@@ -68,43 +70,127 @@ pub(crate) async fn import_palettes(state: &AppState) -> usize {
             .await
             .unwrap_or_default();
 
-    let mut imported = 0;
+    // Group discovery by provider TYPE (= the `source` column) so a two-bridge
+    // setup prunes across the whole type — but dedupe PER ROW (inside the loop):
+    // per-room copies of one bridge's stock scene collapse, while two bridges'
+    // genuinely distinct same-named scenes both survive.
+    let mut by_source: HashMap<String, (Vec<crate::providers::ProviderPalette>, bool)> =
+        HashMap::new();
     for row in providers {
         let provider_type: String = row.get("provider_type");
         let credentials: String = row.get("credentials");
         // Only light providers expose palettes; building a non-light type fails,
-        // which we skip. The default `discover_palettes` is empty, so a light
-        // provider without scenes simply contributes nothing.
+        // which we skip — but the type is still marked INCOMPLETE: a light row
+        // whose credentials fail to build must not have its palettes pruned on
+        // the strength of a healthy sibling's discovery. (For genuinely
+        // non-light types the incomplete empty entry is a harmless no-op.)
         let Ok(provider) = build_provider(state, &provider_type, &credentials) else {
+            by_source
+                .entry(provider_type)
+                .or_insert((Vec::new(), true))
+                .1 = false;
             continue;
         };
-        let palettes = match provider.discover_palettes().await {
-            Ok(p) => p,
+        let entry = by_source
+            .entry(provider_type.clone())
+            .or_insert((Vec::new(), true));
+        match provider.discover_palettes().await {
+            Ok(p) => entry.0.extend(dedupe_palettes(p)),
             Err(e) => {
                 tracing::debug!(provider = %provider_type, "discover_palettes failed: {e:#}");
-                continue;
-            }
-        };
-        for p in palettes {
-            let colors_json = serde_json::to_string(&p.colors).unwrap_or_else(|_| "[]".into());
-            let res = sqlx::query(
-                "INSERT INTO palettes (id, name, source, source_id, colors) VALUES (?, ?, ?, ?, ?)
-                 ON CONFLICT(source, source_id)
-                 DO UPDATE SET name = excluded.name, colors = excluded.colors",
-            )
-            .bind(Uuid::new_v4().to_string())
-            .bind(&p.name)
-            .bind(&provider_type)
-            .bind(&p.provider_id)
-            .bind(&colors_json)
-            .execute(&state.db)
-            .await;
-            if res.is_ok() {
-                imported += 1;
+                // Incomplete discovery: never prune this source on partial data
+                // (an unreachable bridge must not wipe its imported palettes).
+                entry.1 = false;
             }
         }
     }
+
+    let mut imported = 0;
+    for (source, (kept, complete)) in by_source {
+        imported += sync_source_palettes(&state.db, &source, &kept, complete).await;
+    }
     tracing::debug!(imported, "palette import complete");
+    imported
+}
+
+/// Collapse ONE provider row's per-room copies of the same scene. A Hue bridge
+/// stores one scene resource PER ROOM, so a stock scene ("Savanna sunset")
+/// arrives once per room — same name, near-identical colours (per-light
+/// gamut/brightness drift makes exact matching useless). A palette is
+/// room-agnostic, so keep ONE per name: the richest copy (most colours),
+/// tie-broken by lowest source id so the winner — and therefore the upsert
+/// key — is stable across re-imports. Applied per bridge, never across
+/// bridges: two bridges' same-named scenes are distinct palettes.
+fn dedupe_palettes(
+    mut palettes: Vec<crate::providers::ProviderPalette>,
+) -> Vec<crate::providers::ProviderPalette> {
+    palettes.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then(b.colors.len().cmp(&a.colors.len()))
+            .then(a.provider_id.cmp(&b.provider_id))
+    });
+    let mut seen = std::collections::HashSet::new();
+    palettes.retain(|p| seen.insert(p.name.clone()));
+    palettes
+}
+
+/// Upsert the kept palettes for one source, then (when discovery was complete)
+/// prune that source's rows whose `source_id` is no longer backed by a kept
+/// scene — the de-dup losers and provider-side deletions. User palettes
+/// (`source_id IS NULL`) and other sources are never touched.
+async fn sync_source_palettes(
+    db: &sqlx::SqlitePool,
+    source: &str,
+    kept: &[crate::providers::ProviderPalette],
+    prune: bool,
+) -> usize {
+    let mut imported = 0;
+    for p in kept {
+        let colors_json = serde_json::to_string(&p.colors).unwrap_or_else(|_| "[]".into());
+        let res = sqlx::query(
+            "INSERT INTO palettes (id, name, source, source_id, colors) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(source, source_id)
+             DO UPDATE SET name = excluded.name, colors = excluded.colors",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&p.name)
+        .bind(source)
+        .bind(&p.provider_id)
+        .bind(&colors_json)
+        .execute(db)
+        .await;
+        if res.is_ok() {
+            imported += 1;
+        }
+    }
+
+    // Never prune down to nothing: an EMPTY discovery is indistinguishable from
+    // a hiccup (a mid-reboot bridge answering with no scenes, or every scene
+    // filtering out as colourless) — wiping the whole source on that signal
+    // would destroy real palettes. A user who truly emptied their bridge can
+    // delete the stragglers from the Scenes page.
+    if prune && !kept.is_empty() {
+        let placeholders = std::iter::repeat_n("?", kept.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "DELETE FROM palettes
+             WHERE source = ? AND source_id IS NOT NULL AND source_id NOT IN ({placeholders})"
+        );
+        let mut q = sqlx::query(&sql).bind(source);
+        for p in kept {
+            q = q.bind(&p.provider_id);
+        }
+        match q.execute(db).await {
+            Ok(r) if r.rows_affected() > 0 => {
+                tracing::debug!(source, pruned = r.rows_affected(), "stale palettes pruned");
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(source, "palette prune failed: {e}"),
+        }
+    }
+
     imported
 }
 
@@ -265,5 +351,135 @@ async fn apply_handler(
     match apply_palette(&state, &id, &req.room_id).await {
         Some((applied, failed)) => Json(ApplyResponse { applied, failed }).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::ProviderPalette;
+
+    fn palette(id: &str, name: &str, n_colors: usize) -> ProviderPalette {
+        ProviderPalette {
+            provider_id: id.to_string(),
+            name: name.to_string(),
+            colors: (0..n_colors)
+                .map(|i| PaletteColor {
+                    xy: Some([0.3 + i as f32 * 0.01, 0.3]),
+                    mirek: None,
+                    brightness: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn dedupe_keeps_one_per_name_richest_copy_stable_winner() {
+        // Three per-room copies of a stock scene: the 2-colour "Nightlight"
+        // beats the 1-colour one; among equals the lowest id wins so re-imports
+        // land on the same upsert key.
+        let kept = dedupe_palettes(vec![
+            palette("c-rid", "Nightlight", 2),
+            palette("a-rid", "Nightlight", 1),
+            palette("b-rid", "Nightlight", 2),
+            palette("z-rid", "Savanna sunset", 6),
+        ]);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].name, "Nightlight");
+        assert_eq!(kept[0].provider_id, "b-rid");
+        assert_eq!(kept[0].colors.len(), 2);
+        assert_eq!(kept[1].name, "Savanna sunset");
+    }
+
+    async fn test_db() -> sqlx::SqlitePool {
+        use std::str::FromStr;
+        let opts = sqlx::sqlite::SqliteConnectOptions::from_str(":memory:")
+            .unwrap()
+            .foreign_keys(true);
+        let db = sqlx::SqlitePool::connect_with(opts).await.unwrap();
+        sqlx::migrate!("./migrations").run(&db).await.unwrap();
+        db
+    }
+
+    #[tokio::test]
+    async fn sync_prunes_dedupe_losers_and_provider_deletions_only() {
+        let db = test_db().await;
+        // Existing rows: two per-room copies of one scene, one deleted-on-the-
+        // bridge scene, a user palette (NULL source_id), and another source.
+        for (id, name, source, source_id) in [
+            ("p1", "Nightlight", "hue", Some("keep-rid")),
+            ("p2", "Nightlight", "hue", Some("loser-rid")),
+            ("p3", "Old scene", "hue", Some("deleted-rid")),
+            ("p4", "My custom", "user", None),
+            ("p5", "Other", "wled", Some("other-rid")),
+        ] {
+            sqlx::query(
+                "INSERT INTO palettes (id, name, source, source_id, colors) VALUES (?, ?, ?, ?, '[]')",
+            )
+            .bind(id)
+            .bind(name)
+            .bind(source)
+            .bind(source_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+
+        let kept = vec![palette("keep-rid", "Nightlight", 2)];
+        let imported = sync_source_palettes(&db, "hue", &kept, true).await;
+        assert_eq!(imported, 1);
+
+        let remaining: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT source, source_id FROM palettes ORDER BY source, source_id")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            remaining,
+            vec![
+                ("hue".into(), Some("keep-rid".into())),
+                ("user".into(), None),
+                ("wled".into(), Some("other-rid".into())),
+            ],
+            "dedupe loser + provider deletion pruned; user + other-source rows untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn incomplete_discovery_never_prunes() {
+        let db = test_db().await;
+        sqlx::query(
+            "INSERT INTO palettes (id, name, source, source_id, colors) VALUES ('p1','Kept','hue','rid','[]')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        // Bridge unreachable → complete=false → the empty kept list must NOT
+        // wipe previously-imported palettes.
+        sync_source_palettes(&db, "hue", &[], false).await;
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM palettes")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[tokio::test]
+    async fn empty_but_successful_discovery_never_prunes_either() {
+        let db = test_db().await;
+        sqlx::query(
+            "INSERT INTO palettes (id, name, source, source_id, colors) VALUES ('p1','Kept','hue','rid','[]')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        // A bridge answering Ok with zero (colour-bearing) scenes looks exactly
+        // like a hiccup — prune-to-zero must never fire even when "complete".
+        sync_source_palettes(&db, "hue", &[], true).await;
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM palettes")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
     }
 }

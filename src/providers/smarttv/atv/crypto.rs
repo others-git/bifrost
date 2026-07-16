@@ -208,8 +208,20 @@ mod tests {
         let server = Identity::generate().unwrap();
         let cder = client.cert_der().unwrap();
         let sder = server.cert_der().unwrap();
-        // "00" check byte almost certainly won't match the real digest[0].
-        let err = pairing_secret(&cder, &sder, "002b3c").unwrap_err();
+        // Compute the REAL check byte for this cert pair, then flip its bits —
+        // a hardcoded "wrong" byte matches fresh random certs 1 run in 256.
+        let (cn, ce) = rsa_modulus_exponent(&cder).unwrap();
+        let (sn, se) = rsa_modulus_exponent(&sder).unwrap();
+        let nonce = [0x2b_u8, 0x3c];
+        let mut h = Sha256::new();
+        h.update(&cn);
+        h.update(&ce);
+        h.update(&sn);
+        h.update(&se);
+        h.update(nonce);
+        let wrong = h.finalize()[0] ^ 0xFF;
+        let code = format!("{:02X}{}", wrong, hex::encode(nonce));
+        let err = pairing_secret(&cder, &sder, &code).unwrap_err();
         assert!(err.to_string().contains("did not match"), "{err}");
     }
 

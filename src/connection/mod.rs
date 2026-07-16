@@ -599,24 +599,31 @@ impl HaPushManager {
 }
 
 /// Writes pushed sensor events to `sensor_devices.last_state`. Full snapshots
-/// (a sensor has a single reading), so this replaces rather than merges.
+/// (a sensor has a single reading), so this replaces rather than merges. After
+/// a **changed** reading is **successfully persisted**, it recomputes the
+/// sensor's rooms' occupancy (`sensor_reading_landed`) so a verdict flip
+/// debug-logs the moment it happens — event-driven, not whenever the next
+/// reader happens to ask. Changed-only: poll/heartbeat re-reports of an
+/// identical payload skip the recompute entirely, and a failed write must not
+/// compute a verdict from state that was never stored.
 async fn sensor_db_writer_task(
     mut rx: broadcast::Receiver<SensorEvent>,
     provider_row_id: String,
     db: SqlitePool,
+    occupancy: crate::api::rooms::OccupancySeen,
 ) {
     let mut last_logged = std::collections::HashMap::new();
     loop {
         match rx.recv().await {
             Ok(event) => {
                 let state_json = serde_json::to_string(&event.state).unwrap_or_default();
-                journal_state_push(
+                let changed = journal_state_push(
                     &mut last_logged,
                     "sensor",
                     &event.device_id,
                     state_json.clone(),
                 );
-                let _ = sqlx::query(
+                let written = sqlx::query(
                     "UPDATE sensor_devices SET last_state = ?, last_seen = datetime('now')
                      WHERE provider_id = ? AND device_id = ?",
                 )
@@ -625,6 +632,15 @@ async fn sensor_db_writer_task(
                 .bind(&event.device_id)
                 .execute(&db)
                 .await;
+                if changed && written.is_ok() {
+                    crate::api::rooms::sensor_reading_landed(
+                        &db,
+                        &occupancy,
+                        &provider_row_id,
+                        &event.device_id,
+                    )
+                    .await;
+                }
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 warn!("sensor event db writer lagged by {n} events");
@@ -713,6 +729,7 @@ impl ConnectionRegistry {
         provider: HueProvider,
         db: SqlitePool,
         inventory: broadcast::Sender<String>,
+        occupancy: crate::api::rooms::OccupancySeen,
     ) {
         let (mgr, rx) = HueConnectionManager::new(provider);
         let mgr = Arc::new(mgr);
@@ -725,6 +742,7 @@ impl ConnectionRegistry {
             sensor_events.subscribe(),
             provider_id.clone(),
             db,
+            occupancy,
         ));
         self.entries.insert(
             provider_id,
@@ -882,6 +900,7 @@ impl ConnectionRegistry {
         provider: HaProvider,
         db: SqlitePool,
         inventory: broadcast::Sender<String>,
+        occupancy: crate::api::rooms::OccupancySeen,
     ) {
         let mgr = Arc::new(HaPushManager::new(provider));
         let state = Arc::clone(&mgr.state);
@@ -906,6 +925,7 @@ impl ConnectionRegistry {
             sensor_events.subscribe(),
             provider_id.clone(),
             db,
+            occupancy,
         ));
         self.entries.insert(
             provider_id,
@@ -1078,17 +1098,20 @@ async fn media_demand_poll_loop(
 /// (Onkyo re-announces its full state every beat) would otherwise flood the
 /// event journal with identical lines. TRACE level: the journal layer captures
 /// `bifrost::events` at TRACE, the console stays quiet at `bifrost=debug`.
+/// Returns whether the payload genuinely CHANGED for this device — the sensor
+/// writer uses that to skip the occupancy recompute on heartbeat re-reports.
 fn journal_state_push(
     last: &mut std::collections::HashMap<String, String>,
     domain: &'static str,
     device_id: &str,
     payload: String,
-) {
+) -> bool {
     if last.get(device_id) == Some(&payload) {
-        return;
+        return false;
     }
     tracing::trace!(target: "bifrost::events", domain, device = %device_id, state = %payload, "state push");
     last.insert(device_id.to_string(), payload);
+    true
 }
 
 /// Writes incoming light events to the DB. Runs as a background task alongside each manager.

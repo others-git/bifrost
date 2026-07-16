@@ -1282,7 +1282,7 @@ async fn engine_room_occupancy(
     engine: &EngineState,
     room_id: &str,
 ) -> Option<bool> {
-    let members = crate::api::rooms::room_presence_readings(state, room_id).await;
+    let members = crate::api::rooms::room_presence_readings_db(&state.db, room_id).await;
     (!members.is_empty()).then(|| {
         members.iter().any(|(id, db_detecting)| {
             engine

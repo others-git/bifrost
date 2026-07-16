@@ -23,7 +23,7 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
+use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -292,8 +292,157 @@ pub(crate) async fn effective_sensor_member_ids(state: &AppState, room_id: &str)
 /// Non-presence sensors (contact/lux/temp/humidity) and disabled/shadowed members
 /// are ignored, so this is safe to read from any surface (kiosk scheduler today).
 pub(crate) async fn room_occupancy(state: &AppState, room_id: &str) -> Option<bool> {
-    let members = room_presence_readings(state, room_id).await;
-    (!members.is_empty()).then(|| members.iter().any(|(_, detecting)| *detecting))
+    room_occupancy_db(&state.db, &state.occupancy_seen, room_id).await
+}
+
+/// Shared per-room verdict cache behind the occupancy debug log. `Arc` so the
+/// sensor DB-writer tasks (which have no `AppState`) share the one map with
+/// every occupancy reader — a flip logs exactly once, whoever sees it first.
+pub type OccupancySeen = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, bool>>>;
+
+/// Pool-based body of [`room_occupancy`], so the sensor event pipeline can
+/// recompute (and debug-log) a room's verdict the moment a presence reading
+/// lands — without waiting for a reader (kiosk scheduler, page load) to ask.
+pub(crate) async fn room_occupancy_db(
+    db: &SqlitePool,
+    seen: &OccupancySeen,
+    room_id: &str,
+) -> Option<bool> {
+    let members = room_presence_readings_db(db, room_id).await;
+    let verdict = (!members.is_empty()).then(|| members.iter().any(|(_, detecting)| *detecting));
+
+    // Dev journal: a room with presence input logs every verdict flip (and its
+    // first observation) at debug, with the sensors currently detecting. The
+    // changed-only seam keeps steady re-reads (the scheduler's 30s tick) silent.
+    let changed = {
+        let mut seen = seen.lock().expect("occupancy_seen poisoned");
+        occupancy_verdict_changed(&mut seen, room_id, verdict)
+    };
+    if changed {
+        let detecting_ids: Vec<&str> = members
+            .iter()
+            .filter(|(_, d)| *d)
+            .map(|(id, _)| id.as_str())
+            .collect();
+        let detecting = sensor_names(db, &detecting_ids).await;
+        // Awaited BEFORE the macro — an `.await` inside `tracing::debug!` holds
+        // `fmt::Arguments` across the await and makes every caller non-Send.
+        let room = room_name(db, room_id)
+            .await
+            .unwrap_or_else(|| room_id.to_string());
+        tracing::debug!(
+            target: "bifrost::rooms",
+            %room,
+            occupied = verdict == Some(true),
+            ?detecting,
+            "room occupancy changed"
+        );
+    }
+
+    verdict
+}
+
+/// Every room a sensor is an effective member of — direct assignment, or via a
+/// synced provider-group link (suppressed everywhere once directly assigned,
+/// matching the member queries). The sensor event pipeline uses this to know
+/// which rooms' occupancy a fresh presence reading can move.
+///
+/// NOT the same as the automation engine's `rooms_containing_sensor`
+/// (automations.rs) — that one is deliberately over-inclusive (no direct-
+/// assignment suppression) and filters to enabled rooms, because the engine
+/// re-verifies membership downstream. This one mirrors the effective-member
+/// rule exactly so the occupancy log matches what `room_occupancy` reads.
+pub(crate) async fn sensor_member_rooms(db: &SqlitePool, sensor_id: &str) -> Vec<String> {
+    sqlx::query(
+        "SELECT room_id FROM room_sensor_devices WHERE sensor_device_id = ?1
+         UNION
+         SELECT rl.room_id
+         FROM room_links rl
+         JOIN provider_group_sensor_devices pgs
+           ON pgs.provider_group_id = rl.provider_group_id
+         WHERE pgs.sensor_device_id = ?1
+           AND ?1 NOT IN (SELECT sensor_device_id FROM room_sensor_devices)",
+    )
+    .bind(sensor_id)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| r.get("room_id"))
+    .collect()
+}
+
+/// Called by the sensor DB-writers right after a pushed reading is persisted:
+/// if the sensor is a presence kind, recompute occupancy for each room it
+/// belongs to — `room_occupancy_db`'s changed-only gate turns a genuine flip
+/// into one `bifrost::rooms` debug line, event-driven rather than waiting for
+/// the next reader.
+pub(crate) async fn sensor_reading_landed(
+    db: &SqlitePool,
+    seen: &OccupancySeen,
+    provider_row_id: &str,
+    provider_device_id: &str,
+) {
+    let row =
+        sqlx::query("SELECT id, kind FROM sensor_devices WHERE provider_id = ? AND device_id = ?")
+            .bind(provider_row_id)
+            .bind(provider_device_id)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
+    let Some(row) = row else { return };
+    if !crate::api::sensors::parse_kind(&row.get::<String, _>("kind")).is_presence() {
+        return;
+    }
+    let sensor_id: String = row.get("id");
+    for room_id in sensor_member_rooms(db, &sensor_id).await {
+        room_occupancy_db(db, seen, &room_id).await;
+    }
+}
+
+/// The changed-only gate behind the occupancy debug log: records `room →
+/// verdict` and reports whether this read should log. `None` verdicts (the
+/// room has no counting presence input) never log and clear the entry, so a
+/// room whose presence input returns later logs its fresh verdict again.
+fn occupancy_verdict_changed(
+    seen: &mut std::collections::HashMap<String, bool>,
+    room_id: &str,
+    verdict: Option<bool>,
+) -> bool {
+    match verdict {
+        Some(v) => seen.insert(room_id.to_string(), v) != Some(v),
+        None => {
+            seen.remove(room_id);
+            false
+        }
+    }
+}
+
+/// Room display name for log lines (falls back to the id upstream).
+async fn room_name(db: &SqlitePool, room_id: &str) -> Option<String> {
+    sqlx::query_scalar("SELECT name FROM rooms WHERE id = ?")
+        .bind(room_id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Sensor display names for log lines (order follows the input ids).
+async fn sensor_names(db: &SqlitePool, ids: &[&str]) -> Vec<String> {
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let name: Option<String> =
+            sqlx::query_scalar("SELECT name FROM sensor_devices WHERE id = ?")
+                .bind(id)
+                .fetch_optional(db)
+                .await
+                .ok()
+                .flatten();
+        out.push(name.unwrap_or_else(|| (*id).to_string()));
+    }
+    out
 }
 
 /// Each of a room's enabled, non-shadowed **presence** members (motion /
@@ -305,8 +454,12 @@ pub(crate) async fn room_occupancy(state: &AppState, room_id: &str) -> Option<bo
 /// Honors the room's presence opt-outs (`room_presence_excluded`): an excluded
 /// sensor stays a member (its readings still display) but never counts here, so
 /// every occupancy consumer — kiosk scheduler, automations, gates — inherits
-/// the exclusion from this one query.
-pub(crate) async fn room_presence_readings(state: &AppState, room_id: &str) -> Vec<(String, bool)> {
+/// the exclusion from this one query. Pool-based so the sensor event pipeline
+/// (no `AppState`) shares it — see [`room_occupancy_db`].
+pub(crate) async fn room_presence_readings_db(
+    db: &SqlitePool,
+    room_id: &str,
+) -> Vec<(String, bool)> {
     use crate::models::sensor::SensorState;
     let rows = sqlx::query(
         "SELECT sd.id AS id, sd.kind AS kind, sd.last_state AS last_state
@@ -328,7 +481,7 @@ pub(crate) async fn room_presence_readings(state: &AppState, room_id: &str) -> V
            )",
     )
     .bind(room_id)
-    .fetch_all(&state.db)
+    .fetch_all(db)
     .await
     .unwrap_or_default();
 
@@ -1887,6 +2040,110 @@ mod occupancy_tests {
         exclude(&state, "m1").await;
         // No counting presence members → unknown, same as a room with none.
         assert_eq!(room_occupancy(&state, "r").await, None);
+    }
+
+    #[tokio::test]
+    async fn sensor_event_hook_recomputes_and_records_the_flip() {
+        let state = test_state().await;
+        seed_provider(&state).await;
+        seed_room(&state).await;
+        seed_sensor(&state, "m1", "motion", r#"{"reading":{"bool":true}}"#).await;
+
+        // A presence reading landing recomputes the room — event-driven, no
+        // reader involved — and the changed-only gate records the verdict.
+        sensor_reading_landed(&state.db, &state.occupancy_seen, "p", "m1").await;
+        assert_eq!(
+            state.occupancy_seen.lock().unwrap().get("r"),
+            Some(&true),
+            "detected reading must flip the room to occupied"
+        );
+
+        // The sensor clearing flips it back.
+        sqlx::query(r#"UPDATE sensor_devices SET last_state = '{"reading":{"bool":false}}' WHERE id = 'm1'"#)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sensor_reading_landed(&state.db, &state.occupancy_seen, "p", "m1").await;
+        assert_eq!(state.occupancy_seen.lock().unwrap().get("r"), Some(&false));
+    }
+
+    #[tokio::test]
+    async fn non_presence_sensor_event_does_not_touch_occupancy() {
+        let state = test_state().await;
+        seed_provider(&state).await;
+        seed_room(&state).await;
+        seed_sensor(
+            &state,
+            "lux",
+            "illuminance",
+            r#"{"reading":{"number":500}}"#,
+        )
+        .await;
+        sensor_reading_landed(&state.db, &state.occupancy_seen, "p", "lux").await;
+        assert!(state.occupancy_seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sensor_member_rooms_covers_direct_and_link_membership() {
+        let state = test_state().await;
+        seed_provider(&state).await;
+        seed_room(&state).await;
+        // Direct assignment.
+        seed_sensor(&state, "m1", "motion", r#"{"reading":{"bool":true}}"#).await;
+        assert_eq!(sensor_member_rooms(&state.db, "m1").await, vec!["r"]);
+
+        // Link membership: a second room linked to a synced group carrying m2.
+        sqlx::query("INSERT INTO rooms (id, name) VALUES ('r2','Den')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO sensor_devices (id, provider_id, device_id, name, kind, last_state)
+             VALUES ('m2','p','m2','m2','motion','{\"reading\":{\"bool\":false}}')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO provider_groups (id, provider_id, provider_group_id, name) VALUES ('pg','p','native','Den')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO room_links (room_id, provider_group_id) VALUES ('r2','pg')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO provider_group_sensor_devices (provider_group_id, sensor_device_id) VALUES ('pg','m2')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(sensor_member_rooms(&state.db, "m2").await, vec!["r2"]);
+
+        // Direct assignment is authoritative: once m2 is directly assigned
+        // anywhere, its link inheritance is suppressed everywhere.
+        sqlx::query(
+            "INSERT INTO room_sensor_devices (room_id, sensor_device_id) VALUES ('r','m2')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(sensor_member_rooms(&state.db, "m2").await, vec!["r"]);
+    }
+
+    #[test]
+    fn occupancy_log_gate_fires_on_first_verdict_and_flips_only() {
+        let mut seen = std::collections::HashMap::new();
+        // First observation logs; a steady re-read (the scheduler's 30s tick) doesn't.
+        assert!(occupancy_verdict_changed(&mut seen, "r", Some(false)));
+        assert!(!occupancy_verdict_changed(&mut seen, "r", Some(false)));
+        // A flip logs once, then goes quiet again.
+        assert!(occupancy_verdict_changed(&mut seen, "r", Some(true)));
+        assert!(!occupancy_verdict_changed(&mut seen, "r", Some(true)));
+        // Losing presence input (None) never logs — and clears the entry, so a
+        // returning verdict logs fresh.
+        assert!(!occupancy_verdict_changed(&mut seen, "r", None));
+        assert!(occupancy_verdict_changed(&mut seen, "r", Some(true)));
+        // Rooms are tracked independently.
+        assert!(occupancy_verdict_changed(&mut seen, "other", Some(true)));
     }
 
     #[tokio::test]

@@ -530,7 +530,7 @@ this view on the kiosk itself.
 | `PUT` | `/api/kiosks/{id}/room` | session | Assign the kiosk to a Room (`{ room_id }`, null clears) — its voice context and presence source |
 | `PUT` | `/api/kiosks/{id}/board` | session | Set the board to auto-launch full-screen (`{ board_id }`, null clears) |
 | `PUT` | `/api/kiosks/{id}/schedule` | session | Scheduled quiet hours: `{ enabled, sleep_at, wake_at }` (server-local `"HH:MM"`; both required and distinct when enabled) |
-| `PUT` | `/api/kiosks/{id}/presence` | session | Presence-driven blanking: `{ enabled, timeout_secs? }` (no-motion grace, clamped 30–3600 s) |
+| `PUT` | `/api/kiosks/{id}/presence` | session | Presence-aware display (wake on motion, screen off when empty): `{ enabled, timeout_secs? }` (screen-off timer, clamped 30–3600 s) |
 | `POST` | `/api/kiosks/{id}/deauth` | session | Revoke the kiosk's key (it must re-enroll) |
 | `DELETE` | `/api/kiosks/{id}` | session | Forget a kiosk record |
 

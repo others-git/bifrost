@@ -49,6 +49,12 @@ pub struct AppState {
     /// every other client — the wall kiosk) refreshes its device lists live
     /// instead of waiting for a reload. Payload = the changed table.
     pub inventory_events: tokio::sync::broadcast::Sender<String>,
+    /// Last occupancy verdict seen per room — the changed-only seam behind the
+    /// `bifrost::rooms` occupancy debug log (a verdict flip logs once, the
+    /// kiosk scheduler's steady 30s re-reads stay silent). `Arc` so the sensor
+    /// DB-writer tasks recompute (and log) on every presence event without
+    /// holding `AppState`. Std mutex: never held across an await.
+    pub occupancy_seen: api::rooms::OccupancySeen,
     cipher: Aes256Gcm,
     /// Non-reversible fingerprint of the derived credential key — for the startup
     /// diagnostic that catches a silently-changed `BIFROST_SECRET`.
@@ -69,6 +75,7 @@ impl AppState {
             automations_changed: std::sync::Arc::new(tokio::sync::Notify::new()),
             hold_watch: api::automations::HoldWatch::default(),
             inventory_events: tokio::sync::broadcast::channel(64).0,
+            occupancy_seen: api::rooms::OccupancySeen::default(),
         }
     }
 
@@ -294,6 +301,7 @@ pub fn start_manager_for(
                         provider,
                         state.db.clone(),
                         state.inventory_events.clone(),
+                        state.occupancy_seen.clone(),
                     );
                 }
                 Err(e) => tracing::error!("failed to build provider {provider_id}: {e:#}"),
@@ -311,6 +319,7 @@ pub fn start_manager_for(
                         provider,
                         state.db.clone(),
                         state.inventory_events.clone(),
+                        state.occupancy_seen.clone(),
                     );
                 }
                 Err(e) => tracing::error!("failed to build HA provider {provider_id}: {e:#}"),

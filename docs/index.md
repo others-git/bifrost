@@ -61,7 +61,7 @@ provider, voice, the wall tablet, and API keys.
 
 ## Wall-tablet & companion repos
 
-- **[bifrost-kiosk](https://github.com/others-git/bifrost-kiosk)** — a native Android app that turns a wall-mounted tablet into a hard-locked, always-on Bifrost fixture: a full-screen dashboard plus an offline wake-word voice satellite. Pair it by scanning a QR code. The hub manages it remotely — over-the-air updates, an auto-launched board, and display power saving (scheduled quiet hours + room-presence blanking).
+- **[bifrost-kiosk](https://github.com/others-git/bifrost-kiosk)** — a native Android app that turns a wall-mounted tablet into a hard-locked, always-on Bifrost fixture: a full-screen dashboard plus an offline wake-word voice satellite. Pair it by scanning a QR code. The hub manages it remotely — over-the-air updates, an auto-launched board, and display power saving (scheduled quiet hours + a presence-aware display that wakes on motion and turns off when the room empties).
 - **[bifrost-skills](https://github.com/others-git/bifrost-skills)** — reusable hardware setup runbooks (starting with the tablet wall-kiosk).
 
 ## AI usage disclosure
