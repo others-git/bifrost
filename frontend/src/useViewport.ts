@@ -15,6 +15,13 @@ export const BREAKPOINTS = { mobile: 640, tablet: 1280 };
 // as compact even though a fine-pointer laptop at the same width would not.
 const COARSE_TABLET_MAX = 1366;
 
+/** Subscribe to an arbitrary media query — for the rare layout that needs a
+ * width tier beyond the shared booleans (e.g. masonry column count on very
+ * wide monitors). Prefer `useViewport()` for the standard breakpoints. */
+export function useMediaQuery(query: string, serverValue = false): boolean {
+  return useMedia(query, serverValue);
+}
+
 function useMedia(query: string, serverValue = false): boolean {
   return useSyncExternalStore(
     (cb) => {

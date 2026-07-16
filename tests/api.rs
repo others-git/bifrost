@@ -10124,6 +10124,119 @@ async fn room_power_membership_roundtrips_and_lists() {
 }
 
 #[tokio::test]
+async fn room_sensor_membership_and_presence_opt_out_roundtrip() {
+    let ha = ha_remote_mock().await;
+    let (app, prov_id, db) = helpers::test_app_with_ha_db(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Two presence sensors: one detecting, one clear.
+    for (id, detecting) in [("hall", true), ("couch", false)] {
+        sqlx::query(
+            "INSERT INTO sensor_devices (id, provider_id, device_id, name, kind, last_state)
+             VALUES (?, ?, ?, ?, 'motion', ?)",
+        )
+        .bind(id)
+        .bind(&prov_id)
+        .bind(format!("binary_sensor.{id}"))
+        .bind(id)
+        .bind(format!(r#"{{"reading":{{"bool":{detecting}}}}}"#))
+        .execute(&db)
+        .await
+        .unwrap();
+    }
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/rooms",
+            &cookie,
+            r#"{"name":"Den","light_ids":[]}"#,
+        ))
+        .await
+        .unwrap();
+    let room_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Assign both sensors; the room lists them and reads occupied (hall detects).
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/sensors"),
+            &cookie,
+            r#"{"sensor_ids":["hall","couch"]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let room_json = |rooms: serde_json::Value| {
+        rooms
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == room_id)
+            .unwrap()
+            .clone()
+    };
+    let rooms = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/rooms", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let room = room_json(rooms);
+    assert_eq!(room["sensor_ids"], serde_json::json!(["couch", "hall"]));
+    assert_eq!(room["direct_sensor_ids"].as_array().unwrap().len(), 2);
+    assert_eq!(room["occupancy"], serde_json::json!(true));
+
+    // Opt the detecting sensor out → still a member, but the room reads empty.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/rooms/{room_id}/presence"),
+            &cookie,
+            r#"{"excluded_sensor_ids":["hall"]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let rooms = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/rooms", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let room = room_json(rooms);
+    assert_eq!(room["sensor_ids"], serde_json::json!(["couch", "hall"]));
+    assert_eq!(room["presence_excluded"], serde_json::json!(["hall"]));
+    assert_eq!(room["occupancy"], serde_json::json!(false));
+
+    // Unknown ids are rejected on both endpoints.
+    for (path, body) in [
+        ("sensors", r#"{"sensor_ids":["nope"]}"#),
+        ("presence", r#"{"excluded_sensor_ids":["nope"]}"#),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(helpers::authed_json(
+                "PUT",
+                &format!("/api/rooms/{room_id}/{path}"),
+                &cookie,
+                body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+}
+
+#[tokio::test]
 async fn room_on_off_fans_out_to_power_members() {
     let ha = ha_power_mock().await;
     let (app, prov_id) = helpers::test_app_with_ha(&ha.uri()).await;

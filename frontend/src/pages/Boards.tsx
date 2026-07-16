@@ -500,7 +500,9 @@ export function BoardsPage() {
         flex: 1,
         minHeight: 0,
         width: "100%",
-        padding: isMobile ? "1rem 0.85rem" : "1rem 1.4rem",
+        // Match the shared page-shell margins (styles.ts pageShell) so Boards
+        // doesn't sit at different offsets than every other page.
+        padding: isMobile ? "1rem 0.85rem" : "2rem 2.5rem",
         gap: "0.5rem",
       }}
     >

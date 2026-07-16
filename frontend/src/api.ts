@@ -1354,6 +1354,17 @@ export interface Room {
   media_devices: RoomMediaMember[];
   /** Power devices (switches/plugs/fans) the room contains. */
   power_device_ids: string[];
+  /** Effective sensor members (all kinds: presence + environmental). */
+  sensor_ids: string[];
+  /** Explicitly-assigned sensors (subset of `sensor_ids`; the rest arrive via
+   * synced provider-group links). */
+  direct_sensor_ids: string[];
+  /** Sensors opted OUT of this room's occupancy. Still members — they just
+   * never count toward `occupancy`. */
+  presence_excluded: string[];
+  /** Live occupancy: null = no presence sensors count here; else whether any
+   * counting presence member is currently detecting. */
+  occupancy: boolean | null;
   /** User-configured quick-control buttons on the room's Control card. */
   controls: RoomControl[];
   /** Disabled rooms are hidden from the Dashboard/Floor Plan; managed in Settings. */
@@ -1433,6 +1444,8 @@ export interface ProviderGroupInfo {
   media_device_ids: string[];
   /** Member power devices (switches/plugs/fans). */
   power_device_ids: string[];
+  /** Member sensors (a synced Hue room's motion accessory, an HA Area's sensors). */
+  sensor_device_ids: string[];
 }
 
 export async function getRooms(): Promise<Room[]> {
@@ -1494,6 +1507,25 @@ export async function setRoomLinks(id: string, provider_group_ids: string[]): Pr
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ provider_group_ids }),
+  });
+}
+
+/** Replace the room's explicit sensor membership (linked members are unaffected). */
+export async function setRoomSensors(id: string, sensor_ids: string[]): Promise<void> {
+  await fetch(`/api/rooms/${id}/sensors`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sensor_ids }),
+  });
+}
+
+/** Replace the room's presence opt-outs: the listed sensors stop counting toward
+ * occupancy (everything else counts by default, including sensors synced later). */
+export async function setRoomPresence(id: string, excluded_sensor_ids: string[]): Promise<void> {
+  await fetch(`/api/rooms/${id}/presence`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ excluded_sensor_ids }),
   });
 }
 

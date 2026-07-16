@@ -31,7 +31,7 @@ import { Select } from "../components/Select";
 import { useDialogs } from "../components/dialogs";
 import { PageHeader } from "../components/PageHeader";
 import { useViewport } from "../useViewport";
-import { S } from "../styles";
+import { S, pageShell, tileGrid } from "../styles";
 import { alpha, color, font, glow, labelType, radius } from "../theme";
 import { Button } from "../components/controls";
 
@@ -152,7 +152,7 @@ export function ScenesPage() {
   }
 
   return (
-    <div style={{ padding: isMobile ? "1rem 0.85rem" : "1.5rem 2rem", maxWidth: 1100, margin: "0 auto" }}>
+    <div style={pageShell(isMobile)}>
       <PageHeader title="Scenes" status="Saved full-state snapshots — whole-home or per-room" />
 
       {loading ? (
@@ -167,7 +167,8 @@ export function ScenesPage() {
               outage resets them to factory state). Mark one as the default for the{" "}
               <strong>Restore Home</strong> button on the dashboard.
             </p>
-            <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", maxWidth: 620 }}>
+            {/* Home-scene rows tile like the room-scene cards below. */}
+            <div style={tileGrid(480, isMobile, "0.5rem 0.75rem")}>
               {homeScenes.map((s) => (
                 <div
                   key={s.id}

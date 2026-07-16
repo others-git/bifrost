@@ -72,7 +72,7 @@ import { PageHeader, SectionLabel } from "../components/PageHeader";
 import { ThemeSwitcher } from "../components/ThemeSwitcher";
 import { Select } from "../components/Select";
 import { useViewport } from "../useViewport";
-import { ACCENT, S } from "../styles";
+import { ACCENT, S, pageShell, tileGrid } from "../styles";
 import { Button, Switch } from "../components/controls";
 import { Glyph } from "../components/glyphs";
 import { speak } from "../tts";
@@ -239,7 +239,7 @@ export function SettingsPage({ onNavigate: _onNavigate, initialAdd, onConsumeAdd
   }
 
   return (
-    <div style={{ padding: isMobile ? "1rem 0.85rem" : "2rem", maxWidth: 720, margin: "0 auto" }}>
+    <div style={pageShell(isMobile)}>
       <PageHeader title="Settings" />
 
       {/* Tabs — keeps a growing Settings page legible. Scrolls on narrow screens. */}
@@ -309,7 +309,7 @@ export function SettingsPage({ onNavigate: _onNavigate, initialAdd, onConsumeAdd
             </div>
           )}
 
-          <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+          <div style={tileGrid(480, isMobile)}>
             {providers.length === 0 && !showAdd && (
               <p style={{ color: "var(--bf-faint)", margin: 0 }}>No providers configured.</p>
             )}
@@ -363,7 +363,7 @@ export function SettingsPage({ onNavigate: _onNavigate, initialAdd, onConsumeAdd
           </div>
 
           {showAdd ? (
-            <div style={{ marginTop: "1.5rem" }}>
+            <div style={{ marginTop: "1.5rem", maxWidth: 680 }}>
               <AddProviderForm
                 key={prefill ? `${prefill.provider_type}:${prefill.name}` : "blank"}
                 types={types}
@@ -390,7 +390,13 @@ export function SettingsPage({ onNavigate: _onNavigate, initialAdd, onConsumeAdd
         </>
       )}
 
-      {tab === "voice" && <AiEndpointsSection dialogs={dialogs} />}
+      {/* Form-shaped tabs keep a readable column (left-aligned, not centered);
+          full-bleed is for card collections, not input stacks. */}
+      {tab === "voice" && (
+        <div style={{ maxWidth: 760 }}>
+          <AiEndpointsSection dialogs={dialogs} />
+        </div>
+      )}
 
       {tab === "clients" && <ClientsTab dialogs={dialogs} />}
 
@@ -400,7 +406,11 @@ export function SettingsPage({ onNavigate: _onNavigate, initialAdd, onConsumeAdd
         </div>
       )}
 
-      {tab === "developer" && <DeveloperTab onDevModeChange={onDevModeChange} />}
+      {tab === "developer" && (
+        <div style={{ maxWidth: 900 }}>
+          <DeveloperTab onDevModeChange={onDevModeChange} />
+        </div>
+      )}
 
       {dialogs.element}
     </div>
@@ -2496,6 +2506,7 @@ function KiosksSection({
   dialogs: Dialogs;
   latest: KioskUpdateManifest | null;
 }) {
+  const { isMobile } = useViewport();
   const [kiosks, setKiosks] = useState<Kiosk[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
   const [boards, setBoards] = useState<Dashboard[]>([]);
@@ -2586,7 +2597,7 @@ function KiosksSection({
         blank the display overnight (power saving) — a manual wake still holds until morning. Pair a
         new one above via <strong>Pair a device</strong>.
       </p>
-      <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+      <div style={tileGrid(460, isMobile, "0.5rem 0.75rem")}>
         {kiosks.length === 0 && (
           <p style={{ color: "var(--bf-faint)", margin: 0, fontSize: "0.85rem" }}>No kiosks have checked in.</p>
         )}

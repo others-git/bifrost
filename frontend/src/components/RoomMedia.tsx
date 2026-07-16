@@ -3,11 +3,13 @@
 // page). Volume/mute fans out to every audio device in the room; each device's
 // per-room offset is applied server-side.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  setMediaState,
   setRoomMediaDevices,
   setRoomMediaState,
   type MediaDevice,
+  type ProviderGroupInfo,
   type Room,
   type RoomMediaMember,
 } from "../api";
@@ -85,19 +87,56 @@ export function RoomVolumeStrip({ room, devices }: { room: Room; devices: MediaD
   );
 }
 
-/** Choose which audio devices belong to the room and calibrate each one's
- * per-room volume offset. Saves the explicit membership; synced audio-group
- * links contribute on top. */
-export function RoomMediaEditor({
+/** One member speaker's live volume — the shared per-device control plane
+ * (`PUT /media/devices/{id}/state`), debounced like every other slider. The
+ * calibration feedback loop: run the sweep below, watch/drag real levels here,
+ * trim offsets until the room balances. */
+function MemberLevel({ device }: { device: MediaDevice }) {
+  const [level, setLevel] = useState(device.state.volume);
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  useEffect(() => setLevel(device.state.volume), [device.id, device.state.volume]);
+
+  function commit(v: number) {
+    setLevel(v);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setMediaState(device.id, { volume: v }), 250);
+  }
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+      <span style={{ fontSize: "0.72rem", color: "var(--bf-dim)", width: 40 }}>level</span>
+      <input
+        type="range"
+        min={0}
+        max={100}
+        value={level}
+        onChange={(e) => commit(Number(e.target.value))}
+        style={{ flex: 1, accentColor: ACCENT }}
+      />
+      <span style={{ fontSize: "0.72rem", color: "var(--bf-dim)", width: 34, textAlign: "right" }}>
+        {level}
+      </span>
+    </div>
+  );
+}
+
+/** The room's Audio section: membership, per-room offsets, each member's LIVE
+ * level, and the room sweep. Never assumes one speaker per room — every member
+ * shows its own honest level; the sweep is a fan-out test action, not a "room
+ * level" readout. Membership + offsets commit on Save; levels apply live. */
+export function RoomAudioSection({
   room,
   devices,
-  onChanged,
+  providerGroups,
+  onSaved,
 }: {
   room: Room;
   devices: MediaDevice[];
-  onChanged: () => void;
+  providerGroups: ProviderGroupInfo[];
+  onSaved: () => void;
 }) {
-  // device id → offset (member) or undefined (not a member).
+  // device id → offset (explicit member) or undefined (not explicit).
   const [draft, setDraft] = useState<Map<string, number | undefined>>(new Map());
   const [saving, setSaving] = useState(false);
 
@@ -106,6 +145,15 @@ export function RoomMediaEditor({
     for (const m of room.media_devices) d.set(m.media_device_id, m.volume_offset);
     setDraft(d);
   }, [room.id, room.media_devices]);
+
+  // Devices arriving via a synced audio-group link: members even without an
+  // explicit row. Ticking one just sets its offset (an explicit row on top).
+  const linkedIds = useMemo(() => {
+    const linked = new Set(room.links.map((l) => l.provider_group_id));
+    return new Set(
+      providerGroups.filter((pg) => linked.has(pg.id)).flatMap((pg) => pg.media_device_ids),
+    );
+  }, [room.links, providerGroups]);
 
   async function save() {
     setSaving(true);
@@ -119,7 +167,7 @@ export function RoomMediaEditor({
         .filter(([id, off]) => off !== undefined && ok.has(id))
         .map(([id, off]) => ({ media_device_id: id, volume_offset: off as number }));
       await setRoomMediaDevices(room.id, list);
-      onChanged();
+      onSaved();
     } finally {
       setSaving(false);
     }
@@ -140,7 +188,8 @@ export function RoomMediaEditor({
     <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
       {selectable.map((d) => {
         const off = draft.get(d.id);
-        const isMember = off !== undefined;
+        const explicit = off !== undefined;
+        const isMember = explicit || linkedIds.has(d.id);
         return (
           <div
             key={d.id}
@@ -154,22 +203,26 @@ export function RoomMediaEditor({
               gap: "0.45rem",
             }}
           >
-            <label style={{ display: "flex", alignItems: "center", gap: "0.6rem", fontSize: "0.9rem", color: "var(--bf-dim)", cursor: "pointer", minHeight: 26 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: "0.6rem", fontSize: "0.9rem", color: "var(--bf-dim)", cursor: "pointer", minHeight: 30 }}>
               <input
                 type="checkbox"
-                checked={isMember}
+                checked={explicit}
                 onChange={() =>
                   setDraft((prev) => {
                     const n = new Map(prev);
-                    n.set(d.id, isMember ? undefined : 0);
+                    n.set(d.id, explicit ? undefined : 0);
                     return n;
                   })
                 }
                 style={{ width: 18, height: 18, accentColor: ACCENT, flexShrink: 0, cursor: "pointer" }}
               />
               <span style={{ flex: 1, minWidth: 0 }}>{d.name}</span>
+              {!explicit && isMember && (
+                <span style={{ fontSize: "0.72rem", color: "var(--bf-faint)" }}>via link</span>
+              )}
             </label>
-            {isMember && (
+            {isMember && <MemberLevel device={d} />}
+            {explicit && (
               <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                 <span style={{ fontSize: "0.72rem", color: "var(--bf-dim)", width: 40 }}>offset</span>
                 <input
@@ -188,6 +241,16 @@ export function RoomMediaEditor({
           </div>
         );
       })}
+
+      {room.media_devices.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.2rem", marginTop: "0.3rem" }}>
+          <span style={{ fontSize: "0.72rem", color: "var(--bf-faint)" }}>
+            Room sweep — one volume fanned to every member with its offset applied
+          </span>
+          <RoomVolumeStrip room={room} devices={devices} />
+        </div>
+      )}
+
       <Button variant="accent"
         onClick={save}
         disabled={saving} style={{ alignSelf: "flex-start", marginTop: "0.3rem", borderColor: ACCENT, color: ACCENT }}

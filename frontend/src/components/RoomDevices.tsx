@@ -1,32 +1,32 @@
-// Unified room device configuration. One panel — instead of separate
-// lights/audio editors — that groups every kind of member a Bifrost Room can
-// hold: synced provider rooms/areas (links), lights, speakers (with per-room
-// volume offset), and power devices. Membership sections are driven by a
-// generic helper so adding a future device class is a few lines, not a new
-// editor. One Save commits all of it.
+// Unified room membership editor — the Members section of a room's config.
+// Groups every kind of member a Bifrost Room can hold: synced provider
+// rooms/areas (links), lights, sensors, and power devices. Membership sections
+// are driven by a generic helper so adding a future device class is a few
+// lines, not a new editor. One Save commits all of it. (Audio membership +
+// per-room offsets live in the Audio section — volume calibration needs its
+// own room.)
 //
 // Mobile: sections stack; each device list scrolls within a capped height so a
 // room with many devices stays manageable on a small screen.
 
 import { useMemo, useState, type ReactNode } from "react";
 import {
-  setRoomMediaDevices,
   setRoomDirectLights,
   setRoomLinks,
   setRoomPowerDevices,
-  type MediaDevice,
+  setRoomSensors,
+  sensorReadingText,
   type Light,
   type PowerDevice,
   type ProviderGroupInfo,
   type Room,
+  type SensorDevice,
 } from "../api";
+import { color } from "../theme";
 import { SelectRow } from "./SelectRow";
 import { Button } from "./controls";
 import { Glyph } from "./glyphs";
-
-// Lights/power rows use SelectRow's default sky accent; speakers use violet to
-// match the Audio page.
-const AUDIO_ACCENT = "#a78bfa";
+import { PRESENCE_ACCENT } from "./RoomPresence";
 
 function toggle(set: Set<string>, id: string): Set<string> {
   const next = new Set(set);
@@ -36,8 +36,8 @@ function toggle(set: Set<string>, id: string): Set<string> {
 }
 
 /** A titled group of selectable rows. The generic building block for the
- * membership sections (links, lights, power); audio is specialised below. */
-function Section({
+ * membership sections (links, lights, sensors, power). */
+export function Section({
   title,
   hint,
   empty,
@@ -78,19 +78,17 @@ function Section({
 export function RoomDevicesPanel({
   room,
   lights,
-  mediaDevices,
   powerDevices,
+  sensors,
   providerGroups,
   onSaved,
-  onCancel,
 }: {
   room: Room;
   lights: Light[];
-  mediaDevices: MediaDevice[];
   powerDevices: PowerDevice[];
+  sensors: SensorDevice[];
   providerGroups: ProviderGroupInfo[];
   onSaved: () => void;
-  onCancel: () => void;
 }) {
   const [links, setLinks] = useState<Set<string>>(
     () => new Set(room.links.map((l) => l.provider_group_id)),
@@ -99,17 +97,25 @@ export function RoomDevicesPanel({
     () => new Set(room.direct_light_ids),
   );
   const [power, setPower] = useState<Set<string>>(() => new Set(room.power_device_ids));
-  // audio device id → per-room offset (members only).
-  const [audio, setAudio] = useState<Map<string, number>>(
-    () => new Map(room.media_devices.map((m) => [m.media_device_id, m.volume_offset])),
+  const [directSensors, setDirectSensors] = useState<Set<string>>(
+    () => new Set(room.direct_sensor_ids),
   );
   const [saving, setSaving] = useState(false);
 
-  // Lights already covered by a selected link — shown, but locked.
+  // Members already covered by a selected link — shown, but locked.
   const linkedLightIds = useMemo(
     () =>
       new Set(
         providerGroups.filter((pg) => links.has(pg.id)).flatMap((pg) => pg.light_ids),
+      ),
+    [providerGroups, links],
+  );
+  const linkedSensorIds = useMemo(
+    () =>
+      new Set(
+        providerGroups
+          .filter((pg) => links.has(pg.id))
+          .flatMap((pg) => pg.sensor_device_ids),
       ),
     [providerGroups, links],
   );
@@ -120,10 +126,7 @@ export function RoomDevicesPanel({
       await setRoomLinks(room.id, [...links]);
       await setRoomDirectLights(room.id, [...directLights]);
       await setRoomPowerDevices(room.id, [...power]);
-      await setRoomMediaDevices(
-        room.id,
-        [...audio.entries()].map(([id, off]) => ({ media_device_id: id, volume_offset: off })),
-      );
+      await setRoomSensors(room.id, [...directSensors]);
       onSaved();
     } finally {
       setSaving(false);
@@ -135,26 +138,25 @@ export function RoomDevicesPanel({
     if (pg.light_ids.length) parts.push(`${pg.light_ids.length} light${pg.light_ids.length !== 1 ? "s" : ""}`);
     if (pg.media_device_ids.length) parts.push(`${pg.media_device_ids.length} speaker${pg.media_device_ids.length !== 1 ? "s" : ""}`);
     if (pg.power_device_ids.length) parts.push(`${pg.power_device_ids.length} power`);
+    if (pg.sensor_device_ids.length) parts.push(`${pg.sensor_device_ids.length} sensor${pg.sensor_device_ids.length !== 1 ? "s" : ""}`);
     return parts.join(" · ") || "empty";
   }
 
+  const selectableSensors = sensors.filter(
+    (s) =>
+      (s.enabled !== false && !s.shadowed_by) ||
+      directSensors.has(s.id) ||
+      linkedSensorIds.has(s.id),
+  );
+
   return (
-    <div
-      style={{
-        borderTop: "1px solid var(--bf-surfaceHi)",
-        paddingTop: "0.7rem",
-        marginTop: "0.2rem",
-        display: "flex",
-        flexDirection: "column",
-        gap: "0.9rem",
-      }}
-    >
+    <div style={{ display: "flex", flexDirection: "column", gap: "0.9rem" }}>
       {providerGroups.length > 0 && (
         <Section title="Linked rooms / areas" hint="(membership syncs automatically)">
           {providerGroups.map((pg) => (
             <SelectRow
               key={pg.id}
-              accent={pg.domain === "media" ? AUDIO_ACCENT : undefined}
+              accent={pg.domain === "media" ? color.violet : undefined}
               checked={links.has(pg.id)}
               onToggle={() => setLinks((s) => toggle(s, pg.id))}
             >
@@ -186,60 +188,30 @@ export function RoomDevicesPanel({
       </Section>
 
       <Section
-        title="Speakers"
-        hint="(per-room volume offset)"
-        empty="No audio devices discovered yet."
-        isEmpty={mediaDevices.length === 0}
+        title="Sensors"
+        hint="(presence sensors feed the room's occupancy — tune which count under Presence)"
+        empty="No sensors yet — a Hue motion sensor or HA binary_sensor appears here after Sync."
+        isEmpty={selectableSensors.length === 0}
       >
-        {mediaDevices.map((d) => {
-          const off = audio.get(d.id);
-          const isMember = off !== undefined;
+        {selectableSensors.map((s) => {
+          const viaLink = linkedSensorIds.has(s.id);
           return (
-            <div
-              key={d.id}
-              style={{
-                borderRadius: 8,
-                border: `1px solid ${isMember ? AUDIO_ACCENT : "transparent"}`,
-                background: isMember ? `${AUDIO_ACCENT}1f` : "rgba(255,255,255,0.02)",
-                padding: "0.4rem 0.6rem",
-                display: "flex",
-                flexDirection: "column",
-                gap: "0.4rem",
-              }}
+            <SelectRow
+              key={s.id}
+              accent={PRESENCE_ACCENT}
+              checked={viaLink || directSensors.has(s.id)}
+              disabled={viaLink}
+              onToggle={() => setDirectSensors((prev) => toggle(prev, s.id))}
             >
-              <label style={{ display: "flex", alignItems: "center", gap: "0.6rem", fontSize: "0.9rem", color: "var(--bf-dim)", cursor: "pointer", minHeight: 30 }}>
-                <input
-                  type="checkbox"
-                  checked={isMember}
-                  onChange={() =>
-                    setAudio((prev) => {
-                      const n = new Map(prev);
-                      if (isMember) n.delete(d.id);
-                      else n.set(d.id, 0);
-                      return n;
-                    })
-                  }
-                  style={{ width: 18, height: 18, accentColor: AUDIO_ACCENT, flexShrink: 0, cursor: "pointer" }}
-                />
-                <span style={{ flex: 1, minWidth: 0 }}>{d.name}</span>
-              </label>
-              {isMember && (
-                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                  <span style={{ fontSize: "0.72rem", color: "var(--bf-dim)", width: 40 }}>offset</span>
-                  <input
-                    type="range"
-                    min={-50}
-                    max={50}
-                    value={off}
-                    onChange={(e) => setAudio((prev) => new Map(prev).set(d.id, Number(e.target.value)))}
-                    style={{ flex: 1, accentColor: AUDIO_ACCENT }}
-                  />
-                  <span style={{ fontSize: "0.72rem", color: "var(--bf-dim)", width: 34, textAlign: "right" }}>
-                    {off! > 0 ? `+${off}` : off}%
-                  </span>
-                </div>
-              )}
-            </div>
+              <span style={{ display: "inline-grid", placeItems: "center", verticalAlign: "-2px" }}>
+                <Glyph name={s.glyph ?? s.kind} size={14} />
+              </span>{" "}
+              {s.name}
+              <span style={{ color: "var(--bf-faint)", fontSize: "0.72rem" }}>
+                {sensorReadingText(s)}
+                {viaLink && " · via link"}
+              </span>
+            </SelectRow>
           );
         })}
       </Section>
@@ -258,12 +230,9 @@ export function RoomDevicesPanel({
         ))}
       </Section>
 
-      <div style={{ display: "flex", gap: "0.5rem", position: "sticky", bottom: 0 }}>
+      <div style={{ display: "flex", gap: "0.5rem" }}>
         <Button variant="accent" onClick={save} disabled={saving}>
-          {saving ? "Saving…" : "Save"}
-        </Button>
-        <Button variant="ghost" onClick={onCancel}>
-          Cancel
+          {saving ? "Saving…" : "Save members"}
         </Button>
       </div>
     </div>

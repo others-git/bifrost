@@ -24,10 +24,11 @@ import {
 import { Glyph } from "../components/glyphs";
 import { RoomCard, litHexes, roomMembers } from "../components/RoomCard";
 import { T, font, glassCard, radius, color, glow, alpha } from "../theme";
+import { pageShell } from "../styles";
 import { CornerFiligree } from "../components/ornament";
 import { PageHeader } from "../components/PageHeader";
 import { useDialogs, type Dialogs } from "../components/dialogs";
-import { useViewport } from "../useViewport";
+import { useMediaQuery, useViewport } from "../useViewport";
 
 interface Props {
   lights: Light[];
@@ -155,7 +156,7 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
   }
 
   return (
-    <div style={{ padding: isMobile ? "1rem 0.85rem" : isCompact ? "1.1rem 1rem" : "2rem", width: "100%", maxWidth: 1100, margin: "0 auto", color: T.text, display: "flex", flexDirection: "column", flex: 1, boxSizing: "border-box" }}>
+    <div style={{ ...pageShell(isMobile), ...(isCompact && !isMobile ? { padding: "1.1rem 1rem" } : {}), color: T.text, display: "flex", flexDirection: "column", flex: 1 }}>
       <PageHeader
         title="Control"
         status={localLights.length > 0 ? `${onCount} of ${localLights.length} lights on` : undefined}
@@ -241,6 +242,10 @@ function RoomGrid({
   onChanged: () => void;
 }) {
   const { isMobile } = useViewport();
+  // Masonry column count scales with the window — the page is full-bleed, so
+  // a big monitor gets more columns instead of a centered strip.
+  const wide = useMediaQuery("(min-width: 1700px)");
+  const ultraWide = useMediaQuery("(min-width: 2400px)");
   const assigned = new Set<string>();
 
   // Membership (enabled filter + bound-receiver fold) comes from the one shared
@@ -281,7 +286,7 @@ function RoomGrid({
   };
 
   return (
-    <div style={{ columnCount: isMobile ? 1 : 2, columnGap: "1.1rem" }}>
+    <div style={{ columnCount: isMobile ? 1 : ultraWide ? 4 : wide ? 3 : 2, columnGap: "1.1rem" }}>
       {roomSections.map(({ room, lights, power, audio }, i) => (
         <RoomBox key={room.id} index={i} name={room.name} roomId={room.id} lights={lights} power={power} audio={audio} controls={room.controls} {...common} />
       ))}

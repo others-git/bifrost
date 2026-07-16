@@ -38,6 +38,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{id}/enabled", put(set_room_enabled))
         .route("/{id}/lights", put(set_direct_lights))
         .route("/{id}/power", put(set_room_power_devices))
+        .route("/{id}/sensors", put(set_room_sensors))
+        .route("/{id}/presence", put(set_room_presence))
         .route("/{id}/links", put(set_links))
         .route("/{id}/controls", put(set_room_controls))
         .route("/{id}/state", put(set_room_state))
@@ -73,6 +75,17 @@ struct RoomInfo {
     media_devices: Vec<RoomMediaMember>,
     /// Power devices (switches/plugs/fans) the room contains.
     power_device_ids: Vec<String>,
+    /// Effective sensor members (all kinds: presence + environmental).
+    sensor_ids: Vec<String>,
+    /// Explicitly-assigned sensors (subset of `sensor_ids`; the rest arrive via
+    /// synced provider-group links and can only be moved on the Devices page).
+    direct_sensor_ids: Vec<String>,
+    /// Sensors opted OUT of this room's occupancy (see mig 0057). Still members;
+    /// they just never count toward `occupancy`.
+    presence_excluded: Vec<String>,
+    /// Live occupancy verdict: None = no presence sensors count here; else
+    /// whether any counting presence member is currently detecting.
+    occupancy: Option<bool>,
     /// User-configured quick-control buttons rendered on the room's Control card.
     controls: Vec<RoomControl>,
     /// Disabled rooms are hidden from the Dashboard/Floor Plan and the public
@@ -121,6 +134,8 @@ struct ProviderGroupInfo {
     media_device_ids: Vec<String>,
     /// Member power devices (switches/plugs/fans).
     power_device_ids: Vec<String>,
+    /// Member sensors (a synced Hue room's motion accessory, an HA Area's sensors).
+    sensor_device_ids: Vec<String>,
 }
 
 /// "media" if the provider type is a registered media provider, else "light".
@@ -234,6 +249,40 @@ pub(crate) async fn effective_power_member_ids(state: &AppState, room_id: &str) 
     .collect()
 }
 
+/// The room's effective sensor members (all kinds, not just presence), enabled
+/// providers only: explicit membership (`room_sensor_devices`) ∪ sensors from
+/// linked provider-groups (a synced Hue room / HA Area). The Rooms page renders
+/// these — presence kinds with a counts-toward-occupancy toggle, environmental
+/// kinds as read-only rows.
+pub(crate) async fn effective_sensor_member_ids(state: &AppState, room_id: &str) -> Vec<String> {
+    sqlx::query(
+        "SELECT sd.id AS sensor_device_id
+         FROM sensor_devices sd
+         JOIN providers p ON p.id = sd.provider_id
+         WHERE p.enabled = 1 AND sd.enabled = 1 AND sd.shadowed_by IS NULL
+           AND sd.id IN (
+               SELECT sensor_device_id FROM room_sensor_devices WHERE room_id = ?1
+               UNION
+               SELECT pgs.sensor_device_id
+               FROM room_links rl
+               JOIN provider_group_sensor_devices pgs
+                 ON pgs.provider_group_id = rl.provider_group_id
+               WHERE rl.room_id = ?1
+               -- A direct assignment is authoritative: a directly-assigned sensor
+               -- drops its provider-group inheritance everywhere (no duplicate).
+               AND pgs.sensor_device_id NOT IN (SELECT sensor_device_id FROM room_sensor_devices)
+           )
+         ORDER BY sd.name",
+    )
+    .bind(room_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| r.get("sensor_device_id"))
+    .collect()
+}
+
 /// Occupancy of a room from its **presence** sensors (motion / occupancy). The
 /// provider-agnostic room property that presence-driven behaviour reads:
 /// - `None` — the room has no presence sensors, so occupancy is unknown here.
@@ -252,6 +301,11 @@ pub(crate) async fn room_occupancy(state: &AppState, room_id: &str) -> Option<bo
 /// member list behind [`room_occupancy`]; the automation engine also reads it
 /// directly so it can overlay its own fresher in-memory readings (the DB cache
 /// is written by a separate task and can trail a push event by a beat).
+///
+/// Honors the room's presence opt-outs (`room_presence_excluded`): an excluded
+/// sensor stays a member (its readings still display) but never counts here, so
+/// every occupancy consumer — kiosk scheduler, automations, gates — inherits
+/// the exclusion from this one query.
 pub(crate) async fn room_presence_readings(state: &AppState, room_id: &str) -> Vec<(String, bool)> {
     use crate::models::sensor::SensorState;
     let rows = sqlx::query(
@@ -268,6 +322,9 @@ pub(crate) async fn room_presence_readings(state: &AppState, room_id: &str) -> V
                  ON pgs.provider_group_id = rl.provider_group_id
                WHERE rl.room_id = ?1
                AND pgs.sensor_device_id NOT IN (SELECT sensor_device_id FROM room_sensor_devices)
+           )
+           AND sd.id NOT IN (
+               SELECT sensor_device_id FROM room_presence_excluded WHERE room_id = ?1
            )",
     )
     .bind(room_id)
@@ -559,12 +616,35 @@ async fn list_rooms(State(state): State<Arc<AppState>>, _: Session) -> impl Into
         let power_device_ids = effective_power_member_ids(&state, &id).await;
         let controls = list_room_controls(&state, &id).await;
 
+        let direct_sensor_ids: Vec<String> =
+            sqlx::query("SELECT sensor_device_id FROM room_sensor_devices WHERE room_id = ?")
+                .bind(&id)
+                .fetch_all(&state.db)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| r.get("sensor_device_id"))
+                .collect();
+        let presence_excluded: Vec<String> =
+            sqlx::query("SELECT sensor_device_id FROM room_presence_excluded WHERE room_id = ?")
+                .bind(&id)
+                .fetch_all(&state.db)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| r.get("sensor_device_id"))
+                .collect();
+
         out.push(RoomInfo {
             light_ids: effective_member_ids(&state, &id).await,
             direct_light_ids: direct,
             links,
             media_devices,
             power_device_ids,
+            sensor_ids: effective_sensor_member_ids(&state, &id).await,
+            direct_sensor_ids,
+            presence_excluded,
+            occupancy: room_occupancy(&state, &id).await,
             controls,
             enabled: room.get::<i64, _>("enabled") != 0,
             id,
@@ -921,6 +1001,13 @@ async fn list_provider_groups(State(state): State<Arc<AppState>>, _: Session) ->
             "power_device_id",
         )
         .await;
+        let sensor_device_ids = group_member_ids(
+            &state,
+            &id,
+            "provider_group_sensor_devices",
+            "sensor_device_id",
+        )
+        .await;
         out.push(ProviderGroupInfo {
             provider_id: r.get("provider_id"),
             provider_group_id: r.get("provider_group_id"),
@@ -929,6 +1016,7 @@ async fn list_provider_groups(State(state): State<Arc<AppState>>, _: Session) ->
             light_ids,
             media_device_ids,
             power_device_ids,
+            sensor_device_ids,
             id,
         });
     }
@@ -1153,6 +1241,113 @@ async fn set_room_power_devices(
         )
         .bind(&id)
         .bind(pid)
+        .execute(&state.db)
+        .await;
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct SetRoomSensorsRequest {
+    sensor_ids: Vec<String>,
+}
+
+/// Replace the room's explicit sensor membership. Effective membership also
+/// includes sensors from synced provider-group links (managed via `set_links`
+/// / provider Sync, not here).
+async fn set_room_sensors(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+    Json(req): Json<SetRoomSensorsRequest>,
+) -> impl IntoResponse {
+    if !room_exists(&state, &id).await {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    for sid in &req.sensor_ids {
+        let known = sqlx::query("SELECT 1 FROM sensor_devices WHERE id = ?")
+            .bind(sid)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        if !known {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("unknown sensor '{sid}'"),
+            )
+                .into_response();
+        }
+    }
+
+    let _ = sqlx::query("DELETE FROM room_sensor_devices WHERE room_id = ?")
+        .bind(&id)
+        .execute(&state.db)
+        .await;
+    for sid in &req.sensor_ids {
+        let _ = sqlx::query(
+            "INSERT OR IGNORE INTO room_sensor_devices (room_id, sensor_device_id) VALUES (?, ?)",
+        )
+        .bind(&id)
+        .bind(sid)
+        .execute(&state.db)
+        .await;
+    }
+
+    crate::api::notify_inventory(&state, "sensor_devices");
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct SetRoomPresenceRequest {
+    /// Sensors that should NOT count toward this room's occupancy (replace-all).
+    /// Everything else counts by default — including sensors synced in later.
+    excluded_sensor_ids: Vec<String>,
+}
+
+/// Replace the room's presence opt-outs. The filter lives in the one shared
+/// `room_presence_readings`, so the kiosk scheduler, automations engine, and
+/// occupancy gates all inherit it.
+async fn set_room_presence(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+    Json(req): Json<SetRoomPresenceRequest>,
+) -> impl IntoResponse {
+    if !room_exists(&state, &id).await {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    for sid in &req.excluded_sensor_ids {
+        let known = sqlx::query("SELECT 1 FROM sensor_devices WHERE id = ?")
+            .bind(sid)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        if !known {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("unknown sensor '{sid}'"),
+            )
+                .into_response();
+        }
+    }
+
+    let _ = sqlx::query("DELETE FROM room_presence_excluded WHERE room_id = ?")
+        .bind(&id)
+        .execute(&state.db)
+        .await;
+    for sid in &req.excluded_sensor_ids {
+        let _ = sqlx::query(
+            "INSERT OR IGNORE INTO room_presence_excluded (room_id, sensor_device_id) VALUES (?, ?)",
+        )
+        .bind(&id)
+        .bind(sid)
         .execute(&state.db)
         .await;
     }
@@ -1657,5 +1852,51 @@ mod occupancy_tests {
             .unwrap();
         // The only presence member is disabled → room has no live presence input.
         assert_eq!(room_occupancy(&state, "r").await, None);
+    }
+
+    /// Opt a sensor out of the room's occupancy (mig 0057).
+    async fn exclude(state: &AppState, id: &str) {
+        sqlx::query(
+            "INSERT INTO room_presence_excluded (room_id, sensor_device_id) VALUES ('r', ?)",
+        )
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn presence_opt_out_stops_a_detecting_sensor_from_counting() {
+        let state = test_state().await;
+        seed_provider(&state).await;
+        seed_room(&state).await;
+        // The hall-facing sensor is detecting but opted out; the real room
+        // sensor is clear → the room must read empty, not occupied.
+        seed_sensor(&state, "hall", "motion", r#"{"reading":{"bool":true}}"#).await;
+        seed_sensor(&state, "room", "motion", r#"{"reading":{"bool":false}}"#).await;
+        exclude(&state, "hall").await;
+        assert_eq!(room_occupancy(&state, "r").await, Some(false));
+    }
+
+    #[tokio::test]
+    async fn all_presence_members_opted_out_means_occupancy_unknown() {
+        let state = test_state().await;
+        seed_provider(&state).await;
+        seed_room(&state).await;
+        seed_sensor(&state, "m1", "motion", r#"{"reading":{"bool":true}}"#).await;
+        exclude(&state, "m1").await;
+        // No counting presence members → unknown, same as a room with none.
+        assert_eq!(room_occupancy(&state, "r").await, None);
+    }
+
+    #[tokio::test]
+    async fn opt_out_is_per_room_membership_stays() {
+        let state = test_state().await;
+        seed_provider(&state).await;
+        seed_room(&state).await;
+        seed_sensor(&state, "m1", "motion", r#"{"reading":{"bool":true}}"#).await;
+        exclude(&state, "m1").await;
+        // Still an effective member (readings display; only occupancy ignores it).
+        assert_eq!(effective_sensor_member_ids(&state, "r").await, vec!["m1"]);
     }
 }

@@ -1,37 +1,52 @@
 // Rooms — the per-room configuration hub. A room combines synced provider
-// rooms/zones (links) with directly assigned lights, plus the audio devices it
-// controls (membership + per-room volume offsets). Live room control (on/off,
-// color, scenes, quick volume) lives on the Dashboard / Floor Plan.
+// rooms/zones (links) with the devices it controls — lights, speakers, power,
+// and sensors (whose presence kinds feed the room's occupancy). Live room
+// control (on/off, color, scenes, quick volume) lives on the Dashboard/Boards.
+//
+// Each room renders as a "charter" card: an engraved name, its link chips, a
+// domain census strip (one glyph niche per device domain, in the domain's
+// accent), and a live occupancy rune. Tapping the header — or any census
+// niche — expands ONE stacked editor: Members → Audio → Presence → Quick
+// controls, with the rare/destructive operations (disable, merge, delete)
+// quiet at the bottom instead of shouting on every card face.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   createRoom,
-  getMediaDevices,
+  getAutomations,
+  getKiosks,
   getLights,
-  getScenes,
+  getMediaDevices,
   getPowerDevices,
   getProviderGroups,
   getRooms,
+  getScenes,
+  getSensors,
   mergeRooms,
   removeRoom,
   setRoomEnabled,
-  type MediaDevice,
+  type Automation,
+  type Kiosk,
   type Light,
-  type Scene,
+  type MediaDevice,
   type PowerDevice,
   type ProviderGroupInfo,
   type Room,
+  type Scene,
+  type SensorDevice,
 } from "../api";
-import { RoomVolumeStrip } from "../components/RoomMedia";
+import { RoomAudioSection } from "../components/RoomMedia";
 import { RoomDevicesPanel } from "../components/RoomDevices";
 import { RoomControlsPanel } from "../components/RoomControls";
+import { PRESENCE_ACCENT, RoomPresencePanel } from "../components/RoomPresence";
 import { Glyph } from "../components/glyphs";
 import { SelectRow } from "../components/SelectRow";
-import { useDialogs, type Dialogs } from "../components/dialogs";
+import { Modal, useDialogs, type Dialogs } from "../components/dialogs";
 import { PageHeader } from "../components/PageHeader";
 import { Select } from "../components/Select";
 import { useViewport } from "../useViewport";
-import { ACCENT, S } from "../styles";
+import { S, pageShell, tileGrid } from "../styles";
+import { alpha, color, font, nicheStyle, radius } from "../theme";
 import { Button } from "../components/controls";
 
 export function RoomsPage() {
@@ -42,21 +57,58 @@ export function RoomsPage() {
   const [lights, setLights] = useState<Light[]>([]);
   const [mediaDevices, setMediaDevices] = useState<MediaDevice[]>([]);
   const [powerDevices, setPowerDevices] = useState<PowerDevice[]>([]);
+  const [sensors, setSensors] = useState<SensorDevice[]>([]);
   const [scenes, setScenes] = useState<Scene[]>([]);
+  const [kiosks, setKiosks] = useState<Kiosk[]>([]);
+  const [automations, setAutomations] = useState<Automation[]>([]);
   const [showAdd, setShowAdd] = useState(false);
 
   async function load() {
-    setRooms(await getRooms());
-    setProviderGroups(await getProviderGroups());
-    setMediaDevices(await getMediaDevices());
-    setPowerDevices(await getPowerDevices());
-    setScenes(await getScenes());
-    const l = await getLights();
+    const [r, pg, md, pd, sd, sc, k, a, l] = await Promise.all([
+      getRooms(),
+      getProviderGroups(),
+      getMediaDevices(),
+      getPowerDevices(),
+      getSensors(),
+      getScenes(),
+      getKiosks(),
+      getAutomations(),
+      getLights(),
+    ]);
+    setRooms(r);
+    setProviderGroups(pg);
+    setMediaDevices(md);
+    setPowerDevices(pd);
+    setSensors(sd);
+    setScenes(sc);
+    setKiosks(k);
+    setAutomations(a);
     if (l !== "unauthorized") setLights(l);
   }
 
   useEffect(() => {
     load();
+  }, []);
+
+  // Live occupancy: a motion event should flip the rune (and the Presence
+  // section's readings) without a reload. Debounced — a busy sensor evening
+  // shouldn't hammer the rooms endpoint.
+  useEffect(() => {
+    const es = new EventSource("/api/events");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = () => {
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
+        setRooms(await getRooms());
+        setSensors(await getSensors());
+      }, 400);
+    };
+    es.addEventListener("sensor_state", refresh);
+    es.addEventListener("inventory", refresh);
+    return () => {
+      clearTimeout(timer);
+      es.close();
+    };
   }, []);
 
   async function handleRemove(id: string, name: string) {
@@ -72,26 +124,27 @@ export function RoomsPage() {
   }
 
   return (
-    <div style={{ padding: isMobile ? "1rem 0.85rem" : "2rem", maxWidth: 760, margin: "0 auto" }}>
+    <div style={pageShell(isMobile)}>
       <PageHeader
         title="Rooms"
         description={
           <>
             A room combines synced provider rooms/zones (links) with the devices it controls —
-            lights, speakers, and power devices. Use the <strong>Devices</strong> button to configure
-            membership, or <strong>Sync</strong> on a provider (Settings) to refresh links.
+            lights, speakers, power, and sensors. Tap a room to configure its members, audio
+            calibration, <strong>presence</strong>, and quick controls; <strong>Sync</strong> a
+            provider (Settings) to refresh links.
           </>
         }
       />
 
-      <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+      <div style={tileGrid(340, isMobile)}>
         {rooms.length === 0 && !showAdd && (
           <p style={{ color: "var(--bf-faint)", margin: 0 }}>
             No rooms yet. Sync a provider, paint one in the planner, or add one here.
           </p>
         )}
         {rooms.map((room) => (
-          <RoomCard
+          <RoomCharter
             key={room.id}
             room={room}
             allRooms={rooms}
@@ -99,7 +152,10 @@ export function RoomsPage() {
             providerGroups={providerGroups}
             mediaDevices={mediaDevices}
             powerDevices={powerDevices}
+            sensors={sensors}
             scenes={scenes}
+            kiosks={kiosks}
+            automations={automations}
             dialogs={dialogs}
             onChanged={load}
             onRemove={() => handleRemove(room.id, room.name)}
@@ -108,16 +164,11 @@ export function RoomsPage() {
       </div>
 
       {showAdd ? (
-        <div style={{ ...S.card, border: "1px solid var(--bf-border)", marginTop: "1rem" }}>
+        <div style={{ ...S.card, border: "1px solid var(--bf-border)", marginTop: "1rem", maxWidth: 620 }}>
           <h3 style={{ margin: "0 0 0.25rem", fontSize: "1rem", color: "var(--bf-dim)" }}>New room</h3>
-          <RoomEditForm
+          <NewRoomForm
             lights={lights}
-            providerGroups={providerGroups}
-            initialName=""
-            initialDirect={[]}
-            initialLinks={[]}
-            submitLabel="Create"
-            onSubmit={async (name, directIds, _linkIds) => {
+            onSubmit={async (name, directIds) => {
               try {
                 await createRoom(name, directIds);
               } catch (e) {
@@ -143,14 +194,82 @@ export function RoomsPage() {
   );
 }
 
-function RoomCard({
+// ── The charter card ─────────────────────────────────────────────────────────
+
+type SectionKey = "members" | "audio" | "presence" | "controls";
+
+/** One census niche: a domain glyph + count in the domain accent, lit while the
+ * room holds any of that domain. Tapping opens the editor at the right section. */
+function CensusNiche({
+  glyph,
+  count,
+  accent,
+  title,
+  onOpen,
+}: {
+  glyph: string;
+  count: number;
+  accent: string;
+  title: string;
+  onOpen: () => void;
+}) {
+  return (
+    <button
+      onClick={onOpen}
+      title={`${count} ${title} — configure`}
+      style={{
+        ...nicheStyle(accent, count > 0),
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 6,
+        minWidth: 56,
+        minHeight: 44,
+        padding: "0 0.6rem",
+        borderRadius: radius.sm,
+        cursor: "pointer",
+        fontFamily: font.display,
+        fontWeight: 700,
+        fontSize: "0.85rem",
+      }}
+    >
+      <Glyph name={glyph} size={15} />
+      {count}
+    </button>
+  );
+}
+
+/** Engraved section header inside the expanded editor. */
+function SectionHeader({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        fontFamily: font.display,
+        fontSize: "0.7rem",
+        fontWeight: 700,
+        letterSpacing: "0.16em",
+        textTransform: "uppercase",
+        color: color.textAccent,
+        borderBottom: `1px solid ${color.hairline}`,
+        paddingBottom: "0.3rem",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function RoomCharter({
   room,
   allRooms,
   lights,
   providerGroups,
   mediaDevices,
   powerDevices,
+  sensors,
   scenes,
+  kiosks,
+  automations,
   dialogs,
   onChanged,
   onRemove,
@@ -161,22 +280,33 @@ function RoomCard({
   providerGroups: ProviderGroupInfo[];
   mediaDevices: MediaDevice[];
   powerDevices: PowerDevice[];
+  sensors: SensorDevice[];
   scenes: Scene[];
-  // Owned by RoomsPage (which renders `dialogs.element`). A RoomCard must NOT
-  // call useDialogs() itself: that returns a separate instance whose element is
-  // never mounted, so confirm()/alert() would hang forever (merge silently did
-  // nothing — no popup, no request).
+  kiosks: Kiosk[];
+  automations: Automation[];
+  // Owned by RoomsPage (which renders `dialogs.element`). A RoomCharter must
+  // NOT call useDialogs() itself: that returns a separate instance whose
+  // element is never mounted, so confirm()/alert() would hang forever.
   dialogs: Dialogs;
   onChanged: () => Promise<void>;
   onRemove: () => void;
 }) {
-  const { isMobile } = useViewport();
-  const [editingDevices, setEditingDevices] = useState(false);
-  const [editingControls, setEditingControls] = useState(false);
+  const { isMobile, isCompact } = useViewport();
+  const [open, setOpen] = useState(false);
   const [merging, setMerging] = useState(false);
+  const sectionRefs = useRef<Partial<Record<SectionKey, HTMLDivElement | null>>>({});
   const mergeCandidates = allRooms.filter((r) => r.id !== room.id);
-  const speakers = room.media_devices.length;
-  const powerCount = room.power_device_ids.length;
+
+  function openAt(key: SectionKey) {
+    setOpen(true);
+    // Wait a frame for the editor to mount before scrolling to the section.
+    requestAnimationFrame(() =>
+      setTimeout(
+        () => sectionRefs.current[key]?.scrollIntoView({ behavior: "smooth", block: "start" }),
+        60,
+      ),
+    );
+  }
 
   async function handleMerge(targetId: string) {
     const target = mergeCandidates.find((r) => r.id === targetId);
@@ -198,149 +328,271 @@ function RoomCard({
     }
   }
 
-  const mergeSelect =
-    mergeCandidates.length > 0 ? (
-      <Select
-        value={undefined}
-        disabled={merging}
-        onChange={(id) => handleMerge(id)}
-        placeholder={merging ? "Merging…" : "Merge into…"}
-        title="Merge this room into another (this room is deleted)"
-        options={mergeCandidates.map((r) => ({ value: r.id, label: r.name }))}
-      />
-    ) : null;
-
-  const titleBlock = (
-    <div style={{ minWidth: 0, flex: isMobile ? 1 : undefined }}>
-      <div style={{ fontWeight: 600 }}>
-        {room.name}
-        {!room.enabled && (
-          <span style={{ marginLeft: "0.5rem", color: "#a86", fontSize: "0.72rem", border: "1px solid #543", borderRadius: 4, padding: "0 0.35rem" }}>
-            disabled
-          </span>
-        )}
-      </div>
-      <div style={{ color: "var(--bf-dim)", fontSize: "0.8rem", marginTop: "0.25rem", display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-        <span>{room.light_ids.length} light{room.light_ids.length !== 1 ? "s" : ""}</span>
-        {speakers > 0 && <span>· {speakers} speaker{speakers !== 1 ? "s" : ""}</span>}
-        {powerCount > 0 && <span>· {powerCount} power</span>}
-        {room.links.map((l) => (
-          <span
-            key={l.provider_group_id}
-            title={l.domain === "media" ? "Synced audio room/zone" : "Synced provider room/zone"}
-            style={{ border: "1px solid var(--bf-border)", borderRadius: 4, padding: "0 0.35rem", color: "#9a9", fontSize: "0.72rem" }}
-          >
-            <span style={{ display: "inline-grid", placeItems: "center", verticalAlign: "-2px" }}>
-              <Glyph name={l.domain === "media" ? "speaker" : "link"} size={13} />
-            </span>{" "}
-            {l.name}
-          </span>
-        ))}
-      </div>
+  const section = (key: SectionKey, title: string, body: React.ReactNode) => (
+    <div
+      ref={(el) => {
+        sectionRefs.current[key] = el;
+      }}
+      style={{ display: "flex", flexDirection: "column", gap: "0.6rem", scrollMarginTop: 70 }}
+    >
+      <SectionHeader>{title}</SectionHeader>
+      {body}
     </div>
   );
 
-  return (
-    <div style={{ ...S.card, gap: "0.6rem", opacity: room.enabled ? 1 : 0.55 }}>
-      <div
-        style={{
-          display: "flex",
-          flexDirection: isMobile ? "column" : "row",
-          alignItems: isMobile ? "stretch" : "center",
-          justifyContent: "space-between",
-          gap: isMobile ? "0.6rem" : "1rem",
-        }}
-      >
-        {/* On mobile, the Merge select rides next to the title to free up the
-            action row below. On desktop it lives with the other buttons. */}
-        {isMobile ? (
-          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "0.6rem" }}>
-            {titleBlock}
-            {mergeSelect}
-          </div>
-        ) : (
-          titleBlock
-        )}
-        <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-          {!isMobile && mergeSelect}
-          <Button variant="ghost"
-            onClick={() => setEditingDevices((v) => !v)} style={{ ...(editingDevices ? { borderColor: ACCENT, color: ACCENT } : {}) }}
-          >
-            Devices
-          </Button>
-          <Button variant="ghost"
-            onClick={() => setEditingControls((v) => !v)} style={{ ...(editingControls ? { borderColor: ACCENT, color: ACCENT } : {}) }}
-          >
-            Controls
-          </Button>
-          <Button variant="ghost"
-            onClick={async () => { await setRoomEnabled(room.id, !room.enabled); await onChanged(); }}
-            title={room.enabled ? "Hide this room from the Dashboard and Floor Plan" : "Show this room again"}
-          >
-            {room.enabled ? "Disable" : "Enable"}
-          </Button>
-          <Button variant="danger" onClick={onRemove}>Remove</Button>
-        </div>
-      </div>
-
-      {/* Live room volume (fans out to all members). */}
-      <RoomVolumeStrip room={room} devices={mediaDevices} />
-
-      {editingDevices && (
+  // The editor body — identical sections whether it renders inline (compact)
+  // or inside the desktop modal.
+  const editorSections = (
+    <>
+      {section(
+        "members",
+        "Members",
         <RoomDevicesPanel
           room={room}
           lights={lights}
-          mediaDevices={mediaDevices}
           powerDevices={powerDevices}
+          sensors={sensors}
           providerGroups={providerGroups}
-          onSaved={() => { setEditingDevices(false); onChanged(); }}
-          onCancel={() => setEditingDevices(false)}
-        />
+          onSaved={onChanged}
+        />,
       )}
-
-      {editingControls && (
+      {section(
+        "audio",
+        "Audio",
+        <RoomAudioSection
+          room={room}
+          devices={mediaDevices}
+          providerGroups={providerGroups}
+          onSaved={onChanged}
+        />,
+      )}
+      {section(
+        "presence",
+        "Presence",
+        <RoomPresencePanel
+          room={room}
+          sensors={sensors}
+          kiosks={kiosks}
+          automations={automations}
+          onChanged={onChanged}
+        />,
+      )}
+      {section(
+        "controls",
+        "Quick controls",
         <RoomControlsPanel
           room={room}
           lights={lights}
           mediaDevices={mediaDevices}
           powerDevices={powerDevices}
           scenes={scenes}
-          onSaved={() => { setEditingControls(false); onChanged(); }}
-          onCancel={() => setEditingControls(false)}
-        />
+          onSaved={onChanged}
+          onCancel={() => setOpen(false)}
+        />,
       )}
+
+      {/* Rare + destructive operations, quiet at the bottom. */}
+      <div
+        style={{
+          gridColumn: "1 / -1",
+          display: "flex",
+          gap: "0.5rem",
+          flexWrap: "wrap",
+          alignItems: "center",
+          borderTop: `1px solid ${color.hairline}`,
+          paddingTop: "0.7rem",
+        }}
+      >
+        <Button variant="ghost"
+          onClick={async () => { await setRoomEnabled(room.id, !room.enabled); await onChanged(); }}
+          title={room.enabled ? "Hide this room from the Dashboard and Floor Plan" : "Show this room again"}
+        >
+          {room.enabled ? "Disable" : "Enable"}
+        </Button>
+        {mergeCandidates.length > 0 && (
+          <Select
+            value={undefined}
+            disabled={merging}
+            onChange={(id) => handleMerge(id)}
+            placeholder={merging ? "Merging…" : "Merge into…"}
+            title="Merge this room into another (this room is deleted)"
+            options={mergeCandidates.map((r) => ({ value: r.id, label: r.name }))}
+          />
+        )}
+        <span style={{ flex: 1 }} />
+        <Button variant="danger" onClick={onRemove}>Delete room</Button>
+      </div>
+    </>
+  );
+
+  return (
+    <div
+      style={{
+        ...S.card,
+        gap: "0.55rem",
+        // The engraved name is the card's own headroom; the shared card
+        // padding reads as dead space above it.
+        paddingTop: "0.9rem",
+        opacity: room.enabled ? 1 : 0.55,
+      }}
+    >
+      {/* Header — the whole row is the expand/collapse affordance. */}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => setOpen((v) => !v)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setOpen((v) => !v);
+          }
+        }}
+        title={open ? "Collapse" : "Configure this room"}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "0.6rem",
+          cursor: "pointer",
+          minHeight: 44,
+        }}
+      >
+        <span
+          style={{
+            fontFamily: font.display,
+            fontWeight: 700,
+            fontSize: "1.05rem",
+            letterSpacing: "0.05em",
+            color: color.text,
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {room.name}
+        </span>
+        {!room.enabled && (
+          <span
+            style={{
+              color: "#a86",
+              fontSize: "0.72rem",
+              border: "1px solid #543",
+              borderRadius: 4,
+              padding: "0 0.35rem",
+              flexShrink: 0,
+            }}
+          >
+            disabled
+          </span>
+        )}
+        <span style={{ flex: 1 }} />
+        {/* Occupancy rune — config feedback, not control: lit while the room's
+            counting presence sensors read occupied; absent without any. */}
+        {room.occupancy != null && (
+          <span
+            title={room.occupancy ? "Room reads occupied" : "Room reads empty"}
+            style={{
+              display: "grid",
+              placeItems: "center",
+              flexShrink: 0,
+              color: room.occupancy ? PRESENCE_ACCENT : color.faint,
+              filter: room.occupancy
+                ? `drop-shadow(0 0 6px ${alpha(PRESENCE_ACCENT, 0.8)})`
+                : undefined,
+            }}
+          >
+            <Glyph name="motion" size={16} />
+          </span>
+        )}
+        <span
+          aria-hidden
+          style={{
+            display: "grid",
+            placeItems: "center",
+            flexShrink: 0,
+            color: color.faint,
+            transform: open ? "rotate(180deg)" : undefined,
+            transition: "transform 0.2s ease",
+          }}
+        >
+          <Glyph name="chevron" size={14} />
+        </span>
+      </div>
+
+      {/* Link chips. */}
+      {room.links.length > 0 && (
+        <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
+          {room.links.map((l) => (
+            <span
+              key={l.provider_group_id}
+              title={l.domain === "media" ? "Synced audio room/zone" : "Synced provider room/zone"}
+              style={{
+                border: "1px solid var(--bf-border)",
+                borderRadius: 4,
+                padding: "0 0.35rem",
+                color: "#9a9",
+                fontSize: "0.72rem",
+              }}
+            >
+              <span style={{ display: "inline-grid", placeItems: "center", verticalAlign: "-2px" }}>
+                <Glyph name={l.domain === "media" ? "speaker" : "link"} size={13} />
+              </span>{" "}
+              {l.name}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Census strip — the room's contents at a glance, one niche per domain. */}
+      <div style={{ display: "flex", gap: "0.45rem", flexWrap: "wrap" }}>
+        <CensusNiche glyph="bulb" count={room.light_ids.length} accent={color.cyan} title="lights" onOpen={() => openAt("members")} />
+        <CensusNiche glyph="speaker" count={room.media_devices.length} accent={color.violet} title="speakers" onOpen={() => openAt("audio")} />
+        <CensusNiche glyph="power" count={room.power_device_ids.length} accent={color.gold} title="power devices" onOpen={() => openAt("members")} />
+        <CensusNiche glyph="motion" count={room.sensor_ids.length} accent={PRESENCE_ACCENT} title="sensors" onOpen={() => openAt("presence")} />
+      </div>
+
+      {open &&
+        (isCompact ? (
+          // Compact: expand inline — a single column growing in place reads
+          // naturally on a stacked page.
+          <div
+            style={{
+              ...tileGrid(420, isMobile, "1.1rem 1.6rem"),
+              borderTop: `1px solid ${color.hairline}`,
+              paddingTop: "0.8rem",
+              marginTop: "0.2rem",
+            }}
+          >
+            {editorSections}
+          </div>
+        ) : (
+          // Desktop: the editor opens as a wide modal — the app's config idiom —
+          // so opening a room never reflows the tile grid around it.
+          <Modal title={room.name} width={1100} onClose={() => setOpen(false)}>
+            <div style={tileGrid(420, false, "1.1rem 1.6rem")}>{editorSections}</div>
+          </Modal>
+        ))}
     </div>
   );
 }
 
-function RoomEditForm({
+// ── New-room form ────────────────────────────────────────────────────────────
+
+function NewRoomForm({
   lights,
-  providerGroups,
-  initialName,
-  initialDirect,
-  initialLinks,
-  submitLabel,
-  nameLocked,
   onSubmit,
   onCancel,
 }: {
   lights: Light[];
-  providerGroups: ProviderGroupInfo[];
-  initialName: string;
-  initialDirect: string[];
-  initialLinks: string[];
-  submitLabel: string;
-  nameLocked?: boolean;
-  onSubmit: (name: string, directIds: string[], linkIds: string[]) => Promise<void>;
+  onSubmit: (name: string, directIds: string[]) => Promise<void>;
   onCancel: () => void;
 }) {
-  const [name, setName] = useState(initialName);
-  const [direct, setDirect] = useState<Set<string>>(new Set(initialDirect));
-  const [links, setLinks] = useState<Set<string>>(new Set(initialLinks));
+  const [name, setName] = useState("");
+  const [direct, setDirect] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
 
-  function toggleSet(setter: React.Dispatch<React.SetStateAction<Set<string>>>, id: string) {
-    setter((prev) => {
+  function toggleDirect(id: string) {
+    setDirect((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
@@ -348,16 +600,15 @@ function RoomEditForm({
     });
   }
 
-  // Lights already covered by a selected link (shown, but as link members).
-  const linkedLightIds = new Set(
-    providerGroups.filter((pg) => links.has(pg.id)).flatMap((pg) => pg.light_ids),
-  );
+  // Lights already claimed by a provider group are still offered — the new room
+  // takes a DIRECT assignment; link membership is configured after creation.
+  const selectable = lights.filter((l) => l.enabled !== false);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setSaving(true);
     try {
-      await onSubmit(name.trim(), [...direct], [...links]);
+      await onSubmit(name.trim(), [...direct]);
     } finally {
       setSaving(false);
     }
@@ -365,79 +616,40 @@ function RoomEditForm({
 
   return (
     <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-      {!nameLocked && (
-        <label style={labelStyle}>
-          <span>Name</span>
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Living Room" style={S.input} required autoFocus />
-        </label>
-      )}
-
-      {providerGroups.some((pg) => pg.domain === "light") && (
-        <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
-          <span style={{ fontSize: "0.875rem", color: "var(--bf-dim)" }}>
-            Linked provider rooms <span style={{ color: "var(--bf-faint)" }}>(membership syncs automatically)</span>
-          </span>
-          {providerGroups
-            .filter((pg) => pg.domain === "light")
-            .map((pg) => (
-              <SelectRow key={pg.id} checked={links.has(pg.id)} onToggle={() => toggleSet(setLinks, pg.id)}>
-                <span style={{ display: "inline-grid", placeItems: "center", verticalAlign: "-2px" }}><Glyph name="link" size={13} /></span>{" "}
-                {pg.name}
-                <span style={{ color: "var(--bf-faint)", fontSize: "0.75rem" }}>
-                  {pg.light_ids.length} light{pg.light_ids.length !== 1 ? "s" : ""}
-                </span>
-              </SelectRow>
-            ))}
-        </div>
-      )}
-
-      {providerGroups.some((pg) => pg.domain === "media") && (
-        <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
-          <span style={{ fontSize: "0.875rem", color: "var(--bf-dim)" }}>
-            Linked audio rooms/zones <span style={{ color: "var(--bf-faint)" }}>(adds the room's speakers)</span>
-          </span>
-          {providerGroups
-            .filter((pg) => pg.domain === "media")
-            .map((pg) => (
-              <SelectRow key={pg.id} checked={links.has(pg.id)} onToggle={() => toggleSet(setLinks, pg.id)}>
-                <span style={{ display: "inline-grid", placeItems: "center", verticalAlign: "-2px" }}><Glyph name="speaker" size={13} /></span>{" "}
-                {pg.name}
-                <span style={{ color: "var(--bf-faint)", fontSize: "0.75rem" }}>
-                  {pg.media_device_ids.length} device{pg.media_device_ids.length !== 1 ? "s" : ""}
-                </span>
-              </SelectRow>
-            ))}
-        </div>
-      )}
+      <label
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: "0.3rem",
+          fontSize: "0.875rem",
+          color: "var(--bf-dim)",
+        }}
+      >
+        <span>Name</span>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="e.g. Living Room"
+          style={S.input}
+          required
+          autoFocus
+        />
+      </label>
 
       <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
-        <span style={{ fontSize: "0.875rem", color: "var(--bf-dim)" }}>Direct lights</span>
-        {lights
-          .filter(
-            (l) =>
-              // Offer enabled lights; keep a light already in the room (direct
-              // or via a synced link) visible so it can still be removed.
-              l.enabled !== false || direct.has(l.id) || linkedLightIds.has(l.id),
-          )
-          .map((l) => {
-          const viaLink = linkedLightIds.has(l.id);
-          return (
-            <SelectRow
-              key={l.id}
-              checked={viaLink || direct.has(l.id)}
-              disabled={viaLink}
-              onToggle={() => toggleSet(setDirect, l.id)}
-            >
-              {l.name}
-              {viaLink && <span style={{ fontSize: "0.72rem", color: "var(--bf-faint)" }}>(via link)</span>}
-            </SelectRow>
-          );
-        })}
+        <span style={{ fontSize: "0.875rem", color: "var(--bf-dim)" }}>
+          Direct lights <span style={{ color: "var(--bf-faint)" }}>(links, sensors, and audio are configured after creation)</span>
+        </span>
+        {selectable.map((l) => (
+          <SelectRow key={l.id} checked={direct.has(l.id)} onToggle={() => toggleDirect(l.id)}>
+            {l.name}
+          </SelectRow>
+        ))}
       </div>
 
       <div style={{ display: "flex", gap: "0.5rem" }}>
         <Button variant="accent" type="submit" disabled={saving}>
-          {saving ? "Saving…" : submitLabel}
+          {saving ? "Saving…" : "Create"}
         </Button>
         <Button variant="ghost" type="button" onClick={onCancel}>
           Cancel
@@ -446,11 +658,3 @@ function RoomEditForm({
     </form>
   );
 }
-
-const labelStyle: React.CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  gap: "0.3rem",
-  fontSize: "0.875rem",
-  color: "var(--bf-dim)",
-};

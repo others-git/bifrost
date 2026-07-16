@@ -24,6 +24,7 @@ import { Button } from "../components/controls";
 import { Glyph } from "../components/glyphs";
 import { PageHeader } from "../components/PageHeader";
 import { useViewport } from "../useViewport";
+import { pageShell, tileGrid } from "../styles";
 import { T, labelType } from "../theme";
 
 export function AutomationsPage() {
@@ -108,7 +109,7 @@ export function AutomationsPage() {
     lights.length + media.length + power.length > 0;
 
   return (
-    <div style={{ padding: isMobile ? "1rem 0.85rem" : isCompact ? "1.1rem 1rem" : "2rem", width: "100%", maxWidth: 760, margin: "0 auto", color: T.text, boxSizing: "border-box" }}>
+    <div style={{ ...pageShell(isMobile), ...(isCompact && !isMobile ? { padding: "1.1rem 1rem" } : {}), color: T.text }}>
       <PageHeader
         title="Automations"
         status={automations.length > 0 ? `${automations.length} rule${automations.length !== 1 ? "s" : ""}` : undefined}
@@ -127,9 +128,10 @@ export function AutomationsPage() {
         </div>
       )}
 
-      <div style={{ display: "flex", flexDirection: "column", gap: "1.2rem" }}>
+      {/* Subject groups tile across the width; each group's rules stay stacked. */}
+      <div style={tileGrid(420, isMobile, "1.2rem 1.6rem")}>
         {groups.map(([key, rules]) => (
-          <section key={key}>
+          <section key={key} style={{ minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "0.5rem" }}>
               <span style={{ ...labelType, fontSize: "0.78rem", color: "#d8cfba", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {subjectName(key)}

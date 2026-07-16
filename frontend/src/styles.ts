@@ -21,6 +21,26 @@ const center: CSSProperties = {
   background: color.void,
 };
 
+/** The page container. Desktop is FULL-BLEED — content spreads across the
+ * window and card collections tile (the Devices page is the reference); a
+ * centered narrow column is a compact-only layout. Prose still caps its own
+ * line length (PageHeader does); the container never does. */
+export const pageShell = (isMobile: boolean): CSSProperties => ({
+  padding: isMobile ? "1rem 0.85rem" : "2rem 2.5rem",
+  width: "100%",
+  boxSizing: "border-box",
+});
+
+/** A tiling card collection: as many `min`-px columns as fit, cards top-aligned
+ * so a tall card doesn't stretch its row. Phones collapse to one column. An
+ * expanded/editing card inside spans the full row (`gridColumn: "1 / -1"`). */
+export const tileGrid = (min: number, isMobile: boolean, gap = "0.75rem"): CSSProperties => ({
+  display: "grid",
+  gridTemplateColumns: isMobile ? "1fr" : `repeat(auto-fill, minmax(${min}px, 1fr))`,
+  gap,
+  alignItems: "start",
+});
+
 /** A solid gothic surface card — forms and config panels. Glass is reserved for
  * the live control surfaces (see `glassCard`); forms read better solid. */
 const card: CSSProperties = {

@@ -18,6 +18,7 @@ import { PageHeader, SectionLabel } from "../components/PageHeader";
 import { Glyph } from "../components/glyphs";
 import { useViewport } from "../useViewport";
 import { T, domain, color, alpha } from "../theme";
+import { pageShell } from "../styles";
 
 const ACCENT = domain.media; // violet — audio's counterpart to the lamps' glow
 
@@ -191,7 +192,7 @@ export function MediaPage() {
   );
 
   return (
-    <div style={{ padding: isMobile ? "1rem 0.85rem" : "2rem", width: "100%", maxWidth: 1080, margin: "0 auto", color: T.text }}>
+    <div style={{ ...pageShell(isMobile), color: T.text }}>
       <PageHeader title="Media" status={status} />
 
       {loading ? (

@@ -24,9 +24,9 @@ scenes, quick volume) stays on the Dashboard / Boards.
 
 A room aggregates members two ways:
 
-- **Direct assignment** — add lights/audio/power devices to the room on the Rooms
-  page, or assign a single device to a room from its row on the **Devices page**
-  (one direct room per device).
+- **Direct assignment** — add lights/audio/power/sensor devices to the room on
+  the Rooms page, or assign a single device to a room from its row on the
+  **Devices page** (one direct room per device).
 - **Linked provider groups (Sync)** — many providers already define their own
   groupings (Hue rooms/zones, Sonos rooms, Home Assistant *Areas*). Press
   **Sync** on a provider (Settings → Providers, or **Sync all**) and Bifrost
@@ -41,8 +41,13 @@ directly-assigned ones, so you can start from a provider's layout and tweak.
 
 Speakers added to a room get a **per-room volume offset** — a trim (e.g. −10 / +5)
 so a quiet speaker and a loud one even out when you set one room volume. A room's
-volume/mute fans out to every media member with its offset applied. Configure the
-media members and their offsets on the Rooms page.
+volume/mute fans out to every media member with its offset applied.
+
+Configure this in the room's **Audio** section on the Rooms page, which never
+pretends a room is one speaker: every member shows its **own live level**
+alongside its offset trim, and a **room sweep** slider at the bottom fans one
+test volume out to all members (offsets applied) so you can calibrate by ear —
+sweep, listen, trim each row until the room balances.
 
 ### Quick-control buttons
 
@@ -60,6 +65,23 @@ Assistant `binary_sensor` are interchangeable presence inputs. Presence-driven
 behaviour reads this room-level state rather than any one sensor; the first
 consumer is the wall tablet's display power saving (blank while the room is
 empty, wake on motion — see [Kiosk control](api.md#kiosk-control-apikiosks)).
+
+**Which sensors count is configurable.** Every enabled presence sensor in the
+room counts by default — including sensors that arrive later via a provider
+Sync — and the room's **Presence** section (expand the room on the Rooms page)
+lets you opt individual sensors out. An opted-out sensor stays a member and
+keeps showing its readings; it just no longer moves the room's occupancy. A
+hall-facing sensor that trips on people walking past is the classic opt-out.
+The exclusion applies everywhere occupancy is read: kiosk displays, automation
+triggers, and occupancy gates all see the same verdict.
+
+The Presence section is also the observability surface: it shows the room's
+live verdict (occupied / empty / no presence input), each presence sensor's
+current reading, the room's environmental sensors (temperature, light level,
+humidity — read-only), and a **Drives** line naming what consumes the verdict
+(kiosk displays assigned to this room, automations triggered or gated on it).
+Each room card also wears a small **occupancy rune** next to its name — lit
+while the room reads occupied — so you can confirm the wiring at a glance.
 
 ### Automations
 
