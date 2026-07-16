@@ -37,8 +37,8 @@ import {
   kioskDeauth,
   setKioskRoom,
   setKioskBoard,
-  setKioskSchedule,
-  setKioskPresence,
+  setKioskPlan,
+  type KioskHourMode,
   getDashboards,
   forgetKiosk,
   getKioskUpdateConfig,
@@ -74,6 +74,7 @@ import { Select } from "../components/Select";
 import { useViewport } from "../useViewport";
 import { ACCENT, S, pageShell, tileGrid } from "../styles";
 import { Button, Switch } from "../components/controls";
+import { alpha, color } from "../theme";
 import { Glyph } from "../components/glyphs";
 import { speak } from "../tts";
 import { copyText } from "../clipboard";
@@ -2307,7 +2308,13 @@ function cmpVersion(a: string, b: string): number {
  * when unset; editing a time commits on blur. The scheduler emits the same
  * sleep/wake commands a human would, so a manual wake mid-window is respected
  * until the next boundary. */
-function KioskSchedule({
+/** Per-kiosk display plan: a paintable 24-hour timeline where every local
+ * hour is one of three modes — Awake (screen forced on), Aware (presence-
+ * controlled: wake on motion, off after the no-motion timer), Asleep (screen
+ * forced off, beats an occupied room). One picture replaces the old sleep
+ * window + presence toggle pair; painting saves as `hour_modes` (mig 0059) and
+ * supersedes the legacy fields on this kiosk. */
+function KioskDisplayPlan({
   k,
   dialogs,
   onSaved,
@@ -2317,133 +2324,58 @@ function KioskSchedule({
   onSaved: () => void;
 }) {
   const [enabled, setEnabled] = useState(k.schedule_enabled);
-  const [sleep, setSleep] = useState(k.sleep_at ?? "23:00");
-  const [wake, setWake] = useState(k.wake_at ?? "07:00");
+  const [plan, setPlan] = useState<string>(() => seedHourPlan(k));
+  const [mins, setMins] = useState(Math.round((k.presence_timeout_secs ?? 600) / 60));
+  const [brush, setBrush] = useState<KioskHourMode>("A");
   const [busy, setBusy] = useState(false);
+  const barRef = useRef<HTMLDivElement>(null);
+  // Painting mutates a ref alongside state so pointer-up saves the fresh plan,
+  // not a stale render's copy.
+  const planRef = useRef(plan);
+  const painting = useRef(false);
 
   // Re-sync when the parent reloads the kiosk list (another edit, a check-in).
   useEffect(() => {
     setEnabled(k.schedule_enabled);
-    setSleep(k.sleep_at ?? "23:00");
-    setWake(k.wake_at ?? "07:00");
-  }, [k.schedule_enabled, k.sleep_at, k.wake_at]);
-
-  async function save(next: { enabled: boolean; sleep_at: string; wake_at: string }) {
-    if (next.enabled && next.sleep_at === next.wake_at) {
-      await dialogs.alert({ title: "Invalid schedule", message: "Sleep and wake times must differ." });
-      return;
-    }
-    setBusy(true);
-    try {
-      await setKioskSchedule(k.id, next);
-      onSaved();
-    } catch (e) {
-      await dialogs.alert({
-        title: "Couldn't save schedule",
-        message: e instanceof Error ? e.message : String(e),
-      });
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const timeInput = {
-    background: "var(--bf-panel, #1a1320)",
-    color: enabled ? "var(--bf-text, #eee)" : "var(--bf-faint)",
-    border: "1px solid var(--bf-hairline, #333)",
-    borderRadius: 6,
-    padding: "0.25rem 0.4rem",
-    fontSize: "0.78rem",
-    colorScheme: "dark" as const,
-  };
-
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: "0.5rem",
-        flexWrap: "wrap",
-        fontSize: "0.78rem",
-        color: "var(--bf-faint)",
-        borderTop: "1px solid var(--bf-hairline, #2a2233)",
-        paddingTop: "0.5rem",
-      }}
-    >
-      <span style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem", color: "var(--bf-dim)" }}>
-        <Glyph name="wx_moon" size={15} /> Sleep schedule
-      </span>
-      <Switch
-        on={enabled}
-        disabled={busy}
-        onChange={(v) => {
-          setEnabled(v);
-          save({ enabled: v, sleep_at: sleep, wake_at: wake });
-        }}
-      />
-      <span style={{ opacity: enabled ? 1 : 0.55, display: "inline-flex", alignItems: "center", gap: "0.35rem" }}>
-        off at
-        <input
-          type="time"
-          value={sleep}
-          disabled={busy}
-          onChange={(e) => setSleep(e.target.value)}
-          onBlur={() => save({ enabled, sleep_at: sleep, wake_at: wake })}
-          style={timeInput}
-        />
-        on at
-        <input
-          type="time"
-          value={wake}
-          disabled={busy}
-          onChange={(e) => setWake(e.target.value)}
-          onBlur={() => save({ enabled, sleep_at: sleep, wake_at: wake })}
-          style={timeInput}
-        />
-      </span>
-      <span style={{ opacity: 0.7 }}>hub local time</span>
-    </div>
-  );
-}
-
-/** Per-kiosk presence-aware display: the screen follows the assigned Room's
- * occupancy — wakes the moment motion is detected, turns off after the room
- * has been empty for the screen-off timer. Uses the room's presence sensors
- * (Hue motion / HA), so it needs a room with sensors. Quiet hours still wins
- * overnight. Presented as ONE "presence aware" switch + timer: blanking and
- * waking are the same policy, not two features. */
-function KioskPresence({
-  k,
-  dialogs,
-  onSaved,
-}: {
-  k: Kiosk;
-  dialogs: Dialogs;
-  onSaved: () => void;
-}) {
-  const [enabled, setEnabled] = useState(k.presence_enabled);
-  const [mins, setMins] = useState(Math.round((k.presence_timeout_secs ?? 600) / 60));
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    setEnabled(k.presence_enabled);
+    const seeded = seedHourPlan(k);
+    setPlan(seeded);
+    planRef.current = seeded;
     setMins(Math.round((k.presence_timeout_secs ?? 600) / 60));
-  }, [k.presence_enabled, k.presence_timeout_secs]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [k.schedule_enabled, k.hour_modes, k.presence_timeout_secs, k.sleep_at, k.wake_at, k.presence_enabled]);
 
-  async function save(next: { enabled: boolean; timeout_secs?: number }) {
+  async function save(next: { enabled: boolean; hour_modes: string; timeout_secs?: number }) {
     setBusy(true);
     try {
-      await setKioskPresence(k.id, next);
+      await setKioskPlan(k.id, next);
       onSaved();
     } catch (e) {
       await dialogs.alert({
-        title: "Couldn't save presence",
+        title: "Couldn't save display plan",
         message: e instanceof Error ? e.message : String(e),
       });
     } finally {
       setBusy(false);
     }
   }
+
+  function paintAt(clientX: number) {
+    const r = barRef.current?.getBoundingClientRect();
+    if (!r || r.width === 0) return;
+    const i = Math.max(0, Math.min(23, Math.floor(((clientX - r.left) / r.width) * 24)));
+    if (planRef.current[i] === brush) return;
+    planRef.current = planRef.current.slice(0, i) + brush + planRef.current.slice(i + 1);
+    setPlan(planRef.current);
+  }
+
+  const MODES: { mode: KioskHourMode; label: string; hint: string; c: string }[] = [
+    { mode: "W", label: "Awake", hint: "screen always on", c: color.gold },
+    { mode: "A", label: "Aware", hint: "follows room presence — wake on motion, off when empty", c: color.good },
+    { mode: "S", label: "Asleep", hint: "screen always off (beats an occupied room)", c: color.violet },
+  ];
+  const modeColor = (m: string) => MODES.find((x) => x.mode === m)?.c ?? color.faint;
+  const nowHour = new Date().getHours();
+  const anyAware = plan.includes("A");
 
   const numInput = {
     background: "var(--bf-panel, #1a1320)",
@@ -2459,49 +2391,153 @@ function KioskPresence({
     <div
       style={{
         display: "flex",
-        alignItems: "center",
-        gap: "0.5rem",
-        flexWrap: "wrap",
+        flexDirection: "column",
+        gap: "0.45rem",
         fontSize: "0.78rem",
         color: "var(--bf-faint)",
-        paddingTop: "0.4rem",
+        borderTop: "1px solid var(--bf-hairline, #2a2233)",
+        paddingTop: "0.5rem",
       }}
     >
-      <span
-        title="The screen follows the room: wakes on motion, turns off once the room has been empty for the timer"
-        style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem", color: "var(--bf-dim)" }}
-      >
-        <Glyph name="motion" size={15} /> Presence aware
-      </span>
-      <Switch
-        on={enabled}
-        disabled={busy}
-        onChange={(v) => {
-          setEnabled(v);
-          save({ enabled: v });
-        }}
-      />
-      <span style={{ opacity: enabled ? 1 : 0.55, display: "inline-flex", alignItems: "center", gap: "0.35rem" }}>
-        wakes on motion · screen off after
-        <input
-          type="number"
-          min={1}
-          max={60}
-          value={mins}
-          disabled={busy}
-          onChange={(e) => setMins(Math.max(1, Number(e.target.value) || 1))}
-          onBlur={() => save({ enabled, timeout_secs: mins * 60 })}
-          style={numInput}
-        />
-        min empty
-      </span>
-      {enabled && !k.room_id && (
-        <span style={{ color: "var(--bf-rose, #e57)" }}>
-          needs a room with motion sensors — assign one at left
+      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem", color: "var(--bf-dim)" }}>
+          <Glyph name="wx_moon" size={15} /> Display plan
         </span>
-      )}
+        <Switch
+          on={enabled}
+          disabled={busy}
+          onChange={(v) => {
+            setEnabled(v);
+            save({ enabled: v, hour_modes: planRef.current, timeout_secs: mins * 60 });
+          }}
+        />
+        {/* Brush chips double as the legend. */}
+        <span style={{ display: "inline-flex", gap: "0.3rem", opacity: enabled ? 1 : 0.55 }}>
+          {MODES.map(({ mode, label, hint, c }) => (
+            <button
+              key={mode}
+              onClick={() => setBrush(mode)}
+              title={hint}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "0.3rem",
+                padding: "0.15rem 0.5rem",
+                borderRadius: 999,
+                fontSize: "0.72rem",
+                cursor: "pointer",
+                color: brush === mode ? "var(--bf-text)" : "var(--bf-dim)",
+                background: brush === mode ? alpha(c, 0.22) : "transparent",
+                border: `1px solid ${brush === mode ? c : "var(--bf-hairline, #333)"}`,
+              }}
+            >
+              <span style={{ width: 8, height: 8, borderRadius: 2, background: alpha(c, 0.85), flexShrink: 0 }} />
+              {label}
+            </button>
+          ))}
+        </span>
+        <span style={{ opacity: enabled && anyAware ? 1 : 0.55, display: "inline-flex", alignItems: "center", gap: "0.35rem" }}>
+          aware: off after
+          <input
+            type="number"
+            min={1}
+            max={60}
+            value={mins}
+            disabled={busy}
+            onChange={(e) => setMins(Math.max(1, Number(e.target.value) || 1))}
+            onBlur={() => save({ enabled, hour_modes: planRef.current, timeout_secs: mins * 60 })}
+            style={numInput}
+          />
+          min empty
+        </span>
+      </div>
+
+      {/* The 24-hour timeline — click or drag to paint with the selected mode.
+          One contiguous strip (touching square cells, hairline hour seams),
+          flanked AM · PM. */}
+      <div style={{ opacity: enabled ? 1 : 0.45, display: "flex", alignItems: "flex-end", gap: "0.4rem" }}>
+        <span style={{ fontSize: "0.62rem", color: "var(--bf-dim)", letterSpacing: "0.08em", paddingBottom: 8 }}>AM</span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(24, 1fr)", marginBottom: 2 }}>
+            {Array.from({ length: 24 }, (_, i) => (
+              <span key={i} style={{ textAlign: "center", fontSize: "0.6rem", color: i === nowHour ? "var(--bf-text)" : "var(--bf-faint)" }}>
+                {i}
+              </span>
+            ))}
+          </div>
+          <div
+            ref={barRef}
+            onPointerDown={(e) => {
+              if (busy || !enabled) return;
+              e.preventDefault();
+              (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+              painting.current = true;
+              paintAt(e.clientX);
+            }}
+            onPointerMove={(e) => {
+              if (painting.current) paintAt(e.clientX);
+            }}
+            onPointerUp={() => {
+              if (!painting.current) return;
+              painting.current = false;
+              save({ enabled, hour_modes: planRef.current, timeout_secs: mins * 60 });
+            }}
+            onPointerCancel={() => {
+              painting.current = false;
+            }}
+            title="Click or drag to paint hours with the selected mode"
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(24, 1fr)",
+              border: "1px solid var(--bf-hairline, #333)",
+              touchAction: "none",
+              cursor: enabled ? "pointer" : "default",
+            }}
+          >
+            {plan.split("").map((m, i) => (
+              <span
+                key={i}
+                style={{
+                  height: 26,
+                  background: alpha(modeColor(m), m === "S" ? 0.32 : 0.5),
+                  // Hairline hour seams instead of per-cell chrome; the current
+                  // hour wears an INSET ring so touching neighbours don't overlap.
+                  borderRight: i < 23 ? "1px solid rgba(0,0,0,0.35)" : "none",
+                  boxShadow: i === nowHour ? "inset 0 0 0 1px var(--bf-text)" : undefined,
+                }}
+              />
+            ))}
+          </div>
+        </div>
+        <span style={{ fontSize: "0.62rem", color: "var(--bf-dim)", letterSpacing: "0.08em", paddingBottom: 8 }}>PM</span>
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between" }}>
+        <span style={{ opacity: 0.7 }}>hub local time — paint with the selected mode</span>
+        {enabled && anyAware && !k.room_id && (
+          <span style={{ color: "var(--bf-rose, #e57)" }}>aware hours need a room with motion sensors — assign one at left</span>
+        )}
+      </div>
     </div>
   );
+}
+
+/** Initial plan for a kiosk that hasn't painted one: derived from its legacy
+ * sleep window + presence flag, so the picture opens showing what the old
+ * config already did. */
+function seedHourPlan(k: Kiosk): string {
+  if (k.hour_modes && /^[WSA]{24}$/.test(k.hour_modes)) return k.hour_modes;
+  const base: KioskHourMode = k.presence_enabled ? "A" : "W";
+  const arr: KioskHourMode[] = Array.from({ length: 24 }, () => base);
+  const hour = (s: string | null) => {
+    const m = s?.match(/^(\d{1,2}):/);
+    return m ? Math.min(23, Number(m[1])) : null;
+  };
+  const off = hour(k.sleep_at);
+  const on = hour(k.wake_at);
+  if (k.schedule_enabled && off !== null && on !== null && off !== on) {
+    for (let i = off; i !== on; i = (i + 1) % 24) arr[i] = "S";
+  }
+  return arr.join("");
 }
 
 function KiosksSection({
@@ -2733,8 +2769,7 @@ function KiosksSection({
                 ))
               )}
             </div>
-            <KioskSchedule k={k} dialogs={dialogs} onSaved={load} />
-            <KioskPresence k={k} dialogs={dialogs} onSaved={load} />
+            <KioskDisplayPlan k={k} dialogs={dialogs} onSaved={load} />
           </div>
         ))}
       </div>

@@ -80,6 +80,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{id}/board", axum::routing::put(set_board))
         .route("/{id}/schedule", axum::routing::put(set_schedule))
         .route("/{id}/presence", axum::routing::put(set_presence))
+        .route("/{id}/plan", axum::routing::put(set_plan))
         .route("/{id}/deauth", post(deauth))
         .route("/{id}", delete(forget))
 }
@@ -344,6 +345,9 @@ struct KioskRow {
     /// drives the Boards preview device list. Null until it first reports.
     viewport_w: Option<i64>,
     viewport_h: Option<i64>,
+    /// Per-hour display plan (24 chars of W/S/A, mig 0059) — see `PUT …/plan`.
+    /// Null = no plan painted; the legacy sleep window + presence flag govern.
+    hour_modes: Option<String>,
 }
 
 /// `GET /api/kiosks` (session) — the clients view: every registered kiosk with
@@ -354,7 +358,7 @@ async fn list(State(state): State<Arc<AppState>>, _: Session) -> impl IntoRespon
                 default_board_id, schedule_enabled, sleep_at, wake_at,
                 presence_enabled, presence_timeout_secs,
                 battery_level, battery_charging, battery_voltage_mv, battery_current_ua,
-                battery_temp_dc, power_source, viewport_w, viewport_h,
+                battery_temp_dc, power_source, viewport_w, viewport_h, hour_modes,
                 api_key_id IS NOT NULL AS authorized,
                 (last_seen > datetime('now', '-{ONLINE_WINDOW_SECS} seconds')) AS online
          FROM kiosks ORDER BY name"
@@ -389,6 +393,7 @@ async fn list(State(state): State<Arc<AppState>>, _: Session) -> impl IntoRespon
                     power_source: r.get("power_source"),
                     viewport_w: r.get("viewport_w"),
                     viewport_h: r.get("viewport_h"),
+                    hour_modes: r.get("hour_modes"),
                 })
                 .collect::<Vec<_>>(),
         )
@@ -658,6 +663,72 @@ async fn set_presence(
     }
 }
 
+#[derive(Deserialize)]
+struct SetPlanRequest {
+    /// Master switch — reuses `schedule_enabled` (off = the display is unmanaged).
+    enabled: bool,
+    /// 24 chars, one per local hour: 'W' awake · 'S' asleep · 'A' aware
+    /// (presence-controlled: wake on motion, off after the no-motion timer).
+    hour_modes: String,
+    /// The aware-hours screen-off timer (seconds); omitted = keep current.
+    #[serde(default)]
+    timeout_secs: Option<i64>,
+}
+
+/// `PUT /api/kiosks/{id}/plan` (session) — the per-hour display plan (mig
+/// 0059): one paintable 24-hour timeline replacing the sleep-window + presence
+/// toggle pair. Writing a plan supersedes the legacy fields on this kiosk (the
+/// scheduler prefers `hour_modes` whenever it's set).
+async fn set_plan(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+    Json(req): Json<SetPlanRequest>,
+) -> impl IntoResponse {
+    if req.hour_modes.len() != 24
+        || !req
+            .hour_modes
+            .bytes()
+            .all(|b| matches!(b, b'W' | b'S' | b'A'))
+    {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "hour_modes must be exactly 24 characters of W (awake), S (asleep), A (aware)",
+        )
+            .into_response();
+    }
+    let timeout = req.timeout_secs.map(|t| t.clamp(30, 3600));
+    let result = match timeout {
+        Some(t) => {
+            sqlx::query(
+                "UPDATE kiosks SET schedule_enabled = ?, hour_modes = ?, presence_timeout_secs = ? WHERE id = ?",
+            )
+            .bind(i64::from(req.enabled))
+            .bind(&req.hour_modes)
+            .bind(t)
+            .bind(&id)
+            .execute(&state.db)
+            .await
+        }
+        None => {
+            sqlx::query("UPDATE kiosks SET schedule_enabled = ?, hour_modes = ? WHERE id = ?")
+                .bind(i64::from(req.enabled))
+                .bind(&req.hour_modes)
+                .bind(&id)
+                .execute(&state.db)
+                .await
+        }
+    };
+    match result {
+        Ok(r) if r.rows_affected() > 0 => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("db error setting kiosk plan: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
 /// Parse a "HH:MM" 24-hour clock string into minutes-since-midnight (0..=1439).
 /// Tolerant of surrounding whitespace; rejects anything out of range or malformed.
 fn parse_hhmm(s: &str) -> Option<u16> {
@@ -686,6 +757,39 @@ fn desired_awake_at(sleep: u16, wake: u16, now: u16) -> bool {
         false
     };
     !asleep
+}
+
+/// One hour's display mode from the painted plan (mig 0059).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum PlanMode {
+    /// Screen forced on.
+    Awake,
+    /// Screen forced off — beats an occupied room, same as legacy quiet hours.
+    Asleep,
+    /// Presence-controlled: wake on motion, off after the no-motion timer.
+    Aware,
+}
+
+/// The plan's mode for a local hour. `None` for a malformed plan or an
+/// out-of-range hour — the caller falls back to the legacy policy pair.
+fn plan_mode(hour_modes: &str, hour: usize) -> Option<PlanMode> {
+    match hour_modes.as_bytes().get(hour)? {
+        b'W' => Some(PlanMode::Awake),
+        b'S' => Some(PlanMode::Asleep),
+        b'A' => Some(PlanMode::Aware),
+        _ => None,
+    }
+}
+
+/// The desired screen state for a plan hour. Awake/Asleep are absolute; an
+/// Aware hour follows the room's presence verdict and governs nothing when the
+/// room has no presence input (`None` — leave the kiosk alone).
+fn plan_desired(mode: PlanMode, present: Option<bool>) -> Option<bool> {
+    match mode {
+        PlanMode::Awake => Some(true),
+        PlanMode::Asleep => Some(false),
+        PlanMode::Aware => present,
+    }
 }
 
 /// Combine the two display-power policies into a single desired-awake verdict.
@@ -749,8 +853,16 @@ pub async fn run_scheduler(state: Arc<AppState>) {
         for row in rows {
             let id: String = row.get("id");
 
-            // Quiet-hours verdict.
-            let schedule_awake = if row.get::<i64, _>("schedule_enabled") != 0 {
+            // A painted hour plan (mig 0059) supersedes the legacy pair; the
+            // master switch is schedule_enabled either way.
+            let plan_enabled = row.get::<i64, _>("schedule_enabled") != 0;
+            let mode = row
+                .get::<Option<String>, _>("hour_modes")
+                .filter(|_| plan_enabled)
+                .and_then(|m| plan_mode(&m, now.hour() as usize));
+
+            // Quiet-hours verdict (legacy path only).
+            let schedule_awake = if mode.is_none() && plan_enabled {
                 let sleep = row
                     .get::<Option<String>, _>("sleep_at")
                     .as_deref()
@@ -767,8 +879,15 @@ pub async fn run_scheduler(state: Arc<AppState>) {
                 None
             };
 
-            // Presence verdict (needs an assigned room with presence sensors).
-            let present = if row.get::<i64, _>("presence_enabled") != 0 {
+            // Presence verdict — needed for an Aware hour, or the legacy flag.
+            // (Needs an assigned room with presence sensors; the grace timer
+            // keeps the screen up until the room has been empty long enough.)
+            let wants_presence = match mode {
+                Some(PlanMode::Aware) => true,
+                Some(_) => false,
+                None => row.get::<i64, _>("presence_enabled") != 0,
+            };
+            let present = if wants_presence {
                 match row.get::<Option<String>, _>("room_id") {
                     Some(room_id) => {
                         let timeout = StdDuration::from_secs(
@@ -792,8 +911,12 @@ pub async fn run_scheduler(state: Arc<AppState>) {
                 None
             };
 
-            let Some(awake) = combined_desired_awake(schedule_awake, present) else {
-                continue; // neither policy governs (e.g. presence on but no sensors)
+            let desired = match mode {
+                Some(m) => plan_desired(m, present),
+                None => combined_desired_awake(schedule_awake, present),
+            };
+            let Some(awake) = desired else {
+                continue; // nothing governs this hour (e.g. aware but no sensors)
             };
             governed.insert(id.clone());
 
@@ -959,5 +1082,31 @@ mod tests {
         assert_eq!(c(Some(true), None), Some(true));
         // Neither policy governs → leave the kiosk alone.
         assert_eq!(c(None, None), None);
+    }
+
+    #[test]
+    fn plan_mode_reads_the_hour_and_rejects_junk() {
+        use super::{PlanMode, plan_mode};
+        let plan = "SSSSSSAAWWWWWWWWWWAAAASS"; // 24 chars
+        assert_eq!(plan_mode(plan, 0), Some(PlanMode::Asleep));
+        assert_eq!(plan_mode(plan, 6), Some(PlanMode::Aware));
+        assert_eq!(plan_mode(plan, 12), Some(PlanMode::Awake));
+        assert_eq!(plan_mode(plan, 23), Some(PlanMode::Asleep));
+        // Out of range / malformed → None (caller falls back to legacy).
+        assert_eq!(plan_mode(plan, 24), None);
+        assert_eq!(plan_mode("XXXX", 1), None);
+        assert_eq!(plan_mode("", 0), None);
+    }
+
+    #[test]
+    fn plan_desired_awake_asleep_absolute_aware_follows_presence() {
+        use super::{PlanMode, plan_desired};
+        // Absolute hours ignore the room entirely.
+        assert_eq!(plan_desired(PlanMode::Awake, Some(false)), Some(true));
+        assert_eq!(plan_desired(PlanMode::Asleep, Some(true)), Some(false));
+        // Aware follows presence — and governs nothing without sensors.
+        assert_eq!(plan_desired(PlanMode::Aware, Some(true)), Some(true));
+        assert_eq!(plan_desired(PlanMode::Aware, Some(false)), Some(false));
+        assert_eq!(plan_desired(PlanMode::Aware, None), None);
     }
 }

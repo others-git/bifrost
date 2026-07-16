@@ -530,8 +530,9 @@ this view on the kiosk itself.
 | `POST` | `/api/kiosks/{id}/command` | session | Queue `{ command }` — one of `sleep`, `wake`, `lock`, `update` |
 | `PUT` | `/api/kiosks/{id}/room` | session | Assign the kiosk to a Room (`{ room_id }`, null clears) — its voice context and presence source |
 | `PUT` | `/api/kiosks/{id}/board` | session | Set the board to auto-launch full-screen (`{ board_id }`, null clears) |
-| `PUT` | `/api/kiosks/{id}/schedule` | session | Scheduled quiet hours: `{ enabled, sleep_at, wake_at }` (server-local `"HH:MM"`; both required and distinct when enabled) |
-| `PUT` | `/api/kiosks/{id}/presence` | session | Presence-aware display (wake on motion, screen off when empty): `{ enabled, timeout_secs? }` (screen-off timer, clamped 30–3600 s) |
+| `PUT` | `/api/kiosks/{id}/plan` | session | Per-hour display plan: `{ enabled, hour_modes, timeout_secs? }` — `hour_modes` is 24 chars, one per local hour: `W` awake · `S` asleep · `A` aware (presence-controlled; `timeout_secs` is its screen-off timer, clamped 30–3600 s). Supersedes the legacy schedule/presence pair below |
+| `PUT` | `/api/kiosks/{id}/schedule` | session | Legacy quiet hours: `{ enabled, sleep_at, wake_at }` (server-local `"HH:MM"`; governs only kiosks with no painted plan) |
+| `PUT` | `/api/kiosks/{id}/presence` | session | Legacy presence toggle: `{ enabled, timeout_secs? }` (governs only kiosks with no painted plan) |
 | `POST` | `/api/kiosks/{id}/deauth` | session | Revoke the kiosk's key (it must re-enroll) |
 | `DELETE` | `/api/kiosks/{id}` | session | Forget a kiosk record |
 

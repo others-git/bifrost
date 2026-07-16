@@ -1701,6 +1701,9 @@ export interface Kiosk {
    * drives the Boards preview device list. Null until it first reports. */
   viewport_w: number | null;
   viewport_h: number | null;
+  /** Per-hour display plan (24 chars of W/S/A; see setKioskPlan). Null = no
+   * plan painted yet — the legacy sleep window + presence flag govern. */
+  hour_modes: string | null;
 }
 
 /** Report this client's CSS viewport to the hub (kiosk WebView only — auth'd by
@@ -1777,6 +1780,25 @@ export async function setKioskPresence(
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(presence),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+}
+
+/** One character per local hour: 'W' awake · 'S' asleep · 'A' aware. */
+export type KioskHourMode = "W" | "S" | "A";
+
+/** Set the kiosk's per-hour display plan — the paintable 24-hour timeline that
+ * supersedes the sleep-window + presence-toggle pair. `hour_modes` is exactly
+ * 24 W/S/A characters; `timeout_secs` is the aware-hours screen-off timer
+ * (clamped server-side to [30, 3600]; omit to keep the current value). */
+export async function setKioskPlan(
+  id: string,
+  plan: { enabled: boolean; hour_modes: string; timeout_secs?: number },
+): Promise<void> {
+  const res = await fetch(`/api/kiosks/${id}/plan`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(plan),
   });
   if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
 }

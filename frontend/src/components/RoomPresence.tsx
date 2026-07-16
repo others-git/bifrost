@@ -73,7 +73,13 @@ export function RoomPresencePanel({
 
   // Consumers of this room's occupancy — the cross-links that answer "what
   // will change if I flip these toggles?".
-  const drivenKiosks = kiosks.filter((k) => k.room_id === room.id && k.presence_enabled);
+  // A kiosk reads this room's presence when its display plan has any Aware
+  // hour (or the legacy presence flag is still on, pre-plan).
+  const drivenKiosks = kiosks.filter(
+    (k) =>
+      k.room_id === room.id &&
+      (k.hour_modes ? k.schedule_enabled && k.hour_modes.includes("A") : k.presence_enabled),
+  );
   const drivenRules = automations.filter((a) => readsRoomOccupancy(a, room.id));
   const consumers: string[] = [
     ...drivenKiosks.map((k) => `${k.name || "kiosk"} display`),

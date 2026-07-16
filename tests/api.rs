@@ -647,6 +647,78 @@ async fn kiosk_reports_its_viewport_and_the_clients_list_carries_it() {
 }
 
 #[tokio::test]
+async fn kiosk_hour_plan_roundtrips_and_validates() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "wall tablet").await;
+
+    // Register the kiosk row.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/kiosks/checkin")
+                .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let id = list[0]["id"].as_str().unwrap().to_string();
+    assert!(list[0]["hour_modes"].is_null(), "no plan painted yet");
+
+    // Paint a plan: overnight asleep, morning aware, day awake, evening aware.
+    let plan = "SSSSSSAAWWWWWWWWWWAAAASS";
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/kiosks/{id}/plan"),
+            &cookie,
+            &format!(r#"{{"enabled":true,"hour_modes":"{plan}","timeout_secs":300}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(list[0]["hour_modes"], plan);
+    assert_eq!(list[0]["schedule_enabled"], true);
+    assert_eq!(list[0]["presence_timeout_secs"], 300);
+
+    // Wrong length and junk characters are rejected.
+    for bad in ["SSS", "SSSSSSAAWWWWWWWWWWAAAASX"] {
+        let resp = app
+            .clone()
+            .oneshot(helpers::authed_json(
+                "PUT",
+                &format!("/api/kiosks/{id}/plan"),
+                &cookie,
+                &format!(r#"{{"enabled":true,"hour_modes":"{bad}"}}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
+    }
+}
+
+#[tokio::test]
 async fn reorder_providers_persists_display_order() {
     let (app, state) = helpers::test_app_with_password_and_state().await;
     for (id, name) in [("p-a", "Alpha"), ("p-b", "Bravo"), ("p-c", "Charlie")] {
@@ -5336,7 +5408,11 @@ async fn wait_for_command(
     recorded: &std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
     needle: &str,
 ) -> bool {
-    for _ in 0..40 {
+    // Generous ceiling: under a fully parallel `cargo test` run the eISCP mock
+    // sockets contend for the runtime and a 2s budget flaked ~1 run in 3
+    // (rotating between this family's tests). The loop returns the moment the
+    // command lands, so the ceiling only costs time on a genuine failure.
+    for _ in 0..200 {
         if recorded.lock().await.iter().any(|c| c.contains(needle)) {
             return true;
         }
