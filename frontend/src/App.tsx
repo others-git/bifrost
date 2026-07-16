@@ -1,5 +1,5 @@
 import { useEffect, useState, type MouseEvent } from "react";
-import { getHealth, getLights, logout, getSetupStatus, kioskLogin, getKioskSelf, type Light, getSettings } from "./api";
+import { getHealth, getLights, logout, getSetupStatus, kioskLogin, getKioskSelf, reportKioskViewport, type Light, getSettings } from "./api";
 import { Glyph } from "./components/glyphs";
 import { SetupPage } from "./pages/Setup";
 import { LoginPage } from "./pages/Login";
@@ -109,6 +109,9 @@ export function App() {
     if (result === "unauthorized") { setPage("login"); return; }
     setLights(result);
     getSettings().then((st) => setDevMode(!!st.dev_mode));
+    // A kiosk reports its exact CSS viewport so the Boards preview on a desktop
+    // can lock a canvas to this device's real pixel size (measured, not guessed).
+    if (IS_KIOSK) reportKioskViewport(window.innerWidth, window.innerHeight);
     // A wall-tablet kiosk with an assigned board lands straight on Boards (which
     // then opens that board full-screen); otherwise the dashboard is home.
     if (IS_KIOSK && (await getKioskSelf())?.default_board_id) {

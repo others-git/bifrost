@@ -66,6 +66,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/checkin", post(checkin))
         .route("/self", get(self_info))
+        .route("/self/viewport", axum::routing::put(set_self_viewport))
         .route("/stream", get(stream))
         .route("/", get(list))
         // OTA relay: session triggers/inspects the cache; key-auth endpoints feed
@@ -263,6 +264,47 @@ async fn self_info(State(state): State<Arc<AppState>>, headers: HeaderMap) -> im
     }
 }
 
+#[derive(Deserialize)]
+struct ViewportRequest {
+    w: i64,
+    h: i64,
+}
+
+/// `PUT /api/kiosks/self/viewport` — the kiosk-served web client reports its
+/// own CSS viewport (`window.innerWidth × innerHeight`). Same `bfr_key`-cookie
+/// auth as `GET /self`. Feeds the Boards preview device list: the exact pixel
+/// size a board renders at on that wall tablet, measured, not guessed.
+async fn set_self_viewport(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<ViewportRequest>,
+) -> impl IntoResponse {
+    let Some(key) = crate::api::auth::kiosk_cookie_key(&headers) else {
+        return StatusCode::UNAUTHORIZED;
+    };
+    let Some(key_id) = crate::api::apikeys::validate_key(&state, &key).await else {
+        return StatusCode::UNAUTHORIZED;
+    };
+    // Sanity clamp: a viewport outside these bounds is a client bug, not data.
+    if !(100..=20_000).contains(&req.w) || !(100..=20_000).contains(&req.h) {
+        return StatusCode::UNPROCESSABLE_ENTITY;
+    }
+    match sqlx::query("UPDATE kiosks SET viewport_w = ?, viewport_h = ? WHERE api_key_id = ?")
+        .bind(req.w)
+        .bind(req.h)
+        .bind(&key_id)
+        .execute(&state.db)
+        .await
+    {
+        Ok(r) if r.rows_affected() > 0 => StatusCode::NO_CONTENT,
+        Ok(_) => StatusCode::NOT_FOUND, // valid key but not a registered kiosk
+        Err(e) => {
+            tracing::error!("db error setting kiosk viewport: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct KioskRow {
     id: String,
@@ -298,6 +340,10 @@ struct KioskRow {
     battery_current_ua: Option<i64>,
     battery_temp_dc: Option<i64>,
     power_source: Option<String>,
+    /// The kiosk's CSS viewport (self-reported via `PUT /self/viewport`) —
+    /// drives the Boards preview device list. Null until it first reports.
+    viewport_w: Option<i64>,
+    viewport_h: Option<i64>,
 }
 
 /// `GET /api/kiosks` (session) — the clients view: every registered kiosk with
@@ -308,7 +354,7 @@ async fn list(State(state): State<Arc<AppState>>, _: Session) -> impl IntoRespon
                 default_board_id, schedule_enabled, sleep_at, wake_at,
                 presence_enabled, presence_timeout_secs,
                 battery_level, battery_charging, battery_voltage_mv, battery_current_ua,
-                battery_temp_dc, power_source,
+                battery_temp_dc, power_source, viewport_w, viewport_h,
                 api_key_id IS NOT NULL AS authorized,
                 (last_seen > datetime('now', '-{ONLINE_WINDOW_SECS} seconds')) AS online
          FROM kiosks ORDER BY name"
@@ -341,6 +387,8 @@ async fn list(State(state): State<Arc<AppState>>, _: Session) -> impl IntoRespon
                     battery_current_ua: r.get("battery_current_ua"),
                     battery_temp_dc: r.get("battery_temp_dc"),
                     power_source: r.get("power_source"),
+                    viewport_w: r.get("viewport_w"),
+                    viewport_h: r.get("viewport_h"),
                 })
                 .collect::<Vec<_>>(),
         )

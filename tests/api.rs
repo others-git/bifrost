@@ -582,6 +582,71 @@ async fn kiosk_default_board_set_and_self_resolves_it() {
 }
 
 #[tokio::test]
+async fn kiosk_reports_its_viewport_and_the_clients_list_carries_it() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "wall tablet").await;
+
+    // Register the kiosk row.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/kiosks/checkin")
+                .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The kiosk-served web client reports its CSS viewport (bfr_key cookie auth).
+    let put_viewport = |body: &'static str, with_key: bool| {
+        let mut b = Request::builder()
+            .method("PUT")
+            .uri("/api/kiosks/self/viewport")
+            .header(header::CONTENT_TYPE, "application/json");
+        if with_key {
+            b = b.header(header::COOKIE, format!("bfr_key={key}"));
+        }
+        b.body(Body::from(body)).unwrap()
+    };
+    let resp = app
+        .clone()
+        .oneshot(put_viewport(r#"{"w":893,"h":533}"#, true))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // The clients list carries it, for the Boards preview device menu.
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(list[0]["viewport_w"], 893);
+    assert_eq!(list[0]["viewport_h"], 533);
+
+    // Nonsense dimensions are rejected; no cookie → 401.
+    let resp = app
+        .clone()
+        .oneshot(put_viewport(r#"{"w":2,"h":533}"#, true))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let resp = app
+        .oneshot(put_viewport(r#"{"w":893,"h":533}"#, false))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn reorder_providers_persists_display_order() {
     let (app, state) = helpers::test_app_with_password_and_state().await;
     for (id, name) in [("p-a", "Alpha"), ("p-b", "Bravo"), ("p-c", "Charlie")] {

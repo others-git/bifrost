@@ -25,8 +25,10 @@ import {
   setMediaState,
   setPowerState,
   updateDashboard,
+  getKiosks,
   type Dashboard,
   type GenericDevice,
+  type Kiosk,
   type Light,
   type LightState,
   type LightStatePatch,
@@ -218,6 +220,11 @@ export function BoardsPage() {
   const [generic, setGeneric] = useState<GenericDevice[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
   const [flyout, setFlyout] = useState<{ widget: Widget; anchor: HTMLElement } | null>(null);
+  // Preview: lock the (view-only) canvas to a target device's exact CSS pixel
+  // size, scaled to fit, so you can see how widgets read on an 8.7" wall tablet
+  // while designing on a desktop. Null = normal responsive canvas.
+  const [preview, setPreview] = useState<{ w: number; h: number; label: string } | null>(null);
+  const [kiosks, setKiosks] = useState<Kiosk[]>([]);
 
   const reloadBoards = useCallback(async () => {
     const bs = await getDashboards();
@@ -245,6 +252,7 @@ export function BoardsPage() {
   useEffect(() => {
     reloadBoards();
     reloadDevices();
+    if (!IS_KIOSK) getKiosks().then(setKiosks);
   }, [reloadBoards, reloadDevices]);
 
   // On a wall-tablet kiosk, auto-launch the board assigned to this device
@@ -545,13 +553,43 @@ export function BoardsPage() {
               </>
             )}
             {!edit && widgets.length > 0 && (
+              <Select
+                value={preview ? preview.label : "__none"}
+                onChange={(v) => {
+                  if (v === "__none") return setPreview(null);
+                  if (v === "__custom") {
+                    const raw = window.prompt("Preview size — width×height in CSS pixels (e.g. 1340x800)", preview ? `${preview.w}x${preview.h}` : "1340x800");
+                    const m = raw?.match(/^\s*(\d{2,5})\s*[x×,\s]\s*(\d{2,5})\s*$/);
+                    if (m) setPreview({ w: +m[1], h: +m[2], label: `${m[1]}×${m[2]}` });
+                    return;
+                  }
+                  const kiosk = kiosks.find((k) => `k:${k.id}` === v);
+                  if (kiosk?.viewport_w && kiosk.viewport_h) {
+                    setPreview({ w: kiosk.viewport_w, h: kiosk.viewport_h, label: `${kiosk.name} (${kiosk.viewport_w}×${kiosk.viewport_h})` });
+                    return;
+                  }
+                  const preset = PREVIEW_PRESETS.find((p) => p.label === v);
+                  if (preset) setPreview({ w: preset.w, h: preset.h, label: preset.label });
+                }}
+                title="Lock the canvas to a device's exact screen size to preview widget scale"
+                options={[
+                  { value: "__none", label: preview ? "Preview: off" : "Preview scale…" },
+                  ...kiosks
+                    .filter((k) => k.viewport_w && k.viewport_h)
+                    .map((k) => ({ value: `k:${k.id}`, label: `${k.name} (${k.viewport_w}×${k.viewport_h})`, group: "Your devices" })),
+                  ...PREVIEW_PRESETS.map((p) => ({ value: p.label, label: p.label, group: "Presets" })),
+                  { value: "__custom", label: "Custom size…", group: "Presets" },
+                ]}
+              />
+            )}
+            {!edit && widgets.length > 0 && (
               <Button variant="ghost" onClick={() => setKiosk(true)} title="Full-screen wall display">
                 Kiosk
               </Button>
             )}
             <Button
               variant={edit ? "primary" : "ghost"}
-              onClick={() => setEdit((v) => !v)}
+              onClick={() => { if (!edit) setPreview(null); setEdit((v) => !v); }}
             >
               {edit ? "Done" : "Edit"}
             </Button>
@@ -593,6 +631,7 @@ export function BoardsPage() {
             widgets={edit ? withExit(widgets) : widgets.filter((w) => w.type !== "exit")}
             aspect={board?.aspect ?? "16:9"}
             edit={edit}
+            preview={preview}
             onChange={patchWidget}
             onChangeMany={patchManyWidgets}
             onConfigure={(w) => setConfiguring(w)}
@@ -700,7 +739,34 @@ export function BoardsPage() {
   );
 }
 
+// ── Preview device presets ────────────────────────────────────────────────────
+
+/** Stock preview sizes — the CSS viewport (not physical pixels) a board renders
+ * against on each device, so widget scale reads true. A live kiosk that has
+ * reported its real viewport is offered on top of these. */
+const PREVIEW_PRESETS: { label: string; w: number; h: number }[] = [
+  { label: 'Galaxy Tab A9+ (8.7", landscape)', w: 1340, h: 800 },
+  { label: 'Galaxy Tab A9+ (8.7", portrait)', w: 800, h: 1340 },
+  { label: 'Nest Hub (7\")', w: 1024, h: 600 },
+  { label: 'Nest Hub Max (10\")', w: 1280, h: 800 },
+  { label: 'iPad (10.9\", landscape)', w: 1180, h: 820 },
+  { label: 'Phone (portrait)', w: 412, h: 915 },
+  { label: '1080p display', w: 1920, h: 1080 },
+];
+
 // ── The drag-resize grid ──────────────────────────────────────────────────────
+
+/** Widget types that scale their own content with the tile (readout widgets via
+ * `cqmin`, the label via its own cqmin font) — so BoardGrid must NOT apply the
+ * canvas `zoom` to them, or they'd double-scale. Everything else is a fixed-px
+ * shared Control component that needs the zoom. */
+const SELF_SCALING_WIDGETS = new Set(["clock", "sensor", "weather", "now_playing", "label"]);
+
+/** The canvas width the fixed-px widgets were sized against (a typical desktop
+ * board canvas). `contentZoom = canvasW / this`, so a board looks identically
+ * scaled on any screen: content shrinks on a small wall tablet, grows on a 4K
+ * display, and stays ≈unchanged on the desktop it was designed on. */
+const REFERENCE_CANVAS_W = 1700;
 
 // Parse an "<w>:<h>" aspect into a grid: `BASE` cells on the longer axis, the
 // shorter axis scaled to keep cells ≈ square. Falls back to 16:9 for junk.
@@ -771,6 +837,7 @@ function BoardGrid({
   widgets,
   aspect,
   edit,
+  preview,
   onChange,
   onChangeMany,
   onConfigure,
@@ -781,6 +848,10 @@ function BoardGrid({
   widgets: Widget[];
   aspect: string;
   edit: boolean;
+  /** View-only scale preview: render the canvas as if the viewport were exactly
+   * this CSS size (a target device), then uniformly scale-to-fit the container —
+   * so widget/font proportions read true. Null = normal responsive canvas. */
+  preview?: { w: number; h: number; label: string } | null;
   onChange: (id: string, next: Widget) => void;
   onChangeMany: (updated: Widget[]) => void;
   onConfigure: (w: Widget) => void;
@@ -815,14 +886,26 @@ function BoardGrid({
   // COLS×ROWS derived from the aspect, and a widget is a fraction of the canvas, so
   // a board looks identical (just scaled) on a phone, desktop, or wall tablet.
   const { ar, cols, rows } = aspectGrid(aspect);
-  let canvasW = size.w;
+  // In preview, letterbox the board inside the TARGET DEVICE's viewport (device
+  // px), then scale that whole frame to fit the container. Widgets are canvas
+  // fractions but fonts/glyphs are fixed px, so rendering at the device's real
+  // pixel size is what makes their scale read true. Otherwise letterbox inside
+  // the live container as usual.
+  const availW = preview ? preview.w : size.w;
+  const availH = preview ? preview.h : size.h;
+  let canvasW = availW;
   let canvasH = canvasW / ar;
-  if (canvasH > size.h) {
-    canvasH = size.h;
+  if (canvasH > availH) {
+    canvasH = availH;
     canvasW = canvasH * ar;
   }
   const cellW = canvasW / cols;
   const cellH = canvasH / rows;
+  // Uniform scale that fits the device frame into the available container.
+  const fit = preview ? Math.min(size.w / preview.w, size.h / preview.h) : 1;
+  // Scale fixed-px widget content with the canvas so a board reads the same
+  // (just scaled) on any screen. Clamped so extremes stay legible/sane.
+  const contentZoom = Math.max(0.5, Math.min(2.2, canvasW / REFERENCE_CANVAS_W));
 
   // ── marquee select (drag on empty canvas) ──
   const marqStart = useRef<{ x: number; y: number } | null>(null);
@@ -900,6 +983,68 @@ function BoardGrid({
       }
     : {};
 
+  const canvas = (
+    <div
+      ref={canvasRef}
+      onPointerDown={marqueeDown}
+      onPointerMove={marqueeMove}
+      onPointerUp={marqueeUp}
+      onPointerCancel={marqueeUp}
+      style={{
+        position: "relative",
+        width: canvasW,
+        height: canvasH,
+        borderRadius: radius.lg,
+        touchAction: edit ? "none" : undefined,
+        // A faint frame + tiered grid guides while editing, so the canvas bounds
+        // and its center/quarters read at a glance.
+        outline: edit ? `1px solid ${T.hairline}` : undefined,
+        ...guides,
+      }}
+    >
+      {widgets.map((w) => (
+        <WidgetBox
+          key={w.id}
+          w={clampWidget(w, cols, rows)}
+          cols={cols}
+          rows={rows}
+          cellW={cellW}
+          cellH={cellH}
+          contentZoom={contentZoom}
+          edit={edit}
+          selected={selected.has(w.id)}
+          groupMove={selected.has(w.id) && selected.size > 1}
+          nudge={groupNudge}
+          onGroupMove={(dx, dy) => setGroupNudge({ dx, dy })}
+          onGroupCommit={commitGroup}
+          onSingleStart={() => selected.size > 0 && setSelected(new Set())}
+          onChange={(next) => onChange(w.id, next)}
+          onConfigure={() => onConfigure(w)}
+          onDuplicate={() => onDuplicate(w)}
+          onRemove={() => onRemove(w.id)}
+        >
+          {renderWidget(w)}
+        </WidgetBox>
+      ))}
+      {marquee && (
+        <div
+          style={{
+            position: "absolute",
+            left: Math.min(marquee.x0, marquee.x1),
+            top: Math.min(marquee.y0, marquee.y1),
+            width: Math.abs(marquee.x1 - marquee.x0),
+            height: Math.abs(marquee.y1 - marquee.y0),
+            border: `1px solid ${T.accent}`,
+            background: alpha(T.accent, 0.12),
+            borderRadius: 3,
+            pointerEvents: "none",
+            zIndex: 20,
+          }}
+        />
+      )}
+    </div>
+  );
+
   return (
     <div
       ref={ref}
@@ -910,68 +1055,46 @@ function BoardGrid({
         overflow: "hidden",
         position: "relative",
         display: "flex",
+        flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
       }}
     >
-      <div
-        ref={canvasRef}
-        onPointerDown={marqueeDown}
-        onPointerMove={marqueeMove}
-        onPointerUp={marqueeUp}
-        onPointerCancel={marqueeUp}
-        style={{
-          position: "relative",
-          width: canvasW,
-          height: canvasH,
-          borderRadius: radius.lg,
-          touchAction: edit ? "none" : undefined,
-          // A faint frame + tiered grid guides while editing, so the canvas bounds
-          // and its center/quarters read at a glance.
-          outline: edit ? `1px solid ${T.hairline}` : undefined,
-          ...guides,
-        }}
-      >
-        {widgets.map((w) => (
-          <WidgetBox
-            key={w.id}
-            w={clampWidget(w, cols, rows)}
-            cols={cols}
-            rows={rows}
-            cellW={cellW}
-            cellH={cellH}
-            edit={edit}
-            selected={selected.has(w.id)}
-            groupMove={selected.has(w.id) && selected.size > 1}
-            nudge={groupNudge}
-            onGroupMove={(dx, dy) => setGroupNudge({ dx, dy })}
-            onGroupCommit={commitGroup}
-            onSingleStart={() => selected.size > 0 && setSelected(new Set())}
-            onChange={(next) => onChange(w.id, next)}
-            onConfigure={() => onConfigure(w)}
-            onDuplicate={() => onDuplicate(w)}
-            onRemove={() => onRemove(w.id)}
-          >
-            {renderWidget(w)}
-          </WidgetBox>
-        ))}
-        {marquee && (
-          <div
-            style={{
-              position: "absolute",
-              left: Math.min(marquee.x0, marquee.x1),
-              top: Math.min(marquee.y0, marquee.y1),
-              width: Math.abs(marquee.x1 - marquee.x0),
-              height: Math.abs(marquee.y1 - marquee.y0),
-              border: `1px solid ${T.accent}`,
-              background: alpha(T.accent, 0.12),
-              borderRadius: 3,
-              pointerEvents: "none",
-              zIndex: 20,
-            }}
-          />
-        )}
-      </div>
+      {preview ? (
+        // Device frame: the target viewport at 1:1 device px (so the letterbox
+        // bars around the board show exactly as they would on the device),
+        // uniformly scaled to fit. The scaled footprint (frame × fit) keeps flex
+        // centering honest; transform-origin top-left aligns the two.
+        <>
+          <div style={{ width: preview.w * fit, height: preview.h * fit, position: "relative", flexShrink: 0 }}>
+            <div
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: preview.w,
+                height: preview.h,
+                transform: `scale(${fit})`,
+                transformOrigin: "top left",
+                background: color.void,
+                borderRadius: radius.lg,
+                outline: `1px solid ${T.hairline}`,
+                overflow: "hidden",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              {canvas}
+            </div>
+          </div>
+          <div style={{ marginTop: "0.6rem", fontSize: "0.78rem", color: T.faint }}>
+            Preview: {preview.label} · {Math.round(fit * 100)}% scale · view-only
+          </div>
+        </>
+      ) : (
+        canvas
+      )}
     </div>
   );
 }
@@ -982,6 +1105,7 @@ function WidgetBox({
   rows,
   cellW,
   cellH,
+  contentZoom,
   edit,
   selected = false,
   groupMove = false,
@@ -1000,6 +1124,8 @@ function WidgetBox({
   rows: number;
   cellW: number;
   cellH: number;
+  /** Canvas-relative scale for fixed-px content (see BoardGrid). */
+  contentZoom: number;
   edit: boolean;
   /** Part of the current multi-selection (highlighted). */
   selected?: boolean;
@@ -1107,6 +1233,16 @@ function WidgetBox({
           // child's `auto` re-captures clicks meant for a button under it.
           pointerEvents: edit || w.type === "label" ? "none" : "auto",
           containerType: "size",
+          // Fixed-px widgets (the shared Control components — room/device/group/
+          // button/control) don't scale with the canvas on their own, so a board
+          // designed on a desktop renders oversized on a small tablet. `zoom`
+          // scales the whole fixed-px subtree (glyphs, tile labels, glyph-button
+          // sizes, slider text) proportionally AND participates in layout, so
+          // hit-testing and the shared components stay untouched. The readout
+          // widgets (clock/sensor/weather/now_playing) already self-scale via
+          // `cqmin`, and the label scales its own font — so exclude both to avoid
+          // double-scaling.
+          ...(SELF_SCALING_WIDGETS.has(w.type) ? {} : { zoom: contentZoom }),
         }}
       >
         {children}
@@ -1518,13 +1654,17 @@ function ClockWidget({ cfg }: { cfg: Record<string, unknown> }) {
 function LabelWidget({ cfg }: { cfg: Record<string, unknown> }) {
   const text = (cfg.text as string) || (cfg.name as string) || "Label";
   const heading = cfg.heading !== false;
+  // Scale the type to the tile (cqmin, like the readout widgets) so a label
+  // reads the same on any screen and never overflows its box; wrap rather than
+  // clip so a multi-word heading stays fully legible.
+  const size = heading ? "clamp(0.7rem, 14cqmin, 2.4rem)" : "clamp(0.62rem, 12cqmin, 2rem)";
   return (
-    <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", padding: "0.4rem 0.2rem" }}>
+    <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", padding: "0.4rem 0.2rem", overflow: "hidden" }}>
       <span
         style={
           heading
-            ? { ...labelType, fontSize: "1rem", color: color.textAccent, ...ELLIPSIS, maxWidth: "100%" }
-            : { fontSize: "0.9rem", color: T.dim, ...ELLIPSIS, maxWidth: "100%" }
+            ? { ...labelType, fontSize: size, color: color.textAccent, maxWidth: "100%", lineHeight: 1.1 }
+            : { fontSize: size, color: T.dim, maxWidth: "100%", lineHeight: 1.15 }
         }
       >
         {text}

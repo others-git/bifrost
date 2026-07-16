@@ -56,6 +56,11 @@ const ELLIPSIS: React.CSSProperties = {
   whiteSpace: "nowrap",
 };
 
+/** Bloom room inside the board-widget body's scrollport (padding + matching
+ * negative margin): must cover the niche glow's visible halo (~16px, see the
+ * `sz.bodyPad` comment) or the scroll container shears it flat at the edges. */
+const WIDGET_BLOOM_PAD = 18;
+
 /** The lit member lights' colours — drives the card's filigree/dot/plate. */
 export function litHexes(lights: Light[]): string[] {
   return lights
@@ -625,9 +630,11 @@ export function RoomCard({
         // The widget body is a scroll container, so its padding box CLIPS —
         // zero padding sheared the buttons' neon glows flat at the top row
         // (the Control card's padded body never shows this). The padding gives
-        // the glow room to bloom; the matching negative margin hands the space
-        // back so the layout sits exactly where it did.
-        bodyPad: 10,
+        // the glow room to bloom; the matching negative margin (below) hands
+        // the space back so the layout sits exactly where it did. Must cover
+        // the niche glow's practical extent: `glow(c, 22)` = 22px blur −6px
+        // spread ≈ 16px of visible halo.
+        bodyPad: WIDGET_BLOOM_PAD,
       };
 
   const lit = lights.filter((l) => l.last_state?.on);
@@ -836,7 +843,7 @@ export function RoomCard({
             padding: sz.bodyPad,
             ...(page
               ? {}
-              : { flex: 1, minHeight: 0, overflowY: "auto", alignContent: "flex-start", margin: -10 }),
+              : { flex: 1, minHeight: 0, overflowY: "auto", alignContent: "flex-start", margin: -WIDGET_BLOOM_PAD }),
           }}
         >
           {lights.map((l) => (

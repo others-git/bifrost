@@ -1697,6 +1697,20 @@ export interface Kiosk {
   battery_temp_dc: number | null;
   /** ac | usb | wireless | none */
   power_source: string | null;
+  /** The kiosk's CSS viewport (self-reported by the web client it serves) —
+   * drives the Boards preview device list. Null until it first reports. */
+  viewport_w: number | null;
+  viewport_h: number | null;
+}
+
+/** Report this client's CSS viewport to the hub (kiosk WebView only — auth'd by
+ * the `bfr_key` cookie the WebView carries). Fire-and-forget. */
+export async function reportKioskViewport(w: number, h: number): Promise<void> {
+  await fetch("/api/kiosks/self/viewport", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ w: Math.round(w), h: Math.round(h) }),
+  }).catch(() => {});
 }
 
 export async function getKiosks(): Promise<Kiosk[]> {

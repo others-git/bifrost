@@ -524,6 +524,7 @@ this view on the kiosk itself.
 |---|---|---|---|
 | `POST` | `/api/kiosks/checkin` | **kiosk key** | Heartbeat: `{ name?, app_version?, screen_on?, battery/power telemetry… }` → `{ command, room, default_board_id }` (queued command, consumed; `room` is the assigned Room's name — the app's voice context) |
 | `GET` | `/api/kiosks/self` | **kiosk cookie** | The kiosk's own record (`{ id, name, default_board_id }`) — how a kiosk-served Boards page resolves its auto-launch board |
+| `PUT` | `/api/kiosks/self/viewport` | **kiosk cookie** | The kiosk-served web client reports its CSS viewport `{ w, h }` (100–20000 each) — feeds the Boards preview device list so a board can be scaled to a real tablet's exact pixel size |
 | `GET` | `/api/kiosks/stream` | **kiosk key** | Live SSE command channel — controller commands are pushed here instantly; the queued copy is the offline fallback |
 | `GET` | `/api/kiosks` | session | List kiosks: check-in status, assignments, schedule/presence config, battery telemetry |
 | `POST` | `/api/kiosks/{id}/command` | session | Queue `{ command }` — one of `sleep`, `wake`, `lock`, `update` |
