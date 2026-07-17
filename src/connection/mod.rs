@@ -4,6 +4,8 @@
 //! This module addresses that with an explicit state machine, exponential-backoff
 //! reconnect, polling fallback during outages, and periodic health checks.
 
+pub mod relocate;
+
 use crate::models::media::MediaEvent;
 use crate::models::power::PowerState;
 use crate::models::sensor::SensorState;

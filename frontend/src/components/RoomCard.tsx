@@ -40,6 +40,7 @@ import { SceneButton, SceneModal } from "./scenes";
 import { type Dialogs } from "./dialogs";
 import { T, font, nicheStyle, radius } from "../theme";
 import { EFFECT_ACCENT, activeEffect, roomLightWrite } from "./lightControl";
+import { useMatchTheme } from "./appearance";
 import { useViewport } from "../useViewport";
 
 /** The engraved room-card title — the Control page's header type. */
@@ -233,12 +234,15 @@ export function LightButton({
 }) {
   const ref = useRef<HTMLButtonElement>(null);
   const [editing, setEditing] = useState(false);
+  // Match-theme boards: the niche wears the theme accent, not the lamp's chroma
+  // (and a running effect drops its drift — the accent IS the statement).
+  const themed = useMatchTheme();
   const isOn = light.last_state?.on ?? false;
   const offline = light.last_state?.reachable === false;
   // A running effect owns the niche: it wears the effect base (the drift
   // animation cycles it through the wheel) rather than a stale/fallback colour.
   const fx = !!activeEffect(light);
-  const hex = fx ? EFFECT_ACCENT : lightHex(light);
+  const hex = themed ? T.accent : fx ? EFFECT_ACCENT : lightHex(light);
 
   // Quick power toggle (long-press) — refreshes after, unlike the editor's
   // debounced live commits, so a power flip reconciles against the server.
@@ -261,7 +265,7 @@ export function LightButton({
         offline={offline}
         title={fx ? `${light.name} — playing ${light.last_state?.effect}` : light.name}
         active={editing}
-        effect={fx}
+        effect={fx && !themed}
         buttonRef={ref}
         onClick={() => setEditing((v) => !v)}
         onLongPress={toggle}
@@ -562,6 +566,7 @@ export function RoomCard({
   scenes,
   dialogs,
   interactive = true,
+  hideHeader = false,
   onScenesChanged,
   onLightUpdate,
   onMediaPatch,
@@ -584,6 +589,10 @@ export function RoomCard({
   dialogs: Dialogs;
   /** False while a board is in edit mode — the header stops opening the editor. */
   interactive?: boolean;
+  /** Board widgets only: drop the header row (dot/title/census, quick controls,
+   * power button) so the device-button body owns the whole plate. The room
+   * editor loses its anchor with it — the per-device buttons stay the controls. */
+  hideHeader?: boolean;
   onScenesChanged: () => void;
   onLightUpdate: (id: string, state: LightState) => void;
   onMediaPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
@@ -660,7 +669,9 @@ export function RoomCard({
   ].filter(Boolean);
   const subtitle = counts.join(" · ");
 
-  const hexes = litHexes(lights);
+  const themed = useMatchTheme();
+  const rawHexes = litHexes(lights);
+  const hexes = themed && rawHexes.length ? [T.accent] : rawHexes;
   const roomHex = hexes[0] ?? "#ffb84d";
 
   function cascade(change: LightControlChange) {
@@ -755,6 +766,7 @@ export function RoomCard({
     <>
       {/* The whole header is the room-editor button; the quick controls and
           power toggle opt out via stopPropagation. */}
+      {!hideHeader && (
       <header
         ref={headerRef}
         onClick={() => { if (tunable && interactive) setEditing((v) => !v); }}
@@ -826,6 +838,7 @@ export function RoomCard({
           </div>
         )}
       </header>
+      )}
 
       {/* One glyph button per member device. The page card flows with its
           content; the board form fills its fixed plate and scrolls. */}

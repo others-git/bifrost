@@ -930,6 +930,158 @@ async fn smarttv_pair_remote_begin_unreachable_returns_502() {
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 }
 
+/// The host relocator (connection::relocate): a smart-TV provider whose stored
+/// host went dead is re-bound to a scan candidate ONLY when that candidate
+/// proves the same hardware identity — live ScalarWeb MAC for a Bravia, the
+/// discovery-carried hw_id for an Android TV. A wrong identity is refused.
+#[tokio::test]
+async fn smarttv_relocator_rebinds_only_to_an_identity_proven_host() {
+    use bifrost::connection::relocate::{lost_tvs, relocate_with_candidates};
+    use bifrost::providers::discovery::DiscoveredDevice;
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let (_app, state) = helpers::test_app_with_password_and_state().await;
+    let creds_host = |enc: &str| {
+        let j = state.decrypt_credentials(enc).unwrap();
+        serde_json::from_str::<serde_json::Value>(&j).unwrap()["host"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    async fn stored_creds(db: &sqlx::SqlitePool, id: &str) -> String {
+        sqlx::query_scalar::<_, String>("SELECT credentials FROM providers WHERE id = ?")
+            .bind(id)
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    // The TV at its NEW address answers getSystemInformation with its MAC.
+    let tv = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/sony/system"))
+        .and(body_string_contains("getSystemInformation"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "result": [{ "name": "BRAVIA", "macAddr": "AA:BB:CC:DD:EE:FF" }],
+            "id": 1
+        })))
+        .mount(&tv)
+        .await;
+    let new_host = tv.uri().trim_start_matches("http://").to_string();
+
+    // The provider still pins a dead host; the hardware id lives on its device
+    // row (the creds themselves never got one — the fallback path).
+    let enc = state
+        .encrypt_credentials(r#"{"host":"127.0.0.1:1","auth":"cookie"}"#)
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO providers (id, provider_type, name, credentials) VALUES ('tv1','smarttv','BRAVIA',?)",
+    )
+    .bind(&enc)
+    .execute(&state.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, hw_id)
+         VALUES ('m1','tv1','main','BRAVIA','mac:aabbccddeeff')",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    // Detected as lost, with the device row supplying the expected identity.
+    let lost = lost_tvs(&state).await;
+    assert_eq!(lost.len(), 1);
+    assert_eq!(lost[0].expected_hw, "mac:aabbccddeeff");
+    assert_eq!(lost[0].host, "127.0.0.1:1");
+
+    // A different TV at a candidate host (wrong MAC) is refused.
+    let stranger = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/sony/system"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "result": [{ "name": "Other", "macAddr": "11:22:33:44:55:66" }],
+            "id": 1
+        })))
+        .mount(&stranger)
+        .await;
+    let stranger_host = stranger.uri().trim_start_matches("http://").to_string();
+    relocate_with_candidates(
+        &state,
+        lost,
+        &[DiscoveredDevice {
+            host: stranger_host,
+            label: None,
+            credentials: serde_json::json!({}),
+        }],
+    )
+    .await;
+    assert_eq!(
+        creds_host(&stored_creds(&state.db, "tv1").await),
+        "127.0.0.1:1",
+        "a wrong-identity candidate must never be adopted"
+    );
+
+    // The true TV is adopted (an hw-mismatched candidate is skipped cheaply),
+    // and the auth cookie survives the rewrite.
+    let lost = lost_tvs(&state).await;
+    relocate_with_candidates(
+        &state,
+        lost,
+        &[
+            DiscoveredDevice {
+                host: "10.0.0.9".into(),
+                label: None,
+                credentials: serde_json::json!({"hw_id": "mac:ffffffffffff"}),
+            },
+            DiscoveredDevice {
+                host: new_host.clone(),
+                label: None,
+                credentials: serde_json::json!({}),
+            },
+        ],
+    )
+    .await;
+    let enc = stored_creds(&state.db, "tv1").await;
+    assert_eq!(creds_host(&enc), new_host);
+    let j: serde_json::Value =
+        serde_json::from_str(&state.decrypt_credentials(&enc).unwrap()).unwrap();
+    assert_eq!(j["auth"], "cookie", "auth must survive the host rewrite");
+
+    // tv1 is reachable again (the mock server answers TCP) → no longer lost.
+    // An Android TV rebinds on the discovery-carried hardware id alone.
+    let enc2 = state
+        .encrypt_credentials(
+            r#"{"host":"127.0.0.1:1","brand":"androidtv","hw_id":"mac:0102030405ff"}"#,
+        )
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO providers (id, provider_type, name, credentials) VALUES ('tv2','smarttv','Dongle',?)",
+    )
+    .bind(&enc2)
+    .execute(&state.db)
+    .await
+    .unwrap();
+    let lost = lost_tvs(&state).await;
+    assert_eq!(lost.len(), 1, "only the dongle should be lost now");
+    assert_eq!(lost[0].provider_id, "tv2");
+    relocate_with_candidates(
+        &state,
+        lost,
+        &[DiscoveredDevice {
+            host: "192.0.2.7".into(),
+            label: None,
+            credentials: serde_json::json!({"hw_id": "mac:0102030405ff", "brand": "androidtv"}),
+        }],
+    )
+    .await;
+    assert_eq!(
+        creds_host(&stored_creds(&state.db, "tv2").await),
+        "192.0.2.7"
+    );
+}
+
 #[tokio::test]
 async fn logout_clears_session() {
     let app = helpers::test_app_with_password().await;

@@ -16,9 +16,14 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-/** Per-board background spec, stored verbatim in `dashboards.background`. */
+/** Per-board appearance spec, stored verbatim in `dashboards.background`.
+ * `kind` may be absent when the board has no background but other appearance
+ * options (e.g. `match_theme`) are set. */
 export interface BoardBackgroundCfg {
-  kind: "preset" | "upload";
+  kind?: "preset" | "upload";
+  /** Widget accents wear the theme's domain colours instead of actual light
+   * chromas / effect gradients (see `components/appearance.tsx`). */
+  match_theme?: boolean;
   /** Preset id (see BACKGROUND_PRESETS). */
   preset?: string;
   /** 0–0.85 darkening overlay for widget legibility. */
@@ -200,12 +205,22 @@ const makeSynthwave: PresetFactory = (p) => {
   // shape instead of tenting between sparse verticals.
   const XS: number[] = [];
   for (let x = -9; x <= 9; x += 0.5) XS.push(x);
-  const curve = (z: number) => (vnoise(z * 0.055, 7.3) - 0.5) * 5.2;
+  const curve = (z: number) => (vnoise(z * 0.06, 7.3) - 0.5) * 6;
+  // Ridged noise: fold the smooth field around its midpoint and square it —
+  // rolling waves become knife-edge crests with steep walls (real ranges, not
+  // dunes). The "era" swell is a very low-frequency layer that carries you
+  // through distinct stretches: open plains, foothills, then a towering canyon.
+  const ridge = (v: number) => {
+    const r = 1 - Math.abs(2 * v - 1);
+    return r * r;
+  };
   const height = (x: number, z: number) => {
     const c = curve(z);
-    const side = Math.min(1, Math.max(0, (Math.abs(x - c) - 1.1) / 2.6)); // flat valley, tall flanks
-    const n = vnoise(x * 0.42, z * 0.3) * 0.75 + vnoise(x * 0.13, z * 0.09) * 0.45;
-    return n * side;
+    const side = Math.min(1, Math.max(0, (Math.abs(x - c) - 0.9) / 2.2)); // flat valley, tall flanks
+    const spine = ridge(vnoise(x * 0.16 + 3.7, z * 0.11)); // sharp main crests
+    const detail = vnoise(x * 0.55, z * 0.34) * 0.35; // broken rock on the slopes
+    const era = 0.35 + vnoise(x * 0.05, z * 0.045) * 1.25; // plains ↔ canyon epochs
+    return (spine * 1.2 + detail) * side * era;
   };
   return (ctx, w, h, t) => {
     const horizon = h * 0.42;
@@ -261,7 +276,7 @@ const makeSynthwave: PresetFactory = (p) => {
     // Terrain projection
     const spread = w * 0.62;
     const K = (h - horizon) * 0.98;
-    const amp = h * 0.5;
+    const amp = h * 0.55;
     const px = (x: number, zRel: number) => w / 2 + (x * spread) / zRel;
     const py = (x: number, z: number, zRel: number) => horizon + K / zRel - (height(x, z) * amp) / zRel;
     const base = Math.floor(camZ);

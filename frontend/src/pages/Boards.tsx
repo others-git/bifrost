@@ -58,6 +58,7 @@ import { EFFECT_ACCENT, activeEffect } from "../components/lightControl";
 import { OptionCheckList, deviceSelectOptions, type RoomedDevice } from "../components/deviceOptions";
 import { CornerFiligree } from "../components/ornament";
 import { BACKGROUND_PRESETS, BoardBackground, type BoardBackgroundCfg } from "../components/BoardBackground";
+import { MatchThemeContext, useMatchTheme } from "../components/appearance";
 import { Button, Segmented } from "../components/controls";
 import { Modal, useDialogs, type Dialogs } from "../components/dialogs";
 import { Select } from "../components/Select";
@@ -337,6 +338,10 @@ export function BoardsPage() {
     board && bgCfg?.kind ? (
       <BoardBackground cfg={bgCfg} boardId={board.id} weather={weatherCond} radius={radius.lg} />
     ) : null;
+  // "Match the theme": widget accents wear the appearance theme's domain
+  // colours instead of actual light chromas/effect gradients (context read by
+  // the shared components — Control and the other pages stay untouched).
+  const themedAccents = bgCfg?.match_theme === true;
 
   // Edit-mode undo: every layout mutation pushes the pre-mutation layout, so a
   // stray drag / remove / reconfigure is one Undo (or Ctrl+Z) away. Session-local,
@@ -552,6 +557,7 @@ export function BoardsPage() {
   );
 
   return (
+    <MatchThemeContext.Provider value={themedAccents}>
     <div
       style={{
         display: "flex",
@@ -792,6 +798,7 @@ export function BoardsPage() {
 
       {dialogs.element}
     </div>
+    </MatchThemeContext.Provider>
   );
 }
 
@@ -1584,6 +1591,7 @@ function DeviceTile({
       : domain === "power"
         ? power.find((d) => d.id === cfg.id)
         : media.find((d) => d.id === cfg.id);
+  const themed = useMatchTheme();
   const commitTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   if (!dev) return <div style={{ ...CENTER, color: T.faint, fontSize: "0.75rem" }}>Device removed</div>;
 
@@ -1597,7 +1605,15 @@ function DeviceTile({
   const reachable =
     (light?.last_state?.reachable ?? mediaDev?.state.reachable ?? powerDev?.state.reachable) !== false;
   const fx = !!light && !!activeEffect(light);
-  const accent = light ? (fx ? EFFECT_ACCENT : lightChromaHex(light)) : domain === "power" ? color.gold : color.violet;
+  const accent = light
+    ? themed
+      ? T.accent
+      : fx
+        ? EFFECT_ACCENT
+        : lightChromaHex(light)
+    : domain === "power"
+      ? color.gold
+      : color.violet;
   // The plate smoulders or blazes with the actual dimmer level (lights only —
   // media/power have no meaningful "how lit" dimension).
   const charge = light && on ? ((light.last_state?.brightness ?? 100) as number) / 100 : 1;
@@ -1662,7 +1678,7 @@ function DeviceTile({
             <span style={{ ...TILE_LABEL, color: T.text }}>{name}</span>
           </button>
         )}
-        <GlyphButton on={on} accent={accent} effect={fx} title={on ? "Turn off" : "Turn on"} active={false} buttonRef={null} onClick={togglePower} size={54}>
+        <GlyphButton on={on} accent={accent} effect={fx && !themed} title={on ? "Turn off" : "Turn on"} active={false} buttonRef={null} onClick={togglePower} size={54}>
           <Glyph name="power" size={24} />
         </GlyphButton>
         {!hideHeader && (
@@ -1692,7 +1708,7 @@ function DeviceTile({
             <Glyph name={glyph} size={20} />
             <span style={{ ...TILE_LABEL, color: T.text }}>{name}</span>
           </button>
-          <GlyphButton on={on} accent={accent} effect={fx} title={on ? "Turn off" : "Turn on"} active={false} buttonRef={null} onClick={togglePower} size={30}>
+          <GlyphButton on={on} accent={accent} effect={fx && !themed} title={on ? "Turn off" : "Turn on"} active={false} buttonRef={null} onClick={togglePower} size={30}>
             <Glyph name="power" size={14} />
           </GlyphButton>
         </div>
@@ -1837,6 +1853,7 @@ function GroupWidget({
 }) {
   const domain = cfg.domain ?? "light";
   const ids = cfg.ids ?? [];
+  const themed = useMatchTheme();
   const ref = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
   const commitTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -1946,7 +1963,7 @@ function GroupWidget({
     }, 300);
   };
 
-  const litHexes = anyOn ? (domain === "light" && lit.length ? lit.map(lightChromaHex) : [accent]) : undefined;
+  const litHexes = anyOn ? (!themed && domain === "light" && lit.length ? lit.map(lightChromaHex) : [accent]) : undefined;
   // Same charge rule as the room plate: blaze with the brightest lit member.
   const groupCharge = lit.length
     ? Math.max(...lit.map((l) => ((l.last_state?.brightness ?? 100) as number) / 100))
@@ -2096,7 +2113,7 @@ function RoomWidget({
   onPowerToggle,
   onChanged,
 }: {
-  cfg: { room_id?: string; name?: string };
+  cfg: { room_id?: string; name?: string; hide_header?: boolean };
   rooms: Room[];
   lights: Light[];
   media: MediaDevice[];
@@ -2109,6 +2126,7 @@ function RoomWidget({
   onPowerToggle: (id: string, next: boolean) => void;
   onChanged: () => void;
 }) {
+  const themedHexes = useMatchTheme();
   const room = rooms.find((r) => r.id === cfg.room_id);
   if (!room) return <div style={{ ...CENTER, color: T.faint, fontSize: "0.75rem" }}>Room removed</div>;
 
@@ -2117,7 +2135,8 @@ function RoomWidget({
     members.lights.some((l) => l.last_state?.on) ||
     members.power.some((d) => d.state.on) ||
     members.audio.some((d) => d.state.power);
-  const hexes = litHexes(members.lights);
+  const rawHexes = litHexes(members.lights);
+  const hexes = themedHexes && rawHexes.length ? [T.accent] : rawHexes;
   const plateHexes = hexes.length ? hexes : anyOn ? [T.accent] : undefined;
   // The room plate blazes with its brightest lit lamp (switch/speaker-only
   // rooms have no dimmer dimension — full charge).
@@ -2131,6 +2150,7 @@ function RoomWidget({
       <RoomCard
         variant="widget"
         name={cfg.name || room.name}
+        hideHeader={cfg.hide_header === true}
         roomId={room.id}
         lights={members.lights}
         power={members.power}
@@ -2658,8 +2678,9 @@ function BoardModal({
   const isPreset = ASPECT_PRESETS.includes(aspect);
   // Background picker state (editing only — creation starts bare).
   const showBackground = initialBackground !== undefined && !!boardId;
-  const [bg, setBg] = useState<BoardBackgroundCfg | null>(initialBackground ?? null);
+  const [bg, setBg] = useState<BoardBackgroundCfg | null>(initialBackground?.kind ? initialBackground : null);
   const [bgFile, setBgFile] = useState<File | null>(null);
+  const [matchTheme, setMatchTheme] = useState(initialBackground?.match_theme === true);
   // Preview a just-picked upload from the local file, before it's on the server.
   const bgFileUrl = useMemo(() => (bgFile ? URL.createObjectURL(bgFile) : null), [bgFile]);
   useEffect(() => () => { if (bgFileUrl) URL.revokeObjectURL(bgFileUrl); }, [bgFileUrl]);
@@ -2692,11 +2713,19 @@ function BoardModal({
 
   function submit() {
     if (!name.trim()) return;
+    // Merge the appearance flag into the stored spec; a board with neither a
+    // background nor the override stores a clean null.
+    const { match_theme: _mt, ...rest } = bg ?? {};
+    const spec: BoardBackgroundCfg | null = bg
+      ? { ...rest, ...(matchTheme ? { match_theme: true } : {}) }
+      : matchTheme
+        ? { match_theme: true }
+        : null;
     onSubmit(
       name,
       aspect.trim() || "16:9",
       seedRoom || undefined,
-      showBackground ? bg : undefined,
+      showBackground ? spec : undefined,
       showBackground ? bgFile : undefined,
     );
   }
@@ -2844,6 +2873,23 @@ function BoardModal({
               </div>
             </>
           )}
+        </Field>
+      )}
+
+      {showBackground && (
+        <Field label="Appearance">
+          <Segmented
+            value={matchTheme ? "theme" : "device"}
+            onChange={(v) => setMatchTheme(v === "theme")}
+            options={[
+              { value: "device", label: "Light colors" },
+              { value: "theme", label: "Match theme" },
+            ]}
+          />
+          <div style={{ fontSize: "0.66rem", color: T.dim, marginTop: "0.4rem" }}>
+            Match theme dresses every widget in the appearance theme's accents instead of each
+            lamp's actual color or effect — a uniform board that never shifts hue.
+          </div>
         </Field>
       )}
 
@@ -3015,7 +3061,7 @@ function WidgetEditorModal({
     d === "light" ? selLights : d === "power" ? selPower : selMedia;
 
   // The tile widgets whose layout is header row + control body.
-  const headerHideable = type === "device" || type === "group" || type === "now_playing";
+  const headerHideable = type === "device" || type === "group" || type === "now_playing" || type === "room";
 
   function save() {
     const nm = name.trim() || undefined;

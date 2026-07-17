@@ -354,6 +354,21 @@ pub(crate) fn bravia_sweep_match(body: &str) -> bool {
     compact.contains(r#""productCategory":"tv""#)
 }
 
+/// Prove a candidate host is a specific Bravia by reading its live identity
+/// (`getSystemInformation` → normalized MAC) and comparing against the expected
+/// hardware id. Used by the host relocator (`connection::relocate`) — an
+/// unverified candidate must never be adopted, so any error is a plain `false`.
+pub(crate) async fn bravia_identity_matches(
+    host: &str,
+    auth: Option<String>,
+    expected_hw: &str,
+) -> bool {
+    match bravia::BraviaVendor::new(host, auth, None) {
+        Ok(v) => matches!(v.identity().await, Ok(id) if id.hw_id.as_deref() == Some(expected_hw)),
+        Err(_) => false,
+    }
+}
+
 fn smarttv_discoverer() -> Box<dyn DeviceDiscovery> {
     // Two legs, deduped by host. Only Bravia today, so no brand stamp is needed
     // (the dispatch defaults to it).
