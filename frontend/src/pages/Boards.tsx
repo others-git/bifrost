@@ -891,11 +891,12 @@ function BoardGrid({
   // COLS×ROWS derived from the aspect, and a widget is a fraction of the canvas, so
   // a board looks identical (just scaled) on a phone, desktop, or wall tablet.
   const { ar, cols, rows } = aspectGrid(aspect);
-  // In preview, letterbox the board inside the TARGET DEVICE's viewport (device
-  // px), then scale that whole frame to fit the container. Widgets are canvas
-  // fractions but fonts/glyphs are fixed px, so rendering at the device's real
-  // pixel size is what makes their scale read true. Otherwise letterbox inside
-  // the live container as usual.
+  // In preview, letterbox the board inside the TARGET DEVICE's viewport at 1:1
+  // CSS pixels — never rescaled to the window (scroll instead when it doesn't
+  // fit). Widgets are canvas fractions but fonts/glyphs are fixed px, so only
+  // rendering at the device's real pixel size makes their scale read true; a
+  // fit-to-window transform would silently re-shrink/enlarge exactly what the
+  // preview exists to judge. Otherwise letterbox inside the live container.
   const availW = preview ? preview.w : size.w;
   const availH = preview ? preview.h : size.h;
   let canvasW = availW;
@@ -906,8 +907,6 @@ function BoardGrid({
   }
   const cellW = canvasW / cols;
   const cellH = canvasH / rows;
-  // Uniform scale that fits the device frame into the available container.
-  const fit = preview ? Math.min(size.w / preview.w, size.h / preview.h) : 1;
   // Scale fixed-px widget content with the canvas so a board reads the same
   // (just scaled) on any screen. Clamped so extremes stay legible/sane.
   const contentZoom = Math.max(0.5, Math.min(2.2, canvasW / REFERENCE_CANVAS_W));
@@ -1066,21 +1065,17 @@ function BoardGrid({
       }}
     >
       {preview ? (
-        // Device frame: the target viewport at 1:1 device px (so the letterbox
-        // bars around the board show exactly as they would on the device),
-        // uniformly scaled to fit. The scaled footprint (frame × fit) keeps flex
-        // centering honest; transform-origin top-left aligns the two.
-        <>
-          <div style={{ width: preview.w * fit, height: preview.h * fit, position: "relative", flexShrink: 0 }}>
+        // Device frame: the target viewport at 1:1 device px — what you see IS
+        // the size it renders on the device (no fit-to-window rescale). A frame
+        // bigger than the window scrolls; `margin: auto` centers a smaller one
+        // without the flex-centering clip that breaks scrolled overflow.
+        <div style={{ width: "100%", height: "100%", overflow: "auto", display: "flex" }}>
+          <div style={{ margin: "auto", padding: "0.75rem", display: "flex", flexDirection: "column", alignItems: "center" }}>
             <div
               style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
                 width: preview.w,
                 height: preview.h,
-                transform: `scale(${fit})`,
-                transformOrigin: "top left",
+                flexShrink: 0,
                 background: color.void,
                 borderRadius: radius.lg,
                 outline: `1px solid ${T.hairline}`,
@@ -1092,11 +1087,11 @@ function BoardGrid({
             >
               {canvas}
             </div>
+            <div style={{ marginTop: "0.6rem", fontSize: "0.78rem", color: T.faint }}>
+              Preview: {preview.label} · actual size (1:1 px) · view-only
+            </div>
           </div>
-          <div style={{ marginTop: "0.6rem", fontSize: "0.78rem", color: T.faint }}>
-            Preview: {preview.label} · {Math.round(fit * 100)}% scale · view-only
-          </div>
-        </>
+        </div>
       ) : (
         canvas
       )}
@@ -1480,6 +1475,8 @@ function DeviceTile({
   if (!dev) return <div style={{ ...CENTER, color: T.faint, fontSize: "0.75rem" }}>Device removed</div>;
 
   const name = (cfg.name as string) || (dev as { name: string }).name;
+  // Hidden header: no title/power row — the control body fills the tile.
+  const hideHeader = cfg.hide_header === true;
   const light = domain === "light" ? (dev as Light) : undefined;
   const mediaDev = domain === "media" ? (dev as MediaDevice) : undefined;
   const powerDev = domain === "power" ? (dev as PowerDevice) : undefined;
@@ -1541,21 +1538,25 @@ function DeviceTile({
         charge={charge}
         style={{ alignItems: "center", justifyContent: "center", gap: "0.5rem", opacity: reachable ? 1 : 0.45 }}
       >
-        <button
-          disabled={edit}
-          onClick={(e) => onOpenFlyout(e.currentTarget)}
-          title={name}
-          style={{ position: "relative", display: "flex", alignItems: "center", gap: "0.4rem", border: "none", background: "none", color: on ? accent : T.dim, cursor: edit ? "default" : "pointer", padding: 0, maxWidth: "100%" }}
-        >
-          <Glyph name={glyph} size={15} />
-          <span style={{ ...TILE_LABEL, color: T.text }}>{name}</span>
-        </button>
+        {!hideHeader && (
+          <button
+            disabled={edit}
+            onClick={(e) => onOpenFlyout(e.currentTarget)}
+            title={name}
+            style={{ position: "relative", display: "flex", alignItems: "center", gap: "0.4rem", border: "none", background: "none", color: on ? accent : T.dim, cursor: edit ? "default" : "pointer", padding: 0, maxWidth: "100%" }}
+          >
+            <Glyph name={glyph} size={15} />
+            <span style={{ ...TILE_LABEL, color: T.text }}>{name}</span>
+          </button>
+        )}
         <GlyphButton on={on} accent={accent} effect={fx} title={on ? "Turn off" : "Turn on"} active={false} buttonRef={null} onClick={togglePower} size={54}>
           <Glyph name="power" size={24} />
         </GlyphButton>
-        <span style={{ position: "relative", fontSize: "0.7rem", color: on ? accent : T.faint }}>
-          {reachable ? (on ? "On" : "Off") : "Offline"}
-        </span>
+        {!hideHeader && (
+          <span style={{ position: "relative", fontSize: "0.7rem", color: on ? accent : T.faint }}>
+            {reachable ? (on ? "On" : "Off") : "Offline"}
+          </span>
+        )}
       </Plate>
     );
   }
@@ -1567,20 +1568,22 @@ function DeviceTile({
       charge={charge}
       style={{ gap: "0.4rem", opacity: reachable ? 1 : 0.45 }}
     >
-      <div style={{ position: "relative", display: "flex", alignItems: "center", gap: "0.45rem" }}>
-        <button
-          disabled={edit}
-          onClick={(e) => onOpenFlyout(e.currentTarget)}
-          title={name}
-          style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: "0.5rem", border: "none", background: "none", color: on ? accent : T.dim, cursor: edit ? "default" : "pointer", padding: 0, textAlign: "left" }}
-        >
-          <Glyph name={glyph} size={20} />
-          <span style={{ ...TILE_LABEL, color: T.text }}>{name}</span>
-        </button>
-        <GlyphButton on={on} accent={accent} effect={fx} title={on ? "Turn off" : "Turn on"} active={false} buttonRef={null} onClick={togglePower} size={30}>
-          <Glyph name="power" size={14} />
-        </GlyphButton>
-      </div>
+      {!hideHeader && (
+        <div style={{ position: "relative", display: "flex", alignItems: "center", gap: "0.45rem" }}>
+          <button
+            disabled={edit}
+            onClick={(e) => onOpenFlyout(e.currentTarget)}
+            title={name}
+            style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: "0.5rem", border: "none", background: "none", color: on ? accent : T.dim, cursor: edit ? "default" : "pointer", padding: 0, textAlign: "left" }}
+          >
+            <Glyph name={glyph} size={20} />
+            <span style={{ ...TILE_LABEL, color: T.text }}>{name}</span>
+          </button>
+          <GlyphButton on={on} accent={accent} effect={fx} title={on ? "Turn off" : "Turn on"} active={false} buttonRef={null} onClick={togglePower} size={30}>
+            <Glyph name="power" size={14} />
+          </GlyphButton>
+        </div>
+      )}
       {np?.title && (
         <div style={{ position: "relative", minWidth: 0, display: "flex", alignItems: "center", gap: "0.5rem" }}>
           <AlbumArt url={np.artwork_url} size={38} />
@@ -1591,19 +1594,22 @@ function DeviceTile({
         </div>
       )}
       <div style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-        {/* The empty area opens the fly-out too — the whole tile (bar aside) is the control. */}
-        <div
-          onClick={(e) => { if (!edit) onOpenFlyout(e.currentTarget); }}
-          style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", cursor: edit ? "default" : "pointer" }}
-        >
-          {!showSlider && (
-            <span style={{ fontSize: "0.72rem", color: on ? accent : T.faint }}>
-              {reachable ? (on ? "On" : "Off") : "Offline"}
-            </span>
-          )}
-        </div>
+        {/* The empty area opens the fly-out too — the whole tile (bar aside) is the
+            control. With the header hidden the slider owns the full height instead. */}
+        {!(hideHeader && showSlider) && (
+          <div
+            onClick={(e) => { if (!edit) onOpenFlyout(e.currentTarget); }}
+            style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", cursor: edit ? "default" : "pointer" }}
+          >
+            {!showSlider && (
+              <span style={{ fontSize: "0.72rem", color: on ? accent : T.faint }}>
+                {reachable ? (on ? "On" : "Off") : "Offline"}
+              </span>
+            )}
+          </div>
+        )}
         {showSlider && (
-          <div style={{ flex: "0 0 60%", minHeight: 33, display: "flex" }}>
+          <div style={{ flex: hideHeader ? 1 : "0 0 60%", minHeight: 33, display: "flex" }}>
             <InlineSlider fill value={sliderVal} accent={accent} unit={mediaDev ? "" : "%"} onChange={onSlide} onCommit={onCommit} />
           </div>
         )}
@@ -1663,18 +1669,25 @@ function ClockWidget({ cfg }: { cfg: Record<string, unknown> }) {
 function LabelWidget({ cfg }: { cfg: Record<string, unknown> }) {
   const text = (cfg.text as string) || (cfg.name as string) || "Label";
   const heading = cfg.heading !== false;
+  // Cell-style alignment within the widget box; textAlign follows the
+  // horizontal choice so wrapped lines align the same way as the block.
+  const align = (cfg.align as string) ?? "left";
+  const valign = (cfg.valign as string) ?? "middle";
+  const justify = align === "center" ? "center" : align === "right" ? "flex-end" : "flex-start";
+  const items = valign === "top" ? "flex-start" : valign === "bottom" ? "flex-end" : "center";
   // Scale the type to the tile (cqmin, like the readout widgets) so a label
   // reads the same on any screen and never overflows its box; wrap rather than
   // clip so a multi-word heading stays fully legible.
   const size = heading ? "clamp(0.7rem, 14cqmin, 2.4rem)" : "clamp(0.62rem, 12cqmin, 2rem)";
   return (
-    <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", padding: "0.4rem 0.2rem", overflow: "hidden" }}>
+    <div style={{ width: "100%", height: "100%", display: "flex", justifyContent: justify, alignItems: items, padding: "0.4rem 0.2rem", overflow: "hidden" }}>
       <span
-        style={
-          heading
+        style={{
+          textAlign: align as "left" | "center" | "right",
+          ...(heading
             ? { ...labelType, fontSize: size, color: color.textAccent, maxWidth: "100%", lineHeight: 1.1 }
-            : { fontSize: size, color: T.dim, maxWidth: "100%", lineHeight: 1.15 }
-        }
+            : { fontSize: size, color: T.dim, maxWidth: "100%", lineHeight: 1.15 }),
+        }}
       >
         {text}
       </span>
@@ -1696,7 +1709,7 @@ function GroupWidget({
   onMediaPatch,
   onPowerToggle,
 }: {
-  cfg: { domain?: string; ids?: string[]; label?: string; name?: string; glyph?: string };
+  cfg: { domain?: string; ids?: string[]; label?: string; name?: string; glyph?: string; hide_header?: boolean };
   lights: Light[];
   media: MediaDevice[];
   power: PowerDevice[];
@@ -1887,51 +1900,57 @@ function GroupWidget({
     );
   }
 
+  const hideHeader = cfg.hide_header === true;
   return (
     <Plate accents={litHexes ?? [accent]} on={anyOn} charge={groupCharge} style={{ gap: "0.4rem" }}>
-      <div style={{ position: "relative", display: "flex", alignItems: "center", gap: "0.5rem" }}>
-        <span
-          aria-hidden
-          style={{
-            width: 14,
-            height: 14,
-            flexShrink: 0,
-            borderRadius: "50%",
-            border: "1px solid rgba(255,255,255,0.22)",
-            background: anyOn ? `radial-gradient(circle at 35% 30%, #ffffff44, transparent 45%), ${dotColor}` : "#3a372e",
-            boxShadow: anyOn ? `0 0 10px -2px ${dotColor}` : "none",
-          }}
-        />
-        <button
-          ref={ref}
-          disabled={edit || !hasEditor || total === 0}
-          onClick={() => setOpen((v) => !v)}
-          title={hasEditor ? "More controls" : undefined}
-          style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: "0.3rem", border: "none", background: "none", padding: 0, cursor: edit || !hasEditor || total === 0 ? "default" : "pointer", textAlign: "left" }}
-        >
-          <span style={{ ...labelType, fontSize: "0.78rem", color: "#d8cfba", ...ELLIPSIS }}>{label}</span>
-          {hasEditor && total > 0 && <Glyph name="chevron" size={13} />}
-        </button>
-        <GlyphButton on={anyOn} accent={buttonAccent} title="Toggle all" active={false} buttonRef={null} onClick={togglePower} size={32}>
-          <Glyph name="power" size={15} />
-        </GlyphButton>
-      </div>
+      {!hideHeader && (
+        <div style={{ position: "relative", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+          <span
+            aria-hidden
+            style={{
+              width: 14,
+              height: 14,
+              flexShrink: 0,
+              borderRadius: "50%",
+              border: "1px solid rgba(255,255,255,0.22)",
+              background: anyOn ? `radial-gradient(circle at 35% 30%, #ffffff44, transparent 45%), ${dotColor}` : "#3a372e",
+              boxShadow: anyOn ? `0 0 10px -2px ${dotColor}` : "none",
+            }}
+          />
+          <button
+            ref={ref}
+            disabled={edit || !hasEditor || total === 0}
+            onClick={() => setOpen((v) => !v)}
+            title={hasEditor ? "More controls" : undefined}
+            style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: "0.3rem", border: "none", background: "none", padding: 0, cursor: edit || !hasEditor || total === 0 ? "default" : "pointer", textAlign: "left" }}
+          >
+            <span style={{ ...labelType, fontSize: "0.78rem", color: "#d8cfba", ...ELLIPSIS }}>{label}</span>
+            {hasEditor && total > 0 && <Glyph name="chevron" size={13} />}
+          </button>
+          <GlyphButton on={anyOn} accent={buttonAccent} title="Toggle all" active={false} buttonRef={null} onClick={togglePower} size={32}>
+            <Glyph name="power" size={15} />
+          </GlyphButton>
+        </div>
+      )}
       <div style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
         {/* The empty area above the bar opens the full editor — the whole widget
-            (bar aside) is the control. */}
-        <div
-          onClick={() => { if (hasEditor) setOpen(true); }}
-          title={hasEditor ? "More controls" : undefined}
-          style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", cursor: hasEditor && !edit ? "pointer" : "default" }}
-        >
-          {!showSlider && (
-            <span style={{ fontSize: "0.78rem", color: anyOn ? buttonAccent : T.faint }}>
-              {total === 0 ? "No devices" : `${onCount} of ${total} on`}
-            </span>
-          )}
-        </div>
+            (bar aside) is the control. With the header hidden the bar owns the
+            full height and is the tile's only control. */}
+        {!(hideHeader && showSlider) && (
+          <div
+            onClick={() => { if (hasEditor) setOpen(true); }}
+            title={hasEditor ? "More controls" : undefined}
+            style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", cursor: hasEditor && !edit ? "pointer" : "default" }}
+          >
+            {!showSlider && (
+              <span style={{ fontSize: "0.78rem", color: anyOn ? buttonAccent : T.faint }}>
+                {total === 0 ? "No devices" : `${onCount} of ${total} on`}
+              </span>
+            )}
+          </div>
+        )}
         {showSlider && (
-          <div style={{ flex: "0 0 60%", minHeight: 39, display: "flex" }}>
+          <div style={{ flex: hideHeader ? 1 : "0 0 60%", minHeight: 39, display: "flex" }}>
             {domain === "light" ? (
               // The brightness bar takes the bulb colour (like the dot), not the theme accent.
               <InlineSlider fill value={initBrightness} accent={dotColor} unit="%" onChange={slideBrightnessChange} onCommit={slideBrightnessCommit} />
@@ -2671,6 +2690,8 @@ function WidgetEditorModal({
   const [clockScale, setClockScale] = useState<string>(String((cfg.scale as number) ?? 1));
   const [labelText, setLabelText] = useState<string>((cfg.text as string) ?? "");
   const [labelHeading, setLabelHeading] = useState<boolean>(cfg.heading !== false);
+  const [labelAlign, setLabelAlign] = useState<string>((cfg.align as string) ?? "left");
+  const [labelValign, setLabelValign] = useState<string>((cfg.valign as string) ?? "middle");
 
   // sensor — "<provider_id>|<device_id>" composite + the control key.
   const [sensorDev, setSensorDev] = useState<string>(
@@ -2695,6 +2716,9 @@ function WidgetEditorModal({
   const [statusHideName, setStatusHideName] = useState<boolean>(cfg.hide_name === true);
   // Universal: render this widget frameless (no plate ring / filigree).
   const [hideBorder, setHideBorder] = useState<boolean>(cfg.hide_border === true);
+  // Device/group tiles: drop the title + power-button header row so the
+  // control body (e.g. the brightness slider) fills the whole widget.
+  const [hideHeader, setHideHeader] = useState<boolean>(cfg.hide_header === true);
 
   // control
   const [control, setControl] = useState<RoomControl>(
@@ -2714,14 +2738,21 @@ function WidgetEditorModal({
   const devicesFor = (d: string): { id: string; name: string }[] =>
     d === "light" ? selLights : d === "power" ? selPower : selMedia;
 
+  // The tile widgets whose layout is header row + control body.
+  const headerHideable = type === "device" || type === "group" || type === "now_playing";
+
   function save() {
     const nm = name.trim() || undefined;
     // Every widget type saves through this wrapper so universal options
-    // (frameless) ride along without touching each branch.
+    // (frameless, hidden header) ride along without touching each branch.
     const onSave = (spec: WidgetSpec) =>
       onSaveRaw({
         ...spec,
-        config: { ...(spec.config as Record<string, unknown>), ...(hideBorder ? { hide_border: true } : {}) },
+        config: {
+          ...(spec.config as Record<string, unknown>),
+          ...(hideBorder ? { hide_border: true } : {}),
+          ...(hideHeader && headerHideable ? { hide_header: true } : {}),
+        },
       });
     if (type === "room") {
       const id = roomId || rooms.find((r) => r.enabled)?.id;
@@ -2794,7 +2825,7 @@ function WidgetEditorModal({
     } else if (type === "clock") {
       onSave({ type, config: { format: clockFormat, scale: Number(clockScale) || 1, name: nm }, w: 12, h: 8 });
     } else if (type === "label") {
-      onSave({ type, config: { text: labelText.trim() || nm || "Label", heading: labelHeading }, w: 16, h: 4 });
+      onSave({ type, config: { text: labelText.trim() || nm || "Label", heading: labelHeading, align: labelAlign, valign: labelValign }, w: 16, h: 4 });
     } else {
       onSave({ type, config: { ...control, name: nm }, w: 8, h: 8 });
     }
@@ -2828,6 +2859,19 @@ function WidgetEditorModal({
           ]}
         />
       </Field>
+
+      {headerHideable && (
+        <Field label="Header">
+          <Segmented
+            value={hideHeader ? "hidden" : "shown"}
+            onChange={(v) => setHideHeader(v === "hidden")}
+            options={[
+              { value: "shown", label: "Shown" },
+              { value: "hidden", label: "Hidden" },
+            ]}
+          />
+        </Field>
+      )}
 
       {type === "room" && (
         <Field label="Room">
@@ -3139,6 +3183,20 @@ function WidgetEditorModal({
               value={labelHeading ? "heading" : "plain"}
               onChange={(v) => setLabelHeading(v === "heading")}
               options={[{ value: "heading", label: "Heading" }, { value: "plain", label: "Plain" }]}
+            />
+          </Field>
+          <Field label="Align">
+            <Segmented
+              value={labelAlign}
+              onChange={setLabelAlign}
+              options={[{ value: "left", label: "Left" }, { value: "center", label: "Center" }, { value: "right", label: "Right" }]}
+            />
+          </Field>
+          <Field label="Vertical">
+            <Segmented
+              value={labelValign}
+              onChange={setLabelValign}
+              options={[{ value: "top", label: "Top" }, { value: "middle", label: "Middle" }, { value: "bottom", label: "Bottom" }]}
             />
           </Field>
         </>

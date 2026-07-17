@@ -295,10 +295,34 @@ pub(crate) async fn room_occupancy(state: &AppState, room_id: &str) -> Option<bo
     room_occupancy_db(&state.db, &state.occupancy_seen, room_id).await
 }
 
-/// Shared per-room verdict cache behind the occupancy debug log. `Arc` so the
-/// sensor DB-writer tasks (which have no `AppState`) share the one map with
+/// Shared per-room verdict cache behind the occupancy debug log, plus the
+/// scheduler wake signal riding the same changed-only gate. `Arc` so the
+/// sensor DB-writer tasks (which have no `AppState`) share the one watch with
 /// every occupancy reader — a flip logs exactly once, whoever sees it first.
-pub type OccupancySeen = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, bool>>>;
+#[derive(Default)]
+pub struct OccupancyWatch {
+    seen: std::sync::Mutex<std::collections::HashMap<String, bool>>,
+    changed: tokio::sync::Notify,
+}
+
+impl OccupancyWatch {
+    /// Wake the kiosk scheduler for an immediate pass — called on every genuine
+    /// occupancy flip, and by display-policy config edits, so presence wake is
+    /// push-latency instead of waiting out the scheduler's fallback tick.
+    pub fn poke(&self) {
+        // notify_one stores a permit when nobody is waiting, so a flip landing
+        // while the scheduler is mid-tick still fires the next select — never
+        // a lost wakeup.
+        self.changed.notify_one();
+    }
+
+    /// Resolves on the next [`poke`](Self::poke) (or instantly on a stored permit).
+    pub async fn poked(&self) {
+        self.changed.notified().await;
+    }
+}
+
+pub type OccupancySeen = std::sync::Arc<OccupancyWatch>;
 
 /// Pool-based body of [`room_occupancy`], so the sensor event pipeline can
 /// recompute (and debug-log) a room's verdict the moment a presence reading
@@ -315,10 +339,11 @@ pub(crate) async fn room_occupancy_db(
     // first observation) at debug, with the sensors currently detecting. The
     // changed-only seam keeps steady re-reads (the scheduler's 30s tick) silent.
     let changed = {
-        let mut seen = seen.lock().expect("occupancy_seen poisoned");
-        occupancy_verdict_changed(&mut seen, room_id, verdict)
+        let mut map = seen.seen.lock().expect("occupancy_seen poisoned");
+        occupancy_verdict_changed(&mut map, room_id, verdict)
     };
     if changed {
+        seen.poke();
         let detecting_ids: Vec<&str> = members
             .iter()
             .filter(|(_, d)| *d)
@@ -2053,10 +2078,17 @@ mod occupancy_tests {
         // reader involved — and the changed-only gate records the verdict.
         sensor_reading_landed(&state.db, &state.occupancy_seen, "p", "m1").await;
         assert_eq!(
-            state.occupancy_seen.lock().unwrap().get("r"),
+            state.occupancy_seen.seen.lock().unwrap().get("r"),
             Some(&true),
             "detected reading must flip the room to occupied"
         );
+        // The flip pokes the kiosk scheduler (a stored permit resolves instantly).
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            state.occupancy_seen.poked(),
+        )
+        .await
+        .expect("verdict flip must poke the scheduler");
 
         // The sensor clearing flips it back.
         sqlx::query(r#"UPDATE sensor_devices SET last_state = '{"reading":{"bool":false}}' WHERE id = 'm1'"#)
@@ -2064,7 +2096,10 @@ mod occupancy_tests {
             .await
             .unwrap();
         sensor_reading_landed(&state.db, &state.occupancy_seen, "p", "m1").await;
-        assert_eq!(state.occupancy_seen.lock().unwrap().get("r"), Some(&false));
+        assert_eq!(
+            state.occupancy_seen.seen.lock().unwrap().get("r"),
+            Some(&false)
+        );
     }
 
     #[tokio::test]
@@ -2080,7 +2115,17 @@ mod occupancy_tests {
         )
         .await;
         sensor_reading_landed(&state.db, &state.occupancy_seen, "p", "lux").await;
-        assert!(state.occupancy_seen.lock().unwrap().is_empty());
+        assert!(state.occupancy_seen.seen.lock().unwrap().is_empty());
+        // No flip → no poke: the scheduler must not churn on non-presence data.
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                state.occupancy_seen.poked()
+            )
+            .await
+            .is_err(),
+            "a non-presence reading must not poke the scheduler"
+        );
     }
 
     #[tokio::test]

@@ -521,7 +521,10 @@ async fn set_room(
         .execute(&state.db)
         .await
     {
-        Ok(r) if r.rows_affected() > 0 => StatusCode::NO_CONTENT,
+        Ok(r) if r.rows_affected() > 0 => {
+            state.occupancy_seen.poke();
+            StatusCode::NO_CONTENT
+        }
         Ok(_) => StatusCode::NOT_FOUND,
         Err(e) => {
             tracing::error!("db error setting kiosk room: {e}");
@@ -603,7 +606,10 @@ async fn set_schedule(
     .execute(&state.db)
     .await
     {
-        Ok(r) if r.rows_affected() > 0 => StatusCode::NO_CONTENT.into_response(),
+        Ok(r) if r.rows_affected() > 0 => {
+            state.occupancy_seen.poke();
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(_) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => {
             tracing::error!("db error setting kiosk schedule: {e}");
@@ -655,7 +661,10 @@ async fn set_presence(
         }
     };
     match result {
-        Ok(r) if r.rows_affected() > 0 => StatusCode::NO_CONTENT.into_response(),
+        Ok(r) if r.rows_affected() > 0 => {
+            state.occupancy_seen.poke();
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(_) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => {
             tracing::error!("db error setting kiosk presence: {e}");
@@ -721,7 +730,10 @@ async fn set_plan(
         }
     };
     match result {
-        Ok(r) if r.rows_affected() > 0 => StatusCode::NO_CONTENT.into_response(),
+        Ok(r) if r.rows_affected() > 0 => {
+            state.occupancy_seen.poke();
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(_) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => {
             tracing::error!("db error setting kiosk plan: {e}");
@@ -828,7 +840,13 @@ pub async fn run_scheduler(state: Arc<AppState>) {
     let mut last_present: HashMap<String, Instant> = HashMap::new();
     let mut ticker = tokio::time::interval(Duration::from_secs(30));
     loop {
-        ticker.tick().await;
+        // An occupancy flip (or a display-policy config edit) pokes an
+        // immediate pass — presence wake at push latency; the 30s tick is the
+        // fallback that catches hour boundaries and grace-timeout expiry.
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = state.occupancy_seen.poked() => {}
+        }
         let now = chrono::Local::now();
         scheduler_tick(
             &state,
