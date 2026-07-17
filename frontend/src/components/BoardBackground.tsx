@@ -193,9 +193,13 @@ function PresetCanvas({ make, weather, speed, animate }: { make: PresetFactory; 
 const makeSynthwave: PresetFactory = (p) => {
   // Camera path: the valley the "road" follows drifts with slow noise — the
   // grid rises into ridges at the sides and banks into turns, never repeating.
-  const ROWS = 26;
+  const ROWS = 40;
+  // Half-step longitudes: integer lines are the major grid, halves the minor —
+  // the same two-tier hierarchy as the edit guides, and finer terrain sampling
+  // (latitude polylines run through these same points) so ridges keep their
+  // shape instead of tenting between sparse verticals.
   const XS: number[] = [];
-  for (let x = -9; x <= 9; x++) XS.push(x);
+  for (let x = -9; x <= 9; x += 0.5) XS.push(x);
   const curve = (z: number) => (vnoise(z * 0.055, 7.3) - 0.5) * 5.2;
   const height = (x: number, z: number) => {
     const c = curve(z);
@@ -228,11 +232,21 @@ const makeSynthwave: PresetFactory = (p) => {
     sun.addColorStop(1, p.rose);
     ctx.fillStyle = sun;
     ctx.fillRect(w / 2 - sunR, sunY - sunR, sunR * 2, sunR * 2);
+    // Scanline slices: thickness AND opacity are functions of a bar's position
+    // in the band (thin/transparent at the top, thick/solid at the rim) — never
+    // of its loop index — so the wrap is seamless: a bar fades in thin at the
+    // top, thickens as it sinks, and slides off the rim instead of popping.
     ctx.fillStyle = p.void_;
-    for (let i = 0; i < 6; i++) {
-      const yy = sunY + sunR * (0.05 + i * 0.16) - ((t * 6) % (sunR * 0.16));
-      ctx.fillRect(w / 2 - sunR, yy, sunR * 2, 1.5 + i * 1.9);
+    const bandTop = sunY + sunR * 0.02;
+    const slot = sunR * 0.16;
+    const phase = (t * 6) % slot;
+    for (let yy = bandTop + phase - slot; yy < sunY + sunR; yy += slot) {
+      const f = (yy - bandTop) / (sunR * 0.98);
+      if (f < 0) continue;
+      ctx.globalAlpha = Math.min(1, f * 5);
+      ctx.fillRect(w / 2 - sunR, yy, sunR * 2, 0.75 + f * 11);
     }
+    ctx.globalAlpha = 1;
     ctx.restore();
     // Horizon glow
     const hg = ctx.createLinearGradient(0, horizon - 14, 0, horizon + 22);
@@ -260,7 +274,7 @@ const makeSynthwave: PresetFactory = (p) => {
     // Two passes: a soft wide glow, then the bright line. Latitudes…
     for (const pass of [0, 1]) {
       for (const { z, zRel } of rows) {
-        const a = Math.min(0.85, 1.6 / zRel) * (pass ? 1 : 0.35);
+        const a = Math.min(0.9, 2.1 / zRel) * (pass ? 1 : 0.35);
         ctx.strokeStyle = pass ? hexA(p.violet, a) : hexA(p.violet, a * 0.6);
         ctx.lineWidth = pass ? 1 : 3;
         ctx.beginPath();
@@ -272,11 +286,13 @@ const makeSynthwave: PresetFactory = (p) => {
         }
         ctx.stroke();
       }
-      // …then longitudes.
+      // …then longitudes: center meridian cyan, integer lines major, halves minor.
       for (const x of XS) {
-        const a = (Math.abs(x) < 2 ? 0.55 : 0.4) * (pass ? 1 : 0.35);
+        const major = Number.isInteger(x);
+        const a = (x === 0 ? 0.75 : major ? 0.55 : 0.28) * (pass ? 1 : 0.35);
         ctx.strokeStyle = pass ? hexA(x === 0 ? p.cyan : p.violet, a) : hexA(p.violet, a * 0.6);
         ctx.lineWidth = pass ? 1 : 3;
+        if (!major && !pass) continue; // minor lines skip the glow pass — hierarchy, not haze
         ctx.beginPath();
         let first = true;
         for (const { z, zRel } of rows) {
