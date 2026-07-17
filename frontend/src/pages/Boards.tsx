@@ -1963,12 +1963,18 @@ function GroupWidget({
     }, 300);
   };
 
-  const litHexes = anyOn ? (!themed && domain === "light" && lit.length ? lit.map(lightChromaHex) : [accent]) : undefined;
+  // A running effect owns the group's accent — same rule as a single light
+  // niche (DeviceTile): wear the effect base instead of a stale/fallback
+  // colour, and light the button's drift animation. `litHexes` (shared with
+  // RoomCard/RoomWidget) already resolves colour-vs-effect per lit light.
+  const groupFx = domain === "light" && tLights.some((l) => !!activeEffect(l));
+  const rawHexes = domain === "light" ? litHexes(tLights) : [];
+  const groupHexes = anyOn ? (!themed && rawHexes.length ? rawHexes : [accent]) : undefined;
   // Same charge rule as the room plate: blaze with the brightest lit member.
   const groupCharge = lit.length
     ? Math.max(...lit.map((l) => ((l.last_state?.brightness ?? 100) as number) / 100))
     : 1;
-  const dotColor = litHexes?.[0] ?? accent;
+  const dotColor = groupHexes?.[0] ?? accent;
   const buttonAccent = domain === "light" ? dotColor : accent;
 
   // The shared light/media editor popovers, anchored on `ref` — reused by both the
@@ -2014,6 +2020,7 @@ function GroupWidget({
         <GlyphButton
           on={anyOn}
           accent={buttonAccent}
+          effect={groupFx && !themed}
           title={label}
           active={open}
           buttonRef={ref}
@@ -2032,7 +2039,7 @@ function GroupWidget({
 
   const hideHeader = cfg.hide_header === true;
   return (
-    <Plate accents={litHexes ?? [accent]} on={anyOn} charge={groupCharge} style={{ gap: "0.4rem" }}>
+    <Plate accents={groupHexes ?? [accent]} on={anyOn} charge={groupCharge} style={{ gap: "0.4rem" }}>
       {!hideHeader && (
         <div style={{ position: "relative", display: "flex", alignItems: "center", gap: "0.5rem" }}>
           <span
@@ -2057,7 +2064,7 @@ function GroupWidget({
             <span style={{ ...labelType, fontSize: "0.78rem", color: "#d8cfba", ...ELLIPSIS }}>{label}</span>
             {hasEditor && total > 0 && <Glyph name="chevron" size={13} />}
           </button>
-          <GlyphButton on={anyOn} accent={buttonAccent} title="Toggle all" active={false} buttonRef={null} onClick={togglePower} size={32}>
+          <GlyphButton on={anyOn} accent={buttonAccent} effect={groupFx && !themed} title="Toggle all" active={false} buttonRef={null} onClick={togglePower} size={32}>
             <Glyph name="power" size={15} />
           </GlyphButton>
         </div>
@@ -3154,7 +3161,7 @@ function WidgetEditorModal({
   }
 
   return (
-    <Modal title={existing ? "Configure widget" : "Add widget"} onClose={onClose}>
+    <Modal title={existing ? "Configure widget" : "Add widget"} onClose={onClose} width={460}>
       {!existing && (
         <Field label="Type">
           <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem" }}>

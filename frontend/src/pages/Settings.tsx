@@ -636,14 +636,13 @@ function DeveloperTab({ onDevModeChange }: { onDevModeChange?: (on: boolean) => 
         <strong>off</strong> on a normal hub — every dev surface is invisible while it's off.
       </p>
 
-      <label
+      <div
         style={{
           ...S.card,
           flexDirection: "row",
           alignItems: "center",
           justifyContent: "space-between",
           padding: "0.8rem 1rem",
-          cursor: devMode === null ? "default" : "pointer",
           gap: "1rem",
         }}
       >
@@ -653,14 +652,8 @@ function DeveloperTab({ onDevModeChange }: { onDevModeChange?: (on: boolean) => 
             {devMode ? "On — dev surfaces and /api/dev are live." : "Off — production behaviour."}
           </div>
         </div>
-        <input
-          type="checkbox"
-          disabled={devMode === null || saving}
-          checked={!!devMode}
-          onChange={(e) => toggle(e.target.checked)}
-          style={{ width: 20, height: 20, accentColor: ACCENT, flexShrink: 0, cursor: "pointer" }}
-        />
-      </label>
+        <Switch on={!!devMode} disabled={devMode === null || saving} onChange={toggle} />
+      </div>
 
       {devMode && (
         <>

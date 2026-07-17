@@ -52,29 +52,28 @@ export function deviceSelectOptions<T extends RoomedDevice>(
 import { useState } from "react";
 import { S } from "../styles";
 import { T } from "../theme";
+import { SelectRow } from "./SelectRow";
 
-const CHECK_ROW: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: "0.5rem",
-  fontSize: "0.82rem",
-  color: T.text,
-  padding: "0.2rem 0.1rem 0.2rem 0.6rem",
-  cursor: "pointer",
-};
 const GROUP_HEADER: React.CSSProperties = {
   fontSize: "0.64rem",
   textTransform: "uppercase",
   letterSpacing: "0.06em",
   color: T.dim,
   margin: "0.5rem 0 0.15rem",
+  gridColumn: "1 / -1", // spans every column of the grid below it
   fontWeight: 600,
 };
+const ITEM_LABEL: React.CSSProperties = { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 
 /** The multi-select twin of a grouped `Select`: a searchable checklist over
  * the same `{value, label, group}` option arrays (`deviceSelectOptions`).
  * Used wherever several devices are picked at once — Boards group widgets,
- * the automation editor's action targets. */
+ * the automation editor's action targets. Each item is a `SelectRow` — the
+ * same "selected = lit box" primitive as the Rooms/Media device pickers and
+ * the room Presence panel, so a multi-select reads the same everywhere in the
+ * app instead of a bare checkbox row. Items lay out as a responsive grid
+ * (auto-fills 2+ columns once the container is wide enough), so a long device
+ * list needs far less scrolling; a group header spans the full width. */
 export function OptionCheckList({
   options,
   selected,
@@ -107,26 +106,31 @@ export function OptionCheckList({
         placeholder="Search…"
         style={{ ...S.input, marginBottom: "0.4rem", fontSize: "0.82rem", width: "100%", boxSizing: "border-box" }}
       />
-      <div style={{ maxHeight, overflowY: "auto", display: "flex", flexDirection: "column", gap: "0.1rem" }}>
+      <div
+        style={{
+          maxHeight,
+          overflowY: "auto",
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))",
+          gridAutoRows: "min-content",
+          gap: "0.3rem",
+          alignItems: "start",
+        }}
+      >
         {groups.map(({ group, items }) => (
-          <div key={group || "·"}>
+          <div key={group || "·"} style={{ display: "contents" }}>
             {group && <div style={GROUP_HEADER}>{group}</div>}
             {items.map((o) => (
-              <label key={o.value} style={CHECK_ROW}>
-                <input
-                  type="checkbox"
-                  checked={selected.includes(o.value)}
-                  onChange={() => onToggle(o.value)}
-                />
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {o.label}
-                </span>
-              </label>
+              <SelectRow key={o.value} checked={selected.includes(o.value)} onToggle={() => onToggle(o.value)}>
+                <span style={ITEM_LABEL}>{o.label}</span>
+              </SelectRow>
             ))}
           </div>
         ))}
         {visible.length === 0 && (
-          <span style={{ color: T.faint, fontSize: "0.8rem", padding: "0.3rem 0" }}>No matches.</span>
+          <span style={{ color: T.faint, fontSize: "0.8rem", padding: "0.3rem 0", gridColumn: "1 / -1" }}>
+            No matches.
+          </span>
         )}
       </div>
     </div>
