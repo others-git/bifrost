@@ -821,130 +821,152 @@ fn combined_desired_awake(schedule_awake: Option<bool>, present: Option<bool>) -
 /// apply the no-motion timeout grace.
 pub async fn run_scheduler(state: Arc<AppState>) {
     use chrono::Timelike;
-    use std::collections::{HashMap, HashSet};
-    use std::time::{Duration as StdDuration, Instant};
+    use std::collections::HashMap;
+    use std::time::Instant;
 
     let mut last_desired: HashMap<String, bool> = HashMap::new();
     let mut last_present: HashMap<String, Instant> = HashMap::new();
     let mut ticker = tokio::time::interval(Duration::from_secs(30));
     loop {
         ticker.tick().await;
-
         let now = chrono::Local::now();
-        let now_min = (now.hour() * 60 + now.minute()) as u16;
+        scheduler_tick(
+            &state,
+            &mut last_desired,
+            &mut last_present,
+            now.hour() as usize,
+            (now.hour() * 60 + now.minute()) as u16,
+        )
+        .await;
+    }
+}
 
-        // Any kiosk governed by *either* policy.
-        let rows = sqlx::query(
-            "SELECT id, room_id, schedule_enabled, sleep_at, wake_at,
-                    presence_enabled, presence_timeout_secs
+/// One scheduler pass, extracted from [`run_scheduler`] so tests can drive it
+/// against the real schema. That coverage is load-bearing: the tick's SELECT
+/// once dropped a column its row handler `get`s (sqlx panics on a missing
+/// column), which killed the scheduler task on its first governed row — no
+/// unit test of the pure helpers could see it.
+pub async fn scheduler_tick(
+    state: &Arc<AppState>,
+    last_desired: &mut std::collections::HashMap<String, bool>,
+    last_present: &mut std::collections::HashMap<String, std::time::Instant>,
+    hour: usize,
+    now_min: u16,
+) {
+    use std::collections::HashSet;
+    use std::time::{Duration as StdDuration, Instant};
+
+    // Any kiosk governed by *either* policy.
+    let rows = sqlx::query(
+        "SELECT id, room_id, schedule_enabled, sleep_at, wake_at,
+                    presence_enabled, presence_timeout_secs, hour_modes
              FROM kiosks
              WHERE schedule_enabled = 1 OR presence_enabled = 1",
-        )
-        .fetch_all(&state.db)
-        .await;
-        let rows = match rows {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(target: "bifrost::kiosk", "scheduler db read failed: {e}");
-                continue;
+    )
+    .fetch_all(&state.db)
+    .await;
+    let rows = match rows {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(target: "bifrost::kiosk", "scheduler db read failed: {e}");
+            return;
+        }
+    };
+
+    let mut governed = HashSet::new();
+    for row in rows {
+        let id: String = row.get("id");
+
+        // A painted hour plan (mig 0059) supersedes the legacy pair; the
+        // master switch is schedule_enabled either way.
+        let plan_enabled = row.get::<i64, _>("schedule_enabled") != 0;
+        let mode = row
+            .get::<Option<String>, _>("hour_modes")
+            .filter(|_| plan_enabled)
+            .and_then(|m| plan_mode(&m, hour));
+
+        // Quiet-hours verdict (legacy path only).
+        let schedule_awake = if mode.is_none() && plan_enabled {
+            let sleep = row
+                .get::<Option<String>, _>("sleep_at")
+                .as_deref()
+                .and_then(parse_hhmm);
+            let wake = row
+                .get::<Option<String>, _>("wake_at")
+                .as_deref()
+                .and_then(parse_hhmm);
+            match (sleep, wake) {
+                (Some(s), Some(w)) if s != w => Some(desired_awake_at(s, w, now_min)),
+                _ => None,
             }
+        } else {
+            None
         };
 
-        let mut governed = HashSet::new();
-        for row in rows {
-            let id: String = row.get("id");
-
-            // A painted hour plan (mig 0059) supersedes the legacy pair; the
-            // master switch is schedule_enabled either way.
-            let plan_enabled = row.get::<i64, _>("schedule_enabled") != 0;
-            let mode = row
-                .get::<Option<String>, _>("hour_modes")
-                .filter(|_| plan_enabled)
-                .and_then(|m| plan_mode(&m, now.hour() as usize));
-
-            // Quiet-hours verdict (legacy path only).
-            let schedule_awake = if mode.is_none() && plan_enabled {
-                let sleep = row
-                    .get::<Option<String>, _>("sleep_at")
-                    .as_deref()
-                    .and_then(parse_hhmm);
-                let wake = row
-                    .get::<Option<String>, _>("wake_at")
-                    .as_deref()
-                    .and_then(parse_hhmm);
-                match (sleep, wake) {
-                    (Some(s), Some(w)) if s != w => Some(desired_awake_at(s, w, now_min)),
-                    _ => None,
-                }
-            } else {
-                None
-            };
-
-            // Presence verdict — needed for an Aware hour, or the legacy flag.
-            // (Needs an assigned room with presence sensors; the grace timer
-            // keeps the screen up until the room has been empty long enough.)
-            let wants_presence = match mode {
-                Some(PlanMode::Aware) => true,
-                Some(_) => false,
-                None => row.get::<i64, _>("presence_enabled") != 0,
-            };
-            let present = if wants_presence {
-                match row.get::<Option<String>, _>("room_id") {
-                    Some(room_id) => {
-                        let timeout = StdDuration::from_secs(
-                            row.get::<i64, _>("presence_timeout_secs").max(0) as u64,
-                        );
-                        match crate::api::rooms::room_occupancy(&state, &room_id).await {
-                            Some(true) => {
-                                last_present.insert(id.clone(), Instant::now());
-                                Some(true)
-                            }
-                            // Empty room: stay "present" until the grace elapses.
-                            Some(false) => {
-                                Some(last_present.get(&id).is_some_and(|t| t.elapsed() < timeout))
-                            }
-                            None => None, // no presence sensors → presence doesn't govern
-                        }
-                    }
-                    None => None,
-                }
-            } else {
-                None
-            };
-
-            let desired = match mode {
-                Some(m) => plan_desired(m, present),
-                None => combined_desired_awake(schedule_awake, present),
-            };
-            let Some(awake) = desired else {
-                continue; // nothing governs this hour (e.g. aware but no sensors)
-            };
-            governed.insert(id.clone());
-
-            if last_desired.get(&id) == Some(&awake) {
-                continue; // already in the desired state — nothing to send.
-            }
-            let cmd = if awake { "wake" } else { "sleep" };
-            match queue_kiosk_command(&state, &id, cmd).await {
-                Ok(_) => {
-                    tracing::debug!(
-                        target: "bifrost::kiosk",
-                        kiosk_id = %id, %cmd, now = %fmt_hhmm(now_min),
-                        schedule = ?schedule_awake, presence = ?present,
-                        "display-power command"
+        // Presence verdict — needed for an Aware hour, or the legacy flag.
+        // (Needs an assigned room with presence sensors; the grace timer
+        // keeps the screen up until the room has been empty long enough.)
+        let wants_presence = match mode {
+            Some(PlanMode::Aware) => true,
+            Some(_) => false,
+            None => row.get::<i64, _>("presence_enabled") != 0,
+        };
+        let present = if wants_presence {
+            match row.get::<Option<String>, _>("room_id") {
+                Some(room_id) => {
+                    let timeout = StdDuration::from_secs(
+                        row.get::<i64, _>("presence_timeout_secs").max(0) as u64,
                     );
-                    last_desired.insert(id, awake);
+                    match crate::api::rooms::room_occupancy(state, &room_id).await {
+                        Some(true) => {
+                            last_present.insert(id.clone(), Instant::now());
+                            Some(true)
+                        }
+                        // Empty room: stay "present" until the grace elapses.
+                        Some(false) => {
+                            Some(last_present.get(&id).is_some_and(|t| t.elapsed() < timeout))
+                        }
+                        None => None, // no presence sensors → presence doesn't govern
+                    }
                 }
-                Err(e) => tracing::warn!(
-                    target: "bifrost::kiosk", kiosk_id = %id,
-                    "scheduler failed to queue {cmd}: {e}"
-                ),
+                None => None,
             }
+        } else {
+            None
+        };
+
+        let desired = match mode {
+            Some(m) => plan_desired(m, present),
+            None => combined_desired_awake(schedule_awake, present),
+        };
+        let Some(awake) = desired else {
+            continue; // nothing governs this hour (e.g. aware but no sensors)
+        };
+        governed.insert(id.clone());
+
+        if last_desired.get(&id) == Some(&awake) {
+            continue; // already in the desired state — nothing to send.
         }
-        // Forget kiosks no longer governed, so re-enabling one reconciles it afresh.
-        last_desired.retain(|id, _| governed.contains(id));
-        last_present.retain(|id, _| governed.contains(id));
+        let cmd = if awake { "wake" } else { "sleep" };
+        match queue_kiosk_command(state, &id, cmd).await {
+            Ok(_) => {
+                tracing::debug!(
+                    target: "bifrost::kiosk",
+                    kiosk_id = %id, %cmd, now = %fmt_hhmm(now_min),
+                    schedule = ?schedule_awake, presence = ?present,
+                    "display-power command"
+                );
+                last_desired.insert(id, awake);
+            }
+            Err(e) => tracing::warn!(
+                target: "bifrost::kiosk", kiosk_id = %id,
+                "scheduler failed to queue {cmd}: {e}"
+            ),
+        }
     }
+    // Forget kiosks no longer governed, so re-enabling one reconciles it afresh.
+    last_desired.retain(|id, _| governed.contains(id));
+    last_present.retain(|id, _| governed.contains(id));
 }
 
 /// `POST /api/kiosks/{id}/deauth` (session) — revoke the kiosk's API key. Its

@@ -178,6 +178,13 @@ async fn health_reports_version_and_uptime() {
     assert_eq!(body["ok"], true);
     assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
     assert!(body["uptime_secs"].is_u64());
+    // The hub's wall clock — RFC 3339 with a UTC offset, so a TZ-skewed
+    // deployment (hour plans consulting the wrong hour) is visible at a glance.
+    let t = body["server_time"].as_str().unwrap();
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(t).is_ok(),
+        "server_time should be RFC 3339: {t}"
+    );
 }
 
 #[tokio::test]
@@ -716,6 +723,76 @@ async fn kiosk_hour_plan_roundtrips_and_validates() {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
     }
+}
+
+/// Drives a real scheduler pass against the real schema — the tick's SELECT and
+/// its row reads must agree (a column read but not fetched panics sqlx's `get`
+/// and killed the scheduler task; the pure plan helpers couldn't catch that).
+#[tokio::test]
+async fn scheduler_tick_enforces_the_hour_plan() {
+    use std::collections::HashMap;
+
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "wall tablet").await;
+
+    // Register the kiosk row.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/kiosks/checkin")
+                .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let id = list[0]["id"].as_str().unwrap().to_string();
+
+    // Paint: midnight→noon awake, noon→midnight asleep.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/kiosks/{id}/plan"),
+            &cookie,
+            r#"{"enabled":true,"hour_modes":"WWWWWWWWWWWWSSSSSSSSSSSS"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let pending = |app: Router, cookie: String| async move {
+        let list = helpers::response_json(
+            app.oneshot(helpers::authed_get("/api/kiosks", &cookie))
+                .await
+                .unwrap(),
+        )
+        .await;
+        list[0]["pending_command"].clone()
+    };
+
+    let mut desired = HashMap::new();
+    let mut present = HashMap::new();
+
+    // An awake hour queues a wake…
+    bifrost::api::kiosks::scheduler_tick(&state, &mut desired, &mut present, 3, 3 * 60).await;
+    assert_eq!(pending(app.clone(), cookie.clone()).await, "wake");
+
+    // …and an asleep hour flips it to sleep (edge-triggered on the change).
+    bifrost::api::kiosks::scheduler_tick(&state, &mut desired, &mut present, 15, 15 * 60).await;
+    assert_eq!(pending(app.clone(), cookie.clone()).await, "sleep");
 }
 
 #[tokio::test]

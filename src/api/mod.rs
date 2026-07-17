@@ -343,6 +343,10 @@ struct HealthResponse {
     ok: bool,
     version: &'static str,
     uptime_secs: u64,
+    /// The hub's local wall clock (RFC 3339 with offset). Time-of-day features
+    /// (kiosk hour plans, automation time gates) run on this clock — if it
+    /// disagrees with the household's, set `TZ` on the service.
+    server_time: String,
     providers: Vec<ProviderHealth>,
 }
 
@@ -390,6 +394,7 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         ok: true,
         version: env!("CARGO_PKG_VERSION"),
         uptime_secs: state.started_at.elapsed().as_secs(),
+        server_time: chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
         providers,
     })
 }
