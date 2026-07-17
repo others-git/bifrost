@@ -8,8 +8,9 @@ use crate::api::auth::Session;
 use crate::models::dashboard::{Dashboard, Widget, clean_aspect, parse_layout};
 use axum::{
     Json, Router,
-    extract::{Path, State},
-    http::StatusCode,
+    body::Bytes,
+    extract::{DefaultBodyLimit, Path, State},
+    http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
     routing::{get, put},
 };
@@ -17,6 +18,21 @@ use serde::Deserialize;
 use sqlx::Row;
 use std::sync::Arc;
 use uuid::Uuid;
+
+/// Uploaded background media cap — generous enough for a short video loop,
+/// small enough that a board can't quietly become a media library.
+const BG_MEDIA_MAX_BYTES: usize = 25 * 1024 * 1024;
+
+/// Accepted background media types: stills, gif, and short video loops (a muted
+/// looping video is *cheaper* to render than a large gif on the wall tablets).
+const BG_MEDIA_MIMES: [&str; 6] = [
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/gif",
+    "video/mp4",
+    "video/webm",
+];
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
@@ -26,6 +42,14 @@ pub fn router() -> Router<Arc<AppState>> {
             "/{id}",
             get(get_handler).put(update_handler).delete(delete_handler),
         )
+        .route(
+            "/{id}/background/media",
+            get(get_bg_media)
+                .put(put_bg_media)
+                .delete(delete_bg_media)
+                // The default axum body cap (2MB) is far below a video loop.
+                .layer(DefaultBodyLimit::max(BG_MEDIA_MAX_BYTES)),
+        )
 }
 
 fn row_to_dashboard(r: &sqlx::sqlite::SqliteRow) -> Dashboard {
@@ -34,13 +58,17 @@ fn row_to_dashboard(r: &sqlx::sqlite::SqliteRow) -> Dashboard {
         name: r.get("name"),
         position: r.get("position"),
         aspect: r.get("aspect"),
+        background: r
+            .get::<Option<String>, _>("background")
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(serde_json::Value::Null),
         widgets: parse_layout(&r.get::<String, _>("layout")),
     }
 }
 
 pub(crate) async fn list_dashboards(state: &AppState) -> Vec<Dashboard> {
     sqlx::query(
-        "SELECT id, name, position, aspect, layout FROM dashboards ORDER BY position, created_at",
+        "SELECT id, name, position, aspect, background, layout FROM dashboards ORDER BY position, created_at",
     )
     .fetch_all(&state.db)
     .await
@@ -97,6 +125,7 @@ async fn create_handler(
                 name: name.to_string(),
                 position,
                 aspect,
+                background: serde_json::Value::Null,
                 widgets: Vec::new(),
             }),
         )
@@ -113,10 +142,12 @@ async fn get_handler(
     _: Session,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match sqlx::query("SELECT id, name, position, aspect, layout FROM dashboards WHERE id = ?")
-        .bind(&id)
-        .fetch_optional(&state.db)
-        .await
+    match sqlx::query(
+        "SELECT id, name, position, aspect, background, layout FROM dashboards WHERE id = ?",
+    )
+    .bind(&id)
+    .fetch_optional(&state.db)
+    .await
     {
         Ok(Some(row)) => Json(row_to_dashboard(&row)).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
@@ -137,6 +168,21 @@ struct UpdateRequest {
     /// Full replacement of the widget layout (omit to leave it unchanged).
     #[serde(default)]
     widgets: Option<Vec<Widget>>,
+    /// Background spec (opaque JSON). Double-optional: omitted = unchanged,
+    /// `null` = clear, an object = replace. The custom deserializer is what
+    /// keeps an explicit `null` from vanishing into the *outer* Option.
+    #[serde(default, deserialize_with = "explicit_null")]
+    background: Option<Option<serde_json::Value>>,
+}
+
+/// Field-present deserializer: wraps the raw value in `Some`, so a JSON `null`
+/// arrives as `Some(None)` (clear) instead of `None` (unchanged).
+fn explicit_null<'de, D>(d: D) -> Result<Option<Option<serde_json::Value>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    Ok(Some(Option::<serde_json::Value>::deserialize(d)?))
 }
 
 async fn update_handler(
@@ -182,6 +228,115 @@ async fn update_handler(
             .execute(&state.db)
             .await;
     }
+    if let Some(background) = &req.background {
+        let json = background
+            .as_ref()
+            .filter(|v| !v.is_null())
+            .map(|v| v.to_string());
+        let _ = sqlx::query("UPDATE dashboards SET background = ? WHERE id = ?")
+            .bind(json)
+            .bind(&id)
+            .execute(&state.db)
+            .await;
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+// ── Background media (uploaded image / short video loop) ─────────────────────
+
+/// `PUT /api/dashboards/{id}/background/media` (session) — store the board's
+/// uploaded background. Raw bytes, typed by the `Content-Type` header (allowlist
+/// [`BG_MEDIA_MIMES`]); replaces any previous upload. The background *spec*
+/// (scrim, cache-buster) is saved separately via the board update.
+async fn put_bg_media(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let mime = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            s.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase()
+        })
+        .unwrap_or_default();
+    if !BG_MEDIA_MIMES.contains(&mime.as_str()) {
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            format!("background media must be one of {BG_MEDIA_MIMES:?}"),
+        )
+            .into_response();
+    }
+    if body.is_empty() {
+        return (StatusCode::UNPROCESSABLE_ENTITY, "empty upload").into_response();
+    }
+    match sqlx::query("UPDATE dashboards SET bg_media = ?, bg_mime = ? WHERE id = ?")
+        .bind(body.as_ref())
+        .bind(&mime)
+        .bind(&id)
+        .execute(&state.db)
+        .await
+    {
+        Ok(r) if r.rows_affected() > 0 => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("db error storing board background media: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// `GET /api/dashboards/{id}/background/media` (session) — serve the upload.
+/// Immutable-cached: the frontend cache-busts with a `?v=` stamp on replace.
+async fn get_bg_media(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let row = sqlx::query("SELECT bg_media, bg_mime FROM dashboards WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+    let media = row.as_ref().and_then(|r| {
+        let bytes: Option<Vec<u8>> = r.get("bg_media");
+        let mime: Option<String> = r.get("bg_mime");
+        Some((bytes?, mime?))
+    });
+    match media {
+        Some((bytes, mime)) => (
+            [
+                (header::CONTENT_TYPE, mime),
+                (
+                    header::CACHE_CONTROL,
+                    "private, max-age=31536000, immutable".to_string(),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// `DELETE /api/dashboards/{id}/background/media` (session) — drop the upload
+/// (idempotent; the spec is cleared separately via the board update).
+async fn delete_bg_media(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let _ = sqlx::query("UPDATE dashboards SET bg_media = NULL, bg_mime = NULL WHERE id = ?")
+        .bind(&id)
+        .execute(&state.db)
+        .await;
     StatusCode::NO_CONTENT.into_response()
 }
 

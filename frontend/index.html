@@ -263,6 +263,21 @@
       .bifrost-tab-enter-right { animation: bifrost-tab-enter-right 0.22s cubic-bezier(0.22, 1, 0.36, 1) both; }
       .bifrost-tab-enter-left  { animation: bifrost-tab-enter-left 0.22s cubic-bezier(0.22, 1, 0.36, 1) both; }
 
+      /* Board background: aurora veil — three gradient ribbons breathing across
+         the upper sky (transform/opacity only, GPU-friendly, no filters). */
+      @keyframes bf-aurora-a {
+        from { transform: translateX(-4%) skewY(-1.4deg); opacity: 0.55; }
+        to   { transform: translateX(5%) skewY(1deg); opacity: 1; }
+      }
+      @keyframes bf-aurora-b {
+        from { transform: translateX(4%) skewY(1.6deg); opacity: 0.45; }
+        to   { transform: translateX(-5%) skewY(-0.8deg); opacity: 0.9; }
+      }
+      @keyframes bf-aurora-c {
+        from { transform: translateX(-6%) skewY(0.6deg); opacity: 0.4; }
+        to   { transform: translateX(3%) skewY(-1.2deg); opacity: 0.8; }
+      }
+
       /* The Scrying Glass (gesture remote). All of these are working feedback:
          the ember trail follows the finger, the ripple confirms a tap (OK),
          an edge tick flares gold when its direction fires, and the slab's

@@ -5,7 +5,7 @@
 // scene over any chosen devices, home-wide), plus scene buttons and now-playing.
 // View mode renders live, interactive widgets; phones get a stacked read view.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   activateScene,
   createDashboard,
@@ -25,6 +25,8 @@ import {
   setMediaState,
   setPowerState,
   updateDashboard,
+  uploadBoardBackground,
+  deleteBoardBackgroundMedia,
   getKiosks,
   type Dashboard,
   type GenericDevice,
@@ -55,6 +57,7 @@ import { GlyphButton, RoomCard, RoomControlButton, litHexes, roomMembers } from 
 import { EFFECT_ACCENT, activeEffect } from "../components/lightControl";
 import { OptionCheckList, deviceSelectOptions, type RoomedDevice } from "../components/deviceOptions";
 import { CornerFiligree } from "../components/ornament";
+import { BACKGROUND_PRESETS, BoardBackground, type BoardBackgroundCfg } from "../components/BoardBackground";
 import { Button, Segmented } from "../components/controls";
 import { Modal, useDialogs, type Dialogs } from "../components/dialogs";
 import { Select } from "../components/Select";
@@ -318,6 +321,23 @@ export function BoardsPage() {
   const board = boards.find((b) => b.id === activeId) ?? null;
   const widgets = board?.widgets ?? [];
 
+  // ── board background ──
+  // The board's atmospheric layer. Weather-lit reads the condition off the
+  // board's own weather widget (no extra config); hidden in edit mode so the
+  // grid guides stay legible (BoardGrid enforces that).
+  const bgCfg = (board?.background ?? null) as BoardBackgroundCfg | null;
+  const weatherWidget = widgets.find((w) => w.type === "weather");
+  const weatherCfg = (weatherWidget?.config ?? {}) as Record<string, unknown>;
+  const weatherCond = weatherWidget
+    ? ((generic
+        .find((d) => d.provider_id === weatherCfg.provider_id && d.device_id === weatherCfg.device_id)
+        ?.controls.find((c) => c.key === "condition")?.value as string | undefined) ?? null)
+    : null;
+  const backgroundNode =
+    board && bgCfg?.kind ? (
+      <BoardBackground cfg={bgCfg} boardId={board.id} weather={weatherCond} radius={radius.lg} />
+    ) : null;
+
   // Edit-mode undo: every layout mutation pushes the pre-mutation layout, so a
   // stray drag / remove / reconfigure is one Undo (or Ctrl+Z) away. Session-local,
   // per board — cleared on board switch and when leaving edit mode.
@@ -413,10 +433,36 @@ export function BoardsPage() {
     setActiveId(b.id);
     setEdit(true);
   }
-  async function saveBoardEdits(name: string, aspect: string) {
+  async function saveBoardEdits(
+    name: string,
+    aspect: string,
+    _seedRoomId?: string,
+    background?: BoardBackgroundCfg | null,
+    bgFile?: File | null,
+  ) {
     if (!board) return;
     setEditingBoard(false);
-    await updateDashboard(board.id, { name: name.trim(), aspect });
+    if (bgFile) {
+      try {
+        await uploadBoardBackground(board.id, bgFile);
+      } catch (e) {
+        await dialogs.alert({ title: "Background upload failed", message: String(e) });
+        background = (board.background as BoardBackgroundCfg | null) ?? null; // keep what was there
+      }
+    }
+    // Dropping an uploaded background also drops its stored media.
+    if (
+      background !== undefined &&
+      background?.kind !== "upload" &&
+      (board.background as BoardBackgroundCfg | null)?.kind === "upload"
+    ) {
+      deleteBoardBackgroundMedia(board.id);
+    }
+    await updateDashboard(board.id, {
+      name: name.trim(),
+      aspect,
+      ...(background !== undefined ? { background } : {}),
+    });
     await reloadBoards();
   }
 
@@ -637,6 +683,7 @@ export function BoardsPage() {
             aspect={board?.aspect ?? "16:9"}
             edit={edit}
             preview={preview}
+            background={backgroundNode}
             onChange={patchWidget}
             onChangeMany={patchManyWidgets}
             onConfigure={(w) => setConfiguring(w)}
@@ -689,6 +736,9 @@ export function BoardsPage() {
           confirmLabel="Save"
           initialName={board.name}
           initialAspect={board.aspect}
+          initialBackground={(board.background as BoardBackgroundCfg | null) ?? null}
+          boardId={board.id}
+          weather={weatherCond}
           onClose={() => setEditingBoard(false)}
           onSubmit={saveBoardEdits}
           onDelete={deleteBoard}
@@ -729,6 +779,7 @@ export function BoardsPage() {
             widgets={withExit(widgets)}
             aspect={board?.aspect ?? "16:9"}
             edit={false}
+            background={backgroundNode}
             onChange={() => {}}
             onChangeMany={() => {}}
             onConfigure={() => {}}
@@ -766,6 +817,15 @@ const PREVIEW_PRESETS: { label: string; w: number; h: number }[] = [
  * canvas `zoom` to them, or they'd double-scale. Everything else is a fixed-px
  * shared Control component that needs the zoom. */
 const SELF_SCALING_WIDGETS = new Set(["clock", "sensor", "device_status", "weather", "now_playing", "label"]);
+
+/** Widgets whose fixed-px content scales to FILL its tile — no dead space under
+ * the button rows. Instead of the global canvas zoom, WidgetBox measures the
+ * content and binary-searches the largest zoom that doesn't overflow (the
+ * RoomCard widget body tags itself `data-bf-scrollport` as the measure point).
+ * The shared components stay untouched — only the wrapper's zoom moves; a
+ * membership change that lands between refits just falls back to the body's
+ * existing scroll. */
+const FIT_ZOOM_WIDGETS = new Set(["room"]);
 
 /** The canvas width the fixed-px widgets were sized against (a typical desktop
  * board canvas). `contentZoom = canvasW / this`, so a board looks identically
@@ -843,6 +903,7 @@ function BoardGrid({
   aspect,
   edit,
   preview,
+  background,
   onChange,
   onChangeMany,
   onConfigure,
@@ -857,6 +918,9 @@ function BoardGrid({
    * this CSS size (a target device), then uniformly scale-to-fit the container —
    * so widget/font proportions read true. Null = normal responsive canvas. */
   preview?: { w: number; h: number; label: string } | null;
+  /** The board's background layer — rendered behind the widgets, view mode only
+   * (edit mode keeps the bare grid + guides legible). */
+  background?: React.ReactNode;
   onChange: (id: string, next: Widget) => void;
   onChangeMany: (updated: Widget[]) => void;
   onConfigure: (w: Widget) => void;
@@ -1006,6 +1070,7 @@ function BoardGrid({
         ...guides,
       }}
     >
+      {!edit && background}
       {widgets.map((w) => (
         <WidgetBox
           key={w.id}
@@ -1184,6 +1249,49 @@ function WidgetBox({
     setDrag(null);
   }
 
+  // ── fit-zoom (room widgets): grow/shrink the content to fill the box ──
+  const fitWidget = FIT_ZOOM_WIDGETS.has(w.type);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [fitZoom, setFitZoom] = useState(contentZoom);
+  useLayoutEffect(() => {
+    if (!fitWidget) return;
+    const el = contentRef.current;
+    if (!el) return;
+    const sp = (el.querySelector("[data-bf-scrollport]") ?? el) as HTMLElement;
+    const fits = (z: number) => {
+      el.style.zoom = String(z);
+      // Reading scroll metrics forces a reflow at this zoom; both sides are in
+      // the zoomed subtree's own units, so the comparison is zoom-independent.
+      return sp.scrollHeight <= sp.clientHeight + 1 && sp.scrollWidth <= sp.clientWidth + 1;
+    };
+    const refit = () => {
+      let lo = 0.5;
+      let hi = 3;
+      if (fits(lo)) {
+        for (let i = 0; i < 7; i++) {
+          const mid = (lo + hi) / 2;
+          if (fits(mid)) lo = mid;
+          else hi = mid;
+        }
+      }
+      // A hair under the boundary so a rounding wobble can't re-wrap a row;
+      // write the style directly too, in case the state lands unchanged.
+      const fit = Math.max(0.5, Math.round(lo * 0.985 * 100) / 100);
+      el.style.zoom = String(fit);
+      setFitZoom(fit);
+    };
+    refit();
+    // Membership can land after mount (device lists load async) or change live —
+    // a childList change on the scrollport re-fits (coalesced per frame).
+    let raf = 0;
+    const mo = new MutationObserver(() => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(refit);
+    });
+    mo.observe(sp, { childList: true });
+    return () => { mo.disconnect(); cancelAnimationFrame(raf); };
+  }, [fitWidget, w.w, w.h, cellW, cellH, contentZoom]);
+
   const movePx = drag?.mode === "move" ? drag : null;
   const sizePx = drag?.mode === "resize" ? drag : null;
   // The widget being dragged uses its own delta; other selected widgets follow the
@@ -1242,8 +1350,13 @@ function WidgetBox({
           // widgets (clock/sensor/weather/now_playing) already self-scale via
           // `cqmin`, and the label scales its own font — so exclude both to avoid
           // double-scaling.
-          ...(SELF_SCALING_WIDGETS.has(w.type) ? {} : { zoom: contentZoom }),
+          ...(fitWidget
+            ? { zoom: fitZoom }
+            : SELF_SCALING_WIDGETS.has(w.type)
+              ? {}
+              : { zoom: contentZoom }),
         }}
+        ref={contentRef}
         // Frameless widgets: hides the plate's ring + corner filigree (the
         // chrome carries .bf-plate-chrome) — content and glow stay.
         {...((w.config as Record<string, unknown> | undefined)?.hide_border ? { "data-plateless": "" } : {})}
@@ -2509,6 +2622,9 @@ function BoardModal({
   confirmLabel,
   initialName = "",
   initialAspect = "16:9",
+  initialBackground,
+  boardId,
+  weather,
   rooms,
   onClose,
   onSubmit,
@@ -2518,10 +2634,19 @@ function BoardModal({
   confirmLabel: string;
   initialName?: string;
   initialAspect?: string;
-  /** When present (creating), offer to seed the layout from a room's devices. */
+  /** When present (editing), offer the background picker. */
+  initialBackground?: BoardBackgroundCfg | null;
+  boardId?: string;
+  weather?: string | null;
   rooms?: Room[];
   onClose: () => void;
-  onSubmit: (name: string, aspect: string, seedRoomId?: string) => void;
+  onSubmit: (
+    name: string,
+    aspect: string,
+    seedRoomId?: string,
+    background?: BoardBackgroundCfg | null,
+    bgFile?: File | null,
+  ) => void;
   /** When present (editing an existing board), a left-aligned "Delete board"
    * action lives here instead of the edit toolbar, so a stray click can't nuke
    * the board — deleting is now Edit → Edit board → Delete → confirm. */
@@ -2531,10 +2656,49 @@ function BoardModal({
   const [aspect, setAspect] = useState(initialAspect);
   const [seedRoom, setSeedRoom] = useState("");
   const isPreset = ASPECT_PRESETS.includes(aspect);
+  // Background picker state (editing only — creation starts bare).
+  const showBackground = initialBackground !== undefined && !!boardId;
+  const [bg, setBg] = useState<BoardBackgroundCfg | null>(initialBackground ?? null);
+  const [bgFile, setBgFile] = useState<File | null>(null);
+  // Preview a just-picked upload from the local file, before it's on the server.
+  const bgFileUrl = useMemo(() => (bgFile ? URL.createObjectURL(bgFile) : null), [bgFile]);
+  useEffect(() => () => { if (bgFileUrl) URL.revokeObjectURL(bgFileUrl); }, [bgFileUrl]);
+
+  function pickPreset(id: string) {
+    setBgFile(null);
+    setBg((prev) => ({
+      kind: "preset",
+      preset: id,
+      scrim: prev?.scrim ?? 0.35,
+      speed: prev?.speed ?? 1,
+      ...(prev?.animate === false ? { animate: false } : {}),
+    }));
+  }
+  function pickFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    if (f.size > 25 * 1024 * 1024) {
+      setBgFile(null);
+      return;
+    }
+    setBgFile(f);
+    setBg((prev) => ({
+      kind: "upload",
+      mime: f.type,
+      v: Date.now(),
+      scrim: prev?.scrim ?? 0.35,
+    }));
+  }
 
   function submit() {
     if (!name.trim()) return;
-    onSubmit(name, aspect.trim() || "16:9", seedRoom || undefined);
+    onSubmit(
+      name,
+      aspect.trim() || "16:9",
+      seedRoom || undefined,
+      showBackground ? bg : undefined,
+      showBackground ? bgFile : undefined,
+    );
   }
 
   return (
@@ -2571,6 +2735,118 @@ function BoardModal({
           Galaxy A9 is 18.5:9). Changing it rescales the existing widgets.
         </div>
       </Field>
+      {showBackground && (
+        <Field label="Background">
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem" }}>
+            <button onClick={() => { setBg(null); setBgFile(null); }} style={{ ...CHIP, ...(!bg ? CHIP_ON : {}) }}>
+              None
+            </button>
+            {BACKGROUND_PRESETS.map((pr) => (
+              <button
+                key={pr.id}
+                onClick={() => pickPreset(pr.id)}
+                title={pr.hint}
+                style={{ ...CHIP, ...(bg?.kind === "preset" && bg.preset === pr.id ? CHIP_ON : {}) }}
+              >
+                {pr.label}
+              </button>
+            ))}
+            <label style={{ ...CHIP, ...(bg?.kind === "upload" ? CHIP_ON : {}), cursor: "pointer" }}>
+              Upload…
+              <input
+                type="file"
+                accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm"
+                onChange={pickFile}
+                style={{ display: "none" }}
+              />
+            </label>
+          </div>
+          {bg?.kind === "upload" && (
+            <div style={{ fontSize: "0.66rem", color: T.dim, marginTop: "0.4rem" }}>
+              {bgFile
+                ? `${bgFile.name} (${(bgFile.size / 1048576).toFixed(1)} MB)`
+                : "Using the previously uploaded media."}{" "}
+              Images, gifs, and short mp4/webm loops up to 25 MB — a muted video loop renders cheaper
+              than a large gif on a tablet.
+            </div>
+          )}
+          {bg && (
+            <>
+              {/* Live preview at board aspect — exactly the layer the board renders. */}
+              <div
+                style={{
+                  position: "relative",
+                  marginTop: "0.6rem",
+                  width: "100%",
+                  aspectRatio: "16 / 6",
+                  border: `1px solid ${T.hairline}`,
+                  borderRadius: radius.frame,
+                  overflow: "hidden",
+                  background: color.void,
+                }}
+              >
+                {bg.kind === "upload" && bgFileUrl ? (
+                  bg.mime?.startsWith("video/") ? (
+                    <video src={bgFileUrl} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} autoPlay loop muted playsInline />
+                  ) : (
+                    <img src={bgFileUrl} alt="" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />
+                  )
+                ) : (
+                  <BoardBackground cfg={{ ...bg, scrim: 0 }} boardId={boardId!} weather={weather} />
+                )}
+                {(bg.scrim ?? 0) > 0 && (
+                  <div style={{ position: "absolute", inset: 0, background: `rgba(0,0,0,${bg.scrim})`, pointerEvents: "none" }} />
+                )}
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.9rem", marginTop: "0.55rem" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.45rem", fontSize: "0.72rem", color: T.dim }}>
+                  Dim
+                  <input
+                    type="range"
+                    min={0}
+                    max={0.8}
+                    step={0.05}
+                    value={bg.scrim ?? 0}
+                    onChange={(e) => setBg({ ...bg, scrim: Number(e.target.value) })}
+                    style={{ width: 110, accentColor: T.accent }}
+                  />
+                  <span style={{ minWidth: "2.6em", fontVariantNumeric: "tabular-nums" }}>
+                    {Math.round((bg.scrim ?? 0) * 100)}%
+                  </span>
+                </label>
+                {bg.kind === "preset" && bg.preset !== "sky" && (
+                  <>
+                    <label style={{ display: "flex", alignItems: "center", gap: "0.45rem", fontSize: "0.72rem", color: T.dim }}>
+                      Speed
+                      <input
+                        type="range"
+                        min={0.25}
+                        max={2.5}
+                        step={0.25}
+                        value={bg.speed ?? 1}
+                        onChange={(e) => setBg({ ...bg, speed: Number(e.target.value) })}
+                        style={{ width: 110, accentColor: T.accent }}
+                      />
+                      <span style={{ minWidth: "2.9em", fontVariantNumeric: "tabular-nums" }}>
+                        {(bg.speed ?? 1).toFixed(2).replace(/\.?0+$/, "")}×
+                      </span>
+                    </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: "0.45rem", fontSize: "0.72rem", color: T.dim }}>
+                      Motion
+                      <Segmented
+                        value={bg.animate === false ? "off" : "on"}
+                        onChange={(v) => setBg({ ...bg, animate: v === "on" ? undefined : false } as BoardBackgroundCfg)}
+                        options={[{ value: "on", label: "On" }, { value: "off", label: "Still" }]}
+                      />
+                    </label>
+                  </>
+                )}
+              </div>
+            </>
+          )}
+        </Field>
+      )}
+
       {rooms && rooms.length > 0 && (
         <Field label="Start from">
           <Select

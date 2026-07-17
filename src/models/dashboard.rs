@@ -32,6 +32,10 @@ pub struct Dashboard {
     pub name: String,
     pub position: i64,
     pub aspect: String,
+    /// Background spec — opaque to the backend like widget `config` (the frontend
+    /// owns its semantics: preset id / scrim / speed / uploaded-media marker).
+    /// `Null` = no background.
+    pub background: serde_json::Value,
     pub widgets: Vec<Widget>,
 }
 

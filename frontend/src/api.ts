@@ -2161,6 +2161,8 @@ export interface Dashboard {
   position: number;
   /** Aspect ratio for the board canvas, e.g. "16:9". */
   aspect: string;
+  /** Background spec (frontend-defined, stored verbatim); null = none. */
+  background?: unknown;
   widgets: Widget[];
 }
 
@@ -2186,11 +2188,11 @@ export async function createDashboard(name: string, aspect?: string): Promise<Da
   return res.json();
 }
 
-/** Save a board's name, aspect ratio, and/or full widget layout. Omit a field to
- * leave it as-is. */
+/** Save a board's name, aspect ratio, background spec, and/or full widget
+ * layout. Omit a field to leave it as-is; `background: null` clears it. */
 export async function updateDashboard(
   id: string,
-  patch: { name?: string; aspect?: string; widgets?: Widget[] },
+  patch: { name?: string; aspect?: string; widgets?: Widget[]; background?: unknown },
 ): Promise<void> {
   const res = await fetch(`/api/dashboards/${id}`, {
     method: "PUT",
@@ -2198,6 +2200,21 @@ export async function updateDashboard(
     body: JSON.stringify(patch),
   });
   if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+}
+
+/** Upload a board's background media (image / gif / short video loop). */
+export async function uploadBoardBackground(id: string, file: File): Promise<void> {
+  const res = await fetch(`/api/dashboards/${id}/background/media`, {
+    method: "PUT",
+    headers: { "content-type": file.type },
+    body: file,
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+}
+
+/** Remove a board's uploaded background media. */
+export async function deleteBoardBackgroundMedia(id: string): Promise<void> {
+  await fetch(`/api/dashboards/${id}/background/media`, { method: "DELETE" });
 }
 
 export async function deleteDashboard(id: string): Promise<void> {

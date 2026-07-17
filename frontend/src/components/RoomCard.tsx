@@ -835,6 +835,7 @@ export function RoomCard({
         </div>
       ) : (
         <div
+          {...(page ? {} : { "data-bf-scrollport": "" })}
           style={{
             position: "relative",
             display: "flex",

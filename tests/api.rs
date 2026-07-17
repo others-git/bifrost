@@ -1403,6 +1403,184 @@ async fn dashboard_crud_persists_name_and_widget_layout() {
 }
 
 #[tokio::test]
+async fn dashboard_background_spec_and_media_roundtrip() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/dashboards",
+            &cookie,
+            r#"{"name":"Wall"}"#,
+        ))
+        .await
+        .unwrap();
+    let board = helpers::response_json(resp).await;
+    let id = board["id"].as_str().unwrap().to_string();
+    assert!(board["background"].is_null(), "new board has no background");
+
+    // Save a background spec (opaque JSON, stored verbatim like widget config).
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/dashboards/{id}"),
+            &cookie,
+            r#"{"background":{"kind":"preset","preset":"synthwave","scrim":0.3,"speed":1.5}}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let board = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get(
+                &format!("/api/dashboards/{id}"),
+                &cookie,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(board["background"]["preset"], "synthwave");
+    assert_eq!(board["background"]["scrim"], 0.3);
+
+    // A name-only update leaves the background untouched (double-option seam).
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/dashboards/{id}"),
+            &cookie,
+            r#"{"name":"Wall 2"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let board = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get(
+                &format!("/api/dashboards/{id}"),
+                &cookie,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(board["background"]["preset"], "synthwave");
+
+    // Upload media: wrong mime is refused, a png roundtrips with its type.
+    let put_media = |mime: &'static str, bytes: &'static [u8]| {
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/api/dashboards/{id}/background/media"))
+            .header(header::COOKIE, &cookie)
+            .header(header::CONTENT_TYPE, mime)
+            .body(Body::from(bytes))
+            .unwrap()
+    };
+    let resp = app
+        .clone()
+        .oneshot(put_media("text/plain", b"nope"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let resp = app
+        .clone()
+        .oneshot(put_media("image/png", b"\x89PNG fake bytes"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get(
+            &format!("/api/dashboards/{id}/background/media"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CONTENT_TYPE).unwrap(),
+        "image/png"
+    );
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&bytes[..], b"\x89PNG fake bytes");
+
+    // Clear the spec (explicit null) and the media; both read back gone.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/dashboards/{id}"),
+            &cookie,
+            r#"{"background":null}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_delete(
+            &format!("/api/dashboards/{id}/background/media"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let board = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get(
+                &format!("/api/dashboards/{id}"),
+                &cookie,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(board["background"].is_null());
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get(
+            &format!("/api/dashboards/{id}/background/media"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Media upload against an unknown board 404s; unauthenticated 401s.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/dashboards/nope/background/media")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "image/png")
+                .body(Body::from(&b"x"[..]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/dashboards/{id}/background/media"))
+                .header(header::CONTENT_TYPE, "image/png")
+                .body(Body::from(&b"x"[..]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn create_scene_rejects_empty_name() {
     let app = helpers::test_app_with_password().await;
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
