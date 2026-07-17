@@ -222,6 +222,10 @@ pub async fn run() -> Result<()> {
 
     start_managers(&state).await;
 
+    // Kiosk microphone sensors: seed the pseudo-provider + its push channel
+    // BEFORE the automation engine spawns, so its first subscribe sees them.
+    api::kiosks::ensure_kiosk_sensor_channel(&state).await;
+
     // Enforce kiosk scheduled quiet hours (display power saving) in the background.
     tokio::spawn(api::kiosks::run_scheduler(Arc::clone(&state)));
     // Sensor automations: edge-triggered rules over the sensor push streams.
@@ -292,6 +296,12 @@ pub fn start_manager_for(
     creds_json: &str,
 ) {
     use providers::ConnectionMode;
+
+    // The internal kiosk-sensor pseudo-provider has no upstream connection —
+    // its push channel is ensured separately (`api::kiosks::ensure_kiosk_sensor_channel`).
+    if provider_type == "kiosk" {
+        return;
+    }
 
     match state.registry.connection_mode(provider_type) {
         Some(ConnectionMode::Sse) => {

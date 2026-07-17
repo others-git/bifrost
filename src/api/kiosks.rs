@@ -67,6 +67,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/checkin", post(checkin))
         .route("/self", get(self_info))
         .route("/self/viewport", axum::routing::put(set_self_viewport))
+        .route("/self/noise", post(report_noise))
         .route("/stream", get(stream))
         .route("/", get(list))
         // OTA relay: session triggers/inspects the cache; key-auth endpoints feed
@@ -81,6 +82,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{id}/schedule", axum::routing::put(set_schedule))
         .route("/{id}/presence", axum::routing::put(set_presence))
         .route("/{id}/plan", axum::routing::put(set_plan))
+        .route("/{id}/mic", axum::routing::put(set_mic))
         .route("/{id}/deauth", post(deauth))
         .route("/{id}", delete(forget))
 }
@@ -120,6 +122,11 @@ struct CheckinResponse {
     /// The board this kiosk should auto-launch full-screen, if configured. The
     /// web client also reads this via `GET /self`; surfaced here for the app.
     default_board_id: Option<String>,
+    /// Microphone presence config — the app starts/stops its on-device sound
+    /// LEVEL monitor from this (no audio ever leaves the tablet).
+    mic_presence: bool,
+    /// low | medium | high (absent = medium).
+    mic_sensitivity: Option<String>,
 }
 
 /// `POST /api/kiosks/checkin` (API-key auth) — the kiosk heartbeat. Upserts the
@@ -211,18 +218,24 @@ async fn checkin(
     .ok()
     .flatten();
 
-    let default_board_id: Option<String> =
-        sqlx::query_scalar("SELECT default_board_id FROM kiosks WHERE id = ?")
-            .bind(&kiosk_id)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
+    let cfg = sqlx::query(
+        "SELECT default_board_id, mic_presence, mic_sensitivity FROM kiosks WHERE id = ?",
+    )
+    .bind(&kiosk_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
 
     Json(CheckinResponse {
         command,
         room,
-        default_board_id,
+        default_board_id: cfg.as_ref().and_then(|r| r.get("default_board_id")),
+        mic_presence: cfg
+            .as_ref()
+            .map(|r| r.get::<i64, _>("mic_presence") != 0)
+            .unwrap_or(false),
+        mic_sensitivity: cfg.as_ref().and_then(|r| r.get("mic_sensitivity")),
     })
     .into_response()
 }
@@ -348,6 +361,12 @@ struct KioskRow {
     /// Per-hour display plan (24 chars of W/S/A, mig 0059) — see `PUT …/plan`.
     /// Null = no plan painted; the legacy sleep window + presence flag govern.
     hour_modes: Option<String>,
+    /// Microphone presence (mig 0061): the kiosk's mic doubles as a room
+    /// occupancy sensor (level-only, computed on-device).
+    mic_presence: bool,
+    mic_sensitivity: Option<String>,
+    /// Last reported sound level (dBFS) — telemetry for the Clients view.
+    mic_level: Option<f64>,
 }
 
 /// `GET /api/kiosks` (session) — the clients view: every registered kiosk with
@@ -359,6 +378,7 @@ async fn list(State(state): State<Arc<AppState>>, _: Session) -> impl IntoRespon
                 presence_enabled, presence_timeout_secs,
                 battery_level, battery_charging, battery_voltage_mv, battery_current_ua,
                 battery_temp_dc, power_source, viewport_w, viewport_h, hour_modes,
+                mic_presence, mic_sensitivity, mic_level,
                 api_key_id IS NOT NULL AS authorized,
                 (last_seen > datetime('now', '-{ONLINE_WINDOW_SECS} seconds')) AS online
          FROM kiosks ORDER BY name"
@@ -394,6 +414,9 @@ async fn list(State(state): State<Arc<AppState>>, _: Session) -> impl IntoRespon
                     viewport_w: r.get("viewport_w"),
                     viewport_h: r.get("viewport_h"),
                     hour_modes: r.get("hour_modes"),
+                    mic_presence: r.get::<i64, _>("mic_presence") != 0,
+                    mic_sensitivity: r.get("mic_sensitivity"),
+                    mic_level: r.get("mic_level"),
                 })
                 .collect::<Vec<_>>(),
         )
@@ -522,6 +545,17 @@ async fn set_room(
         .await
     {
         Ok(r) if r.rows_affected() > 0 => {
+            // The kiosk's mic sensor (when present) follows its room.
+            if let Ok(Some(sensor_id)) = sqlx::query_scalar::<_, String>(
+                "SELECT id FROM sensor_devices WHERE provider_id = ? AND device_id = ?",
+            )
+            .bind(KIOSK_SENSOR_PROVIDER)
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await
+            {
+                sync_mic_sensor_room(&state.db, &sensor_id, req.room_id.as_deref()).await;
+            }
             state.occupancy_seen.poke();
             StatusCode::NO_CONTENT
         }
@@ -985,6 +1019,215 @@ pub async fn scheduler_tick(
     // Forget kiosks no longer governed, so re-enabling one reconciles it afresh.
     last_desired.retain(|id, _| governed.contains(id));
     last_present.retain(|id, _| governed.contains(id));
+}
+
+// ── Microphone presence: the kiosk mic as a room occupancy sensor ────────────
+
+/// The internal pseudo-provider that owns kiosk microphone sensors. One row in
+/// `providers` (type `kiosk`, seeded on first use) so the sensors are REAL
+/// `sensor_devices` rows — room presence, the kiosk scheduler, automations,
+/// SSE, and the Devices page all see them through the existing machinery.
+pub const KIOSK_SENSOR_PROVIDER: &str = "kiosk-sensors";
+
+/// Idempotently seed the pseudo-provider row and its manager-less sensor push
+/// channel (`ConnectionRegistry::ensure_sensor_push_channel`). Called lazily by
+/// the mic endpoints and at startup, so readings always have a pipeline.
+pub async fn ensure_kiosk_sensor_channel(state: &Arc<AppState>) {
+    let enc = state.encrypt_credentials("{}").unwrap_or_default();
+    let _ = sqlx::query(
+        "INSERT OR IGNORE INTO providers (id, provider_type, name, credentials)
+         VALUES (?, 'kiosk', 'Kiosk sensors', ?)",
+    )
+    .bind(KIOSK_SENSOR_PROVIDER)
+    .bind(&enc)
+    .execute(&state.db)
+    .await;
+    let mut connections = state.connections.lock().await;
+    connections.ensure_sensor_push_channel(
+        KIOSK_SENSOR_PROVIDER.to_string(),
+        state.db.clone(),
+        state.occupancy_seen.clone(),
+    );
+}
+
+/// Point a kiosk's mic sensor at its kiosk's room (direct assignment; the
+/// membership moves whenever the kiosk is reassigned).
+async fn sync_mic_sensor_room(db: &sqlx::SqlitePool, sensor_id: &str, room_id: Option<&str>) {
+    let _ = sqlx::query("DELETE FROM room_sensor_devices WHERE sensor_device_id = ?")
+        .bind(sensor_id)
+        .execute(db)
+        .await;
+    if let Some(room_id) = room_id {
+        let _ = sqlx::query(
+            "INSERT OR IGNORE INTO room_sensor_devices (room_id, sensor_device_id) VALUES (?, ?)",
+        )
+        .bind(room_id)
+        .bind(sensor_id)
+        .execute(db)
+        .await;
+    }
+}
+
+#[derive(Deserialize)]
+struct SetMicRequest {
+    /// Turn the mic occupancy sensor on/off for this kiosk.
+    enabled: bool,
+    /// low | medium | high. Omitted = keep the stored value.
+    #[serde(default)]
+    sensitivity: Option<String>,
+}
+
+/// `PUT /api/kiosks/{id}/mic` (session) — enable/disable microphone presence.
+/// Enabling creates the kiosk's `sensor_devices` row (kind `occupancy`) under
+/// [`KIOSK_SENSOR_PROVIDER`] and assigns it to the kiosk's room; disabling
+/// removes it (membership cascades). The app itself picks the change up on its
+/// next check-in and starts/stops the on-device level monitor.
+async fn set_mic(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+    Json(req): Json<SetMicRequest>,
+) -> impl IntoResponse {
+    if let Some(sens) = req.sensitivity.as_deref()
+        && !["low", "medium", "high"].contains(&sens)
+    {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "sensitivity must be low, medium, or high",
+        )
+            .into_response();
+    }
+    let row = sqlx::query("SELECT name, room_id FROM kiosks WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await;
+    let (kiosk_name, room_id): (String, Option<String>) = match row {
+        Ok(Some(r)) => (r.get("name"), r.get("room_id")),
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("db error reading kiosk: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let _ = sqlx::query(
+        "UPDATE kiosks SET mic_presence = ?, mic_sensitivity = COALESCE(?, mic_sensitivity)
+         WHERE id = ?",
+    )
+    .bind(i64::from(req.enabled))
+    .bind(&req.sensitivity)
+    .bind(&id)
+    .execute(&state.db)
+    .await;
+
+    if req.enabled {
+        ensure_kiosk_sensor_channel(&state).await;
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM sensor_devices WHERE provider_id = ? AND device_id = ?",
+        )
+        .bind(KIOSK_SENSOR_PROVIDER)
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+        let sensor_id = match existing {
+            Some(sid) => sid,
+            None => {
+                let sid = Uuid::new_v4().to_string();
+                let name = format!("{kiosk_name} sound");
+                let initial =
+                    serde_json::to_string(&crate::models::sensor::SensorState::boolean(false))
+                        .unwrap_or_default();
+                let _ = sqlx::query(
+                    "INSERT INTO sensor_devices (id, provider_id, device_id, name, provider_name, kind, last_state, last_seen)
+                     VALUES (?, ?, ?, ?, ?, 'occupancy', ?, datetime('now'))",
+                )
+                .bind(&sid)
+                .bind(KIOSK_SENSOR_PROVIDER)
+                .bind(&id)
+                .bind(&name)
+                .bind(&name)
+                .bind(&initial)
+                .execute(&state.db)
+                .await;
+                sid
+            }
+        };
+        sync_mic_sensor_room(&state.db, &sensor_id, room_id.as_deref()).await;
+    } else {
+        // Membership rows cascade with the sensor.
+        let _ = sqlx::query("DELETE FROM sensor_devices WHERE provider_id = ? AND device_id = ?")
+            .bind(KIOSK_SENSOR_PROVIDER)
+            .bind(&id)
+            .execute(&state.db)
+            .await;
+    }
+    // Either direction changes what counts toward the room's occupancy.
+    state.occupancy_seen.poke();
+    crate::api::notify_inventory(&state, "sensor_devices");
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct NoiseRequest {
+    /// The on-device verdict: sound level is elevated above the ambient baseline.
+    elevated: bool,
+    /// Current level (dBFS) — telemetry only, shown on the Clients view.
+    #[serde(default)]
+    level: Option<f64>,
+}
+
+/// `POST /api/kiosks/self/noise` — the kiosk app reports an elevated/quiet edge
+/// (same `bfr_key` cookie auth as `/self`). The reading is injected into the
+/// shared sensor pipeline (persist → journal → occupancy poke → automations →
+/// SSE) via the pseudo-provider's push channel — never a parallel path. A
+/// report for a kiosk whose mic is disabled is dropped (a stale app config
+/// between check-ins, not an error).
+async fn report_noise(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<NoiseRequest>,
+) -> impl IntoResponse {
+    let Some(key) = crate::api::auth::kiosk_cookie_key(&headers) else {
+        return StatusCode::UNAUTHORIZED;
+    };
+    let Some(key_id) = crate::api::apikeys::validate_key(&state, &key).await else {
+        return StatusCode::UNAUTHORIZED;
+    };
+    let row = sqlx::query("SELECT id, mic_presence FROM kiosks WHERE api_key_id = ?")
+        .bind(&key_id)
+        .fetch_optional(&state.db)
+        .await;
+    let (kiosk_id, mic_on): (String, bool) = match row {
+        Ok(Some(r)) => (r.get("id"), r.get::<i64, _>("mic_presence") != 0),
+        Ok(None) => return StatusCode::NOT_FOUND,
+        Err(e) => {
+            tracing::error!("db error resolving kiosk: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    };
+    if let Some(level) = req.level {
+        let _ = sqlx::query("UPDATE kiosks SET mic_level = ? WHERE id = ?")
+            .bind(level)
+            .bind(&kiosk_id)
+            .execute(&state.db)
+            .await;
+    }
+    if !mic_on {
+        return StatusCode::NO_CONTENT;
+    }
+    ensure_kiosk_sensor_channel(&state).await;
+    let sender = {
+        let connections = state.connections.lock().await;
+        connections.sensor_sender(KIOSK_SENSOR_PROVIDER)
+    };
+    if let Some(tx) = sender {
+        let _ = tx.send(crate::connection::SensorEvent {
+            device_id: kiosk_id,
+            state: crate::models::sensor::SensorState::boolean(req.elevated),
+        });
+    }
+    StatusCode::NO_CONTENT
 }
 
 /// `POST /api/kiosks/{id}/deauth` (session) — revoke the kiosk's API key. Its

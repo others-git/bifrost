@@ -1704,6 +1704,13 @@ export interface Kiosk {
   /** Per-hour display plan (24 chars of W/S/A; see setKioskPlan). Null = no
    * plan painted yet — the legacy sleep window + presence flag govern. */
   hour_modes: string | null;
+  /** Microphone presence: the kiosk's mic doubles as a room occupancy sensor
+   * (sound LEVEL computed on-device; no audio leaves the tablet). */
+  mic_presence: boolean;
+  /** low | medium | high (null = medium). */
+  mic_sensitivity: string | null;
+  /** Last reported sound level (dBFS) — live telemetry. */
+  mic_level: number | null;
 }
 
 /** Report this client's CSS viewport to the hub (kiosk WebView only — auth'd by
@@ -1780,6 +1787,20 @@ export async function setKioskPresence(
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(presence),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+}
+
+/** Enable/disable microphone presence for a kiosk (and set its sensitivity).
+ * Enabling mints a real occupancy sensor assigned to the kiosk's room. */
+export async function setKioskMic(
+  id: string,
+  mic: { enabled: boolean; sensitivity?: string },
+): Promise<void> {
+  const res = await fetch(`/api/kiosks/${id}/mic`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(mic),
   });
   if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
 }

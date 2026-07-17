@@ -10671,6 +10671,202 @@ async fn room_power_membership_roundtrips_and_lists() {
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
+/// Kiosk microphone presence, end to end through the shared sensor pipeline:
+/// enabling the mic mints a real occupancy sensor assigned to the kiosk's room;
+/// a noise edge posted by the kiosk flips the ROOM's occupancy (persist →
+/// occupancy recompute all ride the same writer task as any provider); moving
+/// the kiosk moves the sensor's membership; disabling removes the sensor.
+#[tokio::test]
+async fn kiosk_mic_becomes_a_room_occupancy_sensor() {
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "wall tablet").await;
+
+    // Register the kiosk and give it a room.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/kiosks/checkin")
+                .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let kiosks = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let kiosk_id = kiosks[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(kiosks[0]["mic_presence"], false);
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/rooms",
+            &cookie,
+            r#"{"name":"Den","light_ids":[]}"#,
+        ))
+        .await
+        .unwrap();
+    let room_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/kiosks/{kiosk_id}/room"),
+            &cookie,
+            &format!(r#"{{"room_id":"{room_id}"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Enable the mic: a real occupancy sensor appears, assigned to the room.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/kiosks/{kiosk_id}/mic"),
+            &cookie,
+            r#"{"enabled":true,"sensitivity":"high"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let (sensor_id, kind): (String, String) = sqlx::query_as(
+        "SELECT id, kind FROM sensor_devices WHERE provider_id = 'kiosk-sensors' AND device_id = ?",
+    )
+    .bind(&kiosk_id)
+    .fetch_one(&state.db)
+    .await
+    .expect("mic sensor row must exist");
+    assert_eq!(kind, "occupancy");
+    let member_room: Option<String> =
+        sqlx::query_scalar("SELECT room_id FROM room_sensor_devices WHERE sensor_device_id = ?")
+            .bind(&sensor_id)
+            .fetch_optional(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(member_room.as_deref(), Some(room_id.as_str()));
+    let kiosks = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(kiosks[0]["mic_presence"], true);
+    assert_eq!(kiosks[0]["mic_sensitivity"], "high");
+
+    // The kiosk reports an elevated edge → the ROOM reads occupied (the event
+    // rides the shared writer pipeline, so poll for the async persist).
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/kiosks/self/noise")
+                .header(header::COOKIE, format!("bfr_key={key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"elevated":true,"level":-21.5}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let mut occupied = false;
+    for _ in 0..200 {
+        let rooms = helpers::response_json(
+            app.clone()
+                .oneshot(helpers::authed_get("/api/rooms", &cookie))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let room = rooms
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == room_id.as_str())
+            .unwrap()
+            .clone();
+        if room["occupancy"] == true {
+            occupied = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(occupied, "an elevated noise edge must flip room occupancy");
+    let kiosks = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(kiosks[0]["mic_level"], -21.5);
+
+    // Unassigning the kiosk's room moves the sensor's membership with it.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/kiosks/{kiosk_id}/room"),
+            &cookie,
+            r#"{"room_id":null}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let member_room: Option<String> =
+        sqlx::query_scalar("SELECT room_id FROM room_sensor_devices WHERE sensor_device_id = ?")
+            .bind(&sensor_id)
+            .fetch_optional(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(member_room, None);
+
+    // Disable: the sensor row (and any membership) is gone; junk sensitivity 422s.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/kiosks/{kiosk_id}/mic"),
+            &cookie,
+            r#"{"enabled":false}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let remaining: Option<String> =
+        sqlx::query_scalar("SELECT id FROM sensor_devices WHERE provider_id = 'kiosk-sensors'")
+            .fetch_optional(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(remaining, None);
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/kiosks/{kiosk_id}/mic"),
+            &cookie,
+            r#"{"enabled":true,"sensitivity":"eleven"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
 #[tokio::test]
 async fn room_sensor_membership_and_presence_opt_out_roundtrip() {
     let ha = ha_remote_mock().await;

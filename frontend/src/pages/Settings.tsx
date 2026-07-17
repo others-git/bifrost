@@ -38,6 +38,7 @@ import {
   setKioskRoom,
   setKioskBoard,
   setKioskPlan,
+  setKioskMic,
   type KioskHourMode,
   getDashboards,
   forgetKiosk,
@@ -73,7 +74,7 @@ import { ThemeSwitcher } from "../components/ThemeSwitcher";
 import { Select } from "../components/Select";
 import { useViewport } from "../useViewport";
 import { ACCENT, S, pageShell, tileGrid } from "../styles";
-import { Button, Switch } from "../components/controls";
+import { Button, Segmented, Switch } from "../components/controls";
 import { alpha, color } from "../theme";
 import { Glyph } from "../components/glyphs";
 import { speak } from "../tts";
@@ -2782,10 +2783,61 @@ function KiosksSection({
               )}
             </div>
             <KioskDisplayPlan k={k} dialogs={dialogs} onSaved={load} />
+            <KioskMicPresence k={k} onSaved={load} />
           </div>
         ))}
       </div>
     </section>
+  );
+}
+
+// ── Kiosk microphone presence ─────────────────────────────────────────────────
+
+/** The kiosk's always-on mic as a room occupancy sensor. Level-only by design:
+ * the app computes loudness on-device against an adaptive ambient baseline and
+ * reports elevated/quiet edges — audio never leaves the tablet. Enabling mints
+ * a real occupancy sensor assigned to the kiosk's room (visible on Devices and
+ * in the room's Presence section like any other sensor). */
+function KioskMicPresence({ k, onSaved }: { k: Kiosk; onSaved: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const set = async (enabled: boolean, sensitivity?: string) => {
+    setBusy(true);
+    try {
+      await setKioskMic(k.id, { enabled, ...(sensitivity ? { sensitivity } : {}) });
+      onSaved();
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "0.6rem", marginTop: "0.55rem" }}>
+      <span style={{ fontSize: "0.74rem", color: "var(--bf-dim)" }}>Mic presence</span>
+      <Switch on={k.mic_presence} disabled={busy} onChange={(v) => set(v)} />
+      {k.mic_presence && (
+        <>
+          <Segmented
+            value={k.mic_sensitivity ?? "medium"}
+            onChange={(v) => set(true, v)}
+            options={[
+              { value: "low", label: "Low" },
+              { value: "medium", label: "Med" },
+              { value: "high", label: "High" },
+            ]}
+          />
+          {k.mic_level != null && (
+            <span
+              title="Last reported sound level (dBFS)"
+              style={{ fontSize: "0.72rem", color: "var(--bf-dim)", fontVariantNumeric: "tabular-nums" }}
+            >
+              {Math.round(k.mic_level)} dB
+            </span>
+          )}
+        </>
+      )}
+      <span style={{ fontSize: "0.66rem", color: "var(--bf-faint)" }}>
+        Sound level only — audio never leaves the tablet.
+      </span>
+    </div>
   );
 }
 

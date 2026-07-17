@@ -942,6 +942,53 @@ impl ConnectionRegistry {
         );
     }
 
+    /// A manager-less **sensor push channel**: no poll loop, no upstream
+    /// connection — events are fed by an HTTP endpoint (the kiosk microphone
+    /// sensors) via [`sensor_sender`](Self::sensor_sender). The channel exists
+    /// so pushed readings ride the IDENTICAL pipeline as any provider's
+    /// (`sensor_db_writer_task`: persist → journal → occupancy poke, plus the
+    /// automation engine and `/api/events` SSE via `subscribe_all_sensor`) —
+    /// never a parallel path. Idempotent: an existing entry is left untouched.
+    pub fn ensure_sensor_push_channel(
+        &mut self,
+        provider_id: String,
+        db: SqlitePool,
+        occupancy: crate::api::rooms::OccupancySeen,
+    ) {
+        if self.entries.contains_key(&provider_id) {
+            return;
+        }
+        let (sensor_events, _) = broadcast::channel(64);
+        let sensor_db = tokio::spawn(sensor_db_writer_task(
+            sensor_events.subscribe(),
+            provider_id.clone(),
+            db,
+            occupancy,
+        ));
+        self.entries.insert(
+            provider_id,
+            ConnectionEntry {
+                state: Arc::new(RwLock::new(ConnectionState::Connected {
+                    since: Instant::now(),
+                    last_event: Instant::now(),
+                })),
+                events: broadcast::channel(8).0,
+                media_events: None,
+                power_events: None,
+                sensor_events: Some(sensor_events),
+                tasks: vec![sensor_db],
+            },
+        );
+    }
+
+    /// The sensor push sender for a provider entry, if it has one — how the
+    /// kiosk noise endpoint injects readings into the shared pipeline.
+    pub fn sensor_sender(&self, provider_id: &str) -> Option<broadcast::Sender<SensorEvent>> {
+        self.entries
+            .get(provider_id)
+            .and_then(|e| e.sensor_events.clone())
+    }
+
     /// Abort tasks for the given provider. No-op if not managed.
     pub fn stop(&mut self, provider_id: &str) {
         self.entries.remove(provider_id); // Drop aborts the tasks.
