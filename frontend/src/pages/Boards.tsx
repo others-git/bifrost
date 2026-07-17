@@ -149,6 +149,7 @@ function Plate({
           the arms jut past the line at each corner — the "spiked corner". */}
       <span
         aria-hidden
+        className="bf-plate-chrome"
         style={{
           position: "absolute",
           inset: 3.5,
@@ -165,7 +166,11 @@ function Plate({
           pointerEvents: "none",
         }}
       />
-      <CornerFiligree colors={on ? hexes : undefined} />
+      {/* display:contents wrapper: the filigree's corners keep positioning
+          against the plate, but the chrome-hiding rule can reach them. */}
+      <span className="bf-plate-chrome" style={{ display: "contents" }}>
+        <CornerFiligree colors={on ? hexes : undefined} />
+      </span>
       {children}
     </Tag>
   );
@@ -180,7 +185,7 @@ const GAP = 8;
 // Fixed row height only for the phone fallback's stacked, view-only list.
 const ROW_H = 42;
 
-type WidgetType = "room" | "device" | "button" | "group" | "now_playing" | "scene" | "control" | "sensor" | "weather" | "clock" | "label" | "exit";
+type WidgetType = "room" | "device" | "button" | "group" | "now_playing" | "scene" | "control" | "sensor" | "device_status" | "weather" | "clock" | "label" | "exit";
 
 // The kiosk-exit control is a special built-in widget: present on every board,
 // movable (positioned in edit mode) but not user-addable or removable. It renders
@@ -760,7 +765,7 @@ const PREVIEW_PRESETS: { label: string; w: number; h: number }[] = [
  * `cqmin`, the label via its own cqmin font) — so BoardGrid must NOT apply the
  * canvas `zoom` to them, or they'd double-scale. Everything else is a fixed-px
  * shared Control component that needs the zoom. */
-const SELF_SCALING_WIDGETS = new Set(["clock", "sensor", "weather", "now_playing", "label"]);
+const SELF_SCALING_WIDGETS = new Set(["clock", "sensor", "device_status", "weather", "now_playing", "label"]);
 
 /** The canvas width the fixed-px widgets were sized against (a typical desktop
  * board canvas). `contentZoom = canvasW / this`, so a board looks identically
@@ -1244,6 +1249,9 @@ function WidgetBox({
           // double-scaling.
           ...(SELF_SCALING_WIDGETS.has(w.type) ? {} : { zoom: contentZoom }),
         }}
+        // Frameless widgets: hides the plate's ring + corner filigree (the
+        // chrome carries .bf-plate-chrome) — content and glow stay.
+        {...((w.config as Record<string, unknown> | undefined)?.hide_border ? { "data-plateless": "" } : {})}
       >
         {children}
       </div>
@@ -1320,6 +1328,7 @@ function WidgetContent({
   const cfg = (w.config ?? {}) as Record<string, unknown>;
 
   if (w.type === "sensor") return <SensorWidget cfg={cfg} generic={generic} />;
+  if (w.type === "device_status") return <DeviceStatusWidget cfg={cfg} generic={generic} />;
   if (w.type === "weather") return <WeatherWidget cfg={cfg} generic={generic} />;
 
   if (w.type === "room") {
@@ -2009,21 +2018,426 @@ function RoomWidget({
 }
 
 
-/** A sensor readout tile — a live value (temperature, humidity, …) from a generic
- * device's control. `cfg.provider_id`/`cfg.device_id`/`cfg.key`. */
+// ── Sensor readout displays ───────────────────────────────────────────────────
+
+/** How urgent a reading is against its configured thresholds. `bad_direction`
+ * says which way trouble lies: a waste drawer alarms HIGH (filling up), a
+ * litter reservoir alarms LOW (running out). */
+type Severity = "none" | "warn" | "alert";
+function sensorSeverity(v: number | null, cfg: Record<string, unknown>): Severity {
+  if (v === null) return "none";
+  const high = (cfg.bad_direction as string) !== "low";
+  const trips = (t: unknown) => typeof t === "number" && (high ? v >= t : v <= t);
+  if (trips(cfg.alert_at)) return "alert";
+  if (trips(cfg.warn_at)) return "warn";
+  return "none";
+}
+const SEVERITY_ACCENT: Record<Severity, string> = {
+  none: color.gold,
+  warn: color.goldBright,
+  alert: color.rose,
+};
+
+/** Numeric parse + display formatting for a readout value. `decimals` pins the
+ * precision; default trims float noise ("90.0" → "90"). */
+function sensorNumber(v: unknown): number | null {
+  const n = typeof v === "number" ? v : typeof v === "string" ? parseFloat(v) : NaN;
+  return Number.isFinite(n) ? n : null;
+}
+function formatReading(v: unknown, decimals: unknown): string {
+  if (v === undefined || v === null) return "—";
+  if (typeof v === "boolean") return v ? "On" : "Off";
+  const n = sensorNumber(v);
+  if (n === null) return String(v);
+  return typeof decimals === "number" ? n.toFixed(decimals) : String(n);
+}
+/** 0..1 fill fraction for gauges/vials/bars; % units default to a 0–100 range. */
+function sensorFraction(n: number | null, cfg: Record<string, unknown>): number | null {
+  if (n === null) return null;
+  const min = typeof cfg.min === "number" ? cfg.min : 0;
+  const max = typeof cfg.max === "number" ? cfg.max : 100;
+  if (max <= min) return null;
+  return Math.max(0, Math.min(1, (n - min) / (max - min)));
+}
+
+/** Engraved arc meter: a faint 270° track with a glowing accent sweep. Sizes
+ * to the tile via cqmin by default; pass `width` (px) for compact card cells —
+ * px picks up the canvas contentZoom automatically. */
+function GaugeArc({
+  frac,
+  accent,
+  value,
+  unit,
+  width = "clamp(56px, 62cqmin, 180px)",
+  valueSize = "clamp(0.9rem, 16cqmin, 2.2rem)",
+}: {
+  frac: number;
+  accent: string;
+  value: string;
+  unit?: string | null;
+  width?: string;
+  valueSize?: string;
+}) {
+  const R = 40;
+  const C = 2 * Math.PI * R;
+  const SWEEP = 0.75; // 270°
+  return (
+    <div style={{ position: "relative", width, aspectRatio: "1" }}>
+      <svg viewBox="0 0 100 100" style={{ width: "100%", height: "100%", transform: "rotate(135deg)" }}>
+        <circle cx="50" cy="50" r={R} fill="none" stroke={T.hairline} strokeWidth="5" strokeLinecap="butt"
+          strokeDasharray={`${C * SWEEP} ${C}`} />
+        <circle cx="50" cy="50" r={R} fill="none" stroke={accent} strokeWidth="5" strokeLinecap="butt"
+          strokeDasharray={`${C * SWEEP * frac} ${C}`}
+          style={{ filter: `drop-shadow(0 0 6px ${alpha(accent, 0.7)})`, transition: "stroke-dasharray 0.6s ease" }} />
+      </svg>
+      <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center" }}>
+        <span style={{ fontSize: valueSize, fontWeight: 600, color: T.text, fontVariantNumeric: "tabular-nums" }}>
+          {value}
+          {unit && <span style={{ fontSize: "0.55em", color: T.dim, marginLeft: 1 }}>{unit}</span>}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/** Engraved quarter-mark lines at 25/50/75 across a fill vessel — the gauge
+ * graduations. Dark notches so they read over both the luminous fill and the
+ * empty track. `vertical` = lines run horizontally (a vial's depth marks). */
+function QuarterMarks({ vertical }: { vertical: boolean }) {
+  return (
+    <>
+      {[25, 50, 75].map((p) => (
+        <span
+          key={p}
+          aria-hidden
+          style={{
+            position: "absolute",
+            background: "rgba(0,0,0,0.55)",
+            ...(vertical
+              ? { left: 0, right: 0, height: 1, top: `${p}%` }
+              : { top: 0, bottom: 0, width: 1, left: `${p}%` }),
+          }}
+        />
+      ))}
+    </>
+  );
+}
+
+/** Reservoir vessel: a SQUARE inset vial filling with luminous accent from
+ * below, quarter-marked. No numeral — the fill against the graduations IS the
+ * reading. Sized by the caller (fills its block, so widget size drives it). */
+function Vial({
+  frac,
+  accent,
+  width = "100%",
+  height = "100%",
+}: {
+  frac: number;
+  accent: string;
+  width?: string;
+  height?: string;
+}) {
+  return (
+    <div
+      style={{
+        position: "relative",
+        width,
+        height,
+        borderRadius: radius.frame,
+        border: `1px solid ${T.hairline}`,
+        background: color.surfaceOff,
+        boxShadow: "inset 0 2px 8px rgba(0,0,0,0.6)",
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          position: "absolute",
+          left: 0,
+          right: 0,
+          bottom: 0,
+          height: `${frac * 100}%`,
+          background: `linear-gradient(180deg, ${alpha(accent, 0.9)}, ${alpha(accent, 0.55)})`,
+          boxShadow: `0 0 14px ${alpha(accent, 0.8)}`,
+          borderTop: `1px solid ${alpha("#ffffff", 0.35)}`,
+          transition: "height 0.6s ease",
+        }}
+      />
+      <QuarterMarks vertical />
+    </div>
+  );
+}
+
+/** Horizontal fill trough: square, quarter-marked, no numeral — like [Vial]
+ * turned on its side. Fills the caller's block. */
+function BarFill({ frac, accent, height = "100%" }: { frac: number; accent: string; height?: string }) {
+  return (
+    <div
+      style={{
+        position: "relative",
+        width: "100%",
+        height,
+        borderRadius: radius.frame,
+        border: `1px solid ${T.hairline}`,
+        background: color.surfaceOff,
+        boxShadow: "inset 0 1px 4px rgba(0,0,0,0.6)",
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          position: "absolute",
+          left: 0,
+          top: 0,
+          bottom: 0,
+          width: `${frac * 100}%`,
+          background: `linear-gradient(90deg, ${alpha(accent, 0.55)}, ${alpha(accent, 0.95)})`,
+          boxShadow: `0 0 12px ${alpha(accent, 0.8)}`,
+          borderRight: `1px solid ${alpha("#ffffff", 0.35)}`,
+          transition: "width 0.6s ease",
+        }}
+      />
+      <QuarterMarks vertical={false} />
+    </div>
+  );
+}
+
+/** A sensor readout tile — a live value (levels, weights, states, …) from a
+ * generic device's control, in a configurable display style: `number` (big
+ * figure), `gauge` (arc meter), `vial` (vertical vessel), `bar` (horizontal
+ * fill), `state` (glyph + word). Optional thresholds escalate the accent
+ * (gold → bright gold → rose) and the plate's bloom, so a full waste drawer
+ * shouts across the room. `cfg.provider_id`/`device_id`/`key` + display opts. */
 function SensorWidget({ cfg, generic }: { cfg: Record<string, unknown>; generic: GenericDevice[] }) {
   const dev = generic.find((d) => d.provider_id === cfg.provider_id && d.device_id === cfg.device_id);
   const ctrl = dev?.controls.find((c) => c.key === cfg.key);
   const label = (cfg.name as string) || ctrl?.label || dev?.name || "Sensor";
   const v = ctrl?.value;
-  const display = v === undefined || v === null ? "—" : typeof v === "boolean" ? (v ? "On" : "Off") : String(v);
+  const n = sensorNumber(v);
+  const shown = formatReading(v, cfg.decimals);
+  const severity = sensorSeverity(n, cfg);
+  const accent = SEVERITY_ACCENT[severity];
+  const frac = sensorFraction(n, cfg);
+  const style = (cfg.display as string) ?? "number";
+  const plate = {
+    accents: [accent],
+    on: severity !== "none",
+    charge: severity === "alert" ? 1 : 0.55,
+  };
+  const labelEl = (
+    <div style={{ ...ELLIPSIS, maxWidth: "100%", fontSize: "clamp(0.68rem, 7cqmin, 1.2rem)", color: T.dim }}>{label}</div>
+  );
+
+  if (style === "gauge" && frac !== null) {
+    return (
+      <Plate {...plate} style={{ alignItems: "center", justifyContent: "center", gap: "0.15rem" }}>
+        <GaugeArc frac={frac} accent={accent} value={shown} unit={ctrl?.unit} />
+        {labelEl}
+      </Plate>
+    );
+  }
+  if (style === "vial" && frac !== null) {
+    // Name on top; the vessel fills the rest of the tile — the fill against
+    // the quarter marks IS the reading, no numeral.
+    return (
+      <Plate {...plate} style={{ alignItems: "center", gap: "clamp(0.2rem, 3cqmin, 0.6rem)" }}>
+        {labelEl}
+        <div style={{ position: "relative", flex: 1, minHeight: 0, width: "min(45cqw, 85%)", paddingBottom: "clamp(4px, 2cqmin, 10px)" }}>
+          <Vial frac={frac} accent={accent} />
+        </div>
+      </Plate>
+    );
+  }
+  if (style === "bar" && frac !== null) {
+    return (
+      <Plate {...plate} style={{ gap: "clamp(0.2rem, 3cqmin, 0.6rem)", padding: "clamp(8px, 8cqmin, 22px)" }}>
+        {labelEl}
+        <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
+          <BarFill frac={frac} accent={accent} />
+        </div>
+      </Plate>
+    );
+  }
+  if (style === "state") {
+    const lit = v !== undefined && v !== null && String(v).toLowerCase() !== "off" && v !== false;
+    return (
+      <Plate accents={[accent]} on={lit} charge={0.7} style={{ alignItems: "center", justifyContent: "center", gap: "0.2rem" }}>
+        <span style={{ color: lit ? accent : T.dim, fontSize: "clamp(18px, 30cqmin, 64px)", lineHeight: 0 }}>
+          <Glyph name={(cfg.glyph as string) || "value"} size="1em" />
+        </span>
+        <span style={{ fontSize: "clamp(0.8rem, 11cqmin, 1.6rem)", fontWeight: 600, color: T.text, textTransform: "capitalize" }}>{shown}</span>
+        {labelEl}
+      </Plate>
+    );
+  }
+  // Default: the big engraved number.
   return (
-    <Plate accents={[color.gold]} style={{ alignItems: "center", justifyContent: "center", gap: "0.1rem" }}>
+    <Plate {...plate} style={{ alignItems: "center", justifyContent: "center", gap: "0.1rem" }}>
       <div style={{ fontSize: "clamp(1.3rem, 24cqmin, 4rem)", fontWeight: 600, color: T.text, fontVariantNumeric: "tabular-nums", lineHeight: 1.1 }}>
-        {display}
+        {shown}
         {ctrl?.unit && <span style={{ fontSize: "0.5em", color: T.dim, marginLeft: 2 }}>{ctrl.unit}</span>}
       </div>
-      <div style={{ ...ELLIPSIS, maxWidth: "100%", fontSize: "clamp(0.68rem, 7cqmin, 1.2rem)", color: T.dim }}>{label}</div>
+      {labelEl}
+    </Plate>
+  );
+}
+
+/** One reading's config inside a device status card — the full sensor-tile
+ * option set, per reading. */
+type ReadingCfg = {
+  key: string;
+  display?: string; // auto (default) | number | gauge | vial | bar | state
+  warn_at?: number;
+  alert_at?: number;
+  bad_direction?: string;
+  min?: number;
+  max?: number;
+  decimals?: number;
+};
+
+/** A device status card — one plate for a generic device composing a chosen
+ * set of its readouts, each in its own display style with its own alert
+ * thresholds. Cells scale with the TILE (cqmin) so the card fills its space:
+ * gauges/vials/stat-blocks flow side by side, bars span full rows. The plate's
+ * accent + bloom escalate with the WORST reading's severity, so one critical
+ * level lights the whole card. `cfg.readings` (legacy `cfg.keys` = defaults). */
+function DeviceStatusWidget({ cfg, generic }: { cfg: Record<string, unknown>; generic: GenericDevice[] }) {
+  const dev = generic.find((d) => d.provider_id === cfg.provider_id && d.device_id === cfg.device_id);
+  if (!dev) return <div style={{ ...CENTER, color: T.faint, fontSize: "0.75rem" }}>Device unavailable</div>;
+  const readings: ReadingCfg[] =
+    (cfg.readings as ReadingCfg[]) ?? ((cfg.keys as string[]) ?? []).map((key) => ({ key }));
+  const items = readings
+    .map((rc) => ({ rc, ctrl: dev.controls.find((c) => c.key === rc.key) }))
+    .filter((x): x is { rc: ReadingCfg; ctrl: NonNullable<typeof x.ctrl> } => !!x.ctrl);
+
+  const rank: Record<Severity, number> = { none: 0, warn: 1, alert: 2 };
+  // Object holder rather than a `let`: TS control-flow narrowing doesn't track
+  // assignments made inside the map callback below.
+  const acc = { worst: "none" as Severity };
+  const blocks = items.map(({ rc, ctrl }) => {
+    const n = sensorNumber(ctrl.value);
+    const sev = sensorSeverity(n, rc as unknown as Record<string, unknown>);
+    if (rank[sev] > rank[acc.worst]) acc.worst = sev;
+    const accent = SEVERITY_ACCENT[sev];
+    const frac = sensorFraction(n, rc as unknown as Record<string, unknown>);
+    const shown = formatReading(ctrl.value, rc.decimals);
+    const label = ctrl.label;
+    const display = rc.display ?? (frac !== null && ctrl.unit === "%" ? "gauge" : "number");
+    const labelEl = (
+      <span style={{ ...ELLIPSIS, maxWidth: "100%", color: T.dim, fontSize: "clamp(0.68rem, 5cqmin, 1.05rem)" }}>{label}</span>
+    );
+    const valueEl = (extra?: React.CSSProperties) => (
+      <span style={{ color: T.text, fontWeight: 600, fontVariantNumeric: "tabular-nums", fontSize: "clamp(1rem, 10cqmin, 2.2rem)", ...extra }}>
+        {shown}
+        {ctrl.unit && <span style={{ fontSize: "0.55em", color: T.dim, marginLeft: 2 }}>{ctrl.unit}</span>}
+      </span>
+    );
+
+    // Every block is a GRID cell (see the container below): definite height,
+    // so fill vessels have real space to fill. Bars span the full row width.
+    const cell: React.CSSProperties = {
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      minHeight: 0,
+      minWidth: 0,
+      height: "100%",
+      gap: "clamp(2px, 1cqmin, 6px)",
+    };
+    if (display === "bar" && frac !== null) {
+      return (
+        <div key={rc.key} style={{ ...cell, alignItems: "stretch", gridColumn: "1 / -1" }}>
+          {labelEl}
+          <div style={{ position: "relative", flex: 1, minHeight: "clamp(12px, 5cqmin, 30px)" }}>
+            <BarFill frac={frac} accent={accent} />
+          </div>
+        </div>
+      );
+    }
+    if (display === "vial" && frac !== null) {
+      return (
+        <div key={rc.key} style={cell}>
+          {labelEl}
+          {/* Width is the CELL's share (card width / reading count) — the
+              widget size drives the instrument, not a fixed clamp. */}
+          <div style={{ position: "relative", flex: 1, minHeight: 0, width: "70%" }}>
+            <Vial frac={frac} accent={accent} />
+          </div>
+        </div>
+      );
+    }
+    if (display === "state") {
+      const lit = ctrl.value !== undefined && ctrl.value !== null && String(ctrl.value).toLowerCase() !== "off" && ctrl.value !== false;
+      return (
+        <div key={rc.key} style={{ ...cell, justifyContent: "center" }}>
+          <span style={{ color: lit ? accent : T.dim, fontSize: "clamp(18px, 12cqmin, 44px)", lineHeight: 0 }}>
+            <Glyph name="value" size="1em" />
+          </span>
+          <span style={{ color: T.text, fontWeight: 600, textTransform: "capitalize", fontSize: "clamp(0.8rem, 7cqmin, 1.4rem)" }}>{shown}</span>
+          {labelEl}
+        </div>
+      );
+    }
+    if (display === "gauge" && frac !== null) {
+      return (
+        <div key={rc.key} style={{ ...cell, justifyContent: "center" }}>
+          <GaugeArc
+            frac={frac}
+            accent={accent}
+            value={shown}
+            unit={ctrl.unit}
+            width="clamp(64px, 32cqmin, 210px)"
+            valueSize="clamp(0.85rem, 8cqmin, 1.8rem)"
+          />
+          {labelEl}
+        </div>
+      );
+    }
+    // number (and any frac-less fallback)
+    return (
+      <div key={rc.key} style={{ ...cell, justifyContent: "center" }}>
+        {valueEl({ fontSize: "clamp(1.1rem, 13cqmin, 2.6rem)" })}
+        {labelEl}
+      </div>
+    );
+  });
+
+  // Grid, not flex-wrap: fill vessels need a DEFINITE height, and a wrapped
+  // flex line's height collapses to its tallest auto-height item (the vials
+  // rendered as slivers). Equal 1fr rows split the card among bar rows and the
+  // shared row of everything else.
+  const sideBySide = items.filter(({ rc, ctrl }) => {
+    const d = rc.display ?? (ctrl.unit === "%" ? "gauge" : "number");
+    return d !== "bar";
+  }).length;
+  return (
+    <Plate
+      accents={[SEVERITY_ACCENT[acc.worst]]}
+      on={acc.worst !== "none"}
+      charge={acc.worst === "alert" ? 1 : 0.6}
+      style={{ gap: "clamp(4px, 2cqmin, 12px)" }}
+    >
+      {cfg.hide_name !== true && (
+        <span style={{ ...TILE_LABEL, color: T.text, position: "relative", fontSize: "clamp(0.68rem, 5cqmin, 1rem)" }}>
+          {(cfg.name as string) || dev.name}
+        </span>
+      )}
+      <div
+        style={{
+          position: "relative",
+          flex: 1,
+          minHeight: 0,
+          display: "grid",
+          gridTemplateColumns: `repeat(${Math.max(1, sideBySide)}, minmax(0, 1fr))`,
+          gridAutoRows: "minmax(0, 1fr)",
+          gap: "clamp(6px, 3cqmin, 18px)",
+          padding: "clamp(2px, 1.5cqmin, 10px)",
+          overflow: "hidden",
+        }}
+      >
+        {blocks.length === 0 && <span style={{ color: T.faint, fontSize: "0.75rem" }}>No readings chosen</span>}
+        {blocks}
+      </div>
     </Plate>
   );
 }
@@ -2216,7 +2630,7 @@ function WidgetEditorModal({
   generic,
   rooms,
   onClose,
-  onSave,
+  onSave: onSaveRaw,
 }: {
   existing: Widget | null;
   lights: Light[];
@@ -2263,6 +2677,24 @@ function WidgetEditorModal({
     cfg.provider_id && cfg.device_id ? `${cfg.provider_id}|${cfg.device_id}` : "",
   );
   const [sensorKey, setSensorKey] = useState<string>((cfg.key as string) ?? "");
+  // sensor display options (all optional; blank = default behaviour)
+  const [sensorDisplay, setSensorDisplay] = useState<string>((cfg.display as string) ?? "number");
+  const [sensorDecimals, setSensorDecimals] = useState<string>(cfg.decimals != null ? String(cfg.decimals) : "");
+  const [sensorMin, setSensorMin] = useState<string>(cfg.min != null ? String(cfg.min) : "");
+  const [sensorMax, setSensorMax] = useState<string>(cfg.max != null ? String(cfg.max) : "");
+  const [sensorWarn, setSensorWarn] = useState<string>(cfg.warn_at != null ? String(cfg.warn_at) : "");
+  const [sensorAlert, setSensorAlert] = useState<string>(cfg.alert_at != null ? String(cfg.alert_at) : "");
+  const [sensorBadDir, setSensorBadDir] = useState<string>((cfg.bad_direction as string) ?? "high");
+  // device status card: which readouts to show, each with its own display +
+  // alert config (legacy `keys` configs seed plain entries).
+  const [statusReadings, setStatusReadings] = useState<ReadingCfg[]>(
+    (cfg.readings as ReadingCfg[]) ?? ((cfg.keys as string[]) ?? []).map((key) => ({ key })),
+  );
+  const patchReading = (key: string, patch: Partial<ReadingCfg>) =>
+    setStatusReadings((cur) => cur.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+  const [statusHideName, setStatusHideName] = useState<boolean>(cfg.hide_name === true);
+  // Universal: render this widget frameless (no plate ring / filigree).
+  const [hideBorder, setHideBorder] = useState<boolean>(cfg.hide_border === true);
 
   // control
   const [control, setControl] = useState<RoomControl>(
@@ -2284,6 +2716,13 @@ function WidgetEditorModal({
 
   function save() {
     const nm = name.trim() || undefined;
+    // Every widget type saves through this wrapper so universal options
+    // (frameless) ride along without touching each branch.
+    const onSave = (spec: WidgetSpec) =>
+      onSaveRaw({
+        ...spec,
+        config: { ...(spec.config as Record<string, unknown>), ...(hideBorder ? { hide_border: true } : {}) },
+      });
     if (type === "room") {
       const id = roomId || rooms.find((r) => r.enabled)?.id;
       if (!id) return;
@@ -2314,7 +2753,40 @@ function WidgetEditorModal({
     } else if (type === "sensor") {
       const [pid, did] = sensorDev.split("|");
       if (!pid || !did || !sensorKey) return;
-      onSave({ type, config: { provider_id: pid, device_id: did, key: sensorKey, name: nm }, w: 8, h: 8 });
+      const num = (s: string) => (s.trim() === "" || Number.isNaN(Number(s)) ? undefined : Number(s));
+      onSave({
+        type,
+        config: {
+          provider_id: pid,
+          device_id: did,
+          key: sensorKey,
+          name: nm,
+          ...(sensorDisplay !== "number" ? { display: sensorDisplay } : {}),
+          ...(num(sensorDecimals) !== undefined ? { decimals: num(sensorDecimals) } : {}),
+          ...(num(sensorMin) !== undefined ? { min: num(sensorMin) } : {}),
+          ...(num(sensorMax) !== undefined ? { max: num(sensorMax) } : {}),
+          ...(num(sensorWarn) !== undefined ? { warn_at: num(sensorWarn) } : {}),
+          ...(num(sensorAlert) !== undefined ? { alert_at: num(sensorAlert) } : {}),
+          ...(sensorBadDir !== "high" ? { bad_direction: sensorBadDir } : {}),
+        },
+        w: 8,
+        h: 8,
+      });
+    } else if (type === "device_status") {
+      const [pid, did] = sensorDev.split("|");
+      if (!pid || !did || statusReadings.length === 0) return;
+      onSave({
+        type,
+        config: {
+          provider_id: pid,
+          device_id: did,
+          readings: statusReadings,
+          name: nm,
+          ...(statusHideName ? { hide_name: true } : {}),
+        },
+        w: 14,
+        h: 10,
+      });
     } else if (type === "weather") {
       const [pid, did] = sensorDev.split("|");
       if (!pid || !did) return;
@@ -2333,7 +2805,7 @@ function WidgetEditorModal({
       {!existing && (
         <Field label="Type">
           <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem" }}>
-            {(["room", "device", "button", "group", "now_playing", "scene", "control", "sensor", "weather", "clock", "label"] as WidgetType[]).map((t) => (
+            {(["room", "device", "button", "group", "now_playing", "scene", "control", "sensor", "device_status", "weather", "clock", "label"] as WidgetType[]).map((t) => (
               <button key={t} onClick={() => setType(t)} style={{ ...CHIP, ...(type === t ? CHIP_ON : {}) }}>
                 {WIDGET_LABELS[t]}
               </button>
@@ -2344,6 +2816,17 @@ function WidgetEditorModal({
 
       <Field label="Name (optional)">
         <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Custom widget name" style={INPUT} />
+      </Field>
+
+      <Field label="Frame">
+        <Segmented
+          value={hideBorder ? "hidden" : "shown"}
+          onChange={(v) => setHideBorder(v === "hidden")}
+          options={[
+            { value: "shown", label: "Framed" },
+            { value: "hidden", label: "Frameless" },
+          ]}
+        />
       </Field>
 
       {type === "room" && (
@@ -2479,6 +2962,129 @@ function WidgetEditorModal({
               placeholder="Choose a reading"
             />
           </Field>
+          <Field label="Display">
+            <Segmented
+              value={sensorDisplay}
+              onChange={setSensorDisplay}
+              options={[
+                { value: "number", label: "Number" },
+                { value: "gauge", label: "Gauge" },
+                { value: "vial", label: "Vial" },
+                { value: "bar", label: "Bar" },
+                { value: "state", label: "State" },
+              ]}
+            />
+          </Field>
+          {sensorDisplay !== "state" && (
+            <Field label="Range & precision (blank = auto; % fills 0–100)">
+              <div style={{ display: "flex", gap: "0.4rem" }}>
+                <input value={sensorMin} onChange={(e) => setSensorMin(e.target.value)} placeholder="min" style={{ ...INPUT, width: 70 }} />
+                <input value={sensorMax} onChange={(e) => setSensorMax(e.target.value)} placeholder="max" style={{ ...INPUT, width: 70 }} />
+                <input value={sensorDecimals} onChange={(e) => setSensorDecimals(e.target.value)} placeholder="decimals" style={{ ...INPUT, width: 90 }} />
+              </div>
+            </Field>
+          )}
+          {sensorDisplay !== "state" && (
+            <Field label="Alerts (accent escalates gold → rose)">
+              <div style={{ display: "flex", gap: "0.4rem", alignItems: "center", flexWrap: "wrap" }}>
+                <input value={sensorWarn} onChange={(e) => setSensorWarn(e.target.value)} placeholder="warn at" style={{ ...INPUT, width: 84 }} />
+                <input value={sensorAlert} onChange={(e) => setSensorAlert(e.target.value)} placeholder="alert at" style={{ ...INPUT, width: 84 }} />
+                <Segmented
+                  value={sensorBadDir}
+                  onChange={setSensorBadDir}
+                  options={[
+                    { value: "high", label: "High is bad" },
+                    { value: "low", label: "Low is bad" },
+                  ]}
+                />
+              </div>
+            </Field>
+          )}
+        </>
+      )}
+
+      {type === "device_status" && (
+        <>
+          <Field label="Device">
+            <Select
+              value={sensorDev}
+              onChange={(v) => { setSensorDev(v); setStatusReadings([]); }}
+              options={generic.map((d) => ({ value: `${d.provider_id}|${d.device_id}`, label: d.name }))}
+              placeholder={generic.length ? "Choose a device" : "No generic devices found"}
+            />
+          </Field>
+          <Field label="Device name">
+            <Segmented
+              value={statusHideName ? "hidden" : "shown"}
+              onChange={(v) => setStatusHideName(v === "hidden")}
+              options={[
+                { value: "shown", label: "Show" },
+                { value: "hidden", label: "Hide (readings fill the tile)" },
+              ]}
+            />
+          </Field>
+          <Field label="Readings to show">
+            <OptionCheckList
+              options={
+                generic
+                  .find((d) => `${d.provider_id}|${d.device_id}` === sensorDev)
+                  ?.controls.filter((c) => ["readout", "number", "toggle", "enum"].includes(c.type))
+                  .map((c) => ({ value: c.key, label: c.label })) ?? []
+              }
+              selected={statusReadings.map((r) => r.key)}
+              onToggle={(k) =>
+                setStatusReadings((cur) =>
+                  cur.some((r) => r.key === k) ? cur.filter((r) => r.key !== k) : [...cur, { key: k }],
+                )
+              }
+            />
+          </Field>
+          {statusReadings.map((r) => {
+            const label =
+              generic
+                .find((d) => `${d.provider_id}|${d.device_id}` === sensorDev)
+                ?.controls.find((c) => c.key === r.key)?.label ?? r.key;
+            const num = (s: string): number | undefined =>
+              s.trim() === "" || Number.isNaN(Number(s)) ? undefined : Number(s);
+            return (
+              <Field key={r.key} label={label}>
+                <div style={{ display: "flex", gap: "0.4rem", alignItems: "center", flexWrap: "wrap" }}>
+                  <Select
+                    value={r.display ?? "auto"}
+                    onChange={(v) => patchReading(r.key, { display: v === "auto" ? undefined : v })}
+                    options={[
+                      { value: "auto", label: "Auto" },
+                      { value: "number", label: "Number" },
+                      { value: "gauge", label: "Gauge" },
+                      { value: "vial", label: "Vial" },
+                      { value: "bar", label: "Bar" },
+                      { value: "state", label: "State" },
+                    ]}
+                  />
+                  <input
+                    defaultValue={r.warn_at != null ? String(r.warn_at) : ""}
+                    onBlur={(e) => patchReading(r.key, { warn_at: num(e.target.value) })}
+                    placeholder="warn at"
+                    style={{ ...INPUT, width: 78 }}
+                  />
+                  <input
+                    defaultValue={r.alert_at != null ? String(r.alert_at) : ""}
+                    onBlur={(e) => patchReading(r.key, { alert_at: num(e.target.value) })}
+                    placeholder="alert at"
+                    style={{ ...INPUT, width: 78 }}
+                  />
+                  <Segmented
+                    value={r.bad_direction ?? "high"}
+                    onChange={(v) => patchReading(r.key, { bad_direction: v === "high" ? undefined : v })}
+                    options={[
+                      { value: "high", label: "High bad" },
+                      { value: "low", label: "Low bad" },
+                    ]}
+                  />
+                </div>
+              </Field>
+            );
+          })}
         </>
       )}
 
@@ -2675,6 +3281,7 @@ const WIDGET_LABELS: Record<WidgetType, string> = {
   control: "Custom control",
   button: "Button",
   sensor: "Sensor",
+  device_status: "Device status",
   weather: "Weather",
   clock: "Clock",
   label: "Label / heading",

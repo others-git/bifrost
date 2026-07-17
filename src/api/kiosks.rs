@@ -34,7 +34,7 @@ use axum::{
     response::sse::{Event, KeepAlive, Sse},
     routing::{delete, get, post},
 };
-use futures_util::stream::{Stream, StreamExt};
+use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::convert::Infallible;
@@ -469,7 +469,7 @@ async fn queue_kiosk_command(state: &AppState, id: &str, cmd: &str) -> Result<bo
 async fn stream(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>> + Send + 'static>, StatusCode> {
+) -> Result<axum::response::Response, StatusCode> {
     let Some(key_id) = require_api_key(&state, &headers).await else {
         return Err(StatusCode::UNAUTHORIZED);
     };
@@ -492,11 +492,12 @@ async fn stream(
             }))
         });
 
-    Ok(Sse::new(events).keep_alive(
+    let sse = Sse::new(events).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("ping"),
-    ))
+    );
+    Ok(crate::api::sse_unbuffered(sse))
 }
 
 #[derive(Deserialize)]

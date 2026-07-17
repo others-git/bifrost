@@ -21,11 +21,22 @@
     <meta name="apple-mobile-web-app-title" content="Bifrost" />
     <style>
       *, *::before, *::after { box-sizing: border-box; }
+      html, body {
+        /* No elastic overscroll "nudge"/glow at scroll bounds — an app-like
+           control surface should feel bolted down, not rubber-banded (the
+           kiosk WebView also disables native overscroll on its side). */
+        overscroll-behavior: none;
+      }
       body {
         margin: 0;
         /* No double-tap-to-zoom (and no 300ms tap delay); pinch-zoom is locked by
            the viewport meta + the gesture guard below. */
         touch-action: manipulation;
+        /* An appliance UI, not a document: double-tap / long-press must never
+           spawn text-selection handles (the clock was selectable). Real text
+           entry opts back in below. */
+        user-select: none;
+        -webkit-user-select: none;
         font-family: "Inter Variable", system-ui, sans-serif;
         /* Slightly heavier than the usual 400 — easier on aging eyes at the
            small sizes used throughout the UI. */
@@ -44,6 +55,16 @@
         -moz-osx-font-smoothing: grayscale;
         text-rendering: optimizeLegibility;
       }
+
+      /* Text entry opts back into selection (body disables it app-wide). */
+      input, textarea, [contenteditable="true"] {
+        user-select: text;
+        -webkit-user-select: text;
+      }
+
+      /* Frameless board widgets (per-widget "hide border"): the plate's ring +
+         corner filigree wear .bf-plate-chrome; content and glow stay. */
+      [data-plateless] .bf-plate-chrome { display: none !important; }
 
       /* ── Unified gilded scrollbar ─────────────────────────────────────────
          One definition themes every scroll surface (effects grid, lists,

@@ -120,6 +120,27 @@ pub(crate) fn notify_inventory(state: &AppState, table: &str) {
     let _ = state.inventory_events.send(table.to_string());
 }
 
+/// Wrap an SSE response with `X-Accel-Buffering: no`, so nginx-family reverse
+/// proxies (Nginx Proxy Manager / openresty — how the hub is exposed over
+/// HTTPS) stream it through instead of buffering. Without this, keep-alives
+/// and pushed events sit in the proxy's buffer: the kiosk's command stream
+/// read-timeouts every 45s and "instant" pushes silently degrade to the
+/// heartbeat fallback. Every SSE endpoint must return through this wrapper.
+pub(crate) fn sse_unbuffered<S>(sse: axum::response::sse::Sse<S>) -> axum::response::Response
+where
+    S: futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>
+        + Send
+        + 'static,
+{
+    use axum::response::IntoResponse;
+    let mut resp = sse.into_response();
+    resp.headers_mut().insert(
+        axum::http::HeaderName::from_static("x-accel-buffering"),
+        axum::http::HeaderValue::from_static("no"),
+    );
+    resp
+}
+
 /// Normalize a friendly-name request: trim whitespace, and treat an empty string
 /// as a clear (`None` → revert to the provider name).
 pub(crate) fn clean_name(name: Option<String>) -> Option<String> {

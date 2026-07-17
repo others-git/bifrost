@@ -2563,8 +2563,20 @@ function KiosksSection({
     getDashboards().then(setBoards);
   }, []);
 
-  // While any update is in flight, poll so the version/online status refresh as
-  // the kiosk downloads, installs, restarts, and checks back in.
+  // Kiosk state changes REMOTELY (each check-in refreshes screen state and
+  // battery, and consumes the queued command), so nothing on this client can
+  // trigger a refetch — poll while the section is on screen, matching the
+  // check-in cadence, and skip ticks in a hidden browser tab. (The Media
+  // page's self-healing poll is the precedent for remote-origin state.)
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (!document.hidden) load();
+    }, 5000);
+    return () => clearInterval(t);
+  }, []);
+
+  // While any update is in flight, poll faster so the version/online status
+  // refresh as the kiosk downloads, installs, restarts, and checks back in.
   useEffect(() => {
     if (Object.keys(updating).length === 0) return;
     const t = setInterval(load, 4000);

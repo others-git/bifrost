@@ -447,9 +447,14 @@ fn link_for(host: &str, port: u16) -> Arc<OnkyoLink> {
 /// **and** re-syncs the cache against any push it missed. The eISCP socket can go
 /// **half-open with no FIN** (the receiver drops us on standby, or a LAN blip),
 /// which leaves `read` blocking forever and freezes the cached state; the
-/// heartbeat is what detects that. Short in tests so the reconnect path is fast.
+/// heartbeat is what detects that. Short in tests so the reconnect path is
+/// fast — but not TOO short: at 100ms×2 probes, a starved CI scheduler that
+/// stalls the loopback mock for >300ms tore healthy links apart repeatedly
+/// (rotating flakes across the audio-mock test family, ~1 full-suite run in 3
+/// on shared runners). 400ms×2 tolerates ~1.2s of scheduler starvation while
+/// keeping the reconnect tests well inside their wait budgets.
 const HEARTBEAT: Duration = if cfg!(test) {
-    Duration::from_millis(100)
+    Duration::from_millis(400)
 } else {
     Duration::from_secs(30)
 };
@@ -543,9 +548,9 @@ async fn onkyo_link_actor(
         // receiver is unreachable right now; say so instead of going quiet.
         let _ = events.send((LINK_STATE.to_string(), "DOWN".to_string()));
         // Backoff before reconnecting (capped); writes queued meanwhile flush on
-        // reconnect. Tests cap much lower: the 100ms test heartbeat tears the
-        // link readily under CI load, and a compounding backoff (1s, 2s, 4s…)
-        // outlasts any reasonable discovery-retry budget in the test suite.
+        // reconnect. Tests cap much lower: the short test heartbeat can still
+        // tear the link under heavy CI load, and a compounding backoff (1s, 2s,
+        // 4s…) outlasts any reasonable discovery-retry budget in the test suite.
         let cap = if cfg!(test) { 500 } else { 20_000 };
         let delay = Duration::from_millis(250u64.saturating_mul(1 << attempt.min(6)).min(cap));
         attempt = attempt.saturating_add(1);

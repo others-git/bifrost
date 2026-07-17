@@ -175,6 +175,39 @@ fn keep_entity(registry: &HashMap<String, EntityMeta>, entity_id: &str) -> bool 
         .unwrap_or(true)
 }
 
+/// The word-prefix shared by ALL of a device's entity names. HA names entities
+/// "<device name> <entity name>", so the common run across the whole group IS
+/// the device name ("Litter-Robot 4") — computing it pairwise instead would
+/// over-trim when two siblings share an extra word ("Litter box" / "Litter
+/// level" → the run must stop where "Waste drawer" breaks it).
+fn shared_name_prefix_len(names: &[&str]) -> usize {
+    let Some(first) = names.first() else { return 0 };
+    let first: Vec<&str> = first.split_whitespace().collect();
+    let mut common = first.len();
+    for name in &names[1..] {
+        let words: Vec<&str> = name.split_whitespace().collect();
+        let run = first
+            .iter()
+            .zip(&words)
+            .take_while(|(a, b)| a.eq_ignore_ascii_case(b))
+            .count();
+        common = common.min(run);
+    }
+    common
+}
+
+/// A sibling readout's label with the group's shared device-name prefix
+/// trimmed ("Litter-Robot 4 Waste drawer" → "Waste drawer"). Never empty:
+/// falls back to the full name when the trim would eat everything.
+fn sibling_label(name: &str, prefix_words: usize) -> String {
+    let words: Vec<&str> = name.split_whitespace().collect();
+    if prefix_words > 0 && prefix_words < words.len() {
+        words[prefix_words..].join(" ")
+    } else {
+        name.to_string()
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct HaConfig {
     /// Base URL of the HA instance, e.g. `http://homeassistant.local:8123`.
@@ -1628,9 +1661,49 @@ impl GenericProvider for HaProvider {
     async fn discover(&self) -> Result<Vec<GenericDevice>> {
         let reg = self.entity_registry().await;
         let hw = self.entity_hw_ids().await;
-        Ok(self
-            .get_states()
-            .await?
+        let states = self.get_states().await?;
+
+        // Sibling readouts: `sensor.*`/`binary_sensor.*` entities grouped by the
+        // HA *device* they belong to (the entity registry's `device_id`). A
+        // generic device's real telemetry usually lives in these siblings — a
+        // litter box registers as a bare `vacuum` while its waste-drawer and
+        // litter levels are separate sensor entities — so fold them in as
+        // readout controls. The escape hatch stays denylist-shaped (sensors
+        // never become device ROWS; they enrich the device they belong to),
+        // diagnostics/hidden entities stay out via `keep_entity`, and boards'
+        // sensor widgets can display any of these readouts unchanged.
+        let mut sibling_readouts: std::collections::HashMap<String, Vec<(String, Control)>> =
+            std::collections::HashMap::new();
+        for e in &states {
+            if !(e.entity_id.starts_with("sensor.") || e.entity_id.starts_with("binary_sensor."))
+                || !keep_entity(&reg, &e.entity_id)
+                || matches!(e.state.as_str(), "unknown" | "unavailable")
+            {
+                continue;
+            }
+            let Some(dev) = reg.get(&e.entity_id).and_then(|m| m.device_id.clone()) else {
+                continue;
+            };
+            let label = friendly_name(&e.entity_id, &e.attributes);
+            sibling_readouts.entry(dev).or_default().push((
+                label.clone(),
+                Control::Readout {
+                    key: e.entity_id.clone(),
+                    label,
+                    value: e.state.clone(),
+                    unit: e
+                        .attributes
+                        .get("unit_of_measurement")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                },
+            ));
+        }
+        for list in sibling_readouts.values_mut() {
+            list.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+
+        Ok(states
             .into_iter()
             .filter(|e| {
                 // Escape-hatch by default: surface every entity except the
@@ -1643,10 +1716,36 @@ impl GenericProvider for HaProvider {
             })
             .map(|e| {
                 let kind = e.entity_id.split('.').next().unwrap_or("").to_string();
+                let name = friendly_name(&e.entity_id, &e.attributes);
+                let mut controls = controls_from_ha(&kind, &e.state, &e.attributes);
+                if let Some(extra) = reg
+                    .get(&e.entity_id)
+                    .and_then(|m| m.device_id.as_ref())
+                    .and_then(|dev| sibling_readouts.get(dev))
+                {
+                    // Drop the device-name prefix the whole group shares
+                    // ("Litter-Robot 4 Waste drawer" next to "Litter-Robot 4
+                    // Litter box" → "Waste drawer").
+                    let group: Vec<&str> = std::iter::once(name.as_str())
+                        .chain(extra.iter().map(|(l, _)| l.as_str()))
+                        .collect();
+                    let prefix = shared_name_prefix_len(&group);
+                    controls.extend(extra.iter().map(|(label, c)| match c {
+                        Control::Readout {
+                            key, value, unit, ..
+                        } => Control::Readout {
+                            key: key.clone(),
+                            label: sibling_label(label, prefix),
+                            value: value.clone(),
+                            unit: unit.clone(),
+                        },
+                        other => other.clone(),
+                    }));
+                }
                 GenericDevice {
                     provider_id: String::new(), // set by the API layer
-                    name: friendly_name(&e.entity_id, &e.attributes),
-                    controls: controls_from_ha(&kind, &e.state, &e.attributes),
+                    name,
+                    controls,
                     kind,
                     hw_id: hw.get(&e.entity_id).cloned(),
                     device_id: e.entity_id,
@@ -2294,6 +2393,119 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, Control::Button { key, .. } if key == "start"))
         );
+    }
+
+    #[tokio::test]
+    async fn generic_devices_carry_their_ha_device_siblings_as_readouts() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/states"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "entity_id": "vacuum.litter_robot_4_litter_box", "state": "docked",
+                  "attributes": { "supported_features": 12296, "friendly_name": "Litter-Robot 4 Litter box" } },
+                // Same HA device: the telemetry the vacuum entity doesn't carry.
+                { "entity_id": "sensor.litter_robot_4_waste_drawer", "state": "8",
+                  "attributes": { "friendly_name": "Litter-Robot 4 Waste drawer", "unit_of_measurement": "%" } },
+                { "entity_id": "sensor.litter_robot_4_litter_level", "state": "90.0",
+                  "attributes": { "friendly_name": "Litter-Robot 4 Litter level", "unit_of_measurement": "%" } },
+                // Unavailable sibling readings are dropped, not shown as junk.
+                { "entity_id": "sensor.litter_robot_4_hopper_status", "state": "unknown",
+                  "attributes": { "friendly_name": "Litter-Robot 4 Hopper status" } },
+                // A DIFFERENT device's sensor must not leak in.
+                { "entity_id": "sensor.cpu_temp", "state": "55",
+                  "attributes": { "friendly_name": "CPU temp" } },
+            ])))
+            .mount(&server)
+            .await;
+
+        let p = HaProvider::new_for_test(server.uri()).unwrap();
+        // Seed the (WS-backed) entity registry: siblings share HA device "lr4".
+        let mut reg = HashMap::new();
+        for id in [
+            "vacuum.litter_robot_4_litter_box",
+            "sensor.litter_robot_4_waste_drawer",
+            "sensor.litter_robot_4_litter_level",
+            "sensor.litter_robot_4_hopper_status",
+        ] {
+            reg.insert(
+                id.to_string(),
+                EntityMeta {
+                    entity_category: None,
+                    disabled_by: None,
+                    hidden_by: None,
+                    device_id: Some("lr4".into()),
+                },
+            );
+        }
+        reg.insert(
+            "sensor.cpu_temp".to_string(),
+            EntityMeta {
+                entity_category: None,
+                disabled_by: None,
+                hidden_by: None,
+                device_id: Some("host".into()),
+            },
+        );
+        *p.registry_cache.lock().await = Some((Instant::now(), Arc::new(reg)));
+
+        let devices = GenericProvider::discover(&p).await.unwrap();
+        let robot = devices
+            .iter()
+            .find(|d| d.device_id == "vacuum.litter_robot_4_litter_box")
+            .expect("vacuum surfaced");
+        let readout = |key: &str| {
+            robot.controls.iter().find_map(|c| match c {
+                Control::Readout {
+                    key: k,
+                    label,
+                    value,
+                    unit,
+                } if k == key => Some((label.clone(), value.clone(), unit.clone())),
+                _ => None,
+            })
+        };
+        // Sibling readings fold in, labels trimmed of the shared device name.
+        assert_eq!(
+            readout("sensor.litter_robot_4_waste_drawer"),
+            Some(("Waste drawer".into(), "8".into(), Some("%".into())))
+        );
+        assert_eq!(
+            readout("sensor.litter_robot_4_litter_level"),
+            Some(("Litter level".into(), "90.0".into(), Some("%".into())))
+        );
+        // Unknown sibling dropped; other devices' sensors don't leak in; and
+        // sensors STILL don't become device rows of their own.
+        assert!(readout("sensor.litter_robot_4_hopper_status").is_none());
+        assert!(readout("sensor.cpu_temp").is_none());
+        assert!(!devices.iter().any(|d| d.device_id.starts_with("sensor.")));
+    }
+
+    #[test]
+    fn sibling_label_trims_the_group_shared_device_prefix() {
+        // The shared run is computed across the WHOLE group, so "Litter box"
+        // vs "Litter level" can't over-trim ("Waste drawer" breaks the run at
+        // the true device name).
+        let group = [
+            "Litter-Robot 4 Litter box",
+            "Litter-Robot 4 Waste drawer",
+            "Litter-Robot 4 Litter level",
+        ];
+        let p = shared_name_prefix_len(&group);
+        assert_eq!(
+            sibling_label("Litter-Robot 4 Waste drawer", p),
+            "Waste drawer"
+        );
+        assert_eq!(
+            sibling_label("Litter-Robot 4 Litter level", p),
+            "Litter level"
+        );
+        // Nothing shared → full name; trim-would-eat-everything → full name.
+        assert_eq!(
+            shared_name_prefix_len(&["Thermostat", "Office humidity"]),
+            0
+        );
+        assert_eq!(sibling_label("Office humidity", 0), "Office humidity");
+        assert_eq!(sibling_label("Office humidity", 2), "Office humidity");
     }
 
     #[tokio::test]

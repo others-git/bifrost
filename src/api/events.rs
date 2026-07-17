@@ -23,8 +23,7 @@ pub fn router() -> Router<Arc<AppState>> {
 async fn sse_events(
     State(state): State<Arc<AppState>>,
     _: Session,
-) -> Result<Sse<impl stream::Stream<Item = Result<Event, Infallible>> + Send + 'static>, StatusCode>
-{
+) -> Result<axum::response::Response, StatusCode> {
     let (receivers, media_receivers, power_receivers, sensor_receivers) = {
         let connections = state.connections.lock().await;
         (
@@ -127,11 +126,12 @@ async fn sse_events(
 
     let merged = stream::select_all(streams);
 
-    Ok(Sse::new(merged).keep_alive(
+    let sse = Sse::new(merged).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("ping"),
-    ))
+    );
+    Ok(crate::api::sse_unbuffered(sse))
 }
 
 #[cfg(test)]
