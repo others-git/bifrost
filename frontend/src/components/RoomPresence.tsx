@@ -11,13 +11,16 @@
 import { useState } from "react";
 import {
   sensorReadingText,
+  setKioskMic,
   setRoomPresence,
   type Automation,
   type Kiosk,
   type Room,
   type SensorDevice,
 } from "../api";
+import { MIC_SENSITIVITY_OPTIONS } from "../pages/Settings";
 import { alpha, color } from "../theme";
+import { Segmented, Switch } from "./controls";
 import { Glyph } from "./glyphs";
 import { SelectRow } from "./SelectRow";
 
@@ -81,6 +84,69 @@ export function RoomPresencePanel({
       (k.hour_modes ? k.schedule_enabled && k.hour_modes.includes("A") : k.presence_enabled),
   );
   const drivenRules = automations.filter((a) => readsRoomOccupancy(a, room.id));
+
+  // Kiosks assigned to this room: each carries an always-on microphone that can
+  // act as a presence sensor — surface that HERE, where presence is configured,
+  // instead of leaving it discoverable only in Settings → Clients. The toggle
+  // is the same control plane (`setKioskMic`); when on, the minted occupancy
+  // sensor also lists among the members above like any other sensor.
+  const roomKiosks = kiosks.filter((k) => k.room_id === room.id);
+  async function setMic(k: Kiosk, enabled: boolean, sensitivity?: string) {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await setKioskMic(k.id, { enabled, ...(sensitivity ? { sensitivity } : {}) });
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  }
+  const kioskMicRows =
+    roomKiosks.length > 0 ? (
+      <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+        {roomKiosks.map((k) => (
+          <div
+            key={k.id}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "0.6rem",
+              padding: "0.35rem 0.6rem",
+              fontSize: "0.8rem",
+              color: color.dim,
+            }}
+          >
+            <span
+              style={{
+                display: "inline-grid",
+                placeItems: "center",
+                color: k.mic_presence ? PRESENCE_ACCENT : color.faint,
+              }}
+            >
+              <Glyph name="mic" size={14} />
+            </span>
+            <span style={{ flex: 1, minWidth: 0 }}>
+              {k.name || "Kiosk"} microphone
+              <span style={{ color: color.faint }}>
+                {k.mic_presence
+                  ? ` — listening${k.online ? "" : " (kiosk offline)"}${
+                      k.mic_level != null ? ` · ${Math.round(k.mic_level)} dB` : ""
+                    } · level only, no audio`
+                  : " — can detect presence from sound level"}
+              </span>
+            </span>
+            {k.mic_presence && (
+              <Segmented
+                value={k.mic_sensitivity ?? "medium"}
+                onChange={(v) => setMic(k, true, v)}
+                options={MIC_SENSITIVITY_OPTIONS}
+              />
+            )}
+            <Switch on={k.mic_presence} disabled={busy} onChange={() => setMic(k, !k.mic_presence)} />
+          </div>
+        ))}
+      </div>
+    ) : null;
   const consumers: string[] = [
     ...drivenKiosks.map((k) => `${k.name || "kiosk"} display`),
     ...(drivenRules.length
@@ -108,10 +174,15 @@ export function RoomPresencePanel({
 
   if (members.length === 0) {
     return (
-      <p style={{ margin: 0, fontSize: "0.8rem", color: color.faint }}>
-        No sensors in this room yet. Add one under Members, assign one on the Devices page, or
-        Sync a provider whose room carries a motion sensor.
-      </p>
+      <div style={{ display: "flex", flexDirection: "column", gap: "0.55rem" }}>
+        <p style={{ margin: 0, fontSize: "0.8rem", color: color.faint }}>
+          No sensors in this room yet. Add one under Members, assign one on the Devices page, or
+          Sync a provider whose room carries a motion sensor.
+          {roomKiosks.length > 0 &&
+            " This room's kiosk can also listen for presence — enable its microphone below."}
+        </p>
+        {kioskMicRows}
+      </div>
     );
   }
 
@@ -166,6 +237,8 @@ export function RoomPresencePanel({
           })}
         </div>
       )}
+
+      {kioskMicRows}
 
       {ambient.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: "0.15rem" }}>

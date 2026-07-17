@@ -2793,9 +2793,17 @@ function KiosksSection({
 
 // ── Kiosk microphone presence ─────────────────────────────────────────────────
 
+/** Sensitivity described by what actually trips it, not an abstract level. The
+ * stored keys stay low/medium/high (the detection margin above ambient). */
+export const MIC_SENSITIVITY_OPTIONS = [
+  { value: "low", label: "Loud noise" },
+  { value: "medium", label: "Speech" },
+  { value: "high", label: "Faint sounds" },
+];
+
 /** The kiosk's always-on mic as a room occupancy sensor. Level-only by design:
  * the app computes loudness on-device against an adaptive ambient baseline and
- * reports elevated/quiet edges — audio never leaves the tablet. Enabling mints
+ * reports elevated/quiet edges — audio never leaves the kiosk. Enabling mints
  * a real occupancy sensor assigned to the kiosk's room (visible on Devices and
  * in the room's Presence section like any other sensor). */
 function KioskMicPresence({ k, onSaved }: { k: Kiosk; onSaved: () => void }) {
@@ -2815,14 +2823,11 @@ function KioskMicPresence({ k, onSaved }: { k: Kiosk; onSaved: () => void }) {
       <Switch on={k.mic_presence} disabled={busy} onChange={(v) => set(v)} />
       {k.mic_presence && (
         <>
+          <span style={{ fontSize: "0.72rem", color: "var(--bf-faint)" }}>Reacts to</span>
           <Segmented
             value={k.mic_sensitivity ?? "medium"}
             onChange={(v) => set(true, v)}
-            options={[
-              { value: "low", label: "Low" },
-              { value: "medium", label: "Med" },
-              { value: "high", label: "High" },
-            ]}
+            options={MIC_SENSITIVITY_OPTIONS}
           />
           {k.mic_level != null && (
             <span
@@ -2835,7 +2840,9 @@ function KioskMicPresence({ k, onSaved }: { k: Kiosk; onSaved: () => void }) {
         </>
       )}
       <span style={{ fontSize: "0.66rem", color: "var(--bf-faint)" }}>
-        Sound level only — audio never leaves the tablet.
+        {k.mic_presence
+          ? "How far a sound must rise above the room's ambient hum (loud ≈15 dB · speech ≈10 dB · faint ≈6 dB). Level only — audio never leaves the kiosk."
+          : "Sound level only — audio never leaves the kiosk."}
       </span>
     </div>
   );
