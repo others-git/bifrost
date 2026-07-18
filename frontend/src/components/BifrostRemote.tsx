@@ -1,9 +1,12 @@
-// Smart-remote pieces for a TV / streamer — a `useRemote` hook plus two embeddable
-// panels: `RemotePad` (the engraved remote plate — Scrying Glass gesture slab or
-// cross keys, plus nav/transport rows) and `RemoteApps` (the launchable app grid). These
-// are composed into the unified "AIO TV Control" fly-out (see MediaControls'
-// MediaEditor); all driven through the shared remote API (session → the same
-// service layer as v1/MCP).
+// Smart-remote pieces for a TV / streamer — a `useRemote` hook plus embeddable
+// panels: `KeysPad` (the engraved cross-keys plate, plus nav/transport rows),
+// `ScryPad` (the full-bleed Scrying Glass gesture slab, plus a nav row) and
+// `RemoteApps` (the launchable app grid). These are composed into the unified
+// "AIO TV Control" fly-out as three peer tabs (see MediaControls' MediaEditor
+// / TvAio) — Keys and Scry are alternative NAVIGATION surfaces, not a mode
+// toggle on one panel, so Scry can own the whole fly-out's surface area
+// without a keys plate competing for room. All driven through the shared
+// remote API (session → the same service layer as v1/MCP).
 
 import { useEffect, useState } from "react";
 import {
@@ -23,7 +26,6 @@ import { T, ACCENT, alpha, color, font, gildedRule, glow, radius } from "../them
 import { Glyph } from "./glyphs";
 import { CornerFiligree } from "./ornament";
 import { ScryingGlass } from "./ScryingGlass";
-import { useViewport } from "../useViewport";
 
 /** Live apps + foreground app for `remoteId`, with the command helpers. Polls the
  * current app on a short interval so the launchable grid's highlight stays fresh. */
@@ -61,73 +63,24 @@ export function useRemote(remoteId: string) {
   return { currentApp, apps, send, press, togglePin };
 }
 
-/** The remote plate — one engraved panel holding the navigation surface and
- * the key rows. Navigation has two modes, remembered per client: the
- * **Scrying Glass** (gesture slab — flick/hold/tap, eyes on the TV; the
- * compact default) and **Keys** (a plus-shaped cross of engraved keys; the
- * desktop default, where a mouse wants targets). Desktop also gets the
- * keyboard: arrows / Enter / Backspace while the fly-out is open. Back, Home,
- * Menu and transport stay discrete keys in both modes. Volume lives above the
- * plate as a slider, not here. */
-const REMOTE_MODE_KEY = "bf-remote-mode";
-
-export function RemotePad({ press }: { press: (k: RemoteKey) => () => void }) {
-  const { isDesktop, isTablet } = useViewport();
-  const [mode, setMode] = useState<"glass" | "keys">(() => {
-    const saved = localStorage.getItem(REMOTE_MODE_KEY);
-    if (saved === "glass" || saved === "keys") return saved;
-    return isDesktop ? "keys" : "glass";
-  });
-  const onKey = (k: RemoteKey) => press(k)();
-
-  function switchMode(m: "glass" | "keys") {
-    setMode(m);
-    localStorage.setItem(REMOTE_MODE_KEY, m);
-  }
-
-  // Desktop: the physical keyboard IS a remote. Arrows steer, Enter selects,
-  // Backspace goes back — unless the user is typing in a field.
-  useEffect(() => {
-    if (!isDesktop) return;
-    const onDown = (e: KeyboardEvent) => {
-      const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-      const map: Record<string, RemoteKey> = {
-        ArrowUp: "up",
-        ArrowDown: "down",
-        ArrowLeft: "left",
-        ArrowRight: "right",
-        Enter: "select",
-        Backspace: "back",
-      };
-      const k = map[e.key];
-      if (!k) return;
-      e.preventDefault();
-      press(k)();
-    };
-    window.addEventListener("keydown", onDown);
-    return () => window.removeEventListener("keydown", onDown);
-  }, [isDesktop, press]);
-
-  // Tablets/kiosks go two-column: the glass fills the left, keys stack right —
-  // a wide modal stops being a stretched phone sheet.
-  const twoCol = isTablet && mode === "glass";
-
-  const nav = (
+/** Back / Home / Menu — the three discrete keys every navigation surface keeps
+ * outside itself (a gesture flick or a D-pad tap can't express them). */
+function NavRow({ onKey }: { onKey: (k: RemoteKey) => void }) {
+  return (
     <Row>
       <KeyNiche glyph="back" label="Back" onClick={() => onKey("back")} />
       <KeyNiche glyph="home" label="Home" onClick={() => onKey("home")} />
       <KeyNiche glyph="menu" label="Menu" onClick={() => onKey("menu")} />
     </Row>
   );
-  const transport = (
-    <Row>
-      <KeyNiche glyph="prev" label="Previous" onClick={() => onKey("previous")} />
-      <KeyNiche glyph="play_pause" label="Play / pause" onClick={() => onKey("play_pause")} />
-      <KeyNiche glyph="next" label="Next" onClick={() => onKey("next")} />
-    </Row>
-  );
+}
 
+/** The Keys plate: cross-keys D-pad, nav row, and transport — an engraved
+ * panel for anyone who wants discrete tap targets (a mouse, or fingers that
+ * prefer buttons to gestures). One of the two peer navigation tabs; see
+ * `ScryPad` for the gesture alternative. */
+export function KeysPad({ press }: { press: (k: RemoteKey) => () => void }) {
+  const onKey = (k: RemoteKey) => press(k)();
   return (
     <div
       style={{
@@ -142,61 +95,34 @@ export function RemotePad({ press }: { press: (k: RemoteKey) => () => void }) {
       }}
     >
       <CornerFiligree />
-      {/* Mode switch — a quiet engraved label, top right of the plate. */}
-      <button
-        onClick={() => switchMode(mode === "glass" ? "keys" : "glass")}
-        title={mode === "glass" ? "Switch to key pad" : "Switch to gesture glass"}
-        style={{
-          position: "absolute",
-          top: 2,
-          right: 6,
-          zIndex: 1,
-          background: "none",
-          border: "none",
-          cursor: "pointer",
-          padding: "8px 10px",
-          fontFamily: font.display,
-          fontSize: "0.6rem",
-          letterSpacing: "0.14em",
-          textTransform: "uppercase",
-          color: T.faint,
-        }}
-      >
-        {mode === "glass" ? "Keys" : "Glass"}
-      </button>
+      <CrossKeys onKey={onKey} />
+      <div aria-hidden style={{ height: 1, background: gildedRule, opacity: 0.5 }} />
+      <NavRow onKey={onKey} />
+      <Row>
+        <KeyNiche glyph="prev" label="Previous" onClick={() => onKey("previous")} />
+        <KeyNiche glyph="play_pause" label="Play / pause" onClick={() => onKey("play_pause")} />
+        <KeyNiche glyph="next" label="Next" onClick={() => onKey("next")} />
+      </Row>
+    </div>
+  );
+}
 
-      {twoCol ? (
-        <div style={{ display: "flex", gap: "0.9rem", alignItems: "stretch" }}>
-          <div style={{ flex: 1.4, minWidth: 0, display: "grid" }}>
-            <ScryingGlass onKey={onKey} height="100%" />
-          </div>
-          <div
-            style={{
-              flex: 1,
-              display: "flex",
-              flexDirection: "column",
-              justifyContent: "center",
-              gap: "0.75rem",
-              minHeight: 280,
-            }}
-          >
-            {nav}
-            <div aria-hidden style={{ height: 1, background: gildedRule, opacity: 0.5 }} />
-            {transport}
-          </div>
-        </div>
-      ) : (
-        <>
-          {mode === "glass" ? (
-            <ScryingGlass onKey={onKey} height="clamp(240px, 34vh, 400px)" />
-          ) : (
-            <CrossKeys onKey={onKey} />
-          )}
-          <div aria-hidden style={{ height: 1, background: gildedRule, opacity: 0.5 }} />
-          {nav}
-          {transport}
-        </>
-      )}
+/** The Scrying Glass plate: the gesture slab filling all the height its parent
+ * gives it, with just the nav row beneath — "eyes on the TV, not on the
+ * phone" means nothing else competes for the surface. The caller (`TvAio`)
+ * is what actually maximizes that parent height when this tab is open. */
+export function ScryPad({ press }: { press: (k: RemoteKey) => () => void }) {
+  const onKey = (k: RemoteKey) => press(k)();
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "0.7rem", flex: 1, minHeight: 0 }}>
+      {/* `flex: 1` fills a bounded ancestor (the mobile fly-out's maximized
+          sheet); `minHeight` is the floor everywhere else (desktop's popover
+          and the tablet modal size to content, so there's no space to grow
+          into) — still a big, deliberately "maximized" glass either way. */}
+      <div style={{ flex: 1, minHeight: "min(56vh, 480px)", display: "grid" }}>
+        <ScryingGlass onKey={onKey} height="100%" />
+      </div>
+      <NavRow onKey={onKey} />
     </div>
   );
 }

@@ -15,13 +15,15 @@ import {
   type MediaFavorite,
 } from "../api";
 import { DisableRow } from "./PowerFlyout";
-import { useRemote, RemotePad, RemoteApps, ExpandedRemote, RemoteTextEntry, AssistantSay } from "./BifrostRemote";
+import { useRemote, KeysPad, ScryPad, RemoteApps, ExpandedRemote, RemoteTextEntry, AssistantSay } from "./BifrostRemote";
 import { PowerToggle, Segmented } from "./controls";
 import { useSwipeTabs } from "./useSwipeTabs";
 import { Flyout, FlyoutHeader } from "./Flyout";
 import { Select } from "./Select";
 import { Glyph } from "./glyphs";
+import { useViewport } from "../useViewport";
 import { T, domain, color, alpha, hitHalo, labelType } from "../theme";
+import type { RemoteKey } from "../api";
 
 const ACCENT = domain.media; // violet — audio's accent
 
@@ -288,6 +290,12 @@ export function PowerButton({ on, onToggle }: { on: boolean; onToggle: () => voi
   return <PowerToggle on={on} accent={domain.media} onToggle={onToggle} />;
 }
 
+/** The AIO TV control's three peer tabs — Keys and Scry are alternative
+ * navigation surfaces (never a mode toggle nested inside one panel), Apps is
+ * the launchable grid. Persisted per client under `TV_TAB_KEY`. */
+export type TvTab = "keys" | "scry" | "apps";
+const TV_TAB_KEY = "bf-remote-tab";
+
 /**
  * Anchored fly-out wrapping MediaControls — the floor-plan counterpart to
  * LightEditor. State is owned by the caller; `onLocalPatch` updates it
@@ -309,11 +317,31 @@ export function MediaEditor({
 }) {
   const cap = device.capabilities;
   const offline = device.state.reachable === false;
+  const { isDesktop } = useViewport();
 
   // A TV's paired remote is resolved server-side onto the effective device
   // (`remote_id`) — its presence turns the fly-out into the unified AIO TV
-  // control (Remote / Watch / Apps) instead of the plain media body.
+  // control (Keys / Scry / Apps) instead of the plain media body.
   const pairedRemoteId = device.kind === "tv" ? (device.remote_id ?? null) : null;
+  // A TV with a paired remote is a wake-capable composite: keep offering its
+  // control (and power) even when the media_player is unreachable — the remote +
+  // Wake-on-LAN can bring a cold box up, which is exactly when it's needed. (The
+  // backend already reports the composite reachable whenever the remote is.)
+  const isTv = !!pairedRemoteId;
+
+  // Which AIO tab is open, remembered per client — desktop opens on Keys (a
+  // mouse wants targets), everything else opens on Scry (the compact
+  // default). Lifted here (not local to TvAio) so the fly-out itself can
+  // maximize/drag-to-close around the Scry tab specifically.
+  const [tvTab, setTvTab] = useState<TvTab>(() => {
+    const saved = localStorage.getItem(TV_TAB_KEY);
+    if (saved === "keys" || saved === "scry" || saved === "apps") return saved;
+    return isDesktop ? "keys" : "scry";
+  });
+  function changeTvTab(t: TvTab) {
+    setTvTab(t);
+    localStorage.setItem(TV_TAB_KEY, t);
+  }
 
   function togglePower() {
     const next = !device.state.power;
@@ -323,17 +351,20 @@ export function MediaEditor({
     setMediaState(device.id, { power: next });
   }
 
-  // A TV with a paired remote is a wake-capable composite: keep offering its
-  // control (and power) even when the media_player is unreachable — the remote +
-  // Wake-on-LAN can bring a cold box up, which is exactly when it's needed. (The
-  // backend already reports the composite reachable whenever the remote is.)
-  const isTv = !!pairedRemoteId;
   // Power for a TV-with-remote shows regardless of media reachability; for other
   // media it needs source switching and a reachable device.
   const showPower = isTv || (!offline && cap.sources);
 
   return (
-    <Flyout anchor={anchor} onClose={onClose} width={isTv ? 320 : 260}>
+    <Flyout
+      anchor={anchor}
+      onClose={onClose}
+      width={isTv ? (tvTab === "scry" ? 420 : 320) : 260}
+      // The Scrying Glass wants the whole fly-out to itself — on the mobile
+      // sheet it goes near-fullscreen (every fly-out gets the drag-down-to-
+      // close handle by default, so no extra prop needed for that here).
+      maximize={isTv && tvTab === "scry"}
+    >
       {/* Media is the violet domain — the shared header carries that accent. */}
       <FlyoutHeader
         title={device.name}
@@ -343,7 +374,13 @@ export function MediaEditor({
         onClose={onClose}
       />
       {pairedRemoteId ? (
-        <TvAio device={device} remoteId={pairedRemoteId} onLocalPatch={onLocalPatch} />
+        <TvAio
+          device={device}
+          remoteId={pairedRemoteId}
+          onLocalPatch={onLocalPatch}
+          tab={tvTab}
+          onTabChange={changeTvTab}
+        />
       ) : offline ? (
         <div style={{ fontSize: "0.8rem", color: "#c66" }}>Device offline.</div>
       ) : (
@@ -359,50 +396,91 @@ export function MediaEditor({
   );
 }
 
-/** The unified "AIO TV Control" — composed from what the composite (the media
- * device ∪ its paired remote) actually exposes, not a fixed kitchen sink. The
- * keypad **Remote** tab is always present (a paired remote always has the
- * canonical keyset); **Watch** (now-playing, volume, source) appears only when
- * the media side reports any of those capabilities; **Apps** (the launchable
- * grid) appears when app launch is available (the LCD across remotes). When only
- * one surface qualifies, the tab bar is dropped entirely. */
+/** The unified "AIO TV Control" — three peer tabs. **Keys** (now-playing,
+ * volume, cross-keys D-pad, text entry, assistant, full remote catalogue —
+ * everything the panel used to hold) and **Scry** (just the Scrying Glass
+ * gesture slab + a nav row — "eyes on the TV, not on the phone" means nothing
+ * else competes for the surface, and the caller maximizes the fly-out around
+ * this tab) are alternative NAVIGATION surfaces, not a mode toggle nested
+ * inside one panel. **Apps** is the launchable grid. Desktop also gets the
+ * keyboard — arrows / Enter / Backspace — while either keypad tab is open. */
 function TvAio({
   device,
   remoteId,
   onLocalPatch,
+  tab,
+  onTabChange,
 }: {
   device: MediaDevice;
   remoteId: string;
   onLocalPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
+  tab: TvTab;
+  onTabChange: (t: TvTab) => void;
 }) {
   const remote = useRemote(remoteId);
-  const [tab, setTab] = useState<"remote" | "apps">("remote");
-  // A horizontal swipe anywhere on the panel body flips Remote ⇄ Apps.
-  const swipe = useSwipeTabs(tab, ["remote", "apps"] as const, setTab);
+  const { isDesktop } = useViewport();
+  // A horizontal swipe anywhere on the panel body flips Keys ⇄ Scry ⇄ Apps.
+  const swipe = useSwipeTabs(tab, ["keys", "scry", "apps"] as const, onTabChange);
+
+  // Desktop: the physical keyboard IS a remote whenever a keypad tab is open.
+  // Arrows steer, Enter selects, Backspace goes back — unless the user is
+  // typing in a field.
+  useEffect(() => {
+    if (!isDesktop || tab === "apps") return;
+    const onDown = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      const map: Record<string, RemoteKey> = {
+        ArrowUp: "up",
+        ArrowDown: "down",
+        ArrowLeft: "left",
+        ArrowRight: "right",
+        Enter: "select",
+        Backspace: "back",
+      };
+      const k = map[e.key];
+      if (!k) return;
+      e.preventDefault();
+      remote.press(k)();
+    };
+    window.addEventListener("keydown", onDown);
+    return () => window.removeEventListener("keydown", onDown);
+  }, [isDesktop, tab, remote.press]);
 
   return (
-    <div {...swipe.handlers} style={{ display: "flex", flexDirection: "column", gap: "0.9rem", touchAction: "pan-y" }}>
+    <div
+      {...swipe.handlers}
+      style={{ display: "flex", flexDirection: "column", gap: "0.9rem", flex: tab === "scry" ? 1 : undefined, minHeight: 0, touchAction: "pan-y" }}
+    >
       <Segmented
         value={tab}
-        onChange={setTab}
+        onChange={onTabChange}
         variant="outline"
         accent={color.violet}
         options={[
-          { value: "remote", label: "Remote" },
+          { value: "keys", label: "Keys" },
+          { value: "scry", label: "Scry" },
           { value: "apps", label: "Apps" },
         ]}
       />
-      <div ref={swipe.contentRef} key={swipe.key} className={swipe.className} style={{ display: "flex", flexDirection: "column", gap: "0.9rem", ...swipe.style }}>
-      {tab === "remote" ? (
+      <div
+        ref={swipe.contentRef}
+        key={swipe.key}
+        className={swipe.className}
+        style={{ display: "flex", flexDirection: "column", gap: "0.9rem", ...(tab === "scry" ? { flex: 1, minHeight: 0 } : {}), ...swipe.style }}
+      >
+      {tab === "keys" ? (
         <div style={{ display: "flex", flexDirection: "column", gap: "0.9rem" }}>
           {/* What's on + volume sit above the keypad — the old "Watch" tab, folded in. */}
           <TvNowPlaying device={device} />
           <FancyVolume device={device} onLocalPatch={onLocalPatch} />
-          <RemotePad press={remote.press} />
+          <KeysPad press={remote.press} />
           <RemoteTextEntry send={remote.send} />
           <AssistantSay deviceId={device.id} />
           <ExpandedRemote remoteId={remoteId} send={remote.send} />
         </div>
+      ) : tab === "scry" ? (
+        <ScryPad press={remote.press} />
       ) : (
         <RemoteApps
           apps={remote.apps}

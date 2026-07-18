@@ -13,6 +13,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "re
 import { createPortal } from "react-dom";
 import { useViewport } from "../useViewport";
 import { sheetStyle } from "./sheet";
+import { useDragToClose } from "./useDragToClose";
 import { color, radius, alpha, gildedRule, hitHalo, labelType } from "../theme";
 
 export function Flyout({
@@ -23,6 +24,8 @@ export function Flyout({
   closeGuard,
   ambientColor,
   ambientStrength = 0.22,
+  maximize = false,
+  dragToClose = true,
   children,
 }: {
   anchor: HTMLElement | { x: number; y: number };
@@ -38,11 +41,30 @@ export function Flyout({
   ambientColor?: string;
   /** 0–1 opacity of the ambient cast (callers scale it by brightness). */
   ambientStrength?: number;
+  /** Mobile bottom sheet only: expand near-fullscreen instead of the default
+   * 85vh cap, for a panel that wants to dominate the screen (e.g. the Scrying
+   * Glass gesture pad). No effect on tablet/desktop. */
+  maximize?: boolean;
+  /** Mobile bottom sheet only: a handle at the top the user can pull down to
+   * dismiss — the sheet follows the finger and commits closed past a distance
+   * or a quick flick, same as a native sheet. On by default (every fly-out
+   * gets it); set false to opt out. No effect on tablet/desktop. */
+  dragToClose?: boolean;
   children: ReactNode;
 }) {
   const { isCompact, isMobile } = useViewport();
   const panelRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+
+  // Drag-to-dismiss (mobile bottom sheet only): moves the sheet's own node
+  // directly, mirroring useSwipeTabs' straight-to-DOM approach so a drag never
+  // re-renders the (possibly heavy) fly-out content mid-gesture.
+  const drag = useDragToClose(onClose, (px, animate) => {
+    const el = panelRef.current;
+    if (!el) return;
+    el.style.transition = animate ? "transform 0.22s ease" : "none";
+    el.style.transform = px > 0 ? `translateY(${px}px)` : "";
+  });
 
   useLayoutEffect(() => {
     // On compact viewports the fly-out is a bottom sheet — no anchor math.
@@ -108,9 +130,35 @@ export function Flyout({
         ref={panelRef}
         style={{
           ...sheetStyle,
+          ...(maximize ? { height: "94dvh", maxHeight: "94dvh" } : {}),
           ...(ambient ? { background: `${ambient}, ${sheetStyle.background}` } : {}),
         }}
       >
+        {dragToClose && (
+          // A negative margin cancels the sheet's own padding so this strip
+          // reaches the true top edge and stretches full-width — the whole
+          // band is grabbable (≥44px tall), not just a small centered box;
+          // the visual pill still centers via justifyContent. `sheetStyle`'s
+          // gap spaces it from the header below.
+          <div
+            {...drag.handlers}
+            aria-hidden
+            style={{
+              display: "flex",
+              justifyContent: "center",
+              alignItems: "center",
+              height: 44,
+              margin: "-0.9rem -0.9rem 0", // the strip reaches the sheet's true top edge
+              touchAction: "none",
+              cursor: "grab",
+              flexShrink: 0,
+            }}
+          >
+            <span
+              style={{ width: 36, height: 4, borderRadius: radius.pill, background: alpha(color.text, 0.24) }}
+            />
+          </div>
+        )}
         {children}
       </div>,
       document.body,
@@ -138,8 +186,8 @@ export function Flyout({
           ref={panelRef}
           style={{
             width: "70%",
-            maxWidth: 560,
-            maxHeight: "85vh",
+            maxWidth: maximize ? 640 : 560,
+            maxHeight: maximize ? "92vh" : "85vh",
             overflowY: "auto",
             background: ambient ? `${ambient}, ${color.surface}` : color.surface,
             border: `1px solid ${color.hairline}`,
