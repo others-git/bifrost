@@ -399,6 +399,88 @@ async fn list_provider_types_returns_hue_and_govee() {
     assert!(types.contains(&"govee".to_string()));
 }
 
+/// A PURE power-only provider type (Kasa — no light/media factory to piggyback
+/// on) end to end: `POST /api/providers` used to 400 with "unknown
+/// provider_type" for exactly this shape (the validation only ever checked
+/// `is_known`/`is_known_media`), and even past that, nothing started a live
+/// poller for it (the connection dispatch's fallback just logged "unknown
+/// type" — there was no "power-only, no other domain" branch). Both are real
+/// bugs this test locks in the fix for, against the real HTTP route and the
+/// real connection manager — not just the provider module's own unit tests.
+///
+/// No mock device is needed: `device_ip` has no port field in Kasa's schema
+/// (every add always targets the fixed protocol port 9999), so this points at
+/// loopback where nothing listens on 9999 within the test sandbox — the
+/// add/build path has no I/O (confirmed: `KasaProvider::from_credentials`
+/// only parses the IP), and the poller's very first tick fails fast
+/// (ECONNREFUSED, not a timeout), which is exactly what this test needs: proof
+/// the manager is running and attempting, not proof a real plug answers (the
+/// provider's own `discover`/`get_state` behaviour against a real device is
+/// covered by src/providers/kasa/mod.rs's mock-TCP-listener tests).
+#[tokio::test]
+async fn kasa_power_only_provider_adds_and_starts_polling() {
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/providers",
+            &cookie,
+            r#"{"name":"Raven Lights","provider_type":"kasa","credentials":{"device_ip":"127.0.0.1"}}"#,
+        ))
+        .await
+        .unwrap();
+    // The bug: this used to be 400 "unknown provider_type 'kasa'".
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Confirm it's a REAL entry in the registry (build_power actually ran) —
+    // `all_types`/`ui_domain` regressions are covered at the unit level
+    // (src/providers/mod.rs); this is the type actually persisted.
+    let stored: String = sqlx::query_scalar("SELECT provider_type FROM providers WHERE id = ?")
+        .bind(&id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(stored, "kasa");
+
+    // The other bug: the connection manager must actually be running for this
+    // provider (not silently absent) — poll for it to leave "disconnected".
+    // A closed loopback port does NOT refuse fast in every environment (this
+    // one included — verified empirically: a connect to a closed port here
+    // hangs the full timeout rather than an instant ECONNREFUSED), so the
+    // first observable transition only lands once the provider's own connect
+    // timeout (5s) elapses and `PowerPollingManager` reports "reconnecting" —
+    // an absent manager would never move off "disconnected" at all, which is
+    // the actual thing this asserts.
+    let mut engaged = false;
+    for _ in 0..140 {
+        let status = helpers::response_json(
+            app.clone()
+                .oneshot(helpers::authed_get(
+                    &format!("/api/providers/{id}/status"),
+                    &cookie,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        if status["state"] == "reconnecting" || status["state"] == "connecting" {
+            engaged = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        engaged,
+        "power polling manager never engaged — start_manager_for's power-only branch didn't run"
+    );
+}
+
 #[tokio::test]
 async fn add_provider_with_unknown_type_returns_400() {
     let app = helpers::test_app_with_password().await;
@@ -793,6 +875,197 @@ async fn scheduler_tick_enforces_the_hour_plan() {
     // …and an asleep hour flips it to sleep (edge-triggered on the change).
     bifrost::api::kiosks::scheduler_tick(&state, &mut desired, &mut present, 15, 15 * 60).await;
     assert_eq!(pending(app.clone(), cookie.clone()).await, "sleep");
+}
+
+/// `PUT /api/kiosks/{id}/aware-override` — the HTTP contract: a valid mixed-
+/// domain target list roundtrips through `GET /api/kiosks`, and an unknown
+/// domain is rejected before anything is stored.
+#[tokio::test]
+async fn aware_override_roundtrips_and_validates_domain() {
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "wall tablet").await;
+    sqlx::query(
+        "INSERT INTO providers (id, provider_type, name, credentials) VALUES ('p','wled','P','x')",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO power_devices (id, provider_id, device_id, name, kind, last_state) VALUES ('pw1','p','d1','Amp','switch','{\"on\":false}')")
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/kiosks/checkin")
+                .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let id = list[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(list[0]["aware_override_targets"], serde_json::json!([]));
+
+    // An unknown domain is rejected before anything is stored.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/kiosks/{id}/aware-override"),
+            &cookie,
+            r#"{"targets":[{"domain":"climate","id":"pw1"}]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // A valid target list roundtrips.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/kiosks/{id}/aware-override"),
+            &cookie,
+            r#"{"targets":[{"domain":"power","id":"pw1"}]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        list[0]["aware_override_targets"],
+        serde_json::json!([{"domain":"power","id":"pw1"}])
+    );
+
+    // An unknown kiosk id 404s.
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/kiosks/nope/aware-override",
+            &cookie,
+            r#"{"targets":[]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// The actual behaviour: an Aware hour with no presence input normally leaves
+/// the kiosk ungoverned (no command queued) — but with an override target
+/// that's ON, the scheduler forces the screen awake regardless, and clears the
+/// moment the device is off again.
+#[tokio::test]
+async fn aware_override_forces_awake_while_the_target_device_is_on() {
+    use std::collections::HashMap;
+
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "wall tablet").await;
+    sqlx::query(
+        "INSERT INTO providers (id, provider_type, name, credentials) VALUES ('p','wled','P','x')",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO power_devices (id, provider_id, device_id, name, kind, last_state) VALUES ('pw1','p','d1','Amp','switch','{\"on\":false}')")
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/kiosks/checkin")
+                .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let id = list[0]["id"].as_str().unwrap().to_string();
+
+    // All-Aware plan, no room assigned — presence never governs on its own.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/kiosks/{id}/plan"),
+            &cookie,
+            r#"{"enabled":true,"hour_modes":"AAAAAAAAAAAAAAAAAAAAAAAA"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/kiosks/{id}/aware-override"),
+            &cookie,
+            r#"{"targets":[{"domain":"power","id":"pw1"}]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let pending = |app: Router, cookie: String| async move {
+        let list = helpers::response_json(
+            app.oneshot(helpers::authed_get("/api/kiosks", &cookie))
+                .await
+                .unwrap(),
+        )
+        .await;
+        list[0]["pending_command"].clone()
+    };
+
+    let mut desired = HashMap::new();
+    let mut present = HashMap::new();
+
+    // Device off, no room, no presence input → nothing governs this hour.
+    bifrost::api::kiosks::scheduler_tick(&state, &mut desired, &mut present, 10, 10 * 60).await;
+    assert_eq!(
+        pending(app.clone(), cookie.clone()).await,
+        serde_json::Value::Null
+    );
+
+    // Flip the device on — the override forces the screen awake.
+    sqlx::query("UPDATE power_devices SET last_state = '{\"on\":true}' WHERE id = 'pw1'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    bifrost::api::kiosks::scheduler_tick(&state, &mut desired, &mut present, 11, 11 * 60).await;
+    assert_eq!(pending(app.clone(), cookie.clone()).await, "wake");
 }
 
 #[tokio::test]

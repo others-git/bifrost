@@ -3,6 +3,7 @@ pub mod govee;
 pub mod govee_lan;
 pub mod ha;
 pub mod hue;
+pub mod kasa;
 pub mod lifx;
 pub mod nanoleaf;
 pub mod onkyo;
@@ -381,6 +382,12 @@ pub trait PowerProviderFactory: Send + Sync {
     fn build(&self, credentials_json: &str) -> Result<Box<dyn PowerProvider>>;
 
     fn credentials_schema(&self) -> &'static [CredentialField];
+
+    /// Network auto-detect, for providers with LAN devices to find (mirrors
+    /// `ProviderFactory`/`MediaProviderFactory`). `None` = no scan button.
+    fn discoverer(&self) -> Option<Box<dyn DeviceDiscovery>> {
+        None
+    }
 }
 
 /// Runtime interface for **sensor devices** — read-only inputs (motion,
@@ -739,12 +746,19 @@ impl ProviderRegistry {
     }
 
     /// The network auto-detect object for a provider type, if it has one.
-    /// Looks in both the light and media factory maps.
+    /// Looks across the light, media, and power factory maps.
     pub fn discoverer(&self, provider_type: &str) -> Option<Box<dyn DeviceDiscovery>> {
         if let Some(f) = self.factories.get(provider_type) {
             return f.discoverer();
         }
-        self.media_factories
+        if let Some(d) = self
+            .media_factories
+            .get(provider_type)
+            .and_then(|f| f.discoverer())
+        {
+            return Some(d);
+        }
+        self.power_factories
             .get(provider_type)
             .and_then(|f| f.discoverer())
     }
@@ -808,14 +822,19 @@ impl ProviderRegistry {
         }
         self.power_factories
             .get(provider_type)
-            .map(|_| ProviderDomain::Light)
+            .map(|_| ProviderDomain::Power)
     }
 
     /// All registered provider types for the "Add provider" UI, **one entry per
     /// type**, sorted by type name. A multi-domain integration (HA) registers in
     /// several maps but must appear once — its light/integration factory is
-    /// authoritative for the menu, so an media factory sharing that type key is
-    /// skipped here (it still serves discovery/control behind the scenes).
+    /// authoritative for the menu, so a media or power factory sharing that
+    /// type key is skipped here (it still serves discovery/control behind the
+    /// scenes). A **power-only** type (no light/media factory at all — e.g.
+    /// Kasa) has no other entry to hide behind, so it needs its own branch:
+    /// without this, a pure `PowerProviderFactory` registration was invisible
+    /// to the add-provider menu entirely (this method only ever looked at
+    /// `factories`/`media_factories`) — the gap Kasa's addition surfaced.
     pub fn all_types(&self) -> Vec<ProviderTypeInfo> {
         let mut types: Vec<_> = self
             .factories
@@ -839,6 +858,21 @@ impl ProviderRegistry {
                         schema: f.credentials_schema().to_vec(),
                     }),
             )
+            .chain(
+                self.power_factories
+                    .values()
+                    .filter(|f| {
+                        !self.factories.contains_key(f.provider_type())
+                            && !self.media_factories.contains_key(f.provider_type())
+                    })
+                    .map(|f| ProviderTypeInfo {
+                        provider_type: f.provider_type(),
+                        display_name: f.display_name(),
+                        kind: ProviderDomain::Power,
+                        supports_discovery: f.discoverer().is_some(),
+                        schema: f.credentials_schema().to_vec(),
+                    }),
+            )
             .collect();
         types.sort_by_key(|t| t.provider_type);
         types
@@ -846,7 +880,7 @@ impl ProviderRegistry {
 }
 
 /// How a provider type is grouped in the "Add provider" UI. Most providers map
-/// to a single device domain (`Light`/`Media`); an `Integration` is a
+/// to a single device domain (`Light`/`Media`/`Power`); an `Integration` is a
 /// higher-level platform adapter (e.g. Home Assistant) that can surface many
 /// device kinds at once, so it gets its own category rather than being filed
 /// under one domain.
@@ -855,6 +889,10 @@ impl ProviderRegistry {
 pub enum ProviderDomain {
     Light,
     Media,
+    /// A provider whose only domain is on/off power (e.g. Kasa) — distinct
+    /// from `Light` so the UI can group/label it honestly rather than filing
+    /// a smart plug under "Lights".
+    Power,
     Integration,
 }
 
@@ -909,6 +947,10 @@ pub fn default_registry() -> ProviderRegistry {
     // today). The IP is auto-discovered; the vendor is auto-selected.
     r.register_media(smarttv::SmartTvMediaFactory);
     r.register_remote(smarttv::SmartTvRemoteFactory);
+    // TP-Link Kasa smart plugs — LAN-only, legacy (pre-KLAP) protocol, power
+    // domain only (strictly on/off). The first power-only provider type; see
+    // `all_types()`'s doc comment for the add-provider-menu gap it surfaced.
+    r.register_power(kasa::KasaPowerFactory);
     r
 }
 
@@ -1071,6 +1113,32 @@ pub(crate) mod tests {
         assert!(reg.build("ha", creds).is_ok());
         assert!(reg.build_power("ha", creds).is_ok());
         assert!(reg.build_media("ha", creds).is_ok());
+    }
+
+    #[test]
+    fn default_registry_lists_kasa_as_a_power_only_type_with_a_scanner() {
+        // Kasa has no light/media/integration factory at all — the case
+        // `all_types()` used to drop silently (it only ever looked at
+        // `factories`/`media_factories`). This is the regression test for
+        // that gap: a pure PowerProviderFactory registration must actually
+        // reach the add-provider menu, with its own domain label and its
+        // scan button wired through the top-level `discoverer()` lookup.
+        let reg = default_registry();
+        assert!(reg.is_known_power("kasa"));
+        assert!(
+            reg.build_power("kasa", r#"{"device_ip":"192.168.1.46"}"#)
+                .is_ok()
+        );
+
+        let entry = reg
+            .all_types()
+            .into_iter()
+            .find(|t| t.provider_type == "kasa")
+            .expect("kasa must appear in the add-provider menu");
+        assert_eq!(entry.kind, ProviderDomain::Power);
+        assert!(entry.supports_discovery, "kasa should offer a scan button");
+        assert_eq!(reg.ui_domain("kasa"), Some(ProviderDomain::Power));
+        assert!(reg.discoverer("kasa").is_some());
     }
 
     #[test]

@@ -39,7 +39,11 @@ import {
   setKioskBoard,
   setKioskPlan,
   setKioskMic,
+  setKioskAwareOverride,
   type KioskHourMode,
+  type ControlTarget,
+  type Light,
+  type PowerDevice,
   getDashboards,
   forgetKiosk,
   getKioskUpdateConfig,
@@ -75,6 +79,7 @@ import { Select } from "../components/Select";
 import { useViewport } from "../useViewport";
 import { ACCENT, S, pageShell, tileGrid } from "../styles";
 import { Button, Segmented, Switch } from "../components/controls";
+import { OptionCheckList } from "../components/deviceOptions";
 import { alpha, color } from "../theme";
 import { Glyph } from "../components/glyphs";
 import { speak } from "../tts";
@@ -2545,6 +2550,11 @@ function KiosksSection({
   const [kiosks, setKiosks] = useState<Kiosk[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
   const [boards, setBoards] = useState<Dashboard[]>([]);
+  // For the "aware override" device picker only — loaded once, not polled
+  // (unlike kiosks, these don't need to track live state here).
+  const [lights, setLights] = useState<Light[]>([]);
+  const [media, setMedia] = useState<MediaDevice[]>([]);
+  const [power, setPower] = useState<PowerDevice[]>([]);
   // kioskId → target version we pushed, so the row can show "Updating…" until the
   // kiosk re-checks-in reporting that version (it goes offline mid-install).
   const [updating, setUpdating] = useState<Record<string, string>>({});
@@ -2555,6 +2565,9 @@ function KiosksSection({
     load();
     getRooms().then(setRooms);
     getDashboards().then(setBoards);
+    getLights().then((l) => setLights(l === "unauthorized" ? [] : l));
+    getMediaDevices().then(setMedia);
+    getPowerDevices().then(setPower);
   }, []);
 
   // Kiosk state changes REMOTELY (each check-in refreshes screen state and
@@ -2777,6 +2790,7 @@ function KiosksSection({
             </div>
             <KioskDisplayPlan k={k} dialogs={dialogs} onSaved={load} />
             <KioskMicPresence k={k} onSaved={load} />
+            <KioskAwareOverride k={k} lights={lights} media={media} power={power} onSaved={load} />
           </div>
         ))}
       </div>
@@ -2837,6 +2851,117 @@ function KioskMicPresence({ k, onSaved }: { k: Kiosk; onSaved: () => void }) {
           ? "How far a sound must rise above the room's ambient hum (loud ≈15 dB · speech ≈10 dB · faint ≈6 dB). Level only — audio never leaves the kiosk."
           : "Sound level only — audio never leaves the kiosk."}
       </span>
+    </div>
+  );
+}
+
+// ── Kiosk aware override ────────────────────────────────────────────────────
+
+/** While any configured device is on, an Aware hour keeps the kiosk's screen
+ * awake regardless of room presence — "don't let the screen sleep from a
+ * no-motion timeout while the TV is playing". Only shown once the kiosk's
+ * plan actually paints an Aware hour (otherwise there's nothing to override).
+ * Mixed-domain device picker mirrors the Boards room-control target picker
+ * (`ControlEditor`'s "Devices" field) — a flat `domain:id` list, no room
+ * grouping, since a target list here is typically one or two devices. */
+function KioskAwareOverride({
+  k,
+  lights,
+  media,
+  power,
+  onSaved,
+}: {
+  k: Kiosk;
+  lights: Light[];
+  media: MediaDevice[];
+  power: PowerDevice[];
+  onSaved: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [targets, setTargets] = useState<ControlTarget[]>(k.aware_override_targets);
+  // Re-sync the draft when the modal (re)opens against the latest saved value.
+  useEffect(() => {
+    if (open) setTargets(k.aware_override_targets);
+  }, [open, k.aware_override_targets]);
+
+  if (!k.hour_modes?.includes("A")) return null;
+
+  const selLights = lights.filter((l) => l.enabled !== false && !l.shadowed_by);
+  const selMedia = media.filter((m) => m.enabled !== false && !m.shadowed_by && !m.companion_of);
+  const selPower = power.filter((p) => p.enabled !== false && !p.shadowed_by);
+  const pool: { domain: ControlTarget["domain"]; list: { id: string; name: string }[] }[] = [
+    { domain: "light", list: selLights },
+    { domain: "media", list: selMedia },
+    { domain: "power", list: selPower },
+  ];
+  const nameFor = (t: ControlTarget) =>
+    pool.find((p) => p.domain === t.domain)?.list.find((d) => d.id === t.id)?.name ?? "(removed device)";
+  const has = (domain: string, id: string) => targets.some((t) => t.domain === domain && t.id === id);
+  const toggle = (domain: ControlTarget["domain"], id: string) =>
+    setTargets((cur) =>
+      has(domain, id)
+        ? cur.filter((t) => !(t.domain === domain && t.id === id))
+        : [...cur, { domain, id }],
+    );
+
+  const summary =
+    k.aware_override_targets.length === 0
+      ? "Not configured"
+      : `Off while: ${k.aware_override_targets.map(nameFor).join(", ")}`;
+
+  async function save() {
+    setBusy(true);
+    try {
+      await setKioskAwareOverride(k.id, targets);
+      onSaved();
+      setOpen(false);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        flexWrap: "wrap",
+        gap: "0.5rem",
+        marginTop: "0.4rem",
+        fontSize: "0.78rem",
+        color: "var(--bf-faint)",
+      }}
+    >
+      <span style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem", color: "var(--bf-dim)" }}>
+        <Glyph name="bolt" size={15} /> Aware override
+      </span>
+      <span style={{ flex: 1, minWidth: 0 }}>{summary}</span>
+      <Button variant="ghost" onClick={() => setOpen(true)} style={{ padding: "0.2rem 0.6rem", fontSize: "0.74rem" }}>
+        Configure
+      </Button>
+      {open && (
+        <Modal title="Aware override" onClose={() => setOpen(false)}>
+          <p style={{ fontSize: "0.8rem", color: "var(--bf-faint)", marginTop: 0 }}>
+            While any of these is on, an Aware hour keeps <strong>{k.name}</strong>'s screen awake
+            regardless of room presence.
+          </p>
+          <OptionCheckList
+            options={pool.flatMap(({ domain, list }) =>
+              list.map((d) => ({ value: `${domain}:${d.id}`, label: d.name })),
+            )}
+            selected={targets.map((t) => `${t.domain}:${t.id}`)}
+            onToggle={(v) => {
+              const sep = v.indexOf(":");
+              toggle(v.slice(0, sep) as ControlTarget["domain"], v.slice(sep + 1));
+            }}
+          />
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1rem" }}>
+            <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button variant="primary" onClick={save} disabled={busy}>Save</Button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

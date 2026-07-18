@@ -137,7 +137,7 @@ pub async fn udp_probe(
 }
 
 /// Credentials object pre-shaped for one host field, e.g. `{"device_ip": ip}`.
-fn host_credentials(field: &str, host: &str) -> serde_json::Value {
+pub(crate) fn host_credentials(field: &str, host: &str) -> serde_json::Value {
     let mut m = serde_json::Map::new();
     m.insert(
         field.to_string(),
@@ -258,7 +258,7 @@ impl DeviceDiscovery for SsdpDiscovery {
 /// The primary local IPv4, found by asking the kernel which source address it
 /// would use to reach the internet (no packets are sent). `None` when offline
 /// or only loopback is available.
-fn local_ipv4() -> Option<Ipv4Addr> {
+pub(crate) fn local_ipv4() -> Option<Ipv4Addr> {
     let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     sock.connect("8.8.8.8:80").ok()?;
     match sock.local_addr().ok()?.ip() {
@@ -268,7 +268,7 @@ fn local_ipv4() -> Option<Ipv4Addr> {
 }
 
 /// Every `http://host` in the local /24 except our own address.
-fn subnet_bases(ip: Ipv4Addr) -> Vec<String> {
+pub(crate) fn subnet_bases(ip: Ipv4Addr) -> Vec<String> {
     let o = ip.octets();
     (1u8..=254)
         .filter(|&h| h != o[3])
@@ -277,7 +277,7 @@ fn subnet_bases(ip: Ipv4Addr) -> Vec<String> {
 }
 
 /// Every `http://host` in the /24 with the given base address (`.1`–`.254`).
-fn extra_subnet_bases(base: Ipv4Addr) -> Vec<String> {
+pub(crate) fn extra_subnet_bases(base: Ipv4Addr) -> Vec<String> {
     let o = base.octets();
     (1u8..=254)
         .map(|h| format!("http://{}.{}.{}.{}", o[0], o[1], o[2], h))

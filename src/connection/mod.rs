@@ -12,7 +12,7 @@ use crate::models::sensor::SensorState;
 use crate::models::{LightCapabilities, LightState, LightStatePatch};
 use crate::providers::ha::{HaProvider, HaPushEvent};
 use crate::providers::hue::HueProvider;
-use crate::providers::{LightProvider, MediaProvider};
+use crate::providers::{LightProvider, MediaProvider, PowerProvider};
 use anyhow::Result;
 use serde::Serialize;
 use sqlx::SqlitePool;
@@ -411,6 +411,99 @@ impl PollingManager {
     }
 }
 
+// ── Power polling manager ───────────────────────────────────────────────────
+
+/// The power-domain twin of [`PollingManager`] — same shape, `PowerProvider`/
+/// `PowerEvent` instead of light. For a provider registered ONLY as a power
+/// factory (no light/media factory to piggyback a push connection on, e.g.
+/// Kasa) this is the only thing that keeps its state live; `HaPushManager`
+/// still owns HA's power devices (they ride its one multi-domain WebSocket).
+pub struct PowerPollingManager {
+    provider: Box<dyn PowerProvider>,
+    pub state: Arc<RwLock<ConnectionState>>,
+    pub events: broadcast::Sender<PowerEvent>,
+    interval: Duration,
+}
+
+impl PowerPollingManager {
+    pub fn new(
+        provider: Box<dyn PowerProvider>,
+        interval: Duration,
+    ) -> (Self, broadcast::Receiver<PowerEvent>) {
+        let (tx, rx) = broadcast::channel(64);
+        let mgr = Self {
+            provider,
+            state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
+            events: tx,
+            interval,
+        };
+        (mgr, rx)
+    }
+
+    /// Poll forever. Successful polls mark the provider Connected; failures
+    /// transition to Reconnecting with exponential backoff — identical
+    /// contract to [`PollingManager::run`].
+    pub async fn run(self: Arc<Self>) {
+        info!("power polling manager starting ({})", self.provider.name());
+        let mut attempt: u32 = 0;
+        let mut connected_since: Option<Instant> = None;
+
+        loop {
+            match self.poll_once().await {
+                Ok(n) => {
+                    attempt = 0;
+                    let since = *connected_since.get_or_insert_with(Instant::now);
+                    *self.state.write().await = ConnectionState::Connected {
+                        since,
+                        last_event: Instant::now(),
+                    };
+                    debug!("{}: polled {n} power devices", self.provider.name());
+                    tokio::time::sleep(self.interval).await;
+                }
+                Err(e) => {
+                    warn!("{}: power poll failed: {e:#}", self.provider.name());
+                    connected_since = None;
+                    let delay = backoff_delay(attempt);
+                    attempt += 1;
+                    *self.state.write().await = ConnectionState::Reconnecting {
+                        attempt,
+                        retry_at: Instant::now() + delay,
+                    };
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+
+    /// One polling pass: enumerate devices, fetch each device's live state,
+    /// broadcast the result. Falls back to the discovery snapshot when a
+    /// per-device state fetch fails (a plug that dropped off Wi-Fi between
+    /// discover and get_state still reports SOMETHING, not a hard error).
+    async fn poll_once(&self) -> Result<usize> {
+        let devices = self.provider.discover().await?;
+        let mut count = 0;
+        for device in devices {
+            let state = match self.provider.get_state(&device.provider_id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    debug!(
+                        "{}: get_state({}) failed, using discovery snapshot: {e:#}",
+                        self.provider.name(),
+                        device.provider_id
+                    );
+                    device.state
+                }
+            };
+            let _ = self.events.send(PowerEvent {
+                device_id: device.provider_id,
+                state,
+            });
+            count += 1;
+        }
+        Ok(count)
+    }
+}
+
 // ── Media push manager ───────────────────────────────────────────────────────
 
 /// Keeps a persistent push channel open to an media device (Onkyo eISCP).
@@ -781,6 +874,38 @@ impl ConnectionRegistry {
                 events,
                 media_events: None,
                 power_events: None,
+                sensor_events: None,
+                tasks: vec![poll_task, db_task],
+            },
+        );
+    }
+
+    /// The power-domain twin of [`start_polling`](Self::start_polling), for a
+    /// provider registered ONLY as a power factory (Kasa) — no light channel
+    /// exists for such an entry, so `events` carries a throwaway
+    /// never-subscribed `LightEvent` sender (the field is mandatory on every
+    /// `ConnectionEntry`, matching the kiosk pseudo-provider's own manager-less
+    /// entry in `ensure_sensor_push_channel`).
+    pub fn start_power_polling(
+        &mut self,
+        provider_id: String,
+        provider: Box<dyn PowerProvider>,
+        interval: Duration,
+        db: SqlitePool,
+    ) {
+        let (mgr, rx) = PowerPollingManager::new(provider, interval);
+        let mgr = Arc::new(mgr);
+        let state = Arc::clone(&mgr.state);
+        let power_events = mgr.events.clone();
+        let poll_task = tokio::spawn(Arc::clone(&mgr).run());
+        let db_task = tokio::spawn(power_db_writer_task(rx, provider_id.clone(), db));
+        self.entries.insert(
+            provider_id,
+            ConnectionEntry {
+                state,
+                events: broadcast::channel(1).0,
+                media_events: None,
+                power_events: Some(power_events),
                 sensor_events: None,
                 tasks: vec![poll_task, db_task],
             },

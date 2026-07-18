@@ -347,7 +347,12 @@ async fn add_provider(
     Json(req): Json<AddProviderRequest>,
 ) -> impl IntoResponse {
     let is_media = state.registry.is_known_media(&req.provider_type);
-    if !state.registry.is_known(&req.provider_type) && !is_media {
+    let is_light = state.registry.is_known(&req.provider_type);
+    // A pure power provider (Kasa) has neither — it's the only reason this
+    // third check exists (every other power-registering type today, HA, is
+    // also a light/media factory and is already covered above).
+    let is_power_only = !is_light && !is_media && state.registry.is_known_power(&req.provider_type);
+    if !is_light && !is_media && !is_power_only {
         return (
             StatusCode::BAD_REQUEST,
             format!(
@@ -365,6 +370,11 @@ async fn add_provider(
         state
             .registry
             .build_media(&req.provider_type, &creds_json)
+            .map(|_| ())
+    } else if is_power_only {
+        state
+            .registry
+            .build_power(&req.provider_type, &creds_json)
             .map(|_| ())
     } else {
         state

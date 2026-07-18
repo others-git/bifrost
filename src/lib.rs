@@ -399,7 +399,34 @@ pub fn start_manager_for(
                     }
                 }
             }
-            None => tracing::warn!("provider {provider_id} has unknown type '{provider_type}'"),
+            // Neither a light nor a media connection mode — a PURE power
+            // provider (Kasa) falls through to here, since it has no other
+            // domain to piggyback a push connection on (unlike HA, whose
+            // power devices ride its light factory's HaPush WebSocket).
+            None => {
+                if state.registry.is_known_power(provider_type) {
+                    match state.registry.build_power(provider_type, creds_json) {
+                        Ok(provider) => {
+                            tracing::info!(
+                                "starting power polling manager for provider {provider_id}"
+                            );
+                            connections.start_power_polling(
+                                provider_id.to_string(),
+                                provider,
+                                std::time::Duration::from_secs(
+                                    providers::DEFAULT_POLL_INTERVAL_SECS,
+                                ),
+                                state.db.clone(),
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!("failed to build power provider {provider_id}: {e:#}")
+                        }
+                    }
+                } else {
+                    tracing::warn!("provider {provider_id} has unknown type '{provider_type}'");
+                }
+            }
         },
     }
 }

@@ -26,6 +26,7 @@
 use crate::AppState;
 use crate::api::apikeys::require_api_key;
 use crate::api::auth::Session;
+use crate::api::rooms::ControlTarget;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -83,6 +84,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{id}/presence", axum::routing::put(set_presence))
         .route("/{id}/plan", axum::routing::put(set_plan))
         .route("/{id}/mic", axum::routing::put(set_mic))
+        .route(
+            "/{id}/aware-override",
+            axum::routing::put(set_aware_override),
+        )
         .route("/{id}/deauth", post(deauth))
         .route("/{id}", delete(forget))
 }
@@ -367,6 +372,9 @@ struct KioskRow {
     mic_sensitivity: Option<String>,
     /// Last reported sound level (dBFS) — telemetry for the Clients view.
     mic_level: Option<f64>,
+    /// Devices that keep an Aware hour awake regardless of presence (mig
+    /// 0062) — see `PUT …/aware-override`.
+    aware_override_targets: Vec<ControlTarget>,
 }
 
 /// `GET /api/kiosks` (session) — the clients view: every registered kiosk with
@@ -378,7 +386,7 @@ async fn list(State(state): State<Arc<AppState>>, _: Session) -> impl IntoRespon
                 presence_enabled, presence_timeout_secs,
                 battery_level, battery_charging, battery_voltage_mv, battery_current_ua,
                 battery_temp_dc, power_source, viewport_w, viewport_h, hour_modes,
-                mic_presence, mic_sensitivity, mic_level,
+                mic_presence, mic_sensitivity, mic_level, aware_override_targets,
                 api_key_id IS NOT NULL AS authorized,
                 (last_seen > datetime('now', '-{ONLINE_WINDOW_SECS} seconds')) AS online
          FROM kiosks ORDER BY name"
@@ -417,6 +425,7 @@ async fn list(State(state): State<Arc<AppState>>, _: Session) -> impl IntoRespon
                     mic_presence: r.get::<i64, _>("mic_presence") != 0,
                     mic_sensitivity: r.get("mic_sensitivity"),
                     mic_level: r.get("mic_level"),
+                    aware_override_targets: parse_aware_targets(r.get("aware_override_targets")),
                 })
                 .collect::<Vec<_>>(),
         )
@@ -911,7 +920,8 @@ pub async fn scheduler_tick(
     // Any kiosk governed by *either* policy.
     let rows = sqlx::query(
         "SELECT id, room_id, schedule_enabled, sleep_at, wake_at,
-                    presence_enabled, presence_timeout_secs, hour_modes
+                    presence_enabled, presence_timeout_secs, hour_modes,
+                    aware_override_targets
              FROM kiosks
              WHERE schedule_enabled = 1 OR presence_enabled = 1",
     )
@@ -985,6 +995,42 @@ pub async fn scheduler_tick(
             }
         } else {
             None
+        };
+
+        // Aware override: while any configured device is on, the room reads
+        // occupied regardless of actual presence — "don't let the screen
+        // sleep from a no-motion timeout while the TV is playing". Only
+        // meaningful during an Aware hour (the only mode presence governs at
+        // all); refreshes the grace timer too, so turning the device back off
+        // hands smoothly to the normal no-motion countdown instead of going
+        // dark the instant it's off.
+        let present = if mode == Some(PlanMode::Aware) {
+            let targets = parse_aware_targets(row.get("aware_override_targets"));
+            let mut overridden = false;
+            for t in &targets {
+                let Some(domain) = (match t.domain.as_str() {
+                    "light" => Some(crate::models::automation::TriggerDeviceDomain::Light),
+                    "media" => Some(crate::models::automation::TriggerDeviceDomain::Media),
+                    "power" => Some(crate::models::automation::TriggerDeviceDomain::Power),
+                    _ => None,
+                }) else {
+                    continue;
+                };
+                if crate::api::automations::cached_device_on(state, domain, &t.id).await
+                    == Some(true)
+                {
+                    overridden = true;
+                    break;
+                }
+            }
+            if overridden {
+                last_present.insert(id.clone(), Instant::now());
+                Some(true)
+            } else {
+                present
+            }
+        } else {
+            present
         };
 
         let desired = match mode {
@@ -1228,6 +1274,64 @@ async fn report_noise(
         });
     }
     StatusCode::NO_CONTENT
+}
+
+// ── Aware override: keep the screen awake while a device is on ───────────────
+
+/// Decode a kiosk row's stored override targets; a missing/malformed value
+/// degrades to "no override" rather than failing the whole listing (matches
+/// `list_room_controls`'s tolerance for a stale row).
+fn parse_aware_targets(raw: Option<String>) -> Vec<ControlTarget> {
+    raw.and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+#[derive(Deserialize)]
+struct SetAwareOverrideRequest {
+    /// Replaces the kiosk's override list wholesale. Empty = no override
+    /// (Aware hours follow presence only, the default).
+    targets: Vec<ControlTarget>,
+}
+
+/// `PUT /api/kiosks/{id}/aware-override` (session) — set the devices that keep
+/// an Aware hour's screen awake regardless of presence while any of them is
+/// on (`scheduler_tick` reads this list — see its doc comment). No existence
+/// check on each target: a removed device just never reads "on" again, the
+/// same tolerance `room_controls` targets already have for a stale reference.
+async fn set_aware_override(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+    Json(req): Json<SetAwareOverrideRequest>,
+) -> impl IntoResponse {
+    for t in &req.targets {
+        if !["light", "media", "power"].contains(&t.domain.as_str()) {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("unknown target domain '{}'", t.domain),
+            )
+                .into_response();
+        }
+    }
+    let json = serde_json::to_string(&req.targets).unwrap_or_else(|_| "[]".into());
+    match sqlx::query("UPDATE kiosks SET aware_override_targets = ? WHERE id = ?")
+        .bind(&json)
+        .bind(&id)
+        .execute(&state.db)
+        .await
+    {
+        Ok(r) if r.rows_affected() > 0 => {
+            // A config edit reconciles the screen immediately, same as every
+            // other display-policy setter.
+            state.occupancy_seen.poke();
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(_) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("db error setting kiosk aware override: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 /// `POST /api/kiosks/{id}/deauth` (session) — revoke the kiosk's API key. Its

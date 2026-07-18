@@ -1711,6 +1711,9 @@ export interface Kiosk {
   mic_sensitivity: string | null;
   /** Last reported sound level (dBFS) — live telemetry. */
   mic_level: number | null;
+  /** Devices that keep an Aware hour's screen awake regardless of presence
+   * while any of them is on (see `setKioskAwareOverride`). Empty = no override. */
+  aware_override_targets: ControlTarget[];
 }
 
 /** Report this client's CSS viewport to the hub (kiosk WebView only — auth'd by
@@ -1801,6 +1804,18 @@ export async function setKioskMic(
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(mic),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+}
+
+/** Set the devices that keep an Aware hour's screen awake regardless of
+ * presence while any of them is on ("don't let the screen sleep while the TV
+ * is playing"). Empty array clears the override. */
+export async function setKioskAwareOverride(id: string, targets: ControlTarget[]): Promise<void> {
+  const res = await fetch(`/api/kiosks/${id}/aware-override`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ targets }),
   });
   if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
 }

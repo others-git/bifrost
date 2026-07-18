@@ -115,8 +115,8 @@ pub(crate) struct RoomControl {
 /// One device a control acts on. `domain` ∈ light | media | power.
 #[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct ControlTarget {
-    domain: String,
-    id: String,
+    pub(crate) domain: String,
+    pub(crate) id: String,
 }
 
 #[derive(Serialize)]

@@ -22,7 +22,7 @@ use crate::models::automation::{
 };
 
 /// The table a device-trigger domain lives in (fixed identifiers — injection-free).
-fn device_trigger_table(domain: TriggerDeviceDomain) -> &'static str {
+pub(crate) fn device_trigger_table(domain: TriggerDeviceDomain) -> &'static str {
     match domain {
         TriggerDeviceDomain::Light => "lights",
         TriggerDeviceDomain::Media => "media_devices",
@@ -517,8 +517,9 @@ async fn rules_for_device(
 }
 
 /// The stored power boolean of a device-trigger subject, from its table's
-/// cached state — the fire-time re-check for device stay timers.
-async fn cached_device_on(
+/// cached state — the fire-time re-check for device stay timers, and the
+/// kiosk scheduler's "aware override" read (`api::kiosks::scheduler_tick`).
+pub(crate) async fn cached_device_on(
     state: &AppState,
     domain: TriggerDeviceDomain,
     device_row_id: &str,
