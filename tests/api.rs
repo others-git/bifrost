@@ -481,6 +481,150 @@ async fn kasa_power_only_provider_adds_and_starts_polling() {
     );
 }
 
+/// `GET /api/providers`' own `domain` field must also know about power-only
+/// providers — a separate match from `ProviderRegistry::ui_domain` that used
+/// to fall through to its `_ => "light"` catch-all, mislabeling every Kasa
+/// (and any future power-only) row in the Devices UI.
+#[tokio::test]
+async fn list_providers_reports_power_domain_for_kasa() {
+    let (app, _state) = helpers::test_app_with_password_and_state().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    app.clone()
+        .oneshot(helpers::authed_post(
+            "/api/providers",
+            &cookie,
+            r#"{"name":"Raven Lights","provider_type":"kasa","credentials":{"device_ip":"127.0.0.1"}}"#,
+        ))
+        .await
+        .unwrap();
+
+    let body = helpers::response_json(
+        app.oneshot(helpers::authed_get("/api/providers", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let kasa = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["provider_type"] == "kasa")
+        .unwrap();
+    assert_eq!(kasa["domain"], "power");
+}
+
+/// The internal `kiosk` provider row (one per paired kiosk, backing its mic
+/// sensor's `sensor_devices.provider_id` FK) has no credentials to edit and
+/// isn't something a user ever adds/removes — it must never surface as a
+/// normal provider card.
+#[tokio::test]
+async fn list_providers_hides_internal_kiosk_sensor_provider() {
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "wall tablet").await;
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/kiosks/checkin")
+                .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let kiosks = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let kiosk_id = kiosks[0]["id"].as_str().unwrap().to_string();
+    app.clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/kiosks/{kiosk_id}/mic"),
+            &cookie,
+            r#"{"enabled":true,"sensitivity":"high"}"#,
+        ))
+        .await
+        .unwrap();
+    let exists: Option<String> =
+        sqlx::query_scalar("SELECT id FROM providers WHERE provider_type = 'kiosk'")
+            .fetch_optional(&state.db)
+            .await
+            .unwrap();
+    assert!(
+        exists.is_some(),
+        "the kiosk-sensors provider row must exist in the DB"
+    );
+
+    let body = helpers::response_json(
+        app.oneshot(helpers::authed_get("/api/providers", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        body.as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["provider_type"] != "kiosk"),
+        "the internal kiosk-sensors row must never appear in the providers list"
+    );
+}
+
+/// A Smart-TV row's connected vendor rides in its credentials (`brand`,
+/// stamped by discovery — absent means Bravia, the default vendor) so the UI
+/// can label a Bravia vs. a generic Android TV box distinctly instead of both
+/// reading as an identical, unlabeled "Smart TV" card.
+#[tokio::test]
+async fn list_providers_reports_smarttv_brand() {
+    let (app, _state) = helpers::test_app_with_password_and_state().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    app.clone()
+        .oneshot(helpers::authed_post(
+            "/api/providers",
+            &cookie,
+            r#"{"name":"Living Room","provider_type":"smarttv","credentials":{"host":"127.0.0.1"}}"#,
+        ))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(helpers::authed_post(
+            "/api/providers",
+            &cookie,
+            r#"{"name":"Bedroom Dongle","provider_type":"smarttv","credentials":{"host":"127.0.0.2","brand":"androidtv"}}"#,
+        ))
+        .await
+        .unwrap();
+
+    let body = helpers::response_json(
+        app.oneshot(helpers::authed_get("/api/providers", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let providers = body.as_array().unwrap();
+    let bravia = providers
+        .iter()
+        .find(|p| p["name"] == "Living Room")
+        .unwrap();
+    let androidtv = providers
+        .iter()
+        .find(|p| p["name"] == "Bedroom Dongle")
+        .unwrap();
+    // Unset brand resolves to "bravia" (build_vendor's own default) rather
+    // than an absent/null field, so the UI always has a concrete label.
+    assert_eq!(bravia["brand"], "bravia");
+    assert_eq!(androidtv["brand"], "androidtv");
+}
+
 #[tokio::test]
 async fn add_provider_with_unknown_type_returns_400() {
     let app = helpers::test_app_with_password().await;

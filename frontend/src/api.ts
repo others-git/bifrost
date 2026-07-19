@@ -229,7 +229,7 @@ export interface Provider {
   /** Human-facing type name, e.g. "Sonos". */
   type_name: string;
   /** UI category: a single device domain, or "integration" (e.g. Home Assistant). */
-  domain: "light" | "media" | "integration";
+  domain: "light" | "media" | "power" | "integration";
   name: string;
   enabled: boolean;
   /** When set, discovering this provider removes devices it no longer reports. */
@@ -239,6 +239,8 @@ export interface Provider {
   created_at: string;
   /** Smart-TV only: Android TV Remote pairing state. */
   remote_paired?: boolean | null;
+  /** Smart-TV only: the connected vendor adapter ("bravia" when unset). */
+  brand?: string | null;
 }
 
 export interface CredentialField {
@@ -254,11 +256,11 @@ export interface ProviderType {
   /** Human-facing name, e.g. "Philips Hue". */
   display_name: string;
   /**
-   * UI grouping in the Add-provider menu. "light"/"media" are single-domain
-   * device providers; "integration" is a higher-level platform adapter (e.g.
-   * Home Assistant) that can surface many device kinds.
+   * UI grouping in the Add-provider menu. "light"/"media"/"power" are
+   * single-domain device providers; "integration" is a higher-level platform
+   * adapter (e.g. Home Assistant) that can surface many device kinds.
    */
-  kind: "light" | "media" | "integration";
+  kind: "light" | "media" | "power" | "integration";
   /** Whether the UI should offer a "Scan network" button for this type. */
   supports_discovery: boolean;
   schema: CredentialField[];

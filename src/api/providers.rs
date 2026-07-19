@@ -104,7 +104,11 @@ struct FoundDevice {
 /// device already covered by a configured provider can be filtered out. Covers
 /// the field names the various schemas use for an address.
 fn hosts_from_credentials(json: &str) -> Vec<String> {
-    const HOST_KEYS: &[&str] = &["host", "bridge_ip", "ip", "host_ip", "address"];
+    // `device_ip` is the one-device LAN providers' field (Kasa, Shelly,
+    // Tasmota, WLED) — missing it made a configured Kasa plug show up in its
+    // own group's scan as addable, minting a duplicate row. (`bind_addr` is
+    // deliberately absent: it's OUR local bind address, not a device host.)
+    const HOST_KEYS: &[&str] = &["host", "bridge_ip", "ip", "host_ip", "address", "device_ip"];
     serde_json::from_str::<serde_json::Value>(json)
         .ok()
         .and_then(|v| v.as_object().cloned())
@@ -224,7 +228,7 @@ struct ProviderRow {
     provider_type: String,
     /// Human-facing type name (e.g. "Sonos"); falls back to the type key.
     type_name: String,
-    /// UI category: "light", "media", or "integration" (matches the add menu).
+    /// UI category: "light", "media", "power", or "integration" (matches the add menu).
     domain: String,
     name: String,
     enabled: bool,
@@ -237,12 +241,22 @@ struct ProviderRow {
     /// (`atv_cert` present in credentials) — drives the per-TV pairing chip.
     #[serde(skip_serializing_if = "Option::is_none")]
     remote_paired: Option<bool>,
+    /// Smart-TV providers only: the connected vendor adapter ("bravia" when
+    /// unset, matching `build_vendor`'s default) — lets the UI group every TV
+    /// under one "Smart TV" card while still labeling each row's actual brand.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    brand: Option<String>,
 }
 
+/// The `kiosk` provider type is an internal row (one per paired kiosk, created
+/// so `sensor_devices.provider_id` has something to `REFERENCES` for a kiosk's
+/// mic-presence sensor) — it has no credentials to edit and isn't something a
+/// user ever "adds" or "removes" directly, so it's excluded here rather than
+/// shown as a normal, editable/removable provider card.
 async fn list_providers(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
     match sqlx::query(
         "SELECT id, provider_type, name, enabled, prune, display_order, created_at, credentials \
-         FROM providers ORDER BY display_order, created_at",
+         FROM providers WHERE provider_type != 'kiosk' ORDER BY display_order, created_at",
     )
     .fetch_all(&state.db)
     .await
@@ -258,17 +272,28 @@ async fn list_providers(State(state): State<Arc<AppState>>, _: Session) -> impl 
                         .to_string();
                     let domain = match state.registry.ui_domain(&provider_type) {
                         Some(crate::providers::ProviderDomain::Media) => "media",
+                        Some(crate::providers::ProviderDomain::Power) => "power",
                         Some(crate::providers::ProviderDomain::Integration) => "integration",
                         _ => "light",
                     }
                     .to_string();
-                    // Pairing state for the per-TV row chip (smart-TV only).
-                    let remote_paired = (provider_type == "smarttv").then(|| {
+                    // Pairing state + connected vendor for the per-TV row (smart-TV
+                    // only) — one decrypt serves both fields.
+                    let creds_json = (provider_type == "smarttv").then(|| {
                         state
                             .decrypt_credentials(&r.get::<String, _>("credentials"))
                             .ok()
                             .and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok())
+                    });
+                    let remote_paired = creds_json.as_ref().map(|c| {
+                        c.as_ref()
                             .is_some_and(|c| c.get("atv_cert").is_some_and(|v| v.is_string()))
+                    });
+                    let brand = creds_json.flatten().map(|c| {
+                        c.get("brand")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("bravia")
+                            .to_string()
                     });
                     ProviderRow {
                         type_name,
@@ -281,6 +306,7 @@ async fn list_providers(State(state): State<Arc<AppState>>, _: Session) -> impl 
                         display_order: r.get("display_order"),
                         created_at: r.get("created_at"),
                         remote_paired,
+                        brand,
                     }
                 })
                 .collect::<Vec<_>>(),
@@ -1485,4 +1511,32 @@ async fn prune_stale(state: &AppState, provider_id: &str, table: &str, before: &
     .await
     .map(|r| r.rows_affected())
     .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hosts_from_credentials_covers_every_schema_address_field() {
+        // One entry per address field name a provider schema actually uses —
+        // `device_ip` (Kasa/Shelly/Tasmota/WLED) was missing once, so a
+        // configured plug reappeared in its own scan as an addable duplicate.
+        for (json, host) in [
+            (r#"{"host":"192.0.2.1"}"#, "192.0.2.1"),
+            (r#"{"bridge_ip":"192.0.2.2"}"#, "192.0.2.2"),
+            (r#"{"device_ip":"192.0.2.3"}"#, "192.0.2.3"),
+        ] {
+            assert_eq!(hosts_from_credentials(json), vec![host.to_string()]);
+        }
+    }
+
+    #[test]
+    fn hosts_from_credentials_ignores_bind_addr_and_junk() {
+        // `bind_addr` is OUR local socket bind, not a device address — 0.0.0.0
+        // in the known-hosts set would never match a found device anyway, but
+        // keeping it out documents the distinction.
+        assert!(hosts_from_credentials(r#"{"bind_addr":"0.0.0.0","api_key":"x"}"#).is_empty());
+        assert!(hosts_from_credentials("not json").is_empty());
+    }
 }
