@@ -61,7 +61,7 @@ import { S } from "../styles";
 import { AutomationsModal } from "../components/Automations";
 import { Switch, Segmented } from "../components/controls";
 import { GenericDevicesSection } from "../components/GenericDevices";
-import type { AddPrefill } from "./Settings";
+import { DEVICE_CENTRIC_TYPES, type AddPrefill } from "./Settings";
 import { MenuItem } from "../components/Select";
 import { AnchoredPanel } from "../components/AnchoredPanel";
 import { useViewport } from "../useViewport";
@@ -1323,6 +1323,24 @@ function buildComposites(
   return out;
 }
 
+/** One reorderable top-level section: a hub provider's row, a device-centric
+ * type's MERGED rows (all Kasa plugs are one "TP-Link Kasa" section — each row
+ * is a device, so a per-row section would title sections with device names),
+ * or an orphan bucket for devices whose provider id isn't in the list. */
+interface ProviderUnit {
+  key: string;
+  label: string;
+  /** Quiet type suffix — null when redundant (merged sections, name = type). */
+  typeLabel: string | null;
+  providerIds: string[];
+}
+
+/** The internal kiosk pseudo-provider's id (`src/api/kiosks.rs`,
+ * `KIOSK_SENSOR_PROVIDER`). Hidden from `/api/providers` (it isn't
+ * user-manageable), so its mic sensors arrive here as orphans — this names
+ * their section honestly instead of "Unknown provider". */
+const KIOSK_SENSOR_PROVIDER_ID = "kiosk-sensors";
+
 export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill) => void }) {
   const [tab, setTab] = useState<"controlled" | "detected">("controlled");
   // Swiping the page body flips Controlled ⇄ Detected (the shared tab gesture).
@@ -1511,18 +1529,45 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
     ),
   ];
 
-  // Persist a new provider order: visible (reordered) ahead of the
+  // Fold providers into sections: device-centric types (Smart TV, Kasa) merge
+  // every row of the type into ONE type-titled unit, mirroring the Settings
+  // page's grouped card; hub providers stay one unit per row.
+  const units: ProviderUnit[] = [];
+  for (const p of visibleProviders) {
+    if (DEVICE_CENTRIC_TYPES.has(p.provider_type)) {
+      const key = `type:${p.provider_type}`;
+      const existing = units.find((u) => u.key === key);
+      if (existing) existing.providerIds.push(p.id);
+      else units.push({ key, label: p.type_name, typeLabel: null, providerIds: [p.id] });
+    } else {
+      units.push({
+        key: p.id,
+        label: p.name,
+        // Only show the type when it differs from the instance name, so a
+        // provider the user named after its type doesn't read "Govee · Govee".
+        typeLabel: p.type_name !== p.name ? p.type_name : null,
+        providerIds: [p.id],
+      });
+    }
+  }
+
+  // Persist a new section order: flatten units back to their provider rows (a
+  // merged type-section carries all its rows together), visible ahead of the
   // device-less ones, sending the full id list so the server order is total.
-  function applyOrder(nextVisible: Provider[]) {
+  function applyOrder(nextUnits: ProviderUnit[]) {
+    const provById = new Map(providers.map((p) => [p.id, p]));
+    const nextVisible = nextUnits
+      .flatMap((u) => u.providerIds)
+      .flatMap((id) => provById.get(id) ?? []);
     const next = [...nextVisible, ...hiddenProviders];
     setProviders(next);
     void setProviderOrder(next.map((p) => p.id));
   }
-  // Move the provider at `index` one slot up (-1) or down (+1).
-  function moveProvider(index: number, dir: -1 | 1) {
+  // Move the section at `index` one slot up (-1) or down (+1).
+  function moveUnit(index: number, dir: -1 | 1) {
     const j = index + dir;
-    if (j < 0 || j >= visibleProviders.length) return;
-    const next = [...visibleProviders];
+    if (j < 0 || j >= units.length) return;
+    const next = [...units];
     [next[index], next[j]] = [next[j], next[index]];
     applyOrder(next);
   }
@@ -1541,7 +1586,7 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
     opacity: disabled ? 0.4 : 1,
     padding: 0,
   });
-  const reorderable = visibleProviders.length > 1;
+  const reorderable = units.length > 1;
 
   // ── Pointer-drag reordering ────────────────────────────────────────────────
   // The grabbed section follows the cursor 1:1; the rest stay in their DOM slots
@@ -1552,7 +1597,7 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
   function beginDrag(e: React.PointerEvent, pid: string, index: number) {
     if (e.button !== 0 && e.pointerType === "mouse") return;
     e.preventDefault();
-    const order = visibleProviders.map((p) => p.id);
+    const order = units.map((u) => u.key);
     const rects = order.map((id) => sectionRefs.current.get(id)?.getBoundingClientRect());
     if (rects.some((r) => !r)) return;
     const centers = rects.map((r) => r!.top + r!.height / 2);
@@ -1576,7 +1621,7 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
   function endDrag() {
     const info = dragInfo.current;
     if (info && info.target !== info.originalIndex) {
-      const next = [...visibleProviders];
+      const next = [...units];
       const [moved] = next.splice(info.originalIndex, 1);
       next.splice(info.target, 0, moved);
       applyOrder(next);
@@ -1599,7 +1644,7 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
         cursor: "grabbing",
       };
     }
-    const from = visibleProviders.findIndex((p) => p.id === drag.id);
+    const from = units.findIndex((u) => u.key === drag.id);
     let shift = 0;
     if (from < drag.target && index > from && index <= drag.target) shift = -drag.h;
     else if (from > drag.target && index < from && index >= drag.target) shift = drag.h;
@@ -1836,12 +1881,20 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
         </div>
       ) : (
         [
-          ...visibleProviders.map((p, i) => ({ pid: p.id, provider: p as Provider | undefined, index: i })),
-          ...orphanIds.map((pid) => ({ pid, provider: undefined as Provider | undefined, index: -1 })),
-        ].map(({ pid, provider, index }) => {
-          const provItems = shown.filter((d) => d.providerId === pid);
+          ...units.map((u, i) => ({ unit: u, index: i })),
+          ...orphanIds.map((pid) => ({
+            unit: {
+              key: pid,
+              label: pid === KIOSK_SENSOR_PROVIDER_ID ? "Kiosk sensors" : "Unknown provider",
+              typeLabel: null,
+              providerIds: [pid],
+            } satisfies ProviderUnit,
+            index: -1,
+          })),
+        ].map(({ unit, index }) => {
+          const provItems = shown.filter((d) => unit.providerIds.includes(d.providerId));
           if (provItems.length === 0) return null;
-          // Domains this provider actually has devices in (an integration like
+          // Domains this section actually has devices in (an integration like
           // Home Assistant spans several; most providers just one).
           const domainsPresent = SECTIONS.filter(({ domain }) =>
             provItems.some((d) => d.domain === domain),
@@ -1851,25 +1904,25 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
           const canReorder = index >= 0 && reorderable && !searching;
           return (
             <section
-              key={pid}
+              key={unit.key}
               ref={(el) => {
-                if (el) sectionRefs.current.set(pid, el);
-                else sectionRefs.current.delete(pid);
+                if (el) sectionRefs.current.set(unit.key, el);
+                else sectionRefs.current.delete(unit.key);
               }}
-              style={{ marginBottom: "2rem", ...dragStyle(pid, index) }}
+              style={{ marginBottom: "2rem", ...dragStyle(unit.key, index) }}
             >
               <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.9rem" }}>
                 {canReorder && (
                   <div style={{ display: "flex", alignItems: "center", gap: "0.25rem", flexShrink: 0 }}>
                     {/* Grip = pointer-drag (mouse + touch); arrows = a11y / precise nudge. */}
                     <span
-                      onPointerDown={(e) => beginDrag(e, pid, index)}
+                      onPointerDown={(e) => beginDrag(e, unit.key, index)}
                       onPointerMove={moveDrag}
                       onPointerUp={endDrag}
                       onPointerCancel={endDrag}
                       title="Drag to reorder"
                       style={{
-                        cursor: drag?.id === pid ? "grabbing" : "grab",
+                        cursor: drag?.id === unit.key ? "grabbing" : "grab",
                         color: T.dim,
                         padding: "0 0.15rem",
                         touchAction: "none",
@@ -1881,7 +1934,7 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
                       ⠿
                     </span>
                     <button
-                      onClick={() => moveProvider(index, -1)}
+                      onClick={() => moveUnit(index, -1)}
                       disabled={index === 0}
                       title="Move up"
                       style={arrowBtnStyle(index === 0)}
@@ -1889,25 +1942,19 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
                       ▲
                     </button>
                     <button
-                      onClick={() => moveProvider(index, 1)}
-                      disabled={index === visibleProviders.length - 1}
+                      onClick={() => moveUnit(index, 1)}
+                      disabled={index === units.length - 1}
                       title="Move down"
-                      style={arrowBtnStyle(index === visibleProviders.length - 1)}
+                      style={arrowBtnStyle(index === units.length - 1)}
                     >
                       ▼
                     </button>
                   </div>
                 )}
                 <SectionLabel style={{ fontSize: "0.95rem", color: T.text }}>
-                  {provider?.name ?? "Unknown provider"}
+                  {unit.label}
                   <span style={{ color: T.faint, fontWeight: 400, letterSpacing: "0.08em" }}>
-                    {/* Only show the type when it differs from the instance name, so
-                        a provider the user named after its type doesn't read
-                        "Govee · Govee". */}
-                    {provider?.type_name && provider.type_name !== provider.name
-                      ? ` · ${provider.type_name}`
-                      : ""}{" "}
-                    · {total}
+                    {unit.typeLabel ? ` · ${unit.typeLabel}` : ""} · {total}
                   </span>
                 </SectionLabel>
               </div>

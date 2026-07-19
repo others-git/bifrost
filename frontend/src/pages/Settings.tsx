@@ -1219,7 +1219,9 @@ const DEVICE_CENTRIC: Record<string, { glyph: string; addLabel: string }> = {
   smarttv: { glyph: "tv", addLabel: "Add TV" },
   kasa: { glyph: "outlet", addLabel: "Add device" },
 };
-const DEVICE_CENTRIC_TYPES = new Set(Object.keys(DEVICE_CENTRIC));
+/** Exported for the Devices page, which merges these types' provider rows
+ * into one section the same way this page merges their cards. */
+export const DEVICE_CENTRIC_TYPES = new Set(Object.keys(DEVICE_CENTRIC));
 
 const TV_BRAND_LABELS: Record<string, string> = {
   bravia: "Bravia",
