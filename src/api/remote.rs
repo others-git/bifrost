@@ -80,9 +80,6 @@ fn row_to_remote(r: &sqlx::sqlite::SqliteRow) -> RemoteDeviceRow {
     }
 }
 
-const SELECT_REMOTE: &str = "SELECT id, provider_id, device_id, name, last_state, last_seen, \
-     enabled, glyph, hw_id, group_id FROM remote_devices";
-
 // ── Provider build / discovery ───────────────────────────────────────────────
 
 pub(crate) fn build_remote_provider(
@@ -505,11 +502,49 @@ pub(crate) async fn read_remote_state(state: &AppState, id: &str) -> Option<Remo
 }
 
 pub(crate) async fn list_remotes(state: &AppState) -> Vec<RemoteDeviceRow> {
-    sqlx::query(&format!("{SELECT_REMOTE} ORDER BY name"))
-        .fetch_all(&state.db)
-        .await
-        .unwrap_or_default()
+    // De-dup by group: a TV reachable both natively and via an integration
+    // (HA) lands two remotes sharing one composite group — but with DIFFERENT
+    // hardware ids (each provider reports its own), so exact-MAC shadowing
+    // (which covers lights/media/power/sensors) never clusters them. The
+    // group is the join instead: within one group_id, a native remote wins
+    // and the integration copy is hidden — the same "native always wins"
+    // rule, expressed for the pairing that actually links them. A lone
+    // integration remote (its TV has no native provider) stays visible.
+    let rows = sqlx::query(
+        "SELECT r.id, r.provider_id, r.device_id, r.name, r.last_state, r.last_seen, \
+                r.enabled, r.glyph, r.hw_id, r.group_id, p.provider_type \
+         FROM remote_devices r JOIN providers p ON r.provider_id = p.id \
+         ORDER BY r.name",
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let is_native = |ptype: &str| {
+        !matches!(
+            state.registry.ui_domain(ptype),
+            Some(crate::providers::ProviderDomain::Integration)
+        )
+    };
+    // Groups that contain at least one native remote — an integration remote
+    // in one of these is the hidden duplicate.
+    let native_groups: std::collections::HashSet<String> = rows
         .iter()
+        .filter(|r| is_native(&r.get::<String, _>("provider_type")))
+        .filter_map(|r| r.try_get::<Option<String>, _>("group_id").ok().flatten())
+        .collect();
+
+    rows.iter()
+        .filter(|r| {
+            if is_native(&r.get::<String, _>("provider_type")) {
+                return true;
+            }
+            // Integration remote: hidden only if a native remote shares its group.
+            match r.try_get::<Option<String>, _>("group_id").ok().flatten() {
+                Some(g) => !native_groups.contains(&g),
+                None => true,
+            }
+        })
         .map(row_to_remote)
         .collect()
 }

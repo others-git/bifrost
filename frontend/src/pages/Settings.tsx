@@ -79,6 +79,7 @@ import { ThemeSwitcher } from "../components/ThemeSwitcher";
 import { Select } from "../components/Select";
 import { useMediaQuery, useViewport } from "../useViewport";
 import { ACCENT, S, pageShell, tileGrid } from "../styles";
+import { pickableLights, pickableMedia, pickablePower } from "../deviceSelectors";
 import { Button, Segmented, Switch } from "../components/controls";
 import { OptionCheckList } from "../components/deviceOptions";
 import { alpha, color } from "../theme";
@@ -3200,9 +3201,9 @@ function KioskAwareOverride({
 
   if (!k.hour_modes?.includes("A")) return null;
 
-  const selLights = lights.filter((l) => l.enabled !== false && !l.shadowed_by);
-  const selMedia = media.filter((m) => m.enabled !== false && !m.shadowed_by && !m.companion_of);
-  const selPower = power.filter((p) => p.enabled !== false && !p.shadowed_by);
+  const selLights = pickableLights(lights);
+  const selMedia = pickableMedia(media);
+  const selPower = pickablePower(power);
   const pool: { domain: ControlTarget["domain"]; list: { id: string; name: string }[] }[] = [
     { domain: "light", list: selLights },
     { domain: "media", list: selMedia },

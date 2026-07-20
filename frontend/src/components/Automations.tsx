@@ -41,6 +41,13 @@ import {
 } from "../api";
 import { Button, Switch } from "./controls";
 import { OptionCheckList, deviceSelectOptions } from "./deviceOptions";
+import {
+  pickableLights,
+  pickableMedia,
+  pickablePower,
+  pickableRemotes,
+  pickableSensors,
+} from "../deviceSelectors";
 import { Modal } from "./dialogs";
 import { hexToRgb } from "./LightEditor";
 import { Glyph } from "./glyphs";
@@ -642,24 +649,16 @@ function AutomationEditor({
       .map((r) => ({ value: `room:${r.id}`, label: r.name, group: "Rooms" })),
     ...deviceSelectOptions(
       [
-        ...sensors
-          .filter((s) => s.enabled !== false && !s.shadowed_by)
-          .map((s) => ({
-            ...s,
-            id: `sensor:${s.id}`,
-            // No reading = it can't fire (disabled at its bridge/hub, or has
-            // never reported) — say so where the rule gets bound.
-            name: s.state.reading == null ? `${s.name} — no signal` : s.name,
-          })),
-        ...media
-          .filter((m) => m.enabled !== false && !m.shadowed_by && !m.companion_of)
-          .map((m) => ({ ...m, id: `device:media:${m.id}` })),
-        ...lights
-          .filter((l) => l.enabled !== false)
-          .map((l) => ({ ...l, id: `device:light:${l.id}` })),
-        ...power
-          .filter((d) => d.enabled !== false)
-          .map((d) => ({ ...d, id: `device:power:${d.id}` })),
+        ...pickableSensors(sensors).map((s) => ({
+          ...s,
+          id: `sensor:${s.id}`,
+          // No reading = it can't fire (disabled at its bridge/hub, or has
+          // never reported) — say so where the rule gets bound.
+          name: s.state.reading == null ? `${s.name} — no signal` : s.name,
+        })),
+        ...pickableMedia(media).map((m) => ({ ...m, id: `device:media:${m.id}` })),
+        ...pickableLights(lights).map((l) => ({ ...l, id: `device:light:${l.id}` })),
+        ...pickablePower(power).map((d) => ({ ...d, id: `device:power:${d.id}` })),
       ],
       rooms,
     ),
@@ -675,8 +674,8 @@ function AutomationEditor({
     : undefined;
 
   // Gate subjects offered as conditions: anything except the trigger itself.
-  const gateSensors = sensors.filter(
-    (s) => s.enabled !== false && !(subject?.type === "sensor" && s.id === subject.id),
+  const gateSensors = pickableSensors(sensors).filter(
+    (s) => !(subject?.type === "sensor" && s.id === subject.id),
   );
   const gateRooms = rooms.filter(
     (r) => r.enabled && !(subject?.type === "room" && r.id === subject.id),
@@ -1226,6 +1225,7 @@ function ActionList({
   const appActions = actions.filter((a): a is Extract<RuleAction, { kind: "app" }> => a.kind === "app");
   const verbActions = actions.filter((a) => a.kind !== "app");
   const rows = rowsFromActions(verbActions);
+  const tvRemotes = pickableRemotes(remotes);
   // A new step with no targets yet can't exist in `actions`; it lives here
   // until its first target is picked, then materializes as a real row.
   const [draft, setDraft] = useState<Omit<ActionRow, "targets"> | null>(null);
@@ -1257,11 +1257,9 @@ function ActionList({
     if (verb === "toggle") {
       return deviceSelectOptions(
         [
-          ...lights.filter((l) => l.enabled !== false).map((l) => ({ ...l, id: `light:${l.id}` })),
-          ...media
-            .filter((m) => m.enabled !== false && !m.shadowed_by && !m.companion_of)
-            .map((m) => ({ ...m, id: `media:${m.id}` })),
-          ...power.filter((p) => p.enabled !== false).map((p) => ({ ...p, id: `power:${p.id}` })),
+          ...pickableLights(lights).map((l) => ({ ...l, id: `light:${l.id}` })),
+          ...pickableMedia(media).map((m) => ({ ...m, id: `media:${m.id}` })),
+          ...pickablePower(power).map((p) => ({ ...p, id: `power:${p.id}` })),
         ],
         rooms,
       );
@@ -1272,8 +1270,8 @@ function ActionList({
         .map((r) => ({ value: `room:${r.id}`, label: r.name, group: "Rooms" })),
       ...deviceSelectOptions(
         [
-          ...lights.filter((l) => l.enabled !== false).map((l) => ({ ...l, id: `light:${l.id}` })),
-          ...power.filter((p) => p.enabled !== false).map((p) => ({ ...p, id: `power:${p.id}` })),
+          ...pickableLights(lights).map((l) => ({ ...l, id: `light:${l.id}` })),
+          ...pickablePower(power).map((p) => ({ ...p, id: `power:${p.id}` })),
         ],
         rooms,
       ),
@@ -1508,7 +1506,7 @@ function ActionList({
         <AppActionRow
           key={`app:${i}`}
           action={a}
-          remotes={remotes}
+          remotes={tvRemotes}
           onChange={(patch) => setAppAction(i, patch)}
           onRemove={() => emitApps(appActions.filter((_, j) => j !== i))}
         />
@@ -1526,7 +1524,7 @@ function ActionList({
           >
             + Action
           </Button>
-          {remotes.length > 0 && (
+          {tvRemotes.length > 0 && (
             <Button
               variant="ghost"
               onClick={() => emitApps([...appActions, { kind: "app", remote_id: "", app: "" }])}

@@ -9670,6 +9670,76 @@ async fn remote_devices_without_session_returns_401() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// `list_remotes` hides an integration (HA) remote when a native remote shares
+/// its composite group — the same physical TV reached two ways. Their hardware
+/// ids differ (each provider reports its own), so exact-MAC shadowing can't
+/// catch it; the group is the join. A lone integration remote (no native
+/// provider for its TV) must still show.
+#[tokio::test]
+async fn list_remotes_hides_the_integration_duplicate_sharing_a_group() {
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let enc = state.encrypt_credentials("{}").unwrap();
+    for (id, ptype) in [("nativep", "smarttv"), ("hap", "ha")] {
+        sqlx::query(
+            "INSERT INTO providers (id, provider_type, name, credentials) VALUES (?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(ptype)
+        .bind(ptype)
+        .bind(&enc)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+    // Two remotes for one TV share group 'g1' (native + HA duplicate), each
+    // with its own MAC; a third HA remote is alone in 'g2'.
+    for (id, prov, name, hw, group) in [
+        ("r-native", "nativep", "BRAVIA", "mac:aa", "g1"),
+        ("r-ha-dup", "hap", "BRAVIA VU1", "mac:bb", "g1"),
+        ("r-ha-solo", "hap", "Bedroom TV", "mac:cc", "g2"),
+    ] {
+        sqlx::query(
+            "INSERT INTO remote_devices (id, provider_id, device_id, name, hw_id, group_id)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(prov)
+        .bind(id)
+        .bind(name)
+        .bind(hw)
+        .bind(group)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    let body = helpers::response_json(
+        app.oneshot(helpers::authed_get("/api/remote/devices", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let names: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.contains(&"BRAVIA"),
+        "the native remote stays: {names:?}"
+    );
+    assert!(
+        names.contains(&"Bedroom TV"),
+        "the lone HA remote stays: {names:?}"
+    );
+    assert!(
+        !names.contains(&"BRAVIA VU1"),
+        "the HA duplicate sharing a group with the native must hide: {names:?}"
+    );
+}
+
 #[tokio::test]
 async fn discover_ha_populates_remotes_then_command_drives_service() {
     let ha = ha_remote_mock().await;

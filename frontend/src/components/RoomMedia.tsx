@@ -16,6 +16,7 @@ import {
 import { Button } from "./controls";
 import { Glyph } from "./glyphs";
 import { alpha } from "../theme";
+import { pickableMedia } from "../deviceSelectors";
 
 const ACCENT = "#a78bfa";
 
@@ -158,11 +159,7 @@ export function RoomAudioSection({
   async function save() {
     setSaving(true);
     try {
-      const ok = new Set(
-        devices
-          .filter((d) => d.enabled !== false && !d.shadowed_by && !d.companion_of)
-          .map((d) => d.id),
-      );
+      const ok = new Set(pickableMedia(devices).map((d) => d.id));
       const list = [...draft.entries()]
         .filter(([id, off]) => off !== undefined && ok.has(id))
         .map(([id, off]) => ({ media_device_id: id, volume_offset: off as number }));
@@ -176,9 +173,7 @@ export function RoomAudioSection({
   // Offer only controllable devices — enabled, not shadowed or merged. A
   // disabled device is never a valid member; the backend save drops any stale
   // disabled member too, so this can't strand one (control already ignores it).
-  const selectable = devices.filter(
-    (d) => d.enabled !== false && !d.shadowed_by && !d.companion_of,
-  );
+  const selectable = pickableMedia(devices);
 
   if (selectable.length === 0) {
     return <span style={{ fontSize: "0.8rem", color: "var(--bf-faint)" }}>No audio devices discovered yet.</span>;

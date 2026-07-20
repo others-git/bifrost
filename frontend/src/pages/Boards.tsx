@@ -59,6 +59,7 @@ import { RestoreHomeButton } from "./Dashboard";
 import { GlyphButton, RoomCard, RoomControlButton, litHexes, roomMembers } from "../components/RoomCard";
 import { EFFECT_ACCENT, activeEffect } from "../components/lightControl";
 import { OptionCheckList, deviceSelectOptions, type RoomedDevice } from "../components/deviceOptions";
+import { pickableLights, pickableMedia, pickablePower } from "../deviceSelectors";
 import { CornerFiligree } from "../components/ornament";
 import { BACKGROUND_PRESETS, BoardBackground, type BoardBackgroundCfg } from "../components/BoardBackground";
 import { MatchThemeContext, useMatchTheme } from "../components/appearance";
@@ -3097,9 +3098,9 @@ function WidgetEditorModal({
   // is hidden from control everywhere else, so it must not be pickable here either.
   // (The widget renderers still receive the full lists so a widget can resolve any
   // device it already references.)
-  const selLights = lights.filter((l) => l.enabled !== false && !l.shadowed_by);
-  const selMedia = media.filter((m) => m.enabled !== false && !m.shadowed_by && !m.companion_of);
-  const selPower = power.filter((p) => p.enabled !== false && !p.shadowed_by);
+  const selLights = pickableLights(lights);
+  const selMedia = pickableMedia(media);
+  const selPower = pickablePower(power);
   const devicesFor = (d: string): { id: string; name: string }[] =>
     d === "light" ? selLights : d === "power" ? selPower : selMedia;
 
@@ -3631,9 +3632,9 @@ function ControlEditor({
   const kind = control.kind;
   // Only target controllable devices: skip disabled and de-dup/composite "merged-in"
   // copies (a shadowed duplicate or a media companion), hidden from control elsewhere.
-  const selLights = lights.filter((l) => l.enabled !== false && !l.shadowed_by);
-  const selMedia = media.filter((m) => m.enabled !== false && !m.shadowed_by && !m.companion_of);
-  const selPower = power.filter((p) => p.enabled !== false && !p.shadowed_by);
+  const selLights = pickableLights(lights);
+  const selMedia = pickableMedia(media);
+  const selPower = pickablePower(power);
   // Which domains a kind can target.
   const pool: { domain: "light" | "media" | "power"; list: { id: string; name: string }[] }[] =
     kind === "brightness"

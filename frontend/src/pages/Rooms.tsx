@@ -48,6 +48,7 @@ import { useViewport } from "../useViewport";
 import { S, pageShell, tileGrid } from "../styles";
 import { alpha, color, font, nicheStyle, radius } from "../theme";
 import { Button } from "../components/controls";
+import { pickableLights } from "../deviceSelectors";
 
 export function RoomsPage() {
   const { isMobile } = useViewport();
@@ -602,7 +603,7 @@ function NewRoomForm({
 
   // Lights already claimed by a provider group are still offered — the new room
   // takes a DIRECT assignment; link membership is configured after creation.
-  const selectable = lights.filter((l) => l.enabled !== false);
+  const selectable = pickableLights(lights);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
