@@ -1100,6 +1100,29 @@ async fn aware_override_roundtrips_and_validates_domain() {
         list[0]["aware_override_targets"],
         serde_json::json!([{"domain":"power","id":"pw1"}])
     );
+    // Mode absent in the PUT → keep_on, the pre-mode behaviour.
+    assert_eq!(list[0]["aware_override_mode"], "keep_on");
+
+    // An explicit keep_off mode roundtrips too.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/kiosks/{id}/aware-override"),
+            &cookie,
+            r#"{"targets":[{"domain":"power","id":"pw1"}],"mode":"keep_off"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(list[0]["aware_override_mode"], "keep_off");
 
     // An unknown kiosk id 404s.
     let resp = app
@@ -1210,6 +1233,102 @@ async fn aware_override_forces_awake_while_the_target_device_is_on() {
         .unwrap();
     bifrost::api::kiosks::scheduler_tick(&state, &mut desired, &mut present, 11, 11 * 60).await;
     assert_eq!(pending(app.clone(), cookie.clone()).await, "wake");
+}
+
+/// The keep_off flavour: while the target device is on, an Aware hour forces
+/// the kiosk ASLEEP — "movie night, kill the tablet glow" — even in a room
+/// with no presence input at all (which would otherwise leave it ungoverned).
+#[tokio::test]
+async fn aware_override_keep_off_forces_asleep_while_the_target_device_is_on() {
+    use std::collections::HashMap;
+
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "wall tablet").await;
+    sqlx::query(
+        "INSERT INTO providers (id, provider_type, name, credentials) VALUES ('p','wled','P','x')",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO power_devices (id, provider_id, device_id, name, kind, last_state) VALUES ('pw1','p','d1','TV plug','switch','{\"on\":false}')")
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/kiosks/checkin")
+                .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let id = list[0]["id"].as_str().unwrap().to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/kiosks/{id}/plan"),
+            &cookie,
+            r#"{"enabled":true,"hour_modes":"AAAAAAAAAAAAAAAAAAAAAAAA"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/kiosks/{id}/aware-override"),
+            &cookie,
+            r#"{"targets":[{"domain":"power","id":"pw1"}],"mode":"keep_off"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let pending = |app: Router, cookie: String| async move {
+        let list = helpers::response_json(
+            app.oneshot(helpers::authed_get("/api/kiosks", &cookie))
+                .await
+                .unwrap(),
+        )
+        .await;
+        list[0]["pending_command"].clone()
+    };
+
+    let mut desired = HashMap::new();
+    let mut present = HashMap::new();
+
+    // Device off, no room, no presence input → nothing governs this hour.
+    bifrost::api::kiosks::scheduler_tick(&state, &mut desired, &mut present, 10, 10 * 60).await;
+    assert_eq!(
+        pending(app.clone(), cookie.clone()).await,
+        serde_json::Value::Null
+    );
+
+    // Flip the device on — keep_off forces the screen asleep.
+    sqlx::query("UPDATE power_devices SET last_state = '{\"on\":true}' WHERE id = 'pw1'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    bifrost::api::kiosks::scheduler_tick(&state, &mut desired, &mut present, 11, 11 * 60).await;
+    assert_eq!(pending(app.clone(), cookie.clone()).await, "sleep");
 }
 
 #[tokio::test]

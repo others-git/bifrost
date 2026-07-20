@@ -42,6 +42,7 @@ import {
   setKioskAwareOverride,
   type KioskHourMode,
   type ControlTarget,
+  type AwareOverrideMode,
   type Light,
   type PowerDevice,
   getDashboards,
@@ -3146,10 +3147,14 @@ function KioskAwareOverride({
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [targets, setTargets] = useState<ControlTarget[]>(k.aware_override_targets);
+  const [mode, setMode] = useState<AwareOverrideMode>(k.aware_override_mode);
   // Re-sync the draft when the modal (re)opens against the latest saved value.
   useEffect(() => {
-    if (open) setTargets(k.aware_override_targets);
-  }, [open, k.aware_override_targets]);
+    if (open) {
+      setTargets(k.aware_override_targets);
+      setMode(k.aware_override_mode);
+    }
+  }, [open, k.aware_override_targets, k.aware_override_mode]);
 
   if (!k.hour_modes?.includes("A")) return null;
 
@@ -3174,12 +3179,12 @@ function KioskAwareOverride({
   const summary =
     k.aware_override_targets.length === 0
       ? "Not configured"
-      : `Off while: ${k.aware_override_targets.map(nameFor).join(", ")}`;
+      : `${k.aware_override_mode === "keep_off" ? "Screen off" : "Screen on"} while: ${k.aware_override_targets.map(nameFor).join(", ")}`;
 
   async function save() {
     setBusy(true);
     try {
-      await setKioskAwareOverride(k.id, targets);
+      await setKioskAwareOverride(k.id, targets, mode);
       onSaved();
       setOpen(false);
     } finally {
@@ -3209,9 +3214,30 @@ function KioskAwareOverride({
       {open && (
         <Modal title="Aware override" onClose={() => setOpen(false)}>
           <p style={{ fontSize: "0.8rem", color: "var(--bf-faint)", marginTop: 0 }}>
-            While any of these is on, an Aware hour keeps <strong>{k.name}</strong>'s screen awake
-            regardless of room presence.
+            While any of these is on, an Aware hour{" "}
+            {mode === "keep_off" ? (
+              <>
+                forces <strong>{k.name}</strong>'s screen off — kill the tablet glow during movie
+                night — beating room presence.
+              </>
+            ) : (
+              <>
+                keeps <strong>{k.name}</strong>'s screen awake regardless of room presence.
+              </>
+            )}
           </p>
+          <div style={{ marginBottom: "0.8rem", maxWidth: 320 }}>
+            <Segmented
+              value={mode}
+              onChange={setMode}
+              variant="outline"
+              accent={ACCENT}
+              options={[
+                { value: "keep_on", label: "Keep screen on" },
+                { value: "keep_off", label: "Keep screen off" },
+              ]}
+            />
+          </div>
           <OptionCheckList
             options={pool.flatMap(({ domain, list }) =>
               list.map((d) => ({ value: `${domain}:${d.id}`, label: d.name })),

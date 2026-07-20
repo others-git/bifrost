@@ -372,9 +372,12 @@ struct KioskRow {
     mic_sensitivity: Option<String>,
     /// Last reported sound level (dBFS) — telemetry for the Clients view.
     mic_level: Option<f64>,
-    /// Devices that keep an Aware hour awake regardless of presence (mig
-    /// 0062) — see `PUT …/aware-override`.
+    /// Devices that override an Aware hour's display while on (mig 0062) —
+    /// see `PUT …/aware-override`.
     aware_override_targets: Vec<ControlTarget>,
+    /// What the override does while a target is on: force the screen awake
+    /// (`keep_on`) or force it asleep (`keep_off`).
+    aware_override_mode: AwareOverrideMode,
 }
 
 /// `GET /api/kiosks` (session) — the clients view: every registered kiosk with
@@ -397,35 +400,42 @@ async fn list(State(state): State<Arc<AppState>>, _: Session) -> impl IntoRespon
     match rows {
         Ok(rows) => Json(
             rows.into_iter()
-                .map(|r| KioskRow {
-                    id: r.get("id"),
-                    name: r.get("name"),
-                    app_version: r.get("app_version"),
-                    screen_on: r.get::<Option<i64>, _>("screen_on").map(|v| v != 0),
-                    last_seen: r.get("last_seen"),
-                    online: r.get::<Option<i64>, _>("online").unwrap_or(0) != 0,
-                    pending_command: r.get("pending_command"),
-                    authorized: r.get::<i64, _>("authorized") != 0,
-                    room_id: r.get("room_id"),
-                    default_board_id: r.get("default_board_id"),
-                    schedule_enabled: r.get::<i64, _>("schedule_enabled") != 0,
-                    sleep_at: r.get("sleep_at"),
-                    wake_at: r.get("wake_at"),
-                    presence_enabled: r.get::<i64, _>("presence_enabled") != 0,
-                    presence_timeout_secs: r.get("presence_timeout_secs"),
-                    battery_level: r.get("battery_level"),
-                    battery_charging: r.get::<Option<i64>, _>("battery_charging").map(|v| v != 0),
-                    battery_voltage_mv: r.get("battery_voltage_mv"),
-                    battery_current_ua: r.get("battery_current_ua"),
-                    battery_temp_dc: r.get("battery_temp_dc"),
-                    power_source: r.get("power_source"),
-                    viewport_w: r.get("viewport_w"),
-                    viewport_h: r.get("viewport_h"),
-                    hour_modes: r.get("hour_modes"),
-                    mic_presence: r.get::<i64, _>("mic_presence") != 0,
-                    mic_sensitivity: r.get("mic_sensitivity"),
-                    mic_level: r.get("mic_level"),
-                    aware_override_targets: parse_aware_targets(r.get("aware_override_targets")),
+                .map(|r| {
+                    let (aware_override_mode, aware_override_targets) =
+                        parse_aware_override(r.get("aware_override_targets"));
+                    KioskRow {
+                        id: r.get("id"),
+                        name: r.get("name"),
+                        app_version: r.get("app_version"),
+                        screen_on: r.get::<Option<i64>, _>("screen_on").map(|v| v != 0),
+                        last_seen: r.get("last_seen"),
+                        online: r.get::<Option<i64>, _>("online").unwrap_or(0) != 0,
+                        pending_command: r.get("pending_command"),
+                        authorized: r.get::<i64, _>("authorized") != 0,
+                        room_id: r.get("room_id"),
+                        default_board_id: r.get("default_board_id"),
+                        schedule_enabled: r.get::<i64, _>("schedule_enabled") != 0,
+                        sleep_at: r.get("sleep_at"),
+                        wake_at: r.get("wake_at"),
+                        presence_enabled: r.get::<i64, _>("presence_enabled") != 0,
+                        presence_timeout_secs: r.get("presence_timeout_secs"),
+                        battery_level: r.get("battery_level"),
+                        battery_charging: r
+                            .get::<Option<i64>, _>("battery_charging")
+                            .map(|v| v != 0),
+                        battery_voltage_mv: r.get("battery_voltage_mv"),
+                        battery_current_ua: r.get("battery_current_ua"),
+                        battery_temp_dc: r.get("battery_temp_dc"),
+                        power_source: r.get("power_source"),
+                        viewport_w: r.get("viewport_w"),
+                        viewport_h: r.get("viewport_h"),
+                        hour_modes: r.get("hour_modes"),
+                        mic_presence: r.get::<i64, _>("mic_presence") != 0,
+                        mic_sensitivity: r.get("mic_sensitivity"),
+                        mic_level: r.get("mic_level"),
+                        aware_override_targets,
+                        aware_override_mode,
+                    }
                 })
                 .collect::<Vec<_>>(),
         )
@@ -997,15 +1007,18 @@ pub async fn scheduler_tick(
             None
         };
 
-        // Aware override: while any configured device is on, the room reads
-        // occupied regardless of actual presence — "don't let the screen
-        // sleep from a no-motion timeout while the TV is playing". Only
-        // meaningful during an Aware hour (the only mode presence governs at
-        // all); refreshes the grace timer too, so turning the device back off
-        // hands smoothly to the normal no-motion countdown instead of going
-        // dark the instant it's off.
+        // Aware override: while any configured device is on, the display is
+        // overridden regardless of actual presence — keep_on ("don't let the
+        // screen sleep from a no-motion timeout while the TV is playing")
+        // treats the room as occupied and refreshes the grace timer, so
+        // turning the device back off hands smoothly to the normal no-motion
+        // countdown; keep_off ("movie night — kill the tablet glow while the
+        // TV is on") forces the screen asleep, beating presence, and governs
+        // even a sensorless room. Only meaningful during an Aware hour (the
+        // only mode presence governs at all).
+        let mut force_asleep = false;
         let present = if mode == Some(PlanMode::Aware) {
-            let targets = parse_aware_targets(row.get("aware_override_targets"));
+            let (ov_mode, targets) = parse_aware_override(row.get("aware_override_targets"));
             let mut overridden = false;
             for t in &targets {
                 let Some(domain) = (match t.domain.as_str() {
@@ -1023,11 +1036,16 @@ pub async fn scheduler_tick(
                     break;
                 }
             }
-            if overridden {
-                last_present.insert(id.clone(), Instant::now());
-                Some(true)
-            } else {
-                present
+            match (overridden, ov_mode) {
+                (true, AwareOverrideMode::KeepOn) => {
+                    last_present.insert(id.clone(), Instant::now());
+                    Some(true)
+                }
+                (true, AwareOverrideMode::KeepOff) => {
+                    force_asleep = true;
+                    present
+                }
+                (false, _) => present,
             }
         } else {
             present
@@ -1037,6 +1055,9 @@ pub async fn scheduler_tick(
             Some(m) => plan_desired(m, present),
             None => combined_desired_awake(schedule_awake, present),
         };
+        // A keep-off override outranks whatever the hour would otherwise say —
+        // including "nothing governs" (a room with no presence sensors).
+        let desired = if force_asleep { Some(false) } else { desired };
         let Some(awake) = desired else {
             continue; // nothing governs this hour (e.g. aware but no sensors)
         };
@@ -1281,9 +1302,40 @@ async fn report_noise(
 /// Decode a kiosk row's stored override targets; a missing/malformed value
 /// degrades to "no override" rather than failing the whole listing (matches
 /// `list_room_controls`'s tolerance for a stale row).
-fn parse_aware_targets(raw: Option<String>) -> Vec<ControlTarget> {
-    raw.and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+/// What an Aware override does to the display while any target device is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AwareOverrideMode {
+    /// Force the screen AWAKE — "the TV is playing, don't let a no-motion
+    /// timeout kill the screen". The original (and default) behaviour.
+    #[default]
+    KeepOn,
+    /// Force the screen ASLEEP — "movie night: kill the tablet glow while
+    /// the TV is on", beating room presence.
+    KeepOff,
+}
+
+/// The `aware_override_targets` column's stored JSON: originally a bare
+/// `[{domain,id},…]` array; grew a `{mode, targets}` object form when the
+/// keep-off mode arrived. Untagged so both shapes parse — a legacy bare array
+/// is `KeepOn` (its only behaviour at the time).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredAwareOverride {
+    Tagged {
+        #[serde(default)]
+        mode: AwareOverrideMode,
+        targets: Vec<ControlTarget>,
+    },
+    Legacy(Vec<ControlTarget>),
+}
+
+fn parse_aware_override(raw: Option<String>) -> (AwareOverrideMode, Vec<ControlTarget>) {
+    match raw.and_then(|s| serde_json::from_str::<StoredAwareOverride>(&s).ok()) {
+        Some(StoredAwareOverride::Tagged { mode, targets }) => (mode, targets),
+        Some(StoredAwareOverride::Legacy(targets)) => (AwareOverrideMode::KeepOn, targets),
+        None => (AwareOverrideMode::KeepOn, Vec::new()),
+    }
 }
 
 #[derive(Deserialize)]
@@ -1291,13 +1343,18 @@ struct SetAwareOverrideRequest {
     /// Replaces the kiosk's override list wholesale. Empty = no override
     /// (Aware hours follow presence only, the default).
     targets: Vec<ControlTarget>,
+    /// Keep the screen on or off while a target is on; absent = `keep_on`
+    /// (the behaviour before the mode existed).
+    #[serde(default)]
+    mode: AwareOverrideMode,
 }
 
-/// `PUT /api/kiosks/{id}/aware-override` (session) — set the devices that keep
-/// an Aware hour's screen awake regardless of presence while any of them is
-/// on (`scheduler_tick` reads this list — see its doc comment). No existence
-/// check on each target: a removed device just never reads "on" again, the
-/// same tolerance `room_controls` targets already have for a stale reference.
+/// `PUT /api/kiosks/{id}/aware-override` (session) — set the devices that
+/// override an Aware hour's screen while any of them is on, and which way
+/// (`mode`: keep it awake, or force it asleep — `scheduler_tick` reads both).
+/// No existence check on each target: a removed device just never reads "on"
+/// again, the same tolerance `room_controls` targets already have for a stale
+/// reference.
 async fn set_aware_override(
     State(state): State<Arc<AppState>>,
     _: Session,
@@ -1313,7 +1370,11 @@ async fn set_aware_override(
                 .into_response();
         }
     }
-    let json = serde_json::to_string(&req.targets).unwrap_or_else(|_| "[]".into());
+    let json = serde_json::to_string(&serde_json::json!({
+        "mode": req.mode,
+        "targets": req.targets,
+    }))
+    .unwrap_or_else(|_| "[]".into());
     match sqlx::query("UPDATE kiosks SET aware_override_targets = ? WHERE id = ?")
         .bind(&json)
         .bind(&id)
@@ -1388,7 +1449,26 @@ async fn forget(
 
 #[cfg(test)]
 mod tests {
-    use super::{desired_awake_at, fmt_hhmm, parse_hhmm};
+    use super::{AwareOverrideMode, desired_awake_at, fmt_hhmm, parse_aware_override, parse_hhmm};
+
+    #[test]
+    fn parse_aware_override_reads_both_stored_shapes() {
+        // Tagged (current) shape carries the mode.
+        let (mode, targets) = parse_aware_override(Some(
+            r#"{"mode":"keep_off","targets":[{"domain":"media","id":"tv1"}]}"#.into(),
+        ));
+        assert_eq!(mode, AwareOverrideMode::KeepOff);
+        assert_eq!(targets.len(), 1);
+        // Legacy bare-array rows (written before the mode existed) read as
+        // keep_on — their only behaviour at the time.
+        let (mode, targets) =
+            parse_aware_override(Some(r#"[{"domain":"power","id":"pw1"}]"#.into()));
+        assert_eq!(mode, AwareOverrideMode::KeepOn);
+        assert_eq!(targets.len(), 1);
+        // Absent / junk → no override.
+        assert_eq!(parse_aware_override(None).1.len(), 0);
+        assert_eq!(parse_aware_override(Some("junk".into())).1.len(), 0);
+    }
 
     #[test]
     fn parse_hhmm_accepts_valid_clock_times() {

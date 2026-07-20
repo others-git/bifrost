@@ -9,6 +9,7 @@
 // remote API (session → the same service layer as v1/MCP).
 
 import { useEffect, useState } from "react";
+import { useViewport } from "../useViewport";
 import {
   getRemoteApps,
   getRemoteCommands,
@@ -530,6 +531,11 @@ export function RemoteApps({
   onLaunch: (pkg: string) => void;
   onPin: (app: RemoteApp) => void;
 }) {
+  // Compact (phones + tablets) tiles run ~50% larger — the desktop sizing
+  // made fingertip-sized launch targets on a phone.
+  const { isCompact } = useViewport();
+  const tileMin = isCompact ? 108 : 72;
+  const avatar = isCompact ? 42 : 28;
   if (apps.length === 0) {
     return (
       <div style={{ fontSize: "0.8rem", color: T.faint }}>
@@ -538,7 +544,13 @@ export function RemoteApps({
     );
   }
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(72px, 1fr))", gap: "0.5rem" }}>
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: `repeat(auto-fill, minmax(${tileMin}px, 1fr))`,
+        gap: isCompact ? "0.6rem" : "0.5rem",
+      }}
+    >
       {apps.map((a) => {
         const active = a.package === currentApp;
         return (
@@ -548,7 +560,7 @@ export function RemoteApps({
               title={`Launch ${a.name}`}
               style={{
                 width: "100%",
-                minHeight: 66,
+                minHeight: isCompact ? 100 : 66,
                 borderRadius: 12,
                 border: `1px solid ${active ? ACCENT : T.border}`,
                 background: active ? `${alpha(ACCENT, 0.1)}` : T.surface,
@@ -557,18 +569,19 @@ export function RemoteApps({
                 display: "flex",
                 flexDirection: "column",
                 alignItems: "center",
-                gap: "0.35rem",
-                padding: "0.55rem 0.35rem 0.45rem",
+                justifyContent: "center",
+                gap: isCompact ? "0.45rem" : "0.35rem",
+                padding: isCompact ? "0.7rem 0.4rem 0.55rem" : "0.55rem 0.35rem 0.45rem",
               }}
             >
               <span
                 style={{
-                  width: 28,
-                  height: 28,
+                  width: avatar,
+                  height: avatar,
                   borderRadius: "50%",
                   display: "grid",
                   placeItems: "center",
-                  fontSize: "0.85rem",
+                  fontSize: isCompact ? "1.05rem" : "0.85rem",
                   fontWeight: 700,
                   background: active ? ACCENT : "rgba(255,255,255,0.08)",
                   color: active ? "#0b1220" : T.text,
@@ -576,17 +589,33 @@ export function RemoteApps({
               >
                 {a.name.charAt(0).toUpperCase()}
               </span>
-              <span style={{ fontSize: "0.72rem", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <span style={{ fontSize: isCompact ? "0.8rem" : "0.72rem", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {a.name}
               </span>
             </button>
+            {/* Fixed CORNER hit box — an absolute top/right/bottom stretch made
+                the pin own the tile's whole right edge, stealing launch taps. */}
             <button
               onClick={() => onPin(a)}
               title={a.pinned ? "Unpin" : "Pin"}
               aria-label={a.pinned ? "Unpin" : "Pin"}
-              style={{ position: "absolute", top: 0, right: 0, bottom: 0, background: "none", border: "none", cursor: "pointer", color: a.pinned ? ACCENT : T.faint, padding: "0 10px", display: "grid", placeItems: "start end", paddingTop: 6, lineHeight: 1 }}
+              style={{
+                position: "absolute",
+                top: 0,
+                right: 0,
+                width: isCompact ? 44 : 30,
+                height: isCompact ? 44 : 30,
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                color: a.pinned ? ACCENT : T.faint,
+                display: "grid",
+                placeItems: "start end",
+                padding: "6px 8px 0 0",
+                lineHeight: 1,
+              }}
             >
-              <Glyph name={a.pinned ? "star_fill" : "star"} size={13} />
+              <Glyph name={a.pinned ? "star_fill" : "star"} size={isCompact ? 15 : 13} />
             </button>
           </div>
         );

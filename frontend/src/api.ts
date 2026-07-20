@@ -1713,10 +1713,15 @@ export interface Kiosk {
   mic_sensitivity: string | null;
   /** Last reported sound level (dBFS) — live telemetry. */
   mic_level: number | null;
-  /** Devices that keep an Aware hour's screen awake regardless of presence
-   * while any of them is on (see `setKioskAwareOverride`). Empty = no override. */
+  /** Devices that override an Aware hour's display while any of them is on
+   * (see `setKioskAwareOverride`). Empty = no override. */
   aware_override_targets: ControlTarget[];
+  /** What the override does while a target is on: force the screen awake
+   * ("keep_on", the default) or force it asleep ("keep_off"). */
+  aware_override_mode: AwareOverrideMode;
 }
+
+export type AwareOverrideMode = "keep_on" | "keep_off";
 
 /** Report this client's CSS viewport to the hub (kiosk WebView only — auth'd by
  * the `bfr_key` cookie the WebView carries). Fire-and-forget. */
@@ -1810,14 +1815,20 @@ export async function setKioskMic(
   if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
 }
 
-/** Set the devices that keep an Aware hour's screen awake regardless of
- * presence while any of them is on ("don't let the screen sleep while the TV
- * is playing"). Empty array clears the override. */
-export async function setKioskAwareOverride(id: string, targets: ControlTarget[]): Promise<void> {
+/** Set the devices that override an Aware hour's display while any of them is
+ * on, and which way: "keep_on" holds the screen awake regardless of presence
+ * ("don't let the screen sleep while the TV is playing"); "keep_off" forces
+ * it asleep ("movie night — kill the tablet glow"). Empty array clears the
+ * override. */
+export async function setKioskAwareOverride(
+  id: string,
+  targets: ControlTarget[],
+  mode: AwareOverrideMode,
+): Promise<void> {
   const res = await fetch(`/api/kiosks/${id}/aware-override`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ targets }),
+    body: JSON.stringify({ targets, mode }),
   });
   if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
 }
