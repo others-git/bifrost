@@ -9483,6 +9483,90 @@ async fn manual_rule_with_app_action_runs_on_demand() {
     assert_eq!(seen.as_deref(), Some("com.hulu.livingroomplus"));
 }
 
+/// The toggle action is *relative*: it reads the device's cached power and
+/// applies the inverse (what a macro button wants). A device whose state is on
+/// gets turned off, off gets turned on, and an unknown state is skipped.
+#[tokio::test]
+async fn toggle_action_inverts_cached_power_state() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let ha = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/services/homeassistant/turn_off"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&ha)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/services/homeassistant/turn_on"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&ha)
+        .await;
+    let (app, prov_id, db) = helpers::test_app_with_ha_db(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // The fan is currently ON.
+    sqlx::query(
+        "INSERT INTO power_devices (id, provider_id, device_id, name, kind, last_state)
+         VALUES ('fan1', ?, 'switch.fan', 'Ceiling Fan', 'fan', '{\"on\":true}')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO automations (id, trigger_json, actions_json)
+         VALUES ('t1', '{\"kind\":\"manual\"}',
+                 '[{\"kind\":\"toggle\",\"domain\":\"power\",\"device_id\":\"fan1\"}]')",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+
+    // Run: ON → the toggle must call turn_OFF.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/automations/t1/run",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        ha.received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.url.path() == "/api/services/homeassistant/turn_off"),
+        "toggling an ON device must turn it off"
+    );
+
+    // Flip the cache to OFF and run again: the toggle must now turn ON.
+    sqlx::query("UPDATE power_devices SET last_state = '{\"on\":false}' WHERE id = 'fan1'")
+        .execute(&db)
+        .await
+        .unwrap();
+    let resp = app
+        .oneshot(helpers::authed_post(
+            "/api/automations/t1/run",
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        ha.received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.url.path() == "/api/services/homeassistant/turn_on"),
+        "toggling an OFF device must turn it on"
+    );
+}
+
 #[tokio::test]
 async fn v1_power_without_key_returns_401() {
     let app = helpers::test_app_with_password().await;

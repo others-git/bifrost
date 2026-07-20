@@ -685,6 +685,14 @@ async fn snapshot_targets(state: &AppState, actions: &[RuleAction]) -> Vec<Resto
             // An app launch has no restorable "previous state" — nothing to
             // snapshot (you can't un-launch Hulu).
             RuleAction::App { .. } => {}
+            // A toggle touches one device's power; snapshot it so a timed hold
+            // can restore it (media isn't in the light/power restore model,
+            // same as scenes/rooms — only light + power are captured).
+            RuleAction::Toggle { domain, device_id } => match domain {
+                TriggerDeviceDomain::Light => want(true, device_id.clone()),
+                TriggerDeviceDomain::Power => want(false, device_id.clone()),
+                TriggerDeviceDomain::Media => {}
+            },
         }
     }
 
@@ -1194,6 +1202,44 @@ pub(crate) async fn execute_rule(state: &AppState, rule: &Automation) {
                 )
                 .await;
                 tracing::debug!(target: "bifrost::automation", rule = %rule.id, remote = %remote_id, %app, outcome = ?outcome, "action: app launch");
+            }
+            RuleAction::Toggle { domain, device_id } => {
+                match cached_device_on(state, *domain, device_id).await {
+                    Some(cur) => {
+                        let next = !cur;
+                        match domain {
+                            TriggerDeviceDomain::Light => {
+                                crate::api::lights::apply_light_state(
+                                    state,
+                                    device_id,
+                                    &crate::models::LightState {
+                                        on: next,
+                                        ..Default::default()
+                                    },
+                                )
+                                .await;
+                            }
+                            TriggerDeviceDomain::Power => {
+                                crate::api::power::apply_power_state(state, device_id, next).await;
+                            }
+                            TriggerDeviceDomain::Media => {
+                                crate::api::media::apply_media_command(
+                                    state,
+                                    device_id,
+                                    &crate::models::media::MediaCommand {
+                                        power: Some(next),
+                                        ..Default::default()
+                                    },
+                                )
+                                .await;
+                            }
+                        }
+                        tracing::debug!(target: "bifrost::automation", rule = %rule.id, ?domain, device = %device_id, from = cur, to = next, "action: toggle");
+                    }
+                    None => {
+                        tracing::debug!(target: "bifrost::automation", rule = %rule.id, ?domain, device = %device_id, "action: toggle skipped — state unknown");
+                    }
+                }
             }
         }
     }

@@ -94,6 +94,10 @@ Each action drives the same shared control paths as the UI and voice:
   brightness or colour clause touches only the lights.
 - **A single light** — on, off, or on with a brightness/colour.
 - **A power device** — on or off.
+- **Power toggle** — flip a device's power (light, switch, or TV/speaker):
+  reads its current state and applies the inverse. This is the *relative*
+  action a physical macro button wants — one press turns it on, the next turns
+  it off. (A device whose state is unknown is skipped rather than guessed.)
 - **A scene** — apply any saved scene.
 - **Open a TV app** — launch a streaming app (Hulu, Netflix, …) on a
   TV/streamer remote. The app list is that TV's own catalog, and the launch

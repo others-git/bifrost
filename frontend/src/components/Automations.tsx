@@ -168,6 +168,10 @@ function actionText(a: RuleAction, names: NameMaps): string {
       return `scene "${names.scene.get(a.scene_id) ?? "…"}"`;
     case "app":
       return `open ${a.app} on ${names.remote.get(a.remote_id) ?? "TV"}`;
+    case "toggle": {
+      const map = a.domain === "light" ? names.light : a.domain === "media" ? names.media : names.power;
+      return `toggle ${map.get(a.device_id) ?? "device"}`;
+    }
   }
 }
 
@@ -747,6 +751,7 @@ function AutomationEditor({
         actions={actions}
         rooms={rooms}
         lights={lights}
+        media={media}
         power={power}
         scenes={scenes}
         remotes={remotes}
@@ -1066,7 +1071,7 @@ function ConditionList({
  * silently do nothing — the sentence always says "turn on and…". */
 type ActionRow = {
   targets: string[];
-  verb: "on" | "off" | "scene";
+  verb: "on" | "off" | "toggle" | "scene";
   /** The "and set brightness to N%" clause; only meaningful on `on`. */
   brightness: number | null;
   /** The "and set color to ▮" clause (hex); only meaningful on `on`. */
@@ -1086,7 +1091,10 @@ function rowsFromActions(actions: RuleAction[]): ActionRow[] {
     // App actions are handled by their own list (AppActionRow), not the
     // verb-grouped rows — skip any that slip in.
     if (a.kind === "app") continue;
-    if (a.kind === "scene") {
+    if (a.kind === "toggle") {
+      verb = "toggle";
+      target = `${a.domain}:${a.device_id}`;
+    } else if (a.kind === "scene") {
       verb = "scene";
       target = `scene:${a.scene_id}`;
     } else if (a.kind === "power") {
@@ -1115,6 +1123,10 @@ function actionsFromRows(rows: ActionRow[]): RuleAction[] {
       const kind = t.slice(0, sep);
       const id = t.slice(sep + 1);
       if (kind === "scene") return { kind: "scene", scene_id: id };
+      if (r.verb === "toggle") {
+        // Toggle targets carry their own domain in the prefix (light/media/power).
+        return { kind: "toggle", domain: kind as TriggerDeviceDomain, device_id: id };
+      }
       const on = r.verb !== "off";
       if (kind === "power") return { kind: "power", device_id: id, on };
       const state: LightState = { on };
@@ -1193,6 +1205,7 @@ function ActionList({
   actions,
   rooms,
   lights,
+  media,
   power,
   scenes,
   remotes,
@@ -1201,6 +1214,7 @@ function ActionList({
   actions: RuleAction[];
   rooms: Room[];
   lights: Light[];
+  media: MediaDevice[];
   power: PowerDevice[];
   scenes: Scene[];
   remotes: RemoteDevice[];
@@ -1228,14 +1242,29 @@ function ActionList({
     background: "rgba(0,0,0,0.25)",
   };
 
-  // Verb-first grammar: the verb decides what it can act on. Power steps offer
-  // rooms + devices under their room headers (the shared room-grouped pattern);
-  // "apply scene" offers only scenes — scenes are a verb's object, never a
-  // pseudo-device. Clauses only shape the light command, so switches can share
-  // a "turn on and set brightness" step — they simply turn on.
+  // Verb-first grammar: the verb decides what it can act on. On/off/power steps
+  // offer rooms + devices under their room headers (the shared room-grouped
+  // pattern); "apply scene" offers only scenes — scenes are a verb's object,
+  // never a pseudo-device. "Power toggle" is per-device (a room has no single
+  // togglable state), so it offers individual lights, media, and switches —
+  // and it's the one verb that can touch a TV/speaker's power. Clauses only
+  // shape the light command, so switches can share a "turn on and set
+  // brightness" step — they simply turn on.
   const targetOptionsFor = (verb: ActionRow["verb"]) => {
     if (verb === "scene") {
       return scenes.map((s) => ({ value: `scene:${s.id}`, label: s.name, group: "Scenes" }));
+    }
+    if (verb === "toggle") {
+      return deviceSelectOptions(
+        [
+          ...lights.filter((l) => l.enabled !== false).map((l) => ({ ...l, id: `light:${l.id}` })),
+          ...media
+            .filter((m) => m.enabled !== false && !m.shadowed_by && !m.companion_of)
+            .map((m) => ({ ...m, id: `media:${m.id}` })),
+          ...power.filter((p) => p.enabled !== false).map((p) => ({ ...p, id: `power:${p.id}` })),
+        ],
+        rooms,
+      );
     }
     return [
       ...rooms
@@ -1252,7 +1281,9 @@ function ActionList({
   };
   // Summaries resolve against the superset, whatever the row's current verb.
   const labelOf = new Map(
-    (["on", "scene"] as const).flatMap((v) => targetOptionsFor(v)).map((o) => [o.value, o.label]),
+    (["on", "toggle", "scene"] as const)
+      .flatMap((v) => targetOptionsFor(v))
+      .map((o) => [o.value, o.label]),
   );
 
   // Verb rows and app actions round-trip together — one always preserves the
@@ -1292,7 +1323,9 @@ function ActionList({
     targets.length === 0
       ? verb === "scene"
         ? "Pick scenes…"
-        : "Pick rooms or devices…"
+        : verb === "toggle"
+          ? "Pick devices…"
+          : "Pick rooms or devices…"
       : targets.length === 1
         ? (labelOf.get(targets[0]) ?? "1 target")
         : `${labelOf.get(targets[0]) ?? "…"} + ${targets.length - 1} more`;
@@ -1319,6 +1352,7 @@ function ActionList({
       options={[
         { value: "on", label: "turn on" },
         { value: "off", label: "turn off" },
+        { value: "toggle", label: "power toggle" },
         { value: "scene", label: "apply scene" },
       ]}
       onChange={(v) => onPick(v as ActionRow["verb"])}

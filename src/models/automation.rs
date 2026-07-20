@@ -226,6 +226,15 @@ pub enum RuleAction {
     /// is whatever the remote's catalog launches with: a vendor launch URI, a
     /// bare package (the Android TV adapter wraps it), or a deep link.
     App { remote_id: String, app: String },
+    /// **Toggle** one device's power — read its cached on-state and apply the
+    /// inverse through the domain's shared apply fn. Unlike the absolute
+    /// `Light`/`Power` actions this is *relative*, which is what a physical
+    /// macro button wants ("press = flip"). A device whose state is unknown is
+    /// skipped rather than blind-guessed.
+    Toggle {
+        domain: TriggerDeviceDomain,
+        device_id: String,
+    },
 }
 
 impl RuleAction {
@@ -620,6 +629,21 @@ mod tests {
         );
         let s = serde_json::to_string(&a).unwrap();
         assert!(s.contains(r#""kind":"app""#));
+    }
+
+    #[test]
+    fn toggle_action_round_trips() {
+        let a: RuleAction =
+            serde_json::from_str(r#"{"kind":"toggle","domain":"power","device_id":"fan1"}"#)
+                .unwrap();
+        assert!(
+            matches!(a, RuleAction::Toggle { domain: TriggerDeviceDomain::Power, ref device_id } if device_id == "fan1")
+        );
+        assert!(
+            serde_json::to_string(&a)
+                .unwrap()
+                .contains(r#""kind":"toggle""#)
+        );
     }
 
     #[test]

@@ -1002,7 +1002,10 @@ export type RuleAction =
   | { kind: "scene"; scene_id: string }
   /** Launch an app on a TV/streamer remote — `app` is a launch URI, bare
    * package, or deep link (whatever the remote's catalog launches with). */
-  | { kind: "app"; remote_id: string; app: string };
+  | { kind: "app"; remote_id: string; app: string }
+  /** Toggle one device's power — reads its cached state and applies the
+   * inverse (relative, what a physical macro button wants). */
+  | { kind: "toggle"; domain: TriggerDeviceDomain; device_id: string };
 
 /** What starts an automation — a tagged trigger input, so more kinds
  * (schedules, device state, …) can join later. Sensor events today. */
