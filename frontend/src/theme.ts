@@ -251,6 +251,23 @@ function hslToHex(h: number, s: number, l: number): string {
   const f = (n: number) => l - a * Math.max(-1, Math.min(k(n) - 3, 9 - k(n), 1));
   return rgbToHex(f(0) * 255, f(8) * 255, f(4) * 255);
 }
+function hexToHsl(hex: string): { h: number; s: number; l: number } {
+  const [r8, g8, b8] = hexToRgb(hex);
+  const r = r8 / 255;
+  const g = g8 / 255;
+  const b = b8 / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  const d = max - min;
+  if (d === 0) return { h: 0, s: 0, l };
+  const s = d / (1 - Math.abs(2 * l - 1));
+  let h: number;
+  if (max === r) h = ((g - b) / d) % 6;
+  else if (max === g) h = (b - r) / d + 2;
+  else h = (r - g) / d + 4;
+  return { h: ((h * 60) % 360 + 360) % 360, s, l };
+}
 
 /** Expand a theme's base colours into the full set of `--bf-*` variables. */
 function deriveVars(c: ThemeColors): Record<string, string> {
@@ -361,6 +378,17 @@ export const THEMES: Theme[] = [
       oxblood: "#6a2a22", rose: "#ff6f5b", good: "#9bbf6f", ink: "#140b06", tarnish: "#8a7a55",
     },
   },
+  {
+    id: "rose-window",
+    name: "Rose Window",
+    category: "Sacred Gothic",
+    colors: {
+      void: "#0b070a", panel: "#150d12", surface: "#1c1219", surfaceHi: "#291b26", surfaceOff: "#120a10",
+      text: "#f0e8ee", dim: "#ac9daa", faint: "#6e5f6c",
+      cyan: "#5fa8ff", violet: "#e06a9f", gold: "#cfa552", goldBright: "#ecc87c", textAccent: "#e8c88a",
+      oxblood: "#5e1f3a", rose: "#f0466e", good: "#5fb87a", ink: "#0d0714", tarnish: "#8a7248",
+    },
+  },
   // ── Deep Water ─────────────────────────────────────────────────────────────
   {
     id: "abyssal",
@@ -406,6 +434,28 @@ export const THEMES: Theme[] = [
       oxblood: "#2a5e3e", rose: "#ff6f6f", good: "#5fe07a", ink: "#060c08", tarnish: "#6a8a5a",
     },
   },
+  {
+    id: "leviathan-deep",
+    name: "Leviathan Deep",
+    category: "Deep Water",
+    colors: {
+      void: "#04090f", panel: "#071119", surface: "#0b1822", surfaceHi: "#122431", surfaceOff: "#060e16",
+      text: "#e5eff7", dim: "#8da6b8", faint: "#4e6274",
+      cyan: "#38c8f0", violet: "#6f8cff", gold: "#7fb8c8", goldBright: "#a8d8e6", textAccent: "#a0d0e0",
+      oxblood: "#1e3a5e", rose: "#ff6b7a", good: "#5fd8a8", ink: "#04121a", tarnish: "#4f7280",
+    },
+  },
+  {
+    id: "pearl-grotto",
+    name: "Pearl Grotto",
+    category: "Deep Water",
+    colors: {
+      void: "#071012", panel: "#0c1a1d", surface: "#122428", surfaceHi: "#1b3339", surfaceOff: "#09171a",
+      text: "#e9f4f4", dim: "#97b4b4", faint: "#587172",
+      cyan: "#7fe6c8", violet: "#e8a0c0", gold: "#cfc094", goldBright: "#e8dcb4", textAccent: "#dcd8ac",
+      oxblood: "#2a5e56", rose: "#f2748a", good: "#6fdca8", ink: "#07110f", tarnish: "#7e8a72",
+    },
+  },
   // ── Verdant ────────────────────────────────────────────────────────────────
   {
     id: "witchlight",
@@ -438,6 +488,39 @@ export const THEMES: Theme[] = [
       text: "#edf0e2", dim: "#a6ad93", faint: "#686d56",
       cyan: "#8fc24f", violet: "#7fb0a0", gold: "#cabf94", goldBright: "#e6dcae", textAccent: "#cdd6a0",
       oxblood: "#4a5e2a", rose: "#e07a6a", good: "#8fcf5f", ink: "#0a0c06", tarnish: "#8a8a5a",
+    },
+  },
+  {
+    id: "fern-hollow",
+    name: "Fern Hollow",
+    category: "Verdant",
+    colors: {
+      void: "#070b06", panel: "#0d150c", surface: "#131e11", surfaceHi: "#1e2d1b", surfaceOff: "#0b120a",
+      text: "#eaf2e6", dim: "#9fb397", faint: "#5f6f58",
+      cyan: "#7fd96a", violet: "#ffc46a", gold: "#b0a068", goldBright: "#d4c890", textAccent: "#cfcf96",
+      oxblood: "#3a5e2a", rose: "#ee6a6a", good: "#6fe08a", ink: "#081007", tarnish: "#7a8a58",
+    },
+  },
+  {
+    id: "nightshade-garden",
+    name: "Nightshade Garden",
+    category: "Verdant",
+    colors: {
+      void: "#080a08", panel: "#101510", surface: "#161d16", surfaceHi: "#222c22", surfaceOff: "#0d120d",
+      text: "#eaf0ea", dim: "#9fae9f", faint: "#606c60",
+      cyan: "#9f6fff", violet: "#5fd08a", gold: "#a8b878", goldBright: "#ccd8a0", textAccent: "#c2d8a8",
+      oxblood: "#452a5e", rose: "#f05f8a", good: "#5fd88a", ink: "#0b070f", tarnish: "#748a60",
+    },
+  },
+  {
+    id: "lichen-stone",
+    name: "Lichen & Stone",
+    category: "Verdant",
+    colors: {
+      void: "#090b09", panel: "#121511", surface: "#191d18", surfaceHi: "#252b23", surfaceOff: "#101310",
+      text: "#ecf0ea", dim: "#a5ad9f", faint: "#676e60",
+      cyan: "#8fbf8f", violet: "#7fa8b8", gold: "#b0ab88", goldBright: "#d2cea8", textAccent: "#c8cba0",
+      oxblood: "#3e5240", rose: "#e07a72", good: "#7fca7f", ink: "#0a0d09", tarnish: "#7c8468",
     },
   },
   // ── Industrial ─────────────────────────────────────────────────────────────
@@ -541,6 +624,39 @@ export const THEMES: Theme[] = [
       oxblood: "#6a2e26", rose: "#ef6f5b", good: "#9bbf6f", ink: "#140c07", tarnish: "#8a7850",
     },
   },
+  {
+    id: "amber-parlor",
+    name: "Amber Parlor",
+    category: "Warm Dusk",
+    colors: {
+      void: "#0c0906", panel: "#16100a", surface: "#1e160e", surfaceHi: "#2b2015", surfaceOff: "#140d08",
+      text: "#f2eadd", dim: "#b2a28c", faint: "#6f604c",
+      cyan: "#ffb54f", violet: "#7fc0b0", gold: "#cf9e5c", goldBright: "#ecc384", textAccent: "#ecc88c",
+      oxblood: "#6e3220", rose: "#f2654f", good: "#96c46f", ink: "#160d05", tarnish: "#8a6c42",
+    },
+  },
+  {
+    id: "sundown-chapel",
+    name: "Sundown Chapel",
+    category: "Warm Dusk",
+    colors: {
+      void: "#0c0808", panel: "#160f0e", surface: "#1e1513", surfaceHi: "#2b1f1c", surfaceOff: "#140c0b",
+      text: "#f2e9e4", dim: "#b39e92", faint: "#705e54",
+      cyan: "#ff8a6a", violet: "#b088d8", gold: "#d0a06a", goldBright: "#ecc492", textAccent: "#eabf92",
+      oxblood: "#6e2a34", rose: "#f25f6a", good: "#94c26f", ink: "#150b06", tarnish: "#8a6a4c",
+    },
+  },
+  {
+    id: "hearthstone",
+    name: "Hearthstone",
+    category: "Warm Dusk",
+    colors: {
+      void: "#0b0706", panel: "#150e0b", surface: "#1d140f", surfaceHi: "#2a1e16", surfaceOff: "#130b08",
+      text: "#f2e9e1", dim: "#b29e8e", faint: "#6f5f50",
+      cyan: "#ff7f4f", violet: "#d0a878", gold: "#c89058", goldBright: "#e8b880", textAccent: "#e6bb84",
+      oxblood: "#6e2418", rose: "#f0574a", good: "#98c06f", ink: "#150a04", tarnish: "#8a663e",
+    },
+  },
 ];
 
 // ── Generator — random but cohesive dark themes ──────────────────────────────
@@ -578,6 +694,58 @@ export function randomTheme(): Theme {
   };
   const id = `gen-${Date.now().toString(36)}`;
   return { id, name: "Generated", custom: true, colors };
+}
+
+/** The five colours a user actually chooses; everything else is derived. The
+ * keys mirror the theme-chip swatch strip (surface, cyan, violet, gold, rose). */
+export interface ThemeKeyColors {
+  /** Canvas tint — its hue drives the whole dark surface ramp + text tint. */
+  base: string;
+  /** Primary accent (the `cyan` slot) — lights, selection, the main neon. */
+  primary: string;
+  /** Secondary accent (the `violet` slot) — media/audio's neon voice. */
+  secondary: string;
+  /** Ornament (the `gold` slot) — filigree, engraved headers, power devices. */
+  ornament: string;
+  /** Danger (the `rose` slot) — errors, offline, destructive actions. */
+  danger: string;
+}
+
+/** Build a full theme from five hand-picked key colours — the "Custom" editor's
+ * engine. The accents are taken VERBATIM (the user's exact picks are what
+ * renders); only the ramp/derived tokens (surfaces, text, ink, bright/tarnished
+ * ornament, oxblood) are synthesised, using `randomTheme`'s formulas so a
+ * hand-built theme hangs together exactly like a generated one. */
+export function themeFromKeyColors(name: string, keys: ThemeKeyColors): Theme {
+  const base = hexToHsl(keys.base);
+  const primary = hexToHsl(keys.primary);
+  const ornament = hexToHsl(keys.ornament);
+  const danger = hexToHsl(keys.danger);
+  const colors: ThemeColors = {
+    void: hslToHex(base.h, 0.3, 0.045),
+    panel: hslToHex(base.h, 0.24, 0.075),
+    surface: hslToHex(base.h, 0.2, 0.105),
+    surfaceHi: hslToHex(base.h, 0.18, 0.155),
+    surfaceOff: hslToHex(base.h, 0.26, 0.06),
+    text: hslToHex(base.h, 0.12, 0.93),
+    dim: hslToHex(base.h, 0.1, 0.66),
+    faint: hslToHex(base.h, 0.08, 0.42),
+    cyan: keys.primary,
+    violet: keys.secondary,
+    gold: keys.ornament,
+    goldBright: hslToHex(ornament.h, Math.min(1, ornament.s + 0.05), 0.7),
+    oxblood: hslToHex(danger.h, 0.5, 0.27),
+    rose: keys.danger,
+    good: hslToHex(145, 0.5, 0.55),
+    ink: hslToHex(primary.h, 0.4, 0.06),
+    tarnish: hslToHex(ornament.h, 0.34, 0.36),
+  };
+  return {
+    id: `custom-${Date.now().toString(36)}`,
+    name,
+    custom: true,
+    colors,
+  };
 }
 
 // ── Persistence ──────────────────────────────────────────────────────────────

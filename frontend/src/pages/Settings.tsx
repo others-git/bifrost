@@ -77,7 +77,7 @@ import { useDialogs, type Dialogs, Modal } from "../components/dialogs";
 import { PageHeader, SectionLabel } from "../components/PageHeader";
 import { ThemeSwitcher } from "../components/ThemeSwitcher";
 import { Select } from "../components/Select";
-import { useViewport } from "../useViewport";
+import { useMediaQuery, useViewport } from "../useViewport";
 import { ACCENT, S, pageShell, tileGrid } from "../styles";
 import { Button, Segmented, Switch } from "../components/controls";
 import { OptionCheckList } from "../components/deviceOptions";
@@ -115,6 +115,12 @@ const VISIBLE_TABS = SETTINGS_TABS.filter((t) => t.id !== "clients" || !IS_KIOSK
 export function SettingsPage({ onNavigate: _onNavigate, initialAdd, onConsumeAdd, onDevModeChange }: Props) {
   const dialogs = useDialogs();
   const { isMobile, isCompact } = useViewport();
+  // Masonry column count for the providers list, scaled with window width
+  // (thresholds ≈ tileGrid's 480px tracks + gaps + page padding).
+  const wide2 = useMediaQuery("(min-width: 1060px)");
+  const wide3 = useMediaQuery("(min-width: 1550px)");
+  const wide4 = useMediaQuery("(min-width: 2040px)");
+  const providerCols = isMobile ? 1 : wide4 ? 4 : wide3 ? 3 : wide2 ? 2 : 1;
   const [providers, setProviders] = useState<Provider[]>([]);
   const [types, setTypes] = useState<ProviderType[]>([]);
   // Per-provider inventory: a device count for every card, and the media rows
@@ -336,20 +342,29 @@ export function SettingsPage({ onNavigate: _onNavigate, initialAdd, onConsumeAdd
             </div>
           )}
 
-          <div style={tileGrid(480, isMobile)}>
-            {providers.length === 0 && !showAdd && (
-              <p style={{ color: "var(--bf-faint)", margin: 0 }}>No providers configured.</p>
-            )}
+          {providers.length === 0 && !showAdd && (
+            <p style={{ color: "var(--bf-faint)", margin: 0 }}>No providers configured.</p>
+          )}
+          {/* Masonry (CSS columns), not a grid: a grid's rows are as tall as
+              their tallest card, so one tall device-group card stranded the
+              next row's cards far below the short hubs beside it. Columns
+              pack fluidly — a tall card just makes its own column longer. */}
+          <div style={{ columnCount: providerCols, columnGap: "0.75rem" }}>
             {groupProviders(providers).map((group) => {
               const providerType = group[0].provider_type;
+              const wrap = (key: string, child: React.ReactNode) => (
+                <div key={key} style={{ breakInside: "avoid", marginBottom: "0.75rem" }}>
+                  {child}
+                </div>
+              );
               // Device-centric types (one row = one LAN device) get the
               // shared type card with per-device rows; hub/account providers
               // stay full cards — even two Hue bridges are each a real
               // provider deserving their own Discover/Sync.
               if (DEVICE_CENTRIC_TYPES.has(providerType)) {
-                return (
+                return wrap(
+                  `group:${providerType}`,
                   <DeviceProviderGroup
-                    key={`group:${providerType}`}
                     providers={group}
                     typeLabel={
                       types.find((t) => t.provider_type === providerType)?.display_name ??
@@ -365,37 +380,39 @@ export function SettingsPage({ onNavigate: _onNavigate, initialAdd, onConsumeAdd
                       await loadInventory();
                     }}
                     showToast={showToast}
-                  />
+                  />,
                 );
               }
-              return group.map((p) => (
-                <ProviderCard
-                  key={p.id}
-                  provider={p}
-                  types={types}
-                  deviceCount={inventory.counts.get(p.id) ?? 0}
-                  onCredentialsSaved={() => showToast("Credentials updated — reconnecting.")}
-                  onRemove={() => handleRemove(p)}
-                  onDiscover={() => handleDiscover(p.id)}
-                  onPruneNow={async () => {
-                    const d = await discoverProvider(p.id, { prune: true });
-                    showToast(`Pruned ${d.pruned}, discovered ${d.discovered}.`);
-                    loadInventory();
-                  }}
-                  onSetPrune={async (prune) => {
-                    await setProviderPrune(p.id, prune);
-                    await loadProviders();
-                  }}
-                  onImportGroups={async () => {
-                    const r = await syncProviderGroups(p.id);
-                    showToast(
-                      r.synced === 0
-                        ? "No rooms or zones defined on this provider."
-                        : `Synced ${r.synced} room${r.synced !== 1 ? "s" : ""} (${r.rooms_created} created, ${r.rooms_linked} linked).`,
-                    );
-                  }}
-                />
-              ));
+              return group.map((p) =>
+                wrap(
+                  p.id,
+                  <ProviderCard
+                    provider={p}
+                    types={types}
+                    deviceCount={inventory.counts.get(p.id) ?? 0}
+                    onCredentialsSaved={() => showToast("Credentials updated — reconnecting.")}
+                    onRemove={() => handleRemove(p)}
+                    onDiscover={() => handleDiscover(p.id)}
+                    onPruneNow={async () => {
+                      const d = await discoverProvider(p.id, { prune: true });
+                      showToast(`Pruned ${d.pruned}, discovered ${d.discovered}.`);
+                      loadInventory();
+                    }}
+                    onSetPrune={async (prune) => {
+                      await setProviderPrune(p.id, prune);
+                      await loadProviders();
+                    }}
+                    onImportGroups={async () => {
+                      const r = await syncProviderGroups(p.id);
+                      showToast(
+                        r.synced === 0
+                          ? "No rooms or zones defined on this provider."
+                          : `Synced ${r.synced} room${r.synced !== 1 ? "s" : ""} (${r.rooms_created} created, ${r.rooms_linked} linked).`,
+                      );
+                    }}
+                  />,
+                ),
+              );
             })}
           </div>
 
@@ -1422,6 +1439,21 @@ function DeviceProviderRow({
   const healthy = !status || ["connected", "ok", "ready"].includes(status.state);
   const paired = provider.remote_paired === true;
 
+  const editBtn = (
+    <Button
+      variant="ghost"
+      onClick={() => setEditingCreds((x) => !x)}
+      title="Edit this device's connection details (IP, auth)"
+    >
+      {editingCreds ? "Close" : "Edit"}
+    </Button>
+  );
+  const removeBtn = (
+    <Button variant="ghost" onClick={onRemove} title="Remove this device and everything it imported">
+      Remove
+    </Button>
+  );
+
   return (
     <div
       style={{
@@ -1472,15 +1504,28 @@ function DeviceProviderRow({
           </span>
         )}
         <span style={{ flex: 1 }} />
-        {isTv &&
-          (paired ? (
-            <span
-              title="Android TV Remote paired — keys, apps, and live state ride the native session"
-              style={{ color: "var(--bf-good)", fontSize: "0.75rem", display: "inline-flex", alignItems: "center", gap: "0.3rem" }}
-            >
-              <Glyph name="remote" size={13} /> remote paired
-            </span>
-          ) : (
+        {isTv && paired && (
+          <span
+            title="Android TV Remote paired — keys, apps, and live state ride the native session"
+            style={{ color: "var(--bf-good)", fontSize: "0.75rem", display: "inline-flex", alignItems: "center", gap: "0.3rem" }}
+          >
+            <Glyph name="remote" size={13} /> remote paired
+          </span>
+        )}
+        {/* Non-TV rows are short enough that the actions share the line. */}
+        {!isTv && (
+          <>
+            {editBtn}
+            {removeBtn}
+          </>
+        )}
+      </div>
+      {/* TV rows: actions get their OWN line — mixed into the info line's
+          flex-wrap they broke unevenly, leaving one straggler button next to
+          the "remote paired" chip and the rest below. */}
+      {isTv && (
+        <div style={{ display: "flex", alignItems: "center", gap: "0.45rem", flexWrap: "wrap" }}>
+          {!paired && (
             <Button
               variant="ghost"
               onClick={handlePairRemote}
@@ -1489,23 +1534,16 @@ function DeviceProviderRow({
             >
               {pairBusy ? "…" : pairStep === "code" ? "Confirm code" : "Pair remote"}
             </Button>
-          ))}
-        {isTv && paired && pairStep === "idle" && (
-          <Button variant="ghost" onClick={handlePairRemote} disabled={pairBusy} title="Re-pair (e.g. after a TV reset)">
-            {pairBusy ? "…" : "Re-pair"}
-          </Button>
-        )}
-        <Button
-          variant="ghost"
-          onClick={() => setEditingCreds((x) => !x)}
-          title="Edit this device's connection details (IP, auth)"
-        >
-          {editingCreds ? "Close" : "Edit"}
-        </Button>
-        <Button variant="ghost" onClick={onRemove} title="Remove this device and everything it imported">
-          Remove
-        </Button>
-      </div>
+          )}
+          {paired && pairStep === "idle" && (
+            <Button variant="ghost" onClick={handlePairRemote} disabled={pairBusy} title="Re-pair (e.g. after a TV reset)">
+              {pairBusy ? "…" : "Re-pair"}
+            </Button>
+          )}
+          {editBtn}
+          {removeBtn}
+        </div>
+      )}
       {isTv && (pairStep === "code" || pairMsg) && (
         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
           {pairStep === "code" && (
@@ -3148,13 +3186,17 @@ function KioskAwareOverride({
   const [busy, setBusy] = useState(false);
   const [targets, setTargets] = useState<ControlTarget[]>(k.aware_override_targets);
   const [mode, setMode] = useState<AwareOverrideMode>(k.aware_override_mode);
-  // Re-sync the draft when the modal (re)opens against the latest saved value.
+  // Re-sync the draft ONLY when the modal opens. The clients list re-polls
+  // every few seconds and each poll mints fresh array/object identities for
+  // `k`, so depending on the values here would wipe in-progress edits
+  // mid-modal every poll tick.
   useEffect(() => {
     if (open) {
       setTargets(k.aware_override_targets);
       setMode(k.aware_override_mode);
     }
-  }, [open, k.aware_override_targets, k.aware_override_mode]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   if (!k.hour_modes?.includes("A")) return null;
 
@@ -3176,10 +3218,14 @@ function KioskAwareOverride({
         : [...cur, { domain, id }],
     );
 
+  const savedNames = k.aware_override_targets.map(nameFor);
+  const savedSubject = savedNames.length > 1 ? `any of ${savedNames.join(", ")}` : savedNames[0];
   const summary =
-    k.aware_override_targets.length === 0
+    savedNames.length === 0
       ? "Not configured"
-      : `${k.aware_override_mode === "keep_off" ? "Screen off" : "Screen on"} while: ${k.aware_override_targets.map(nameFor).join(", ")}`;
+      : k.aware_override_mode === "keep_off"
+        ? `Sleeps while ${savedSubject} is on`
+        : `Stays awake while ${savedSubject} is on`;
 
   async function save() {
     setBusy(true);
