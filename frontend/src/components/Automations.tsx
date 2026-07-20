@@ -12,6 +12,8 @@ import {
   getLights,
   getMediaDevices,
   getPowerDevices,
+  getRemoteApps,
+  getRemoteDevices,
   getRooms,
   getScenes,
   getSensors,
@@ -27,6 +29,8 @@ import {
   type LightState,
   type MediaDevice,
   type PowerDevice,
+  type RemoteApp,
+  type RemoteDevice,
   type Room,
   type RuleAction,
   type RuleCondition,
@@ -50,12 +54,15 @@ import { T, alpha, color } from "../theme";
 export type TriggerSubject =
   | { type: "sensor"; id: string; kind: SensorDevice["kind"] }
   | { type: "room"; id: string }
-  | { type: "device"; domain: TriggerDeviceDomain; id: string };
+  | { type: "device"; domain: TriggerDeviceDomain; id: string }
+  /** A macro — no event input; the rule runs only on demand. */
+  | { type: "manual" };
 
 function subjectOf(trigger: AutomationTrigger, sensors: SensorDevice[]): TriggerSubject {
   if (trigger.kind === "room") return { type: "room", id: trigger.room_id };
   if (trigger.kind === "device")
     return { type: "device", domain: trigger.domain, id: trigger.device_id };
+  if (trigger.kind === "manual") return { type: "manual" };
   return {
     type: "sensor",
     id: trigger.sensor_id,
@@ -67,6 +74,7 @@ function subjectOf(trigger: AutomationTrigger, sensors: SensorDevice[]): Trigger
 export function subjectKey(trigger: AutomationTrigger): string {
   if (trigger.kind === "room") return `room:${trigger.room_id}`;
   if (trigger.kind === "device") return `device:${trigger.domain}:${trigger.device_id}`;
+  if (trigger.kind === "manual") return "manual";
   return `sensor:${trigger.sensor_id}`;
 }
 
@@ -77,6 +85,7 @@ function isBoolKind(kind: SensorDevice["kind"]): boolean {
 
 /** The event phrasing, tuned per subject so the sentence reads naturally. */
 function eventOptions(subject: TriggerSubject): { value: string; label: string }[] {
+  if (subject.type === "manual") return [];
   if (subject.type === "room") {
     return [
       { value: "became_true", label: "becomes occupied" },
@@ -110,6 +119,7 @@ function eventOptions(subject: TriggerSubject): { value: string; label: string }
 
 /** The rendered event phrase for a stored trigger. */
 function triggerText(trigger: AutomationTrigger, sensors: SensorDevice[]): string {
+  if (trigger.kind === "manual") return "run by hand (a button, voice, or the play icon)";
   const event = trigger.event;
   const label = (v: string) =>
     eventOptions(subjectOf(trigger, sensors)).find((o) => o.value === v)?.label ?? v;
@@ -133,6 +143,7 @@ type NameMaps = {
   media: Map<string, string>;
   power: Map<string, string>;
   scene: Map<string, string>;
+  remote: Map<string, string>;
 };
 
 /** "Office to 40% (colored)" — the compact clause-aware phrasing for list rows. */
@@ -155,6 +166,8 @@ function actionText(a: RuleAction, names: NameMaps): string {
       return `${names.power.get(a.device_id) ?? "switch"} ${a.on ? "on" : "off"}`;
     case "scene":
       return `scene "${names.scene.get(a.scene_id) ?? "…"}"`;
+    case "app":
+      return `open ${a.app} on ${names.remote.get(a.remote_id) ?? "TV"}`;
   }
 }
 
@@ -241,6 +254,7 @@ export function useAutomationData() {
   const [power, setPower] = useState<PowerDevice[]>([]);
   const [scenes, setScenes] = useState<Scene[]>([]);
   const [sensors, setSensors] = useState<SensorDevice[]>([]);
+  const [remotes, setRemotes] = useState<RemoteDevice[]>([]);
 
   useEffect(() => {
     getRooms().then(setRooms);
@@ -249,6 +263,7 @@ export function useAutomationData() {
     getPowerDevices().then(setPower);
     getScenes().then(setScenes);
     getSensors().then(setSensors);
+    getRemoteDevices().then(setRemotes);
   }, []);
 
   const names: NameMaps = useMemo(
@@ -258,11 +273,12 @@ export function useAutomationData() {
       media: new Map(media.map((m) => [m.id, m.name])),
       power: new Map(power.map((p) => [p.id, p.name])),
       scene: new Map(scenes.map((s) => [s.id, s.name])),
+      remote: new Map(remotes.map((r) => [r.id, r.name])),
     }),
-    [rooms, lights, media, power, scenes],
+    [rooms, lights, media, power, scenes, remotes],
   );
   const sensorName = (id: string) => sensors.find((s) => s.id === id)?.name ?? "sensor";
-  return { rooms, lights, media, power, scenes, sensors, names, sensorName };
+  return { rooms, lights, media, power, scenes, sensors, remotes, names, sensorName };
 }
 
 type AutomationData = ReturnType<typeof useAutomationData>;
@@ -521,7 +537,9 @@ function AutomationEditor({
   onCancel: () => void;
   onSave: (body: AutomationBody) => void;
 }) {
-  const { rooms, lights, media, power, scenes, sensors } = data;
+  const { rooms, lights, media, power, scenes, sensors, remotes } = data;
+  const initialEvent =
+    initial && initial.trigger.kind !== "manual" ? initial.trigger.event : undefined;
   const [subject, setSubject] = useState<TriggerSubject | undefined>(
     initial ? subjectOf(initial.trigger, sensors) : initialSubject,
   );
@@ -533,19 +551,19 @@ function AutomationEditor({
 
   const [name, setName] = useState(initial?.name ?? "");
   const [eventKind, setEventKind] = useState<string>(
-    initial?.trigger.event.kind ??
+    initialEvent?.kind ??
       (initialSubject && initialSubject.type === "sensor" && !isBoolKind(initialSubject.kind)
         ? "rose_above"
         : "became_true"),
   );
   const [stayMins, setStayMins] = useState(
-    initial?.trigger.event.kind === "clear_for" || initial?.trigger.event.kind === "held_for"
-      ? Math.max(1, Math.round(initial.trigger.event.secs / 60))
+    initialEvent?.kind === "clear_for" || initialEvent?.kind === "held_for"
+      ? Math.max(1, Math.round(initialEvent.secs / 60))
       : 10,
   );
   const [threshold, setThreshold] = useState(
-    initial?.trigger.event.kind === "rose_above" || initial?.trigger.event.kind === "dropped_below"
-      ? initial.trigger.event.value
+    initialEvent?.kind === "rose_above" || initialEvent?.kind === "dropped_below"
+      ? initialEvent.value
       : 0,
   );
   const [conditions, setConditions] = useState<RuleCondition[]>(initial?.conditions ?? []);
@@ -561,7 +579,9 @@ function AutomationEditor({
   /** Switching the subject can change its reading type; keep the event legal. */
   function pickSubject(key: string) {
     let next: TriggerSubject;
-    if (key.startsWith("room:")) {
+    if (key === "manual") {
+      next = { type: "manual" };
+    } else if (key.startsWith("room:")) {
       next = { type: "room", id: key.slice(5) };
     } else if (key.startsWith("device:")) {
       const rest = key.slice(7);
@@ -579,8 +599,9 @@ function AutomationEditor({
       };
     }
     setSubject(next);
-    if (!eventOptions(next).some((o) => o.value === eventKind)) {
-      setEventKind(eventOptions(next)[0].value);
+    const opts = eventOptions(next);
+    if (opts.length > 0 && !opts.some((o) => o.value === eventKind)) {
+      setEventKind(opts[0].value);
     }
   }
 
@@ -594,6 +615,7 @@ function AutomationEditor({
 
   function builtTrigger(): AutomationTrigger | null {
     if (!subject) return null;
+    if (subject.type === "manual") return { kind: "manual" };
     if (subject.type === "room") return { kind: "room", room_id: subject.id, event: builtEvent() };
     if (subject.type === "device")
       return { kind: "device", domain: subject.domain, device_id: subject.id, event: builtEvent() };
@@ -608,6 +630,9 @@ function AutomationEditor({
   // switches — under its room's header (the shared room-grouped pattern; ids
   // pre-prefixed to carry the subject kind).
   const subjectOptions = [
+    // The macro subject: no event input — the rule is a named action list an
+    // AIO board button (or voice / the play icon) runs on demand.
+    { value: "manual", label: "I press a button (macro)", group: "Manual" },
     ...rooms
       .filter((r) => r.enabled)
       .map((r) => ({ value: `room:${r.id}`, label: r.name, group: "Rooms" })),
@@ -636,11 +661,13 @@ function AutomationEditor({
     ),
   ];
   const subjectValue = subject
-    ? subject.type === "room"
-      ? `room:${subject.id}`
-      : subject.type === "device"
-        ? `device:${subject.domain}:${subject.id}`
-        : `sensor:${subject.id}`
+    ? subject.type === "manual"
+      ? "manual"
+      : subject.type === "room"
+        ? `room:${subject.id}`
+        : subject.type === "device"
+          ? `device:${subject.domain}:${subject.id}`
+          : `sensor:${subject.id}`
     : undefined;
 
   // Gate subjects offered as conditions: anything except the trigger itself.
@@ -671,13 +698,15 @@ function AutomationEditor({
           searchable
           empty="No sensors yet — add a Hue or Home Assistant provider first"
         />
-        <Select
-          value={eventKind}
-          options={subject ? eventOptions(subject) : []}
-          onChange={setEventKind}
-          width={180}
-          disabled={!subject}
-        />
+        {subject?.type !== "manual" && (
+          <Select
+            value={eventKind}
+            options={subject ? eventOptions(subject) : []}
+            onChange={setEventKind}
+            width={180}
+            disabled={!subject}
+          />
+        )}
         {isStay && (
           <>
             <input
@@ -720,6 +749,7 @@ function AutomationEditor({
         lights={lights}
         power={power}
         scenes={scenes}
+        remotes={remotes}
         onChange={setActions}
       />
 
@@ -1053,6 +1083,9 @@ function rowsFromActions(actions: RuleAction[]): ActionRow[] {
     let brightness: number | null = null;
     let colorHex: string | null = null;
     let target: string;
+    // App actions are handled by their own list (AppActionRow), not the
+    // verb-grouped rows — skip any that slip in.
+    if (a.kind === "app") continue;
     if (a.kind === "scene") {
       verb = "scene";
       target = `scene:${a.scene_id}`;
@@ -1094,12 +1127,75 @@ function actionsFromRows(rows: ActionRow[]): RuleAction[] {
   );
 }
 
+/** One "open <app> on <TV>" action row. The app list is the remote's own
+ * catalog (pinned ∪ recents), fetched when the remote changes — the same
+ * source the remote UI's launcher uses, so a rule offers exactly what's
+ * installed. */
+function AppActionRow({
+  action,
+  remotes,
+  onChange,
+  onRemove,
+}: {
+  action: Extract<RuleAction, { kind: "app" }>;
+  remotes: RemoteDevice[];
+  onChange: (patch: Partial<Extract<RuleAction, { kind: "app" }>>) => void;
+  onRemove: () => void;
+}) {
+  const [apps, setApps] = useState<RemoteApp[]>([]);
+  useEffect(() => {
+    if (!action.remote_id) {
+      setApps([]);
+      return;
+    }
+    let alive = true;
+    getRemoteApps(action.remote_id).then((a) => {
+      if (alive) setApps(a);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [action.remote_id]);
+
+  // Launch with the vendor URI when the catalog has one, else the bare package
+  // (the provider wraps it) — the same value the remote's own launcher sends.
+  const appValueOf = (a: RemoteApp) => a.activity ?? a.package;
+
+  return (
+    <div style={ROW}>
+      <span style={{ color: T.dim, fontSize: "0.8rem", whiteSpace: "nowrap" }}>open</span>
+      <Select
+        value={apps.some((a) => appValueOf(a) === action.app) ? action.app : undefined}
+        options={apps.map((a) => ({ value: appValueOf(a), label: a.name }))}
+        onChange={(v) => onChange({ app: v })}
+        placeholder={action.remote_id ? "Pick an app" : "Pick a TV first"}
+        width={168}
+        searchable
+        disabled={!action.remote_id}
+        empty="No apps found — open one on the TV so it's learned"
+      />
+      <span style={{ color: T.dim, fontSize: "0.8rem", whiteSpace: "nowrap" }}>on</span>
+      <Select
+        value={action.remote_id || undefined}
+        options={remotes.map((r) => ({ value: r.id, label: r.name }))}
+        onChange={(v) => onChange({ remote_id: v, app: "" })}
+        placeholder="Pick a TV"
+        width={168}
+      />
+      <button onClick={onRemove} title="Remove this step" style={ICON_BTN}>
+        ✕
+      </button>
+    </div>
+  );
+}
+
 function ActionList({
   actions,
   rooms,
   lights,
   power,
   scenes,
+  remotes,
   onChange,
 }: {
   actions: RuleAction[];
@@ -1107,9 +1203,15 @@ function ActionList({
   lights: Light[];
   power: PowerDevice[];
   scenes: Scene[];
+  remotes: RemoteDevice[];
   onChange: (a: RuleAction[]) => void;
 }) {
-  const rows = rowsFromActions(actions);
+  // App-launch actions have a fundamentally different shape (one remote + one
+  // app, un-mergeable) from the verb-grouped device/scene actions, so they
+  // live in their own list below rather than distorting the verb machinery.
+  const appActions = actions.filter((a): a is Extract<RuleAction, { kind: "app" }> => a.kind === "app");
+  const verbActions = actions.filter((a) => a.kind !== "app");
+  const rows = rowsFromActions(verbActions);
   // A new step with no targets yet can't exist in `actions`; it lives here
   // until its first target is picked, then materializes as a real row.
   const [draft, setDraft] = useState<Omit<ActionRow, "targets"> | null>(null);
@@ -1153,7 +1255,12 @@ function ActionList({
     (["on", "scene"] as const).flatMap((v) => targetOptionsFor(v)).map((o) => [o.value, o.label]),
   );
 
-  const emit = (next: ActionRow[]) => onChange(actionsFromRows(next));
+  // Verb rows and app actions round-trip together — one always preserves the
+  // other so editing devices never drops the TV-app steps and vice versa.
+  const emit = (next: ActionRow[]) => onChange([...actionsFromRows(next), ...appActions]);
+  const emitApps = (next: RuleAction[]) => onChange([...actionsFromRows(rows), ...next]);
+  const setAppAction = (i: number, patch: Partial<Extract<RuleAction, { kind: "app" }>>) =>
+    emitApps(appActions.map((a, j) => (j === i ? { ...a, ...patch } : a)));
   const setRow = (i: number, patch: Partial<ActionRow>) => {
     if (patch.verb && patch.verb !== rows[i].verb) {
       // A verb change keeps only the targets it can still act on (a scene step
@@ -1363,6 +1470,16 @@ function ActionList({
           : []),
       ]}
 
+      {appActions.map((a, i) => (
+        <AppActionRow
+          key={`app:${i}`}
+          action={a}
+          remotes={remotes}
+          onChange={(patch) => setAppAction(i, patch)}
+          onRemove={() => emitApps(appActions.filter((_, j) => j !== i))}
+        />
+      ))}
+
       {!draft && (
         <div style={ROW}>
           <Button
@@ -1375,6 +1492,15 @@ function ActionList({
           >
             + Action
           </Button>
+          {remotes.length > 0 && (
+            <Button
+              variant="ghost"
+              onClick={() => emitApps([...appActions, { kind: "app", remote_id: "", app: "" }])}
+              title="Launch a streaming app on a TV as part of this automation"
+            >
+              + Open a TV app
+            </Button>
+          )}
         </div>
       )}
     </div>

@@ -376,6 +376,7 @@ pub(crate) async fn set_app_pin(
 // ── Service layer (shared by session / v1 / MCP) ─────────────────────────────
 
 /// Outcome of a control/read call, mapped to HTTP by each surface.
+#[derive(Debug)]
 pub(crate) enum RemoteOutcome {
     Ok,
     NotFound,

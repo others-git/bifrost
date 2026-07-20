@@ -56,6 +56,14 @@ smart TV that only answers when asked gets polled tightly **while a rule
 watches it** — within seconds of the TV coming on — and isn't touched at all
 once no rule does.
 
+### Macro (I press a button)
+
+A rule with **no event input at all** — it never fires on its own. It's just a
+named list of actions run **on demand**: the **Action button** board widget,
+the ▶ Run control, or voice. This is how one press does several things at once
+— "movie night" turns off the lights and opens Hulu on the bedroom TV. Because
+it never event-fires, a macro also skips conditions; it's purely its actions.
+
 ---
 
 ## Conditions ("only if")
@@ -87,6 +95,10 @@ Each action drives the same shared control paths as the UI and voice:
 - **A single light** — on, off, or on with a brightness/colour.
 - **A power device** — on or off.
 - **A scene** — apply any saved scene.
+- **Open a TV app** — launch a streaming app (Hulu, Netflix, …) on a
+  TV/streamer remote. The app list is that TV's own catalog, and the launch
+  routes through the same path the remote UI uses (per-vendor handling, recents
+  recording). Playing a specific *title* isn't cracked yet — this opens the app.
 
 An action step reads as a sentence: a verb (**turn on**, **turn off**, or
 **apply scene**), then its targets — pick several at once from one searchable,

@@ -10,10 +10,12 @@ import {
   activateScene,
   createDashboard,
   deleteDashboard,
+  getAutomations,
   getDashboards,
   getGenericDevices,
   getKioskSelf,
   getLights,
+  runAutomation,
   getMediaDevices,
   getPowerDevices,
   getRooms,
@@ -39,6 +41,7 @@ import {
   type ControlTarget,
   type Room,
   type RoomControl,
+  type Automation,
   type Scene,
   type Widget,
 } from "../api";
@@ -189,7 +192,7 @@ const GAP = 8;
 // Fixed row height only for the phone fallback's stacked, view-only list.
 const ROW_H = 42;
 
-type WidgetType = "room" | "device" | "button" | "group" | "now_playing" | "scene" | "control" | "sensor" | "device_status" | "weather" | "clock" | "label" | "exit";
+type WidgetType = "room" | "device" | "button" | "group" | "now_playing" | "scene" | "macro" | "control" | "sensor" | "device_status" | "weather" | "clock" | "label" | "exit";
 
 // The kiosk-exit control is a special built-in widget: present on every board,
 // movable (positioned in edit mode) but not user-addable or removable. It renders
@@ -1341,7 +1344,7 @@ function WidgetBox({
           // Plate widgets clip at the frame's own corners (a square clip behind
           // a rounded child reads as a ghost box); bare controls (button, label)
           // aren't clipped at all, so their glow blooms like every other niche.
-          overflow: w.type === "button" || w.type === "label" ? "visible" : "hidden",
+          overflow: w.type === "button" || w.type === "label" || w.type === "macro" ? "visible" : "hidden",
           borderRadius: radius.frame,
           // None while editing (so the box drags). A label is also click-through in
           // view mode — both the outer box and this content must be `none`, or a
@@ -1531,6 +1534,31 @@ function WidgetContent({
         style={{ alignItems: "center", justifyContent: "center", gap: "0.45rem", cursor: edit ? "default" : "pointer" }}
       >
         <Glyph name="scene" size={24} />
+        <span style={{ ...labelType, position: "relative", fontSize: "0.74rem", color: color.textAccent, ...ELLIPSIS, maxWidth: "100%" }}>
+          {label}
+        </span>
+      </Plate>
+    );
+  }
+
+  if (w.type === "macro") {
+    // An AIO "do several things" button: runs one automation (its actions
+    // fire through the shared service layer, skipping trigger/conditions —
+    // the same POST /run the Automations page uses). Label + glyph are stored
+    // on the widget so it stands alone without resolving the rule live.
+    const label = (cfg.name as string) || "Action";
+    const automationId = cfg.automation_id as string | undefined;
+    return (
+      <Plate
+        as="button"
+        accents={[color.gold]}
+        on
+        disabled={edit}
+        onClick={async () => { if (automationId) await runAutomation(automationId); }}
+        title={label}
+        style={{ alignItems: "center", justifyContent: "center", gap: "0.45rem", cursor: edit ? "default" : "pointer" }}
+      >
+        <Glyph name={(cfg.glyph as string) || "bolt"} size={24} />
         <span style={{ ...labelType, position: "relative", fontSize: "0.74rem", color: color.textAccent, ...ELLIPSIS, maxWidth: "100%" }}>
           {label}
         </span>
@@ -3007,6 +3035,14 @@ function WidgetEditorModal({
   const [restoreHome, setRestoreHome] = useState<boolean>(!!cfg.restore_home);
   const [sceneId, setSceneId] = useState<string>((cfg.scene_id as string) ?? "");
 
+  // macro (Action button) — runs one automation; its own catalog is loaded once.
+  const [automations, setAutomations] = useState<Automation[]>([]);
+  const [automationId, setAutomationId] = useState<string>((cfg.automation_id as string) ?? "");
+  const [macroGlyph, setMacroGlyph] = useState<string>((cfg.glyph as string) ?? "bolt");
+  useEffect(() => {
+    getAutomations().then(setAutomations);
+  }, []);
+
   // group
   const [groupDomain, setGroupDomain] = useState<string>((cfg.domain as string) ?? "light");
   const [groupIds, setGroupIds] = useState<string[]>((cfg.ids as string[]) ?? []);
@@ -3110,6 +3146,17 @@ function WidgetEditorModal({
         w: 12,
         h: 4,
       });
+    } else if (type === "macro") {
+      if (!automationId) return;
+      // Default the label to the automation's name so the button reads right
+      // without the user re-typing it; an explicit name still wins.
+      const label = nm ?? automations.find((a) => a.id === automationId)?.name;
+      onSave({
+        type,
+        config: { automation_id: automationId, name: label, glyph: macroGlyph || undefined },
+        w: 6,
+        h: 6,
+      });
     } else if (type === "sensor") {
       const [pid, did] = sensorDev.split("|");
       if (!pid || !did || !sensorKey) return;
@@ -3165,7 +3212,7 @@ function WidgetEditorModal({
       {!existing && (
         <Field label="Type">
           <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem" }}>
-            {(["room", "device", "button", "group", "now_playing", "scene", "control", "sensor", "device_status", "weather", "clock", "label"] as WidgetType[]).map((t) => (
+            {(["room", "device", "button", "group", "now_playing", "scene", "macro", "control", "sensor", "device_status", "weather", "clock", "label"] as WidgetType[]).map((t) => (
               <button key={t} onClick={() => setType(t)} style={{ ...CHIP, ...(type === t ? CHIP_ON : {}) }}>
                 {WIDGET_LABELS[t]}
               </button>
@@ -3305,6 +3352,31 @@ function WidgetEditorModal({
               />
             </Field>
           )}
+        </>
+      )}
+
+      {type === "macro" && (
+        <>
+          <Field label="Automation to run">
+            <Select
+              value={automationId}
+              onChange={setAutomationId}
+              placeholder={automations.length ? "Choose an automation" : "No automations yet"}
+              options={automations.map((a) => ({
+                value: a.id,
+                label: a.name || "(unnamed)",
+                // A macro (manual) rule is the natural fit; others still work
+                // (run skips their trigger), so group by kind rather than hide.
+                group: a.trigger.kind === "manual" ? "Macros" : "Other automations",
+              }))}
+              empty="Create one on the Automations page (trigger: “I press a button”)"
+            />
+          </Field>
+          <Field label="Icon">
+            <div style={{ maxHeight: 120, overflowY: "auto" }}>
+              <GlyphGrid options={CONTROL_GLYPH_OPTIONS} value={macroGlyph} onPick={setMacroGlyph} size={34} />
+            </div>
+          </Field>
         </>
       )}
 
@@ -3665,6 +3737,7 @@ const WIDGET_LABELS: Record<WidgetType, string> = {
   group: "Device group",
   now_playing: "Now playing",
   scene: "Scene button",
+  macro: "Action button",
   control: "Custom control",
   button: "Button",
   sensor: "Sensor",

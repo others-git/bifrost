@@ -999,7 +999,10 @@ export type RuleAction =
   | { kind: "room"; room_id: string; state: LightState }
   | { kind: "light"; light_id: string; state: LightState }
   | { kind: "power"; device_id: string; on: boolean }
-  | { kind: "scene"; scene_id: string };
+  | { kind: "scene"; scene_id: string }
+  /** Launch an app on a TV/streamer remote — `app` is a launch URI, bare
+   * package, or deep link (whatever the remote's catalog launches with). */
+  | { kind: "app"; remote_id: string; app: string };
 
 /** What starts an automation — a tagged trigger input, so more kinds
  * (schedules, device state, …) can join later. Sensor events today. */
@@ -1008,7 +1011,10 @@ export type TriggerDeviceDomain = "light" | "media" | "power";
 export type AutomationTrigger =
   | { kind: "sensor"; sensor_id: string; event: SensorTrigger }
   | { kind: "room"; room_id: string; event: SensorTrigger }
-  | { kind: "device"; domain: TriggerDeviceDomain; device_id: string; event: SensorTrigger };
+  | { kind: "device"; domain: TriggerDeviceDomain; device_id: string; event: SensorTrigger }
+  /** A macro: no event input at all — runs only on demand (an AIO board
+   * button, `runAutomation`, voice). */
+  | { kind: "manual" };
 
 export interface Automation {
   id: string;

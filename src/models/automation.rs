@@ -220,6 +220,12 @@ pub enum RuleAction {
     Power { device_id: String, on: bool },
     /// Apply a scene (`apply_scene_entries`).
     Scene { scene_id: String },
+    /// Launch an app on a TV/streamer's remote (`apply_remote_command` with
+    /// `LaunchApp` — the same shared path the remote UI and voice use, so
+    /// recents recording and per-vendor launch routing come along free). `app`
+    /// is whatever the remote's catalog launches with: a vendor launch URI, a
+    /// bare package (the Android TV adapter wraps it), or a deep link.
+    App { remote_id: String, app: String },
 }
 
 impl RuleAction {
@@ -275,6 +281,11 @@ pub enum AutomationTrigger {
         device_id: String,
         event: SensorTrigger,
     },
+    /// No event input at all — a **macro**: the rule only runs on demand
+    /// (`POST /api/automations/{id}/run` — an AIO board button, voice, MCP).
+    /// The engine never event-fires it, and `run` skips conditions like any
+    /// hand-run rule, so a manual rule is purely "a named list of actions".
+    Manual {},
 }
 
 impl AutomationTrigger {
@@ -306,12 +317,14 @@ impl AutomationTrigger {
         }
     }
 
-    /// The transition event — every input kind carries one.
-    pub fn event(&self) -> &SensorTrigger {
+    /// The transition event — `None` for a manual (macro) rule, which has no
+    /// event input to match.
+    pub fn event(&self) -> Option<&SensorTrigger> {
         match self {
             AutomationTrigger::Sensor { event, .. }
             | AutomationTrigger::Room { event, .. }
-            | AutomationTrigger::Device { event, .. } => event,
+            | AutomationTrigger::Device { event, .. } => Some(event),
+            AutomationTrigger::Manual {} => None,
         }
     }
 }
@@ -543,7 +556,7 @@ mod tests {
         .unwrap();
         assert_eq!(t.sensor_id(), Some("s1"));
         assert_eq!(t.room_id(), None);
-        assert_eq!(t.event(), &SensorTrigger::BecameTrue);
+        assert_eq!(t.event(), Some(&SensorTrigger::BecameTrue));
         let json = serde_json::to_string(&t).unwrap();
         assert!(json.contains(r#""kind":"sensor""#));
 
@@ -553,7 +566,7 @@ mod tests {
         .unwrap();
         assert_eq!(t.sensor_id(), None); // room rules have no sensor lookup key
         assert_eq!(t.room_id(), Some("r1"));
-        assert_eq!(t.event().stay_watch(), Some((false, 900)));
+        assert_eq!(t.event().and_then(|e| e.stay_watch()), Some((false, 900)));
 
         let t: AutomationTrigger = serde_json::from_str(
             r#"{"kind":"device","domain":"media","device_id":"tv1","event":{"kind":"became_true"}}"#,
@@ -561,7 +574,7 @@ mod tests {
         .unwrap();
         assert_eq!(t.sensor_id(), None);
         assert_eq!(t.device(), Some((TriggerDeviceDomain::Media, "tv1")));
-        assert_eq!(t.event(), &SensorTrigger::BecameTrue);
+        assert_eq!(t.event(), Some(&SensorTrigger::BecameTrue));
         assert!(
             serde_json::to_string(&t)
                 .unwrap()
@@ -578,6 +591,35 @@ mod tests {
         assert!(matches!(a, RuleAction::Power { ref device_id, on: false } if device_id == "p1"));
         let s = serde_json::to_string(&SensorTrigger::RoseAbove { value: 25.5 }).unwrap();
         assert!(s.contains(r#""kind":"rose_above""#));
+    }
+
+    #[test]
+    fn manual_trigger_is_a_macro_with_no_event_input() {
+        let t: AutomationTrigger = serde_json::from_str(r#"{"kind":"manual"}"#).unwrap();
+        assert!(matches!(t, AutomationTrigger::Manual {}));
+        // No event, no lookup keys — the engine can never event-fire it.
+        assert_eq!(t.event(), None);
+        assert_eq!(t.sensor_id(), None);
+        assert_eq!(t.room_id(), None);
+        assert_eq!(t.device(), None);
+        assert!(
+            serde_json::to_string(&t)
+                .unwrap()
+                .contains(r#""kind":"manual""#)
+        );
+    }
+
+    #[test]
+    fn app_action_round_trips() {
+        let a: RuleAction = serde_json::from_str(
+            r#"{"kind":"app","remote_id":"r1","app":"com.hulu.livingroomplus"}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(a, RuleAction::App { ref remote_id, ref app } if remote_id == "r1" && app == "com.hulu.livingroomplus")
+        );
+        let s = serde_json::to_string(&a).unwrap();
+        assert!(s.contains(r#""kind":"app""#));
     }
 
     #[test]

@@ -192,9 +192,11 @@ impl super::SmartTvVendor for AndroidTvVendor {
 
     async fn launch_app(&self, app: &str) -> Result<()> {
         let id = self.identity_or_pair()?;
-        // `RemoteAppLinkLaunchRequest` takes a Play Store package id or a deep
-        // link — pass through whatever the caller resolved.
-        atv::client::send_message(&self.host, id, atv::messages::remote_app_link_launch(app))
+        atv::client::send_message(
+            &self.host,
+            id,
+            atv::messages::remote_app_link_launch(&app_link_for(app)),
+        )
     }
 
     async fn send_text(&self, text: &str) -> Result<()> {
@@ -217,6 +219,21 @@ impl super::SmartTvVendor for AndroidTvVendor {
     }
 }
 
+/// Turn whatever the caller resolved into something `RemoteAppLinkLaunchRequest`
+/// actually opens. The request's `app_link` field is a LINK (https/custom
+/// scheme) — a bare Play Store package id is silently ignored by the TV. A
+/// pure Android TV box has no vendor HTTP catalog, so its app rows carry only
+/// bare packages (learned from foreground pushes) — wrap those as
+/// `market://launch?id=<pkg>`, the protocol's "open this installed app" form.
+/// Real links (deep links, the content resolver's search URLs) pass through.
+fn app_link_for(app: &str) -> String {
+    if app.contains("://") {
+        app.to_string()
+    } else {
+        format!("market://launch?id={app}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +242,22 @@ mod tests {
     #[test]
     fn empty_host_is_rejected() {
         assert!(AndroidTvVendor::new("  ", None, None, None).is_err());
+    }
+
+    #[test]
+    fn bare_packages_launch_as_market_links() {
+        // A bare package id (all a catalog-less Android TV box has) must be
+        // wrapped — sent raw, the TV ignores it and "nothing happens".
+        assert_eq!(
+            app_link_for("com.hulu.livingroomplus"),
+            "market://launch?id=com.hulu.livingroomplus"
+        );
+        // Real links pass through untouched (deep links, search URLs).
+        assert_eq!(
+            app_link_for("https://www.hulu.com/search?q=x"),
+            "https://www.hulu.com/search?q=x"
+        );
+        assert_eq!(app_link_for("netflix://title/1"), "netflix://title/1");
     }
 
     #[tokio::test]

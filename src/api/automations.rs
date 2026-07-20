@@ -126,9 +126,11 @@ async fn validate_body(state: &AppState, body: &AutomationBody) -> Result<(), Sa
     let event = body.trigger.event();
     let trigger_numeric = matches!(
         event,
-        SensorTrigger::RoseAbove { .. } | SensorTrigger::DroppedBelow { .. }
+        Some(SensorTrigger::RoseAbove { .. } | SensorTrigger::DroppedBelow { .. })
     );
     match &body.trigger {
+        // A macro has no event input — nothing to validate on the trigger side.
+        AutomationTrigger::Manual {} => {}
         AutomationTrigger::Sensor { sensor_id, .. } => {
             let kind: Option<String> =
                 sqlx::query_scalar("SELECT kind FROM sensor_devices WHERE id = ?")
@@ -192,7 +194,7 @@ async fn validate_body(state: &AppState, body: &AutomationBody) -> Result<(), Sa
             }
         }
     }
-    if let Some((_, secs)) = event.stay_watch()
+    if let Some((_, secs)) = event.and_then(|e| e.stay_watch())
         && !(30..=24 * 3600).contains(&secs)
     {
         return Err(SaveRuleOutcome::BadRequest(
@@ -680,6 +682,9 @@ async fn snapshot_targets(state: &AppState, actions: &[RuleAction]) -> Vec<Resto
                     want(false, id);
                 }
             }
+            // An app launch has no restorable "previous state" — nothing to
+            // snapshot (you can't un-launch Hulu).
+            RuleAction::App { .. } => {}
         }
     }
 
@@ -1179,6 +1184,17 @@ pub(crate) async fn execute_rule(state: &AppState, rule: &Automation) {
                 let applied = crate::api::scenes::apply_scene_entries(state, scene_id, None).await;
                 tracing::debug!(target: "bifrost::automation", rule = %rule.id, scene = %scene_id, ok = applied.is_some(), "action: scene");
             }
+            RuleAction::App { remote_id, app } => {
+                let outcome = crate::api::remote::apply_remote_command(
+                    state,
+                    remote_id,
+                    &crate::models::remote::RemoteCommand::LaunchApp {
+                        activity: app.clone(),
+                    },
+                )
+                .await;
+                tracing::debug!(target: "bifrost::automation", rule = %rule.id, remote = %remote_id, %app, outcome = ?outcome, "action: app launch");
+            }
         }
     }
     // Watch the held devices now the shared apply path has written the cache:
@@ -1234,7 +1250,10 @@ async fn apply_edge(
         .pending
         .retain(|_, p| !(p.subject == *subject && now.as_bool() == Some(!p.watched)));
     for rule in rules {
-        let event = rule.trigger.event();
+        // A manual (macro) rule has no event input — it can't event-fire.
+        let Some(event) = rule.trigger.event() else {
+            continue;
+        };
         if let Some((watched, secs)) = event.arms_stay_timer(prev, now) {
             tracing::debug!(target: "bifrost::automation", rule = %rule.id, watched, secs, "stay timer armed");
             engine.pending.insert(
@@ -1404,7 +1423,7 @@ fn seed_stay(engine: &mut EngineState, rule: &Automation, subject: StaySubject, 
     if engine.pending.contains_key(&rule.id) {
         return;
     }
-    if let Some((watched, secs)) = rule.trigger.event().stay_watch()
+    if let Some((watched, secs)) = rule.trigger.event().and_then(|e| e.stay_watch())
         && current == watched
     {
         engine.pending.insert(

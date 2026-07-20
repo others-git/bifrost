@@ -9389,6 +9389,100 @@ async fn run_automation_executes_actions_immediately() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+/// A MANUAL rule (the AIO button's engine): saves with no event input, never
+/// event-fires, and `POST /{id}/run` executes a mixed action list — including
+/// the new `app` action, which launches through the shared remote command
+/// path (recents recording and all).
+#[tokio::test]
+async fn manual_rule_with_app_action_runs_on_demand() {
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let ha = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/services/homeassistant/turn_off"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&ha)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/services/remote/turn_on"))
+        .and(body_string_contains("com.hulu.livingroomplus"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&ha)
+        .await;
+    let (app, prov_id, db) = helpers::test_app_with_ha_db(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    sqlx::query(
+        "INSERT INTO power_devices (id, provider_id, device_id, name, kind, last_state)
+         VALUES ('p1', ?, 'switch.lamp', 'Lamp', 'switch', '{\"on\":true}')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO remote_devices (id, provider_id, device_id, name, last_state)
+         VALUES ('r1', ?, 'remote.bedroom_tv', 'Bedroom TV', '{}')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    // Create through the real route — validation must accept a manual trigger.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/automations",
+            &cookie,
+            r#"{"name":"Bedroom movie","enabled":true,
+                "trigger":{"kind":"manual"},
+                "conditions":[],
+                "actions":[
+                  {"kind":"power","device_id":"p1","on":false},
+                  {"kind":"app","remote_id":"r1","app":"com.hulu.livingroomplus"}
+                ]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/automations/{id}/run"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let reqs = ha.received_requests().await.unwrap();
+    assert!(
+        reqs.iter()
+            .any(|r| r.url.path() == "/api/services/homeassistant/turn_off"),
+        "the power action must reach the provider"
+    );
+    assert!(
+        reqs.iter()
+            .any(|r| r.url.path() == "/api/services/remote/turn_on"),
+        "the app action must launch through the shared remote path"
+    );
+    // The launch registered as a recent in the app catalog — proof it went
+    // through apply_remote_command, not a bespoke dispatch.
+    let seen: Option<String> =
+        sqlx::query_scalar("SELECT package FROM remote_apps WHERE remote_id = 'r1'")
+            .fetch_optional(&db)
+            .await
+            .unwrap();
+    assert_eq!(seen.as_deref(), Some("com.hulu.livingroomplus"));
+}
+
 #[tokio::test]
 async fn v1_power_without_key_returns_401() {
     let app = helpers::test_app_with_password().await;
