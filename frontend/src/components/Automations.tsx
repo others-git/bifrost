@@ -22,6 +22,7 @@ import {
   runAutomation,
   updateAutomation,
   xyToRgb,
+  type ActionStep,
   type Automation,
   type AutomationBody,
   type AutomationTrigger,
@@ -49,6 +50,7 @@ import {
   pickableSensors,
 } from "../deviceSelectors";
 import { Modal } from "./dialogs";
+import { Flyout } from "./Flyout";
 import { hexToRgb } from "./LightEditor";
 import { Glyph } from "./glyphs";
 import { Select } from "./Select";
@@ -253,6 +255,42 @@ const ROW: React.CSSProperties = {
   flexWrap: "wrap",
 };
 
+/** One labelled section of the editor: an engraved label sitting tight above
+ * its content, so the eye groups each part of the sentence. Sections are
+ * spaced apart by the editor's own column gap. */
+function Field({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem" }}>
+      <span style={SECTION_LABEL}>
+        {label}
+        {hint && (
+          <span
+            style={{
+              color: T.faint,
+              fontWeight: 400,
+              letterSpacing: 0,
+              textTransform: "none",
+              fontSize: "0.72rem",
+            }}
+          >
+            {" "}
+            · {hint}
+          </span>
+        )}
+      </span>
+      {children}
+    </div>
+  );
+}
+
 // ── Shared data ───────────────────────────────────────────────────────────────
 
 /** The device/room/scene context every automation surface needs: the lists
@@ -337,7 +375,10 @@ export function AutomationRow({
           {rule.name || `When it ${triggerText(rule.trigger, sensors)}`}
         </div>
         <div style={{ fontSize: "0.72rem", color: T.faint, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {`${triggerText(rule.trigger, sensors)} → ${rule.actions.map((a) => actionText(a, names)).join(", ")}`}
+          {`${triggerText(rule.trigger, sensors)} → ${rule.steps
+            .flatMap((s) => s.actions)
+            .map((a) => actionText(a, names))
+            .join(", ")}`}
           {rule.conditions.length > 0 &&
             ` · only ${rule.conditions.map((c) => conditionText(c, names, sensorName)).join(", ")}`}
           {rule.restore_secs != null &&
@@ -374,7 +415,7 @@ export async function duplicateAutomation(rule: Automation): Promise<Automation 
     enabled: false,
     trigger: rule.trigger,
     conditions: rule.conditions,
-    actions: rule.actions,
+    steps: rule.steps,
     cooldown_secs: rule.cooldown_secs,
   });
   return typeof result === "string" ? null : result;
@@ -413,7 +454,7 @@ export function AutomationEditorModal({
   }
 
   return (
-    <Modal title={initial ? "Edit automation" : "New automation"} onClose={onClose} width={480}>
+    <Modal title={initial ? "Edit automation" : "New automation"} onClose={onClose} width={640}>
       <AutomationEditor
         initial={initial}
         initialSubject={initialSubject}
@@ -476,7 +517,7 @@ export function AutomationsModal({
       <Modal
         title={editing === "new" ? "New automation" : "Edit automation"}
         onClose={onClose}
-        width={480}
+        width={640}
       >
         <AutomationEditor
           initial={editing === "new" ? null : editing}
@@ -548,7 +589,7 @@ function AutomationEditor({
   onCancel: () => void;
   onSave: (body: AutomationBody) => void;
 }) {
-  const { rooms, lights, media, power, scenes, sensors, remotes } = data;
+  const { rooms, lights, media, power, sensors } = data;
   const initialEvent =
     initial && initial.trigger.kind !== "manual" ? initial.trigger.event : undefined;
   const [subject, setSubject] = useState<TriggerSubject | undefined>(
@@ -578,7 +619,17 @@ function AutomationEditor({
       : 0,
   );
   const [conditions, setConditions] = useState<RuleCondition[]>(initial?.conditions ?? []);
-  const [actions, setActions] = useState<RuleAction[]>(initial?.actions ?? []);
+  // The "then" is a list of steps, each `{conditions, actions}`. A new rule
+  // starts with one empty, unconditional step.
+  const [steps, setSteps] = useState<ActionStep[]>(
+    initial?.steps?.length ? initial.steps : [{ conditions: [], actions: [] }],
+  );
+  const totalActions = steps.reduce((n, s) => n + s.actions.length, 0);
+  const setStep = (i: number, patch: Partial<ActionStep>) =>
+    setSteps((cur) => cur.map((s, j) => (j === i ? { ...s, ...patch } : s)));
+  const [advancedOpen, setAdvancedOpen] = useState(
+    !!(initial && (initial.cooldown_secs > 0 || initial.restore_secs)),
+  );
   const [cooldownMins, setCooldownMins] = useState(
     initial ? Math.round(initial.cooldown_secs / 60) : 0,
   );
@@ -681,121 +732,174 @@ function AutomationEditor({
     (r) => r.enabled && !(subject?.type === "room" && r.id === subject.id),
   );
 
+  const hairline: React.CSSProperties = {
+    border: "none",
+    borderTop: `1px solid ${T.cardBorder}`,
+    margin: 0,
+  };
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "0.7rem" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: "1.15rem" }}>
       <input
         style={S.input}
-        placeholder="Name (optional)"
+        placeholder="Name this automation (optional)"
         value={name}
         onChange={(e) => setName(e.target.value)}
       />
 
-      <span style={SECTION_LABEL}>When</span>
-      <div style={ROW}>
-        <Select
-          value={subjectValue}
-          options={subjectOptions}
-          onChange={pickSubject}
-          placeholder="Pick a room or sensor"
-          width={200}
-          searchable
-          empty="No sensors yet — add a Hue or Home Assistant provider first"
-        />
-        {subject?.type !== "manual" && (
+      <Field label="When">
+        <div style={ROW}>
           <Select
-            value={eventKind}
-            options={subject ? eventOptions(subject) : []}
-            onChange={setEventKind}
-            width={180}
-            disabled={!subject}
+            value={subjectValue}
+            options={subjectOptions}
+            onChange={pickSubject}
+            placeholder="Pick a trigger"
+            width={200}
+            searchable
+            empty="No sensors yet — add a Hue or Home Assistant provider first"
           />
-        )}
-        {isStay && (
-          <>
+          {subject?.type !== "manual" && (
+            <Select
+              value={eventKind}
+              options={subject ? eventOptions(subject) : []}
+              onChange={setEventKind}
+              width={180}
+              disabled={!subject}
+            />
+          )}
+          {isStay && (
+            <>
+              <input
+                type="number"
+                min={1}
+                max={1440}
+                style={numInput}
+                value={stayMins}
+                onChange={(e) => setStayMins(Math.max(1, Number(e.target.value) || 1))}
+              />
+              <span style={{ color: T.dim, fontSize: "0.8rem" }}>minutes</span>
+            </>
+          )}
+          {(eventKind === "rose_above" || eventKind === "dropped_below") && (
             <input
               type="number"
-              min={1}
-              max={1440}
               style={numInput}
-              value={stayMins}
-              onChange={(e) => setStayMins(Math.max(1, Number(e.target.value) || 1))}
+              value={threshold}
+              onChange={(e) => setThreshold(Number(e.target.value) || 0)}
             />
-            <span style={{ color: T.dim, fontSize: "0.8rem" }}>minutes</span>
+          )}
+        </div>
+      </Field>
+
+      <Field label="Only if" hint="optional">
+        <ConditionList
+          conditions={conditions}
+          gateSensors={gateSensors}
+          gateRooms={gateRooms}
+          allRooms={rooms}
+          lights={lights}
+          media={media}
+          power={power}
+          onChange={setConditions}
+        />
+      </Field>
+
+      <Field label="Then">
+        <div style={{ display: "flex", flexDirection: "column", gap: steps.length > 1 ? "0.9rem" : "0.5rem" }}>
+          {steps.map((step, i) => (
+            <StepCard
+              key={i}
+              step={step}
+              index={i}
+              grouped={steps.length > 1}
+              data={data}
+              gateSensors={gateSensors}
+              gateRooms={gateRooms}
+              onChange={(patch) => setStep(i, patch)}
+              onRemove={
+                steps.length > 1
+                  ? () => setSteps((cur) => cur.filter((_, j) => j !== i))
+                  : undefined
+              }
+            />
+          ))}
+          <div>
+            <Button
+              variant="ghost"
+              onClick={() => setSteps((cur) => [...cur, { conditions: [], actions: [] }])}
+              title="Add a second group of actions that runs only when its own condition is met"
+              style={{ fontSize: "0.76rem", padding: "0.2rem 0.6rem" }}
+            >
+              + Add a conditional step
+            </Button>
+          </div>
+        </div>
+      </Field>
+
+      <hr style={hairline} />
+
+      {/* Advanced settings — the rare knobs, collapsed so the common rule stays
+          short. */}
+      <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+        <button
+          onClick={() => setAdvancedOpen((v) => !v)}
+          style={{
+            ...SECTION_LABEL,
+            background: "none",
+            border: "none",
+            padding: 0,
+            cursor: "pointer",
+            textAlign: "left",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "0.3rem",
+          }}
+        >
+          {advancedOpen ? "▾" : "▸"} Advanced
+        </button>
+        {advancedOpen && (
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <span style={{ color: T.dim, fontSize: "0.8rem" }}>Don't re-run within</span>
+              <input
+                type="number"
+                min={0}
+                style={numInput}
+                value={cooldownMins}
+                onChange={(e) => setCooldownMins(Math.max(0, Number(e.target.value) || 0))}
+              />
+              <span style={{ color: T.dim, fontSize: "0.8rem" }}>minutes</span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+              <Switch on={restoreMins > 0} onChange={(v) => setRestoreMins(v ? 10 : 0)} />
+              <span style={{ color: restoreMins > 0 ? T.text : T.dim, fontSize: "0.8rem" }}>
+                Put things back after
+              </span>
+              <input
+                type="number"
+                min={1}
+                max={1440}
+                disabled={restoreMins === 0}
+                style={{ ...numInput, opacity: restoreMins === 0 ? 0.5 : 1 }}
+                value={restoreMins || 10}
+                onChange={(e) => setRestoreMins(Math.max(1, Number(e.target.value) || 1))}
+              />
+              <span style={{ color: restoreMins > 0 ? T.text : T.dim, fontSize: "0.8rem" }}>
+                minutes — everything this rule changes returns to how it was
+              </span>
+            </div>
           </>
         )}
-        {(eventKind === "rose_above" || eventKind === "dropped_below") && (
-          <input
-            type="number"
-            style={numInput}
-            value={threshold}
-            onChange={(e) => setThreshold(Number(e.target.value) || 0)}
-          />
-        )}
-      </div>
-
-      <span style={SECTION_LABEL}>Only if (optional)</span>
-      <ConditionList
-        conditions={conditions}
-        gateSensors={gateSensors}
-        gateRooms={gateRooms}
-        allRooms={rooms}
-        lights={lights}
-        media={media}
-        power={power}
-        onChange={setConditions}
-      />
-
-      <span style={SECTION_LABEL}>Then</span>
-      <ActionList
-        actions={actions}
-        rooms={rooms}
-        lights={lights}
-        media={media}
-        power={power}
-        scenes={scenes}
-        remotes={remotes}
-        onChange={setActions}
-      />
-
-      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-        <span style={{ color: T.dim, fontSize: "0.8rem" }}>Don't re-run within</span>
-        <input
-          type="number"
-          min={0}
-          style={numInput}
-          value={cooldownMins}
-          onChange={(e) => setCooldownMins(Math.max(0, Number(e.target.value) || 0))}
-        />
-        <span style={{ color: T.dim, fontSize: "0.8rem" }}>minutes</span>
-      </div>
-
-      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
-        <Switch on={restoreMins > 0} onChange={(v) => setRestoreMins(v ? 10 : 0)} />
-        <span style={{ color: restoreMins > 0 ? T.text : T.dim, fontSize: "0.8rem" }}>
-          Put things back after
-        </span>
-        <input
-          type="number"
-          min={1}
-          max={1440}
-          disabled={restoreMins === 0}
-          style={{ ...numInput, opacity: restoreMins === 0 ? 0.5 : 1 }}
-          value={restoreMins || 10}
-          onChange={(e) => setRestoreMins(Math.max(1, Number(e.target.value) || 1))}
-        />
-        <span style={{ color: restoreMins > 0 ? T.text : T.dim, fontSize: "0.8rem" }}>
-          minutes — everything this rule changes returns to how it was
-        </span>
       </div>
 
       {error && <span style={{ color: T.bad, fontSize: "0.8rem" }}>{error}</span>}
-      <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end" }}>
+      <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end", marginTop: "0.25rem" }}>
         <Button variant="ghost" onClick={onCancel}>
           Cancel
         </Button>
         <Button
           variant="primary"
-          disabled={!subject || actions.length === 0}
+          disabled={!subject || totalActions === 0}
           onClick={() => {
             const trigger = builtTrigger();
             if (!trigger) return;
@@ -804,7 +908,8 @@ function AutomationEditor({
               enabled: initial?.enabled ?? true,
               trigger,
               conditions,
-              actions,
+              // Drop any empty step the user added but never filled.
+              steps: steps.filter((s) => s.actions.length > 0),
               cooldown_secs: cooldownMins * 60,
               restore_secs: restoreMins > 0 ? restoreMins * 60 : null,
             });
@@ -1030,29 +1135,25 @@ function ConditionList({
           </button>
         </div>
       ))}
-      <div style={ROW}>
-        <Button
-          variant="ghost"
-          onClick={() =>
-            onChange([...conditions, { kind: "time_window", start: "21:00", end: "06:00" }])
-          }
-        >
-          + Time window
-        </Button>
-        {gateOptions.length > 0 && (
-          <Button
-            variant="ghost"
-            onClick={() =>
-              onChange([
-                ...conditions,
-                forGate(gateOptions[0].value, { kind: "time_window", start: "", end: "" }),
-              ])
-            }
-          >
-            + Condition
-          </Button>
-        )}
-      </div>
+      {/* One add affordance — a small menu, not two competing buttons. */}
+      <Select
+        value=""
+        options={[
+          { value: "time", label: "Time window" },
+          ...(gateOptions.length > 0
+            ? [{ value: "gate", label: "A sensor, room, or device" }]
+            : []),
+        ]}
+        onChange={(v) =>
+          onChange(
+            v === "time"
+              ? [...conditions, { kind: "time_window", start: "21:00", end: "06:00" }]
+              : [...conditions, forGate(gateOptions[0].value, { kind: "time_window", start: "", end: "" })],
+          )
+        }
+        placeholder="+ Add condition"
+        width={160}
+      />
     </div>
   );
 }
@@ -1174,6 +1275,16 @@ function AppActionRow({
 
   return (
     <div style={ROW}>
+      {/* Read left-to-right in pick order: choose the TV first (it populates
+          the app list), then the app. */}
+      <span style={{ color: T.dim, fontSize: "0.8rem", whiteSpace: "nowrap" }}>on</span>
+      <Select
+        value={action.remote_id || undefined}
+        options={remotes.map((r) => ({ value: r.id, label: r.name }))}
+        onChange={(v) => onChange({ remote_id: v, app: "" })}
+        placeholder="Pick a TV"
+        width={168}
+      />
       <span style={{ color: T.dim, fontSize: "0.8rem", whiteSpace: "nowrap" }}>open</span>
       <Select
         value={apps.some((a) => appValueOf(a) === action.app) ? action.app : undefined}
@@ -1185,17 +1296,97 @@ function AppActionRow({
         disabled={!action.remote_id}
         empty="No apps found — open one on the TV so it's learned"
       />
-      <span style={{ color: T.dim, fontSize: "0.8rem", whiteSpace: "nowrap" }}>on</span>
-      <Select
-        value={action.remote_id || undefined}
-        options={remotes.map((r) => ({ value: r.id, label: r.name }))}
-        onChange={(v) => onChange({ remote_id: v, app: "" })}
-        placeholder="Pick a TV"
-        width={168}
-      />
       <button onClick={onRemove} title="Remove this step" style={ICON_BTN}>
         ✕
       </button>
+    </div>
+  );
+}
+
+/** One step of the "then". A single-step rule shows its actions *flat* — no
+ * chrome, no per-step condition (the rule-level "Only if" already gates it).
+ * Once a rule has more than one step (`grouped`), each becomes a light,
+ * accent-barred group with a "Step N" label and its own "only when" gate — so
+ * branching (do X, but only-if…; else do Y) reads as an ordered list without a
+ * heavy nested box. */
+function StepCard({
+  step,
+  index,
+  grouped,
+  data,
+  gateSensors,
+  gateRooms,
+  onChange,
+  onRemove,
+}: {
+  step: ActionStep;
+  index: number;
+  /** More than one step exists — show the group chrome + per-step gate. */
+  grouped: boolean;
+  data: AutomationData;
+  gateSensors: SensorDevice[];
+  gateRooms: Room[];
+  onChange: (patch: Partial<ActionStep>) => void;
+  onRemove?: () => void;
+}) {
+  const { rooms, lights, media, power, scenes, remotes } = data;
+  const [showConditions, setShowConditions] = useState(step.conditions.length > 0);
+
+  const actions = (
+    <ActionList
+      actions={step.actions}
+      rooms={rooms}
+      lights={lights}
+      media={media}
+      power={power}
+      scenes={scenes}
+      remotes={remotes}
+      onChange={(actions) => onChange({ actions })}
+    />
+  );
+
+  // Single step: flat, no chrome — the common case stays clean.
+  if (!grouped) return actions;
+
+  // Grouped: a quiet left accent bar + label, not a boxed card.
+  return (
+    <div style={{ borderLeft: `2px solid ${alpha(color.gold, 0.4)}`, paddingLeft: "0.7rem", display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+      <div style={{ display: "flex", alignItems: "center" }}>
+        <span style={{ ...SECTION_LABEL, fontSize: "0.62rem" }}>Step {index + 1}</span>
+        <span style={{ flex: 1 }} />
+        {onRemove && (
+          <button onClick={onRemove} title="Remove this step" style={{ ...ICON_BTN }}>
+            ✕
+          </button>
+        )}
+      </div>
+      {actions}
+      {showConditions ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
+          <span style={{ ...SECTION_LABEL, fontSize: "0.62rem" }}>Only when</span>
+          <ConditionList
+            conditions={step.conditions}
+            gateSensors={gateSensors}
+            gateRooms={gateRooms}
+            allRooms={rooms}
+            lights={lights}
+            media={media}
+            power={power}
+            onChange={(conditions) => onChange({ conditions })}
+          />
+        </div>
+      ) : (
+        <div>
+          <Button
+            variant="ghost"
+            onClick={() => setShowConditions(true)}
+            title="Run this step only when a condition holds"
+            style={{ fontSize: "0.76rem", padding: "0.2rem 0.6rem" }}
+          >
+            + only when…
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1226,10 +1417,16 @@ function ActionList({
   const verbActions = actions.filter((a) => a.kind !== "app");
   const rows = rowsFromActions(verbActions);
   const tvRemotes = pickableRemotes(remotes);
-  // A new step with no targets yet can't exist in `actions`; it lives here
-  // until its first target is picked, then materializes as a real row.
-  const [draft, setDraft] = useState<Omit<ActionRow, "targets"> | null>(null);
-  const [openPicker, setOpenPicker] = useState<number | null>(null);
+  // A new action being built: a row with no targets can't live in `actions`
+  // (it round-trips to nothing), so it accumulates its target selections here
+  // and commits to `actions` when its picker closes (or is discarded empty).
+  const [draft, setDraft] = useState<ActionRow | null>(null);
+  // The target picker opens as an anchored fly-out (never inline — an inline
+  // checklist shoved the rest of the editor down and lost your place). One at
+  // a time: which row (or the draft) plus the button it's anchored to.
+  const [picker, setPicker] = useState<{ which: number | "draft"; anchor: HTMLElement } | null>(
+    null,
+  );
   const numInput: React.CSSProperties = { ...S.input, width: 64, padding: "0.35rem 0.5rem", minHeight: 38 };
   const conj: React.CSSProperties = { color: T.dim, fontSize: "0.8rem", whiteSpace: "nowrap" };
   const swatch: React.CSSProperties = {
@@ -1307,14 +1504,30 @@ function ActionList({
         : [...rows[i].targets, v],
     });
 
-  /** The draft's first pick creates the real row, and the picker follows it. */
-  const draftPick = (v: string) => {
-    if (!draft) return;
-    const next = [...rows, { targets: [v], ...draft }];
-    const merged = rowsFromActions(actionsFromRows(next));
-    setDraft(null);
-    setOpenPicker(merged.findIndex((r) => rowSig(r) === rowSig(draft)));
-    emit(next);
+  /** Toggle a target into the draft — accumulating, so the fly-out stays open
+   * for multi-select just like an existing row's picker. */
+  const draftToggle = (v: string) =>
+    setDraft((d) =>
+      d
+        ? {
+            ...d,
+            targets: d.targets.includes(v)
+              ? d.targets.filter((x) => x !== v)
+              : [...d.targets, v],
+          }
+        : d,
+    );
+
+  /** Close the picker. A draft that gained targets commits to a real row; an
+   * empty draft stays visible (closing the picker isn't the same as discarding
+   * the action — that's the row's own ✕). Used by both the fly-out's own close
+   * and the target button's toggle-closed. */
+  const closePicker = () => {
+    if (picker?.which === "draft" && draft && draft.targets.length > 0) {
+      emit([...rows, draft]);
+      setDraft(null);
+    }
+    setPicker(null);
   };
 
   const summary = (targets: string[], verb: ActionRow["verb"]) =>
@@ -1333,16 +1546,34 @@ function ActionList({
     width: 200,
     textAlign: "left",
     cursor: "pointer",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
+    display: "flex",
+    alignItems: "center",
+    gap: "0.4rem",
   };
-  const pickerBox: React.CSSProperties = {
-    border: `1px solid ${alpha(color.cyan, 0.25)}`,
-    borderRadius: 8,
-    padding: "0.5rem 0.6rem",
-    background: "rgba(0,0,0,0.25)",
+  // While its picker is open, the target button reads as the active one.
+  const targetBtnOpen: React.CSSProperties = {
+    borderColor: color.cyan,
+    boxShadow: `0 0 0 1px ${alpha(color.cyan, 0.4)}`,
   };
+  // The summary text (ellipsised) + a chevron, so the button reads as a
+  // picker (matching `Select`'s affordance) rather than a text field.
+  const targetInner = (text: string, muted: boolean) => (
+    <>
+      <span
+        style={{
+          flex: 1,
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          color: muted ? T.faint : T.text,
+        }}
+      >
+        {text}
+      </span>
+      <span style={{ color: T.dim, flexShrink: 0, fontSize: "0.7rem" }}>▾</span>
+    </>
+  );
 
   const verbSelect = (value: ActionRow["verb"], onPick: (v: ActionRow["verb"]) => void) => (
     <Select
@@ -1421,15 +1652,6 @@ function ActionList({
     );
   };
 
-  // Rows and the draft render as ONE keyed array, keyed by row signature: the
-  // draft carries the same key its materialized row will, so React updates the
-  // subtree in place on the first pick instead of unmounting the checklist
-  // mid-click (which yanked the modal's scroll to the top and lost the search
-  // text). A draft whose signature already matches a row will merge into it on
-  // pick — key it "draft" then, since two children must not share a key.
-  const draftKey =
-    draft && rows.every((r) => rowSig(r) !== rowSig(draft)) ? rowSig(draft) : "draft";
-
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem" }}>
       {[
@@ -1437,65 +1659,75 @@ function ActionList({
         <div key={`s:${rowSig(r)}`} style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
           <div style={ROW}>
             {verbSelect(r.verb, (v) => setRow(i, { verb: v }))}
-            {clauseChain(r, (patch) => setRow(i, patch))}
             <button
-              onClick={() => setOpenPicker(openPicker === i ? null : i)}
+              onClick={(e) =>
+                picker?.which === i
+                  ? closePicker()
+                  : setPicker({ which: i, anchor: e.currentTarget })
+              }
               title={
                 r.verb === "scene"
                   ? "Choose which scenes to apply"
-                  : "Choose which rooms and devices this step drives"
+                  : "Choose which rooms and devices this action drives"
               }
-              style={targetBtn}
+              style={{ ...targetBtn, ...(picker?.which === i ? targetBtnOpen : {}) }}
             >
-              {summary(r.targets, r.verb)}
+              {targetInner(summary(r.targets, r.verb), r.targets.length === 0)}
             </button>
+            {clauseChain(r, (patch) => setRow(i, patch))}
             <button
               onClick={() => emit(rows.filter((_, j) => j !== i))}
-              title="Remove this step"
+              title="Remove this action"
               style={ICON_BTN}
             >
               ✕
             </button>
           </div>
-          {openPicker === i && (
-            <div style={pickerBox}>
-              <OptionCheckList
-                options={targetOptionsFor(r.verb)}
-                selected={r.targets}
-                onToggle={(v) => toggleTarget(i, v)}
-              />
-            </div>
-          )}
         </div>
         )),
         ...(draft
           ? [
               <div
-                key={`s:${draftKey}`}
+                key="s:draft"
                 style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}
               >
                 <div style={ROW}>
-                  {verbSelect(draft.verb, (v) =>
+                  {verbSelect(draft.verb, (v) => {
+                    // Keep only targets the new verb can still act on; clauses
+                    // belong to "turn on" alone.
+                    const valid = new Set(targetOptionsFor(v).map((o) => o.value));
                     setDraft({
                       ...draft,
                       verb: v,
+                      targets: draft.targets.filter((t) => valid.has(t)),
                       ...(v !== "on" ? { brightness: null, colorHex: null } : {}),
-                    }),
-                  )}
+                    });
+                  })}
+                  <button
+                    onClick={(e) =>
+                      picker?.which === "draft"
+                        ? closePicker()
+                        : setPicker({ which: "draft", anchor: e.currentTarget })
+                    }
+                    style={{
+                      ...targetBtn,
+                      ...(picker?.which === "draft" ? targetBtnOpen : {}),
+                    }}
+                    title="Choose what this action drives"
+                  >
+                    {targetInner(summary(draft.targets, draft.verb), draft.targets.length === 0)}
+                  </button>
                   {clauseChain(draft, (patch) => setDraft({ ...draft, ...patch }))}
-                  <span style={{ ...targetBtn, color: T.faint }}>
-                    {draft.verb === "scene" ? "Pick scenes…" : "Pick rooms or devices…"}
-                  </span>
-                  <button onClick={() => setDraft(null)} title="Discard this step" style={ICON_BTN}>
+                  <button
+                    onClick={() => {
+                      setDraft(null);
+                      setPicker(null);
+                    }}
+                    title="Discard this action"
+                    style={ICON_BTN}
+                  >
                     ✕
                   </button>
-                </div>
-                <div style={pickerBox}>
-                  <OptionCheckList
-                    options={targetOptionsFor(draft.verb)}
-                    selected={[]}
-                    onToggle={draftPick}
-                  />
                 </div>
               </div>,
             ]
@@ -1517,24 +1749,49 @@ function ActionList({
           <Button
             variant="ghost"
             disabled={targetOptionsFor("on").length + scenes.length === 0}
-            onClick={() => {
-              setDraft({ verb: "on", brightness: null, colorHex: null });
-              setOpenPicker(null);
-            }}
+            onClick={() => setDraft({ verb: "on", targets: [], brightness: null, colorHex: null })}
+            style={{ fontSize: "0.76rem", padding: "0.2rem 0.6rem" }}
           >
-            + Action
+            + Control devices
           </Button>
           {tvRemotes.length > 0 && (
             <Button
               variant="ghost"
               onClick={() => emitApps([...appActions, { kind: "app", remote_id: "", app: "" }])}
               title="Launch a streaming app on a TV as part of this automation"
+              style={{ fontSize: "0.76rem", padding: "0.2rem 0.6rem" }}
             >
               + Open a TV app
             </Button>
           )}
         </div>
       )}
+
+      {/* The one anchored target picker — never inline. Resolves its options /
+          selection / toggle from whichever row (or the draft) opened it, and
+          stays open for multi-select; it commits the draft on close. */}
+      {picker &&
+        (() => {
+          const rowIdx = picker.which === "draft" ? null : picker.which;
+          const verb = rowIdx === null ? draft?.verb : rows[rowIdx]?.verb;
+          if (!verb) return null;
+          const selected = rowIdx === null ? (draft?.targets ?? []) : rows[rowIdx].targets;
+          const onToggle =
+            rowIdx === null ? draftToggle : (v: string) => toggleTarget(rowIdx, v);
+          return (
+            <Flyout anchor={picker.anchor} onClose={closePicker} width={240}>
+              <div style={{ padding: "0.5rem 0.55rem" }}>
+                <OptionCheckList
+                  options={targetOptionsFor(verb)}
+                  selected={selected}
+                  onToggle={onToggle}
+                  columns={1}
+                  maxHeight={220}
+                />
+              </div>
+            </Flyout>
+          );
+        })()}
     </div>
   );
 }

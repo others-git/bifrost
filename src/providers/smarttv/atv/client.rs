@@ -277,6 +277,11 @@ struct RemoteLink {
     /// Set when a fresher link replaces this one; the actor exits its retry
     /// loop instead of spinning forever with retired credentials.
     retired: Arc<std::sync::atomic::AtomicBool>,
+    /// Set once the TV rejects our pairing cert (`CertificateUnknown`): the
+    /// session can never connect, so an enqueued command would be silently
+    /// dropped. Send paths check this and fail loudly ("re-pair the remote")
+    /// instead of reporting a phantom success. Cleared by a healthy session.
+    auth_failed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn remote_links() -> &'static Mutex<HashMap<String, Arc<RemoteLink>>> {
@@ -311,6 +316,7 @@ fn link_for(host: &str, identity: &Identity) -> Arc<RemoteLink> {
     let (tx, rx) = mpsc::unbounded_channel();
     let (events, _) = broadcast::channel(64);
     let retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let auth_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let state = Arc::new(Mutex::new(AtvStateCache::default()));
     tokio::spawn(remote_link_actor(
         host.to_string(),
@@ -318,6 +324,7 @@ fn link_for(host: &str, identity: &Identity) -> Arc<RemoteLink> {
         rx,
         events.clone(),
         Arc::clone(&retired),
+        Arc::clone(&auth_failed),
         Arc::clone(&state),
     ));
     let link = Arc::new(RemoteLink {
@@ -326,6 +333,7 @@ fn link_for(host: &str, identity: &Identity) -> Arc<RemoteLink> {
         state,
         identity_fp: fp,
         retired,
+        auth_failed,
     });
     map.insert(host.to_string(), link.clone());
     link
@@ -353,6 +361,13 @@ pub fn cached_state(host: &str, identity: &Identity) -> AtvStateCache {
 /// delivery on the persistent session.
 pub fn send_message(host: &str, identity: &Identity, body: Vec<u8>) -> Result<()> {
     let link = link_for(host, identity);
+    // Don't enqueue into a session the TV rejects — the message would be
+    // silently dropped and the caller told it succeeded. Fail with the fix.
+    if link.auth_failed.load(std::sync::atomic::Ordering::Relaxed) {
+        anyhow::bail!(
+            "the TV rejected this remote's pairing — re-pair it (Settings → Smart TV → Pair remote)"
+        );
+    }
     link.tx
         .send(body)
         .map_err(|_| anyhow!("remote link for {host} is closed"))
@@ -433,8 +448,10 @@ async fn remote_link_actor(
     mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
     events: broadcast::Sender<AtvEvent>,
     retired: Arc<std::sync::atomic::AtomicBool>,
+    auth_failed: Arc<std::sync::atomic::AtomicBool>,
     state: Arc<Mutex<AtvStateCache>>,
 ) {
+    use std::sync::atomic::Ordering;
     let mut delay = Duration::from_secs(3);
     let mut warned_auth = false;
     loop {
@@ -444,23 +461,28 @@ async fn remote_link_actor(
             Err(e) => {
                 let msg = format!("{e:#}");
                 // A cert rejection means our pairing is no longer trusted —
-                // retrying can't fix it; say so once, loudly.
-                if msg.contains("CertificateUnknown") && !warned_auth {
-                    warned_auth = true;
-                    tracing::warn!(
-                        target: "bifrost::smarttv",
-                        host,
-                        "ATV remote: the TV no longer trusts our pairing — re-pair the remote (Settings → Smart TV → Pair remote)"
-                    );
+                // retrying can't fix it; say so once, loudly, and flag the link
+                // so send paths fail with an actionable error.
+                if msg.contains("CertificateUnknown") {
+                    auth_failed.store(true, Ordering::Relaxed);
+                    if !warned_auth {
+                        warned_auth = true;
+                        tracing::warn!(
+                            target: "bifrost::smarttv",
+                            host,
+                            "ATV remote: the TV no longer trusts our pairing — re-pair the remote (Settings → Smart TV → Pair remote)"
+                        );
+                    }
                 }
                 tracing::debug!(target: "bifrost::smarttv", host, "ATV remote session ended: {msg}");
             }
         }
-        // A session that lived a while was healthy — restart eagerly. Failing
-        // fast (connect/handshake) backs off up to 5 minutes.
+        // A session that lived a while was healthy — restart eagerly, and clear
+        // the auth-failed flag (a re-pair or a recovered TV is trusted again).
         if started.elapsed() > Duration::from_secs(60) {
             delay = Duration::from_secs(3);
             warned_auth = false;
+            auth_failed.store(false, Ordering::Relaxed);
         }
         tokio::time::sleep(delay).await;
         delay = (delay * 2).min(Duration::from_secs(300));

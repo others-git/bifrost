@@ -34,6 +34,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/devices/{id}/ungroup", post(ungroup_handler))
         .route("/devices/{id}/receiver", put(set_receiver_handler))
         .route("/devices/{id}/companion", put(set_companion_handler))
+        .route("/devices/{id}/dissolve", post(dissolve_handler))
         .route("/devices/{id}/assistant", post(assistant_say_handler))
         .route("/play-on", post(play_on_handler))
         .merge(crate::api::inventory_router(
@@ -73,6 +74,17 @@ async fn set_companion_handler(
     Json(req): Json<crate::api::SetCompanionRequest>,
 ) -> impl IntoResponse {
     set_companion_status(set_media_companion(&state, &id, req.primary_id).await)
+}
+
+/// `POST /api/media/devices/{id}/dissolve` — unravel the composite this device
+/// anchors: un-merge every companion and un-pair the remote (see
+/// [`dissolve_composite`]).
+async fn dissolve_handler(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    set_companion_status(dissolve_composite(&state, &id).await)
 }
 
 /// Body for "group this speaker with a coordinator" — the Bifrost device id of
@@ -955,6 +967,58 @@ pub(crate) async fn set_media_companion(
         Ok(_) => SetCompanionOutcome::NotFound,
         Err(e) => {
             tracing::error!("db error merging group: {e}");
+            SetCompanionOutcome::Db
+        }
+    }
+}
+
+/// Dissolve a whole composite: clear `group_id` on every media device AND
+/// remote that shares `id`'s group, so each member becomes a standalone device
+/// again (companions un-merge, the paired remote un-pairs). The "unravel"
+/// action for a composite that grew wrong. A device with no group is a no-op
+/// success. NOTE: a subsequent **Discover** re-pairs auto-paired remotes by
+/// hardware id (`reconcile_remote_pairings`); only manual companion merges stay
+/// dissolved permanently.
+pub(crate) async fn dissolve_composite(state: &AppState, id: &str) -> SetCompanionOutcome {
+    let group: Option<String> =
+        match sqlx::query_scalar("SELECT group_id FROM media_devices WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await
+        {
+            Ok(Some(g)) => g,
+            Ok(None) => return SetCompanionOutcome::NotFound,
+            Err(e) => {
+                tracing::error!("db error reading group to dissolve: {e}");
+                return SetCompanionOutcome::Db;
+            }
+        };
+    let Some(group) = group else {
+        return SetCompanionOutcome::Ok; // already standalone — nothing to unravel
+    };
+    let mut tx = match state.db.begin().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("db error starting dissolve transaction: {e}");
+            return SetCompanionOutcome::Db;
+        }
+    };
+    for table in ["media_devices", "remote_devices"] {
+        if let Err(e) = sqlx::query(&format!(
+            "UPDATE {table} SET group_id = NULL WHERE group_id = ?"
+        ))
+        .bind(&group)
+        .execute(&mut *tx)
+        .await
+        {
+            tracing::error!("db error dissolving {table} group: {e}");
+            return SetCompanionOutcome::Db;
+        }
+    }
+    match tx.commit().await {
+        Ok(()) => SetCompanionOutcome::Ok,
+        Err(e) => {
+            tracing::error!("db error committing dissolve: {e}");
             SetCompanionOutcome::Db
         }
     }

@@ -17,8 +17,8 @@ use crate::AppState;
 use crate::api::auth::Session;
 use crate::connection::SensorEvent;
 use crate::models::automation::{
-    Automation, AutomationTrigger, RestoreEntry, RuleAction, RuleCondition, SensorTrigger,
-    TriggerDeviceDomain,
+    ActionStep, Automation, AutomationTrigger, RestoreEntry, RuleAction, RuleCondition,
+    SensorTrigger, TriggerDeviceDomain,
 };
 
 /// The table a device-trigger domain lives in (fixed identifiers — injection-free).
@@ -67,7 +67,7 @@ fn row_to_automation(r: sqlx::sqlite::SqliteRow) -> Automation {
         ),
         conditions: serde_json::from_str(&r.get::<String, _>("conditions_json"))
             .unwrap_or_default(),
-        actions: serde_json::from_str(&r.get::<String, _>("actions_json")).unwrap_or_default(),
+        steps: serde_json::from_str(&r.get::<String, _>("actions_json")).unwrap_or_default(),
         cooldown_secs: r.get::<i64, _>("cooldown_secs") as u32,
         restore_secs: r.get::<Option<i64>, _>("restore_secs").map(|v| v as u32),
         last_fired_at: r.get("last_fired_at"),
@@ -94,7 +94,7 @@ pub(crate) struct AutomationBody {
     pub trigger: AutomationTrigger,
     #[serde(default)]
     pub conditions: Vec<RuleCondition>,
-    pub actions: Vec<RuleAction>,
+    pub steps: Vec<ActionStep>,
     #[serde(default)]
     pub cooldown_secs: u32,
     /// Timed hold: put everything back after this many seconds.
@@ -118,7 +118,7 @@ pub(crate) enum SaveRuleOutcome {
 /// motion sensor — or on a room — would never fire; reject it loudly instead),
 /// and there must be at least one action.
 async fn validate_body(state: &AppState, body: &AutomationBody) -> Result<(), SaveRuleOutcome> {
-    if body.actions.is_empty() {
+    if body.steps.iter().all(|s| s.actions.is_empty()) {
         return Err(SaveRuleOutcome::BadRequest(
             "an automation needs at least one action".into(),
         ));
@@ -211,11 +211,20 @@ async fn validate_body(state: &AppState, body: &AutomationBody) -> Result<(), Sa
     Ok(())
 }
 
-fn actions_json(actions: &[RuleAction]) -> String {
-    let normalized: Vec<RuleAction> = actions
+/// Serialize the step list for the `actions_json` column, normalizing each
+/// action's embedded light state (clear-effect tokens → `None`).
+fn steps_json(steps: &[ActionStep]) -> String {
+    let normalized: Vec<ActionStep> = steps
         .iter()
-        .cloned()
-        .map(RuleAction::normalized)
+        .map(|s| ActionStep {
+            conditions: s.conditions.clone(),
+            actions: s
+                .actions
+                .iter()
+                .cloned()
+                .map(RuleAction::normalized)
+                .collect(),
+        })
         .collect();
     serde_json::to_string(&normalized).unwrap_or_else(|_| "[]".into())
 }
@@ -235,7 +244,7 @@ pub(crate) async fn create_rule(state: &AppState, body: AutomationBody) -> SaveR
     .bind(body.enabled as i64)
     .bind(serde_json::to_string(&body.trigger).unwrap_or_default())
     .bind(serde_json::to_string(&body.conditions).unwrap_or_else(|_| "[]".into()))
-    .bind(actions_json(&body.actions))
+    .bind(steps_json(&body.steps))
     .bind(body.cooldown_secs as i64)
     .bind(body.restore_secs.map(|v| v as i64))
     .execute(&state.db)
@@ -269,7 +278,7 @@ pub(crate) async fn update_rule(
     .bind(body.enabled as i64)
     .bind(serde_json::to_string(&body.trigger).unwrap_or_default())
     .bind(serde_json::to_string(&body.conditions).unwrap_or_else(|_| "[]".into()))
-    .bind(actions_json(&body.actions))
+    .bind(steps_json(&body.steps))
     .bind(body.cooldown_secs as i64)
     .bind(body.restore_secs.map(|v| v as i64))
     .bind(id)
@@ -586,13 +595,14 @@ fn in_cooldown(rule: &Automation, now_utc: chrono::DateTime<chrono::Utc>) -> boo
     now_utc.signed_duration_since(last_utc).num_seconds() < rule.cooldown_secs as i64
 }
 
-/// Evaluate a rule's conditions right now. Fails closed on unknown readings.
-async fn conditions_hold(state: &AppState, rule: &Automation) -> bool {
+/// Evaluate a set of conditions right now. Fails closed on unknown readings.
+/// Shared by the rule-level gate and each step's own gate.
+async fn conditions_hold(state: &AppState, conditions: &[RuleCondition]) -> bool {
     use chrono::{Datelike, Timelike};
     let now = chrono::Local::now();
     let now_min = (now.hour() * 60 + now.minute()) as u16;
     let now_day = now.weekday().num_days_from_monday() as u8;
-    for cond in &rule.conditions {
+    for cond in conditions {
         // Cross-subject gates need the other subject's current state; resolve
         // it before the sync `holds` call.
         let reading = match cond {
@@ -624,7 +634,7 @@ async fn conditions_hold(state: &AppState, rule: &Automation) -> bool {
             |_| occupancy,
             |_, _| device_on,
         ) {
-            tracing::debug!(target: "bifrost::automation", rule = %rule.id, ?cond, "rule skipped: condition not met");
+            tracing::debug!(target: "bifrost::automation", ?cond, "condition not met");
             return false;
         }
     }
@@ -636,7 +646,10 @@ async fn conditions_hold(state: &AppState, rule: &Automation) -> bool {
 /// effective light + power members, scene actions to the devices the scene
 /// drives. Deduped (first capture of a device wins). Media members are not
 /// captured: resuming playback isn't re-applying a state.
-async fn snapshot_targets(state: &AppState, actions: &[RuleAction]) -> Vec<RestoreEntry> {
+async fn snapshot_targets<'a>(
+    state: &AppState,
+    actions: impl Iterator<Item = &'a RuleAction>,
+) -> Vec<RestoreEntry> {
     let mut seen: std::collections::HashSet<(bool, String)> = std::collections::HashSet::new();
     let mut light_ids: Vec<String> = Vec::new();
     let mut power_ids: Vec<String> = Vec::new();
@@ -1066,7 +1079,7 @@ async fn schedule_restore(state: &AppState, rule: &Automation, secs: u32) {
         tracing::debug!(target: "bifrost::automation", rule = %rule.id, secs, "hold extended (original snapshot kept)");
         return;
     }
-    let mut snapshot = snapshot_targets(state, &rule.actions).await;
+    let mut snapshot = snapshot_targets(state, rule.all_actions()).await;
     if snapshot.is_empty() {
         return; // nothing capturable — nothing to put back
     }
@@ -1163,81 +1176,91 @@ pub(crate) async fn execute_rule(state: &AppState, rule: &Automation) {
         target: "bifrost::automation",
         rule = %rule.id,
         name = %rule.name,
-        actions = rule.actions.len(),
+        steps = rule.steps.len(),
         "rule fired",
     );
     if let Some(secs) = rule.restore_secs {
         schedule_restore(state, rule, secs).await;
     }
-    for action in &rule.actions {
-        match action {
-            RuleAction::Room { room_id, state: st } => {
-                let members = crate::api::rooms::effective_members(state, room_id).await;
-                let (applied, failed) =
-                    crate::api::rooms::apply_room_state(state, room_id, st, members).await;
-                tracing::debug!(target: "bifrost::automation", rule = %rule.id, room = %room_id, applied, failed, "action: room state");
-            }
-            RuleAction::Light {
-                light_id,
-                state: st,
-            } => {
-                let outcome = crate::api::lights::apply_light_state(state, light_id, st).await;
-                tracing::debug!(target: "bifrost::automation", rule = %rule.id, light = %light_id, ok = matches!(outcome, crate::api::lights::SetLightOutcome::Ok), "action: light state");
-            }
-            RuleAction::Power { device_id, on } => {
-                let outcome = crate::api::power::apply_power_state(state, device_id, *on).await;
-                tracing::debug!(target: "bifrost::automation", rule = %rule.id, device = %device_id, on, ok = matches!(outcome, crate::api::power::SetPowerOutcome::Ok), "action: power");
-            }
-            RuleAction::Scene { scene_id } => {
-                let applied = crate::api::scenes::apply_scene_entries(state, scene_id, None).await;
-                tracing::debug!(target: "bifrost::automation", rule = %rule.id, scene = %scene_id, ok = applied.is_some(), "action: scene");
-            }
-            RuleAction::App { remote_id, app } => {
-                let outcome = crate::api::remote::apply_remote_command(
-                    state,
-                    remote_id,
-                    &crate::models::remote::RemoteCommand::LaunchApp {
-                        activity: app.clone(),
-                    },
-                )
-                .await;
-                tracing::debug!(target: "bifrost::automation", rule = %rule.id, remote = %remote_id, %app, outcome = ?outcome, "action: app launch");
-            }
-            RuleAction::Toggle { domain, device_id } => {
-                match cached_device_on(state, *domain, device_id).await {
-                    Some(cur) => {
-                        let next = !cur;
-                        match domain {
-                            TriggerDeviceDomain::Light => {
-                                crate::api::lights::apply_light_state(
-                                    state,
-                                    device_id,
-                                    &crate::models::LightState {
-                                        on: next,
-                                        ..Default::default()
-                                    },
-                                )
-                                .await;
+    for (i, step) in rule.steps.iter().enumerate() {
+        // A step runs only if its own conditions hold (the rule-level gate was
+        // already checked by `try_fire`). An empty condition list always runs.
+        if !step.conditions.is_empty() && !conditions_hold(state, &step.conditions).await {
+            tracing::debug!(target: "bifrost::automation", rule = %rule.id, step = i, "step skipped: conditions not met");
+            continue;
+        }
+        for action in &step.actions {
+            match action {
+                RuleAction::Room { room_id, state: st } => {
+                    let members = crate::api::rooms::effective_members(state, room_id).await;
+                    let (applied, failed) =
+                        crate::api::rooms::apply_room_state(state, room_id, st, members).await;
+                    tracing::debug!(target: "bifrost::automation", rule = %rule.id, room = %room_id, applied, failed, "action: room state");
+                }
+                RuleAction::Light {
+                    light_id,
+                    state: st,
+                } => {
+                    let outcome = crate::api::lights::apply_light_state(state, light_id, st).await;
+                    tracing::debug!(target: "bifrost::automation", rule = %rule.id, light = %light_id, ok = matches!(outcome, crate::api::lights::SetLightOutcome::Ok), "action: light state");
+                }
+                RuleAction::Power { device_id, on } => {
+                    let outcome = crate::api::power::apply_power_state(state, device_id, *on).await;
+                    tracing::debug!(target: "bifrost::automation", rule = %rule.id, device = %device_id, on, ok = matches!(outcome, crate::api::power::SetPowerOutcome::Ok), "action: power");
+                }
+                RuleAction::Scene { scene_id } => {
+                    let applied =
+                        crate::api::scenes::apply_scene_entries(state, scene_id, None).await;
+                    tracing::debug!(target: "bifrost::automation", rule = %rule.id, scene = %scene_id, ok = applied.is_some(), "action: scene");
+                }
+                RuleAction::App { remote_id, app } => {
+                    let outcome = crate::api::remote::apply_remote_command(
+                        state,
+                        remote_id,
+                        &crate::models::remote::RemoteCommand::LaunchApp {
+                            activity: app.clone(),
+                        },
+                    )
+                    .await;
+                    tracing::debug!(target: "bifrost::automation", rule = %rule.id, remote = %remote_id, %app, outcome = ?outcome, "action: app launch");
+                }
+                RuleAction::Toggle { domain, device_id } => {
+                    match cached_device_on(state, *domain, device_id).await {
+                        Some(cur) => {
+                            let next = !cur;
+                            match domain {
+                                TriggerDeviceDomain::Light => {
+                                    crate::api::lights::apply_light_state(
+                                        state,
+                                        device_id,
+                                        &crate::models::LightState {
+                                            on: next,
+                                            ..Default::default()
+                                        },
+                                    )
+                                    .await;
+                                }
+                                TriggerDeviceDomain::Power => {
+                                    crate::api::power::apply_power_state(state, device_id, next)
+                                        .await;
+                                }
+                                TriggerDeviceDomain::Media => {
+                                    crate::api::media::apply_media_command(
+                                        state,
+                                        device_id,
+                                        &crate::models::media::MediaCommand {
+                                            power: Some(next),
+                                            ..Default::default()
+                                        },
+                                    )
+                                    .await;
+                                }
                             }
-                            TriggerDeviceDomain::Power => {
-                                crate::api::power::apply_power_state(state, device_id, next).await;
-                            }
-                            TriggerDeviceDomain::Media => {
-                                crate::api::media::apply_media_command(
-                                    state,
-                                    device_id,
-                                    &crate::models::media::MediaCommand {
-                                        power: Some(next),
-                                        ..Default::default()
-                                    },
-                                )
-                                .await;
-                            }
+                            tracing::debug!(target: "bifrost::automation", rule = %rule.id, ?domain, device = %device_id, from = cur, to = next, "action: toggle");
                         }
-                        tracing::debug!(target: "bifrost::automation", rule = %rule.id, ?domain, device = %device_id, from = cur, to = next, "action: toggle");
-                    }
-                    None => {
-                        tracing::debug!(target: "bifrost::automation", rule = %rule.id, ?domain, device = %device_id, "action: toggle skipped — state unknown");
+                        None => {
+                            tracing::debug!(target: "bifrost::automation", rule = %rule.id, ?domain, device = %device_id, "action: toggle skipped — state unknown");
+                        }
                     }
                 }
             }
@@ -1273,7 +1296,7 @@ async fn try_fire(state: &AppState, rule: &Automation) {
         tracing::debug!(target: "bifrost::automation", rule = %rule.id, "rule skipped: in cooldown");
         return;
     }
-    if !conditions_hold(state, rule).await {
+    if !conditions_hold(state, &rule.conditions).await {
         return;
     }
     execute_rule(state, rule).await;
@@ -1754,7 +1777,7 @@ mod tests {
         let trigger = format!(r#"{{"kind":"sensor","sensor_id":"{sensor}","event":{event}}}"#);
         sqlx::query(
             "INSERT INTO automations (id, sensor_id, trigger_json, conditions_json, actions_json)
-             VALUES (?, ?, ?, ?, '[{\"kind\":\"power\",\"device_id\":\"nope\",\"on\":true}]')",
+             VALUES (?, ?, ?, ?, '[{\"conditions\":[],\"actions\":[{\"kind\":\"power\",\"device_id\":\"nope\",\"on\":true}]}]')",
         )
         .bind(id)
         .bind(sensor)
@@ -1770,7 +1793,7 @@ mod tests {
         let trigger = format!(r#"{{"kind":"room","room_id":"{room}","event":{event}}}"#);
         sqlx::query(
             "INSERT INTO automations (id, trigger_json, actions_json)
-             VALUES (?, ?, '[{\"kind\":\"power\",\"device_id\":\"nope\",\"on\":true}]')",
+             VALUES (?, ?, '[{\"conditions\":[],\"actions\":[{\"kind\":\"power\",\"device_id\":\"nope\",\"on\":true}]}]')",
         )
         .bind(id)
         .bind(&trigger)
@@ -2097,7 +2120,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO automations (id, trigger_json, actions_json)
              VALUES ('r1', '{\"kind\":\"device\",\"domain\":\"media\",\"device_id\":\"tv1\",\"event\":{\"kind\":\"became_true\"}}',
-                     '[{\"kind\":\"power\",\"device_id\":\"nope\",\"on\":true}]')",
+                     '[{\"conditions\":[],\"actions\":[{\"kind\":\"power\",\"device_id\":\"nope\",\"on\":true}]}]')",
         )
         .execute(&state.db)
         .await
@@ -2149,7 +2172,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO automations (id, trigger_json, actions_json)
              VALUES ('r1', '{\"kind\":\"device\",\"domain\":\"media\",\"device_id\":\"tv1\",\"event\":{\"kind\":\"became_true\"}}',
-                     '[{\"kind\":\"power\",\"device_id\":\"nope\",\"on\":true}]')",
+                     '[{\"conditions\":[],\"actions\":[{\"kind\":\"power\",\"device_id\":\"nope\",\"on\":true}]}]')",
         )
         .execute(&state.db)
         .await
@@ -2181,7 +2204,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO automations (id, trigger_json, actions_json, restore_secs)
              VALUES ('r1', '{\"kind\":\"sensor\",\"sensor_id\":\"x\",\"event\":{\"kind\":\"became_true\"}}',
-                     '[{\"kind\":\"light\",\"light_id\":\"l1\",\"state\":{\"on\":false}}]', 600)",
+                     '[{\"conditions\":[],\"actions\":[{\"kind\":\"light\",\"light_id\":\"l1\",\"state\":{\"on\":false}}]}]', 600)",
         )
         .execute(&state.db)
         .await
@@ -2253,11 +2276,11 @@ mod tests {
         for (id, action) in [
             (
                 "rA",
-                r#"[{"kind":"light","light_id":"l1","state":{"on":true}}]"#,
+                r#"[{"conditions":[],"actions":[{"kind":"light","light_id":"l1","state":{"on":true}}]}]"#,
             ),
             (
                 "rB",
-                r#"[{"kind":"light","light_id":"l1","state":{"on":true,"brightness":100.0}}]"#,
+                r#"[{"conditions":[],"actions":[{"kind":"light","light_id":"l1","state":{"on":true,"brightness":100.0}}]}]"#,
             ),
         ] {
             sqlx::query(
@@ -2615,17 +2638,14 @@ mod tests {
         .await
         .unwrap();
 
-        let entries = snapshot_targets(
-            &state,
-            &[RuleAction::Room {
-                room_id: "room1".into(),
-                state: crate::models::LightState {
-                    on: false,
-                    ..Default::default()
-                },
-            }],
-        )
-        .await;
+        let actions = [RuleAction::Room {
+            room_id: "room1".into(),
+            state: crate::models::LightState {
+                on: false,
+                ..Default::default()
+            },
+        }];
+        let entries = snapshot_targets(&state, actions.iter()).await;
         assert_eq!(
             entries.len(),
             2,
@@ -2652,7 +2672,7 @@ mod tests {
                 event: SensorTrigger::BecameTrue,
             },
             conditions: vec![],
-            actions: vec![],
+            steps: vec![],
             cooldown_secs: cooldown,
             restore_secs: None,
             last_fired_at: last.map(str::to_string),

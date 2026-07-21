@@ -6761,6 +6761,71 @@ async fn audio_companion_link_crud_and_validation() {
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 }
 
+/// "Unravel" a composite: `POST …/dissolve` clears the whole group so every
+/// member becomes a standalone device again — the one-click cleanup for a
+/// composite that grew wrong.
+#[tokio::test]
+async fn dissolve_composite_unmerges_the_whole_group() {
+    let (port_a, _) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let (port_b, _) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let primary = add_onkyo_device(&app, &cookie, port_a, "TV", &[]).await;
+    let companion = add_onkyo_device(
+        &app,
+        &cookie,
+        port_b,
+        "TV speaker",
+        std::slice::from_ref(&primary),
+    )
+    .await;
+
+    // Merge them into one composite.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/media/devices/{companion}/companion"),
+            &cookie,
+            &format!(r#"{{"primary_id":"{primary}"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Unravel: dissolve the composite.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/media/devices/{primary}/dissolve"),
+            &cookie,
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Both are standalone again — neither is a companion of the other.
+    let list = helpers::response_json(
+        app.oneshot(helpers::authed_get("/api/media/devices", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    for id in [&primary, &companion] {
+        let d = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == id.as_str())
+            .unwrap();
+        assert!(
+            d["companion_of"].is_null(),
+            "device {id} should be standalone after unravel: {d}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn audio_receiver_binding_routes_volume_to_receiver() {
     let (port_s, src_cmds) = audio_mock::spawn(audio_mock::receiver_state()).await;
@@ -9220,7 +9285,7 @@ async fn sensor_rule_crud_and_validation() {
             "/api/automations",
             &cookie,
             r#"{"trigger":{"kind":"sensor","sensor_id":"m1","event":{"kind":"rose_above","value":5}},
-                "actions":[{"kind":"power","device_id":"p1","on":true}]}"#,
+                "steps":[{"actions":[{"kind":"power","device_id":"p1","on":true}]}]}"#,
         ))
         .await
         .unwrap();
@@ -9233,7 +9298,7 @@ async fn sensor_rule_crud_and_validation() {
             "POST",
             "/api/automations",
             &cookie,
-            r#"{"trigger":{"kind":"sensor","sensor_id":"m1","event":{"kind":"became_true"}},"actions":[]}"#,
+            r#"{"trigger":{"kind":"sensor","sensor_id":"m1","event":{"kind":"became_true"}},"steps":[]}"#,
         ))
         .await
         .unwrap();
@@ -9249,7 +9314,7 @@ async fn sensor_rule_crud_and_validation() {
             r#"{"name":"Hall night light",
                 "trigger":{"kind":"sensor","sensor_id":"m1","event":{"kind":"became_true"}},
                 "conditions":[{"kind":"time_window","start":"21:00","end":"06:00"}],
-                "actions":[{"kind":"room","room_id":"r1","state":{"on":true,"brightness":30}}],
+                "steps":[{"actions":[{"kind":"room","room_id":"r1","state":{"on":true,"brightness":30}}]}],
                 "cooldown_secs":60}"#,
         ))
         .await
@@ -9271,7 +9336,7 @@ async fn sensor_rule_crud_and_validation() {
             &cookie,
             r#"{"name":"Hall off","enabled":false,
                 "trigger":{"kind":"sensor","sensor_id":"m1","event":{"kind":"clear_for","secs":600}},
-                "actions":[{"kind":"room","room_id":"r1","state":{"on":false}}]}"#,
+                "steps":[{"actions":[{"kind":"room","room_id":"r1","state":{"on":false}}]}]}"#,
         ))
         .await
         .unwrap();
@@ -9312,6 +9377,83 @@ async fn sensor_rule_crud_and_validation() {
     );
 }
 
+/// Per-step conditions: a rule's "then" is a list of steps, each optionally
+/// gated. Two steps target different switches; the second is gated by a
+/// condition that passes in one run (an all-day time window) and fails in the
+/// other (a reading gate on a sensor that doesn't exist → fails closed) — so
+/// only the ungated step runs then. Proves steps gate independently at fire time.
+#[tokio::test]
+async fn per_step_conditions_gate_each_step_independently() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // First run: an always-true window → both steps run. Second run: a gate on
+    // a nonexistent sensor (fails closed) → only the ungated step runs.
+    let passing = r#"{"kind":"time_window","start":"00:00","end":"00:00"}"#;
+    let failing = r#"{"kind":"sensor_below","sensor_id":"ghost","value":10}"#;
+    for (gate, expect_second) in [(passing, true), (failing, false)] {
+        let ha = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/services/homeassistant/turn_on"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&ha)
+            .await;
+        let (app, prov_id, db) = helpers::test_app_with_ha_db(&ha.uri()).await;
+        let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+        for (id, entity) in [("always", "switch.always"), ("gated", "switch.gated")] {
+            sqlx::query(
+                "INSERT INTO power_devices (id, provider_id, device_id, name, kind, last_state)
+                 VALUES (?, ?, ?, ?, 'switch', '{\"on\":false}')",
+            )
+            .bind(id)
+            .bind(&prov_id)
+            .bind(entity)
+            .bind(entity)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        let body = format!(
+            r#"{{"name":"Stepped","trigger":{{"kind":"manual"}},"steps":[
+                {{"actions":[{{"kind":"power","device_id":"always","on":true}}]}},
+                {{"conditions":[{gate}],
+                  "actions":[{{"kind":"power","device_id":"gated","on":true}}]}}
+              ]}}"#
+        );
+        let resp = app
+            .clone()
+            .oneshot(helpers::authed_post("/api/automations", &cookie, &body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let id = helpers::response_json(resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let resp = app
+            .clone()
+            .oneshot(helpers::authed_post(
+                &format!("/api/automations/{id}/run"),
+                &cookie,
+                "{}",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let reqs = ha.received_requests().await.unwrap();
+        let hit = |needle: &str| {
+            reqs.iter()
+                .any(|r| String::from_utf8_lossy(&r.body).contains(needle))
+        };
+        assert!(hit("switch.always"), "the ungated step always runs");
+        assert_eq!(
+            hit("switch.gated"),
+            expect_second,
+            "gated step should run={expect_second} for gate {gate}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn run_automation_executes_actions_immediately() {
     use wiremock::matchers::{method, path};
@@ -9345,7 +9487,7 @@ async fn run_automation_executes_actions_immediately() {
     sqlx::query(
         "INSERT INTO automations (id, sensor_id, trigger_json, actions_json)
          VALUES ('a1', 'm1', '{\"kind\":\"sensor\",\"sensor_id\":\"m1\",\"event\":{\"kind\":\"became_true\"}}',
-                 '[{\"kind\":\"power\",\"device_id\":\"p1\",\"on\":true}]')",
+                 '[{\"conditions\":[],\"actions\":[{\"kind\":\"power\",\"device_id\":\"p1\",\"on\":true}]}]')",
     )
     .execute(&db)
     .await
@@ -9439,10 +9581,10 @@ async fn manual_rule_with_app_action_runs_on_demand() {
             r#"{"name":"Bedroom movie","enabled":true,
                 "trigger":{"kind":"manual"},
                 "conditions":[],
-                "actions":[
+                "steps":[{"actions":[
                   {"kind":"power","device_id":"p1","on":false},
                   {"kind":"app","remote_id":"r1","app":"com.hulu.livingroomplus"}
-                ]}"#,
+                ]}]}"#,
         ))
         .await
         .unwrap();
@@ -9517,7 +9659,7 @@ async fn toggle_action_inverts_cached_power_state() {
     sqlx::query(
         "INSERT INTO automations (id, trigger_json, actions_json)
          VALUES ('t1', '{\"kind\":\"manual\"}',
-                 '[{\"kind\":\"toggle\",\"domain\":\"power\",\"device_id\":\"fan1\"}]')",
+                 '[{\"conditions\":[],\"actions\":[{\"kind\":\"toggle\",\"domain\":\"power\",\"device_id\":\"fan1\"}]}]')",
     )
     .execute(&db)
     .await

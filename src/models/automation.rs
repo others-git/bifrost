@@ -349,6 +349,21 @@ pub enum RestoreEntry {
     Power { device_id: String, on: bool },
 }
 
+/// One **step** of a rule's "then": a list of actions, optionally gated by the
+/// step's own conditions. This is what lets a single rule branch — "dim the
+/// lights always, but only open Hulu after 18:00" is two steps, the second
+/// carrying a time-window condition; two steps with opposite conditions on one
+/// trigger are an if/else. A step with empty `conditions` always runs (given
+/// the rule-level gate passed).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionStep {
+    /// This step's own gate, checked at fire time (in addition to the
+    /// rule-level conditions). Empty = the step always runs.
+    #[serde(default)]
+    pub conditions: Vec<RuleCondition>,
+    pub actions: Vec<RuleAction>,
+}
+
 /// A stored automation, as served to clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Automation {
@@ -356,8 +371,12 @@ pub struct Automation {
     pub name: String,
     pub enabled: bool,
     pub trigger: AutomationTrigger,
+    /// Rule-level gate: checked once at fire time; if it fails, nothing runs.
+    /// Per-step conditions gate individual steps on top of this.
     pub conditions: Vec<RuleCondition>,
-    pub actions: Vec<RuleAction>,
+    /// The "then": one or more steps, each optionally condition-gated. (Stored
+    /// in the `actions_json` column, whose content is now a step list.)
+    pub steps: Vec<ActionStep>,
     pub cooldown_secs: u32,
     /// Timed hold: put everything the actions touched back to its pre-fire
     /// state after this many seconds. `None` = the changes stick.
@@ -365,6 +384,15 @@ pub struct Automation {
     pub restore_secs: Option<u32>,
     /// When the automation last ran (`datetime('now')` UTC), for the UI readout.
     pub last_fired_at: Option<String>,
+}
+
+impl Automation {
+    /// Every action across all steps, ignoring step conditions — for the
+    /// restore snapshot (over-capturing a device a failing-condition step
+    /// won't touch is a harmless no-op restore).
+    pub fn all_actions(&self) -> impl Iterator<Item = &RuleAction> {
+        self.steps.iter().flat_map(|s| s.actions.iter())
+    }
 }
 
 #[cfg(test)]

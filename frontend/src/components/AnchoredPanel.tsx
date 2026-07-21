@@ -53,7 +53,7 @@ export function AnchoredPanel({
         style={{
           position: "fixed",
           inset: 0,
-          zIndex: 60,
+          zIndex: 150,
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
@@ -77,13 +77,13 @@ export function AnchoredPanel({
 
   // Phone: full-width bottom sheet. Desktop: anchored dropdown.
   const panelStyle: CSSProperties = isMobile
-    ? { ...sheetStyle, zIndex: 61, maxHeight: "60vh" }
+    ? { ...sheetStyle, zIndex: 150, maxHeight: "60vh" }
     : {
         position: "fixed",
         left: pos?.left ?? -9999,
         top: pos?.top ?? -9999,
         visibility: pos ? "visible" : "hidden",
-        zIndex: 61,
+        zIndex: 150,
         width,
         maxHeight: 300,
         overflowY: "auto",
@@ -92,7 +92,7 @@ export function AnchoredPanel({
 
   return createPortal(
     <>
-      <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 60 }} />
+      <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 149 }} />
       <div ref={ref} style={panelStyle}>
         {children}
       </div>

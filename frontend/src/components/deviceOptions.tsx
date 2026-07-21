@@ -79,11 +79,15 @@ export function OptionCheckList({
   selected,
   onToggle,
   maxHeight = 240,
+  columns,
 }: {
   options: { value: string; label: string; group?: string }[];
   selected: string[];
   onToggle: (value: string) => void;
   maxHeight?: number;
+  /** Fixed column count — e.g. 1 for a compact dropdown. Omit for the
+   * responsive auto-fill grid (the wide multi-select panels). */
+  columns?: number;
 }) {
   const [query, setQuery] = useState("");
   const q = query.trim().toLowerCase();
@@ -111,7 +115,9 @@ export function OptionCheckList({
           maxHeight,
           overflowY: "auto",
           display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))",
+          gridTemplateColumns: columns
+            ? `repeat(${columns}, 1fr)`
+            : "repeat(auto-fill, minmax(150px, 1fr))",
           gridAutoRows: "min-content",
           gap: "0.3rem",
           alignItems: "start",

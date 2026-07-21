@@ -17,6 +17,7 @@ import {
   getSettings,
   getDeviceRaw,
   getCompositeRouting,
+  dissolveComposite,
   type ControlRoute,
   discoverAllDevices,
   type FoundDevice,
@@ -1842,6 +1843,25 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
                   <span style={{ color: T.faint, fontSize: "0.68rem", letterSpacing: "0.07em", textTransform: "uppercase" }}>
                     {c.kindLabel}
                   </span>
+                  <span style={{ flex: 1 }} />
+                  <button
+                    onClick={async () => {
+                      await dissolveComposite(c.id);
+                      refresh();
+                    }}
+                    title="Dissolve this composite — un-merge every member into standalone devices"
+                    style={{
+                      background: "transparent",
+                      border: `1px solid ${T.cardBorder}`,
+                      borderRadius: 7,
+                      color: T.dim,
+                      cursor: "pointer",
+                      fontSize: "0.72rem",
+                      padding: "0.2rem 0.6rem",
+                    }}
+                  >
+                    Unravel
+                  </button>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
                   {c.members.map((m, i) => (

@@ -1,6 +1,6 @@
 [package]
 name = "bifrost"
-version = "0.31.7"
+version = "0.31.8"
 edition = "2024"
 
 [lib]

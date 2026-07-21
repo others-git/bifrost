@@ -172,7 +172,7 @@ export function Flyout({
         style={{
           position: "fixed",
           inset: 0,
-          zIndex: 60,
+          zIndex: 150,
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
@@ -214,7 +214,7 @@ export function Flyout({
         left: pos?.left ?? 0,
         top: pos?.top ?? 0,
         visibility: pos ? "visible" : "hidden",
-        zIndex: 60,
+        zIndex: 150,
         width,
         background: ambient ? `${ambient}, ${color.surface}` : color.surface,
         border: `1px solid ${color.hairline}`,

@@ -184,6 +184,13 @@ export async function setMediaCompanion(id: string, primary_id: string | null): 
   });
 }
 
+/** Unravel a composite: dissolve the whole group so every member (companions +
+ * paired remote) becomes a standalone device again. A later Discover may
+ * re-pair auto-paired remotes; manual merges stay undone. */
+export async function dissolveComposite(id: string): Promise<void> {
+  await fetch(`/api/media/devices/${id}/dissolve`, { method: "POST" });
+}
+
 /** Assign a device to a room from the device side (`null` removes it from its
  * room). Sets *direct* membership — room links (synced provider groups) are
  * managed on the Rooms page. */
@@ -1019,13 +1026,24 @@ export type AutomationTrigger =
    * button, `runAutomation`, voice). */
   | { kind: "manual" };
 
+/** One step of a rule's "then": actions optionally gated by the step's own
+ * conditions (empty = always runs, given the rule-level gate passed). Two
+ * steps with opposite conditions on one trigger are an if/else. */
+export interface ActionStep {
+  conditions: RuleCondition[];
+  actions: RuleAction[];
+}
+
 export interface Automation {
   id: string;
   name: string;
   enabled: boolean;
   trigger: AutomationTrigger;
+  /** Rule-level gate — checked once; if it fails nothing runs. Per-step
+   * conditions gate individual steps on top of this. */
   conditions: RuleCondition[];
-  actions: RuleAction[];
+  /** The "then": one or more condition-able steps. */
+  steps: ActionStep[];
   cooldown_secs: number;
   /** Timed hold: put everything the actions touched back after this many
    * seconds. Null/absent = the changes stick. */

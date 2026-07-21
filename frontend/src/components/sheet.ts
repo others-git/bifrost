@@ -12,7 +12,10 @@ export const sheetStyle: CSSProperties = {
   width: "100%",
   maxHeight: "85vh",
   overflowY: "auto",
-  zIndex: 60,
+  // Above modals (100) so a fly-out/sheet opened FROM a modal isn't hidden
+  // behind it; below a Select's own dropdown (200) so a Select nested in a
+  // fly-out still layers correctly. The shared popover tier.
+  zIndex: 150,
   background: glass.background,
   backdropFilter: glass.backdropFilter,
   WebkitBackdropFilter: glass.WebkitBackdropFilter,
