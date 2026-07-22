@@ -1104,7 +1104,7 @@ export async function getDevEvents(
   after: number,
   target?: string,
   level?: string,
-): Promise<{ entries: DevEvent[]; last_seq: number } | null> {
+): Promise<{ entries: DevEvent[]; last_seq: number; areas: string[] } | null> {
   const params = new URLSearchParams({ after: String(after) });
   if (target) params.set("target", target);
   if (level) params.set("level", level);

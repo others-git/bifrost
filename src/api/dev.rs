@@ -113,7 +113,15 @@ async fn events_handler(
         q.level.as_deref(),
         q.limit.unwrap_or(200).min(500),
     );
-    Json(json!({ "entries": entries, "last_seq": last_seq })).into_response()
+    // `areas` is the live set of targets in the buffer — the panel's filter
+    // options are derived from it rather than hardcoded, so a new tracing
+    // target shows up on its own.
+    Json(json!({
+        "entries": entries,
+        "last_seq": last_seq,
+        "areas": crate::journal::Journal::global().areas(),
+    }))
+    .into_response()
 }
 
 async fn events_clear_handler(

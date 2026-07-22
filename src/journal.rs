@@ -104,6 +104,22 @@ impl Journal {
         (entries, last_seq)
     }
 
+    /// Every distinct target currently in the buffer, sorted. This is what the
+    /// panel's area filter offers: a hand-maintained list drifts the moment a
+    /// new `tracing` target appears (and misses the ones that inherit their
+    /// module path instead of naming a target explicitly), so the options are
+    /// read from what the server has actually emitted. Computed over the WHOLE
+    /// buffer, never the filtered view, so picking an area doesn't collapse the
+    /// menu to that one choice.
+    pub fn areas(&self) -> Vec<String> {
+        let buf = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        buf.iter()
+            .map(|e| e.target.clone())
+            .collect::<std::collections::BTreeSet<_>>() // deduped and sorted
+            .into_iter()
+            .collect()
+    }
+
     /// Drop everything (the panel's Clear button).
     pub fn clear(&self) {
         self.entries
@@ -180,6 +196,24 @@ impl Visit for FieldVisitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn areas_report_every_target_actually_emitted() {
+        let j = Journal::default();
+        assert!(
+            j.areas().is_empty(),
+            "nothing emitted yet, nothing to offer"
+        );
+        j.record("DEBUG", "bifrost::smarttv", "a".into(), BTreeMap::new());
+        j.record("INFO", "bifrost::connection", "b".into(), BTreeMap::new());
+        j.record("DEBUG", "bifrost::smarttv", "c".into(), BTreeMap::new());
+        // Deduped and sorted — this is the panel's filter menu, so it must
+        // reflect what the log rows show, including module-path targets that
+        // never name themselves explicitly.
+        assert_eq!(j.areas(), vec!["bifrost::connection", "bifrost::smarttv"]);
+        j.clear();
+        assert!(j.areas().is_empty());
+    }
 
     #[test]
     fn ring_buffer_caps_and_sequences() {

@@ -10466,6 +10466,16 @@ async fn dev_event_journal_serves_and_clears_entries() {
             .starts_with("bifrost::automation")),
         "target filter must exclude other areas"
     );
+    // `areas` drives the panel's filter menu, so it must list the targets the
+    // server really emitted — including ones the current filter excludes, or
+    // picking an area would collapse the menu to that single choice.
+    let areas = body["areas"].as_array().unwrap();
+    assert!(areas.iter().any(|a| a == "bifrost::automation"));
+    assert!(
+        areas.iter().any(|a| a == "bifrost::voice"),
+        "areas must span the whole buffer, not the filtered view"
+    );
+
     let last_seq = body["last_seq"].as_u64().unwrap();
     assert!(last_seq >= 2);
 

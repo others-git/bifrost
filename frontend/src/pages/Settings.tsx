@@ -724,25 +724,28 @@ function DeveloperTab({ onDevModeChange }: { onDevModeChange?: (on: boolean) => 
  * discovery, composite routing), captured server-side regardless of RUST_LOG.
  * Polls while visible; pause to scroll back, filter by area, clear to reset. */
 function DevEventLog() {
-  const AREAS: { value: string; label: string }[] = [
-    { value: "", label: "All areas" },
-    { value: "bifrost::automation", label: "Automations" },
-    { value: "bifrost::voice", label: "Voice" },
-    { value: "bifrost::events", label: "Device state" },
-    { value: "bifrost::discover", label: "Discovery" },
-    { value: "bifrost::composite", label: "Composite" },
-    { value: "bifrost::smarttv", label: "Smart TV" },
-  ];
   const LEVELS: { value: string; label: string }[] = [
     { value: "", label: "All levels" },
     { value: "warn", label: "Warnings +" },
     { value: "error", label: "Errors" },
   ];
   const [events, setEvents] = useState<DevEvent[]>([]);
+  const [areas, setAreas] = useState<string[]>([]);
   const [area, setArea] = useState("");
   const [level, setLevel] = useState("");
   const [paused, setPaused] = useState(false);
   const lastSeq = useRef(0);
+
+  // The area options are the targets the SERVER reports it has actually
+  // emitted, labelled exactly as the log rows print them (`bifrost::` stripped)
+  // — a hand-written list drifted from the real targets and offered areas that
+  // never appear while hiding ones that do. The current selection is kept even
+  // once it ages out of the ring buffer, so the filter never reads as blank.
+  const shown = area && !areas.includes(area) ? [area, ...areas] : areas;
+  const areaOptions = [
+    { value: "", label: "All areas" },
+    ...shown.map((a) => ({ value: a, label: a.replace(/^bifrost::/, "") })),
+  ];
 
   // Poll while mounted (the tab is open) and not paused. Changing the area or
   // level filter re-reads from the start so history under the new filter shows
@@ -756,6 +759,7 @@ function DevEventLog() {
       const batch = await getDevEvents(lastSeq.current, area || undefined, level || undefined);
       if (!alive || !batch) return;
       lastSeq.current = batch.last_seq;
+      setAreas(batch.areas ?? []);
       if (batch.entries.length > 0) {
         // Newest first; cap what the panel keeps.
         setEvents((prev) => [...batch.entries.reverse(), ...prev].slice(0, 500));
@@ -776,7 +780,7 @@ function DevEventLog() {
     <div style={{ ...S.card, marginTop: "1rem", padding: "0.8rem 1rem", gap: "0.6rem" }}>
       <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap" }}>
         <div style={{ fontWeight: 600, fontSize: "0.92rem", flex: 1, minWidth: 120 }}>Event log</div>
-        <Select value={area} options={AREAS} onChange={setArea} width={160} />
+        <Select value={area} options={areaOptions} onChange={setArea} width={160} />
         <Select value={level} options={LEVELS} onChange={setLevel} width={124} />
         <Button variant="ghost" onClick={() => setPaused((p) => !p)}>
           {paused ? "Resume" : "Pause"}
