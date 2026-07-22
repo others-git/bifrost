@@ -1562,6 +1562,10 @@ impl LanBinding for HueLanBinding {
         443 // Hue is HTTPS-only
     }
 
+    fn can_verify(&self, creds: &Credentials, _known_hw: &[String]) -> bool {
+        cred_str(creds, "app_key").is_some()
+    }
+
     async fn is_same_device(&self, host: &str, creds: &Credentials, _known_hw: &[String]) -> bool {
         let Some(app_key) = cred_str(creds, "app_key") else {
             return false;

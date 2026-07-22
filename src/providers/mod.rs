@@ -136,6 +136,57 @@ pub fn cached_client(
 /// A provider's decrypted credential object.
 pub type Credentials = serde_json::Map<String, serde_json::Value>;
 
+/// Is this hardware id one a **moved** device could still be matched by?
+///
+/// A `mac:` id comes from the hardware itself, so it survives an address
+/// change. The `host:<ip>` fallback some devices fall back to when no MAC is
+/// readable (a bare Android TV found by the TCP port sweep) is derived FROM the
+/// address — once that address changes it can never match anything, so a
+/// provider holding only one of those can't be relocated at all.
+pub fn is_portable_hw_id(hw: &str) -> bool {
+    hw.starts_with("mac:")
+}
+
+/// Reduce a stored host or a discovery candidate to its bare address so the two
+/// can be compared: scheme, path, and port stripped, IPv6 brackets removed.
+/// A credential may hold any of `192.168.1.5`, `192.168.1.5:1400`,
+/// `https://192.168.1.5/`, or `[fd00::1]:80` — all of which name one device.
+pub fn host_only(raw: &str) -> &str {
+    let h = raw.trim();
+    let h = h
+        .strip_prefix("https://")
+        .or_else(|| h.strip_prefix("http://"))
+        .unwrap_or(h);
+    let h = h.split('/').next().unwrap_or(h);
+    if let Some(rest) = h.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    // Strip a trailing `:port` only — a bare IPv6 literal is full of colons.
+    match h.rsplit_once(':') {
+        Some((head, port)) if !head.contains(':') && port.parse::<u16>().is_ok() => head,
+        _ => h,
+    }
+}
+
+/// An explicit port in a stored host, if it carries one (`ip:1400`,
+/// `http://ip:8080/`, `[fd00::1]:80`). `None` = the caller's default applies.
+pub fn host_port(raw: &str) -> Option<u16> {
+    let h = raw.trim();
+    let h = h
+        .strip_prefix("https://")
+        .or_else(|| h.strip_prefix("http://"))
+        .unwrap_or(h);
+    let h = h.split('/').next()?;
+    if let Some((_, after)) = h.rsplit_once(']') {
+        return after.strip_prefix(':')?.parse().ok();
+    }
+    let (head, port) = h.rsplit_once(':')?;
+    if head.contains(':') {
+        return None; // bare IPv6 literal, not a port
+    }
+    port.parse().ok()
+}
+
 /// Read a credential string field, trimmed and non-empty.
 pub fn cred_str<'a>(creds: &'a Credentials, key: &str) -> Option<&'a str> {
     creds
@@ -173,9 +224,23 @@ pub trait LanBinding: Send + Sync {
     /// Bravia answers on 80, a bare Android TV only on 6466).
     fn probe_port(&self, creds: &Credentials) -> u16;
 
+    /// Could this provider be proven at all — is there *anything* a candidate
+    /// could be matched against? A MAC-proving binding needs a recorded
+    /// hardware id; a token-proving one needs its credential.
+    ///
+    /// `false` means no scan could ever succeed, so the relocator skips the
+    /// provider outright rather than sweeping the network on its behalf forever.
+    /// Answering this honestly is what keeps an unprovable device from costing a
+    /// scan every backoff window for the life of the process.
+    fn can_verify(&self, creds: &Credentials, known_hw: &[String]) -> bool;
+
     /// Is `host` the very device these credentials belong to? `known_hw` carries
     /// the hardware ids Bifrost recorded for this provider's devices (empty when
     /// it has none). Every error, timeout, and ambiguity answers `false`.
+    ///
+    /// Called only for candidates that did **not** identify themselves with a
+    /// hardware id, and bounded by the relocator's own verification timeout — so
+    /// an implementation may do network I/O without stalling the watch.
     async fn is_same_device(&self, host: &str, creds: &Credentials, known_hw: &[String]) -> bool;
 }
 

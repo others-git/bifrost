@@ -113,10 +113,14 @@ impl Journal {
     /// menu to that one choice.
     pub fn areas(&self) -> Vec<String> {
         let buf = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        // Dedupe by reference, clone only the survivors: the panel polls this
+        // every 2s and the buffer holds ~1000 entries that collapse to a dozen
+        // targets — and the lock is the one the capture layer needs per event.
         buf.iter()
-            .map(|e| e.target.clone())
+            .map(|e| e.target.as_str())
             .collect::<std::collections::BTreeSet<_>>() // deduped and sorted
             .into_iter()
+            .map(str::to_string)
             .collect()
     }
 

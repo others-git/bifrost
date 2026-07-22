@@ -74,7 +74,7 @@ async fn scan_network(
             let known = known_provider_hosts(&state).await;
             let fresh: Vec<_> = devices
                 .into_iter()
-                .filter(|d| !known.contains(&d.host))
+                .filter(|d| !known.contains(crate::providers::host_only(&d.host)))
                 .collect();
             Json(fresh).into_response()
         }
@@ -124,7 +124,7 @@ fn hosts_from_credentials(json: &str) -> Vec<String> {
 /// Addresses already behind a configured provider — scans filter these out so
 /// only genuinely NEW devices are offered (an already-added TV answering the
 /// Android-TV probes must not show up as addable next to itself).
-async fn known_provider_hosts(state: &AppState) -> std::collections::HashSet<String> {
+pub(crate) async fn known_provider_hosts(state: &AppState) -> std::collections::HashSet<String> {
     let mut known = std::collections::HashSet::new();
     if let Ok(rows) = sqlx::query("SELECT credentials FROM providers")
         .fetch_all(&state.db)
@@ -133,7 +133,13 @@ async fn known_provider_hosts(state: &AppState) -> std::collections::HashSet<Str
         for row in &rows {
             let enc: String = row.get("credentials");
             if let Ok(json) = state.decrypt_credentials(&enc) {
-                known.extend(hosts_from_credentials(&json));
+                // Normalized: a credential may store a scheme/port that a bare-IP
+                // discovery candidate never carries, and they name one device.
+                known.extend(
+                    hosts_from_credentials(&json)
+                        .iter()
+                        .map(|h| crate::providers::host_only(h).to_string()),
+                );
             }
         }
     }
@@ -202,7 +208,7 @@ async fn discover_all(State(state): State<Arc<AppState>>, _: Session) -> impl In
         .await
         .into_iter()
         .flatten()
-        .filter(|d| !known_hosts.contains(&d.host))
+        .filter(|d| !known_hosts.contains(crate::providers::host_only(&d.host)))
         .collect();
     tracing::debug!(
         target: "bifrost::discover",

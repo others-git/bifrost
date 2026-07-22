@@ -35,6 +35,7 @@ use crate::providers::{
         DeviceDiscovery, HttpSweepDiscovery, MdnsDiscovery, SsdpDiscovery, TcpPortSweepDiscovery,
         UnionDiscovery,
     },
+    is_portable_hw_id,
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -695,6 +696,15 @@ impl LanBinding for SmartTvLanBinding {
             Some("androidtv") => atv::client::REMOTE_PORT,
             _ => 80,
         }
+    }
+
+    fn can_verify(&self, _creds: &Credentials, known_hw: &[String]) -> bool {
+        // Both brands prove themselves by MAC (mDNS `bt` for an Android TV, a
+        // live ScalarWeb read for a Bravia). A TV found by the TCP port sweep
+        // carries only a `host:<ip>` id, which is derived from the very address
+        // that changed — it can never match, so such a row is skipped instead
+        // of driving a scan forever.
+        known_hw.iter().any(|h| is_portable_hw_id(h))
     }
 
     async fn is_same_device(&self, host: &str, creds: &Credentials, known_hw: &[String]) -> bool {

@@ -1704,6 +1704,106 @@ async fn relocator_heals_a_non_tv_provider_through_its_own_host_field() {
     assert_eq!(stored_ip(&creds_of(&state.db, "k1").await), "192.0.2.51");
 }
 
+/// A candidate sitting at an address ANOTHER provider row is already configured
+/// at is never adopted: it's a device Bifrost already manages, so rebinding onto
+/// it would point two rows at one device instead of healing anything. This is
+/// reachable for a household-scoped binding — every Sonos player's MAC is
+/// recorded under the row that discovered it, so a sibling row's host really
+/// does satisfy the identity check.
+#[tokio::test]
+async fn relocator_never_adopts_a_host_another_provider_already_owns() {
+    use bifrost::connection::relocate::{lost_devices, relocate_with_candidates};
+    use bifrost::providers::discovery::DiscoveredDevice;
+
+    let (_app, state) = helpers::test_app_with_password_and_state().await;
+
+    // Two Sonos rows for one household. Row A's seed is dead; row B is healthy
+    // and configured at 192.0.2.60.
+    for (id, host) in [("sonosA", "127.0.0.1:1"), ("sonosB", "192.0.2.60")] {
+        let enc = state
+            .encrypt_credentials(&format!(r#"{{"host":"{host}"}}"#))
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO providers (id, provider_type, name, credentials) VALUES (?,'sonos',?,?)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(&enc)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+    // Row A discovered the whole household, so row B's player is among its
+    // known hardware ids — the identity check would happily accept it.
+    sqlx::query(
+        "INSERT INTO media_devices (id, provider_id, device_id, name, hw_id)
+         VALUES ('s1','sonosA','RINCON_A','Kitchen','mac:949f3e123456'),
+                ('s2','sonosA','RINCON_B','Den','mac:949f3e654321')",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let lost = lost_devices(&state).await;
+    assert_eq!(lost.len(), 1, "only row A's host is dead");
+    assert_eq!(lost[0].provider_id, "sonosA");
+
+    let healed = relocate_with_candidates(
+        &state,
+        lost,
+        &[DiscoveredDevice {
+            host: "192.0.2.60".into(),
+            label: None,
+            credentials: serde_json::json!({"host": "192.0.2.60"}),
+        }],
+    )
+    .await;
+    assert!(
+        healed.is_empty(),
+        "an address another row already owns must never be adopted"
+    );
+}
+
+/// A provider with nothing that could ever prove a replacement is skipped before
+/// the scan, not swept for forever. A `host:<ip>` hardware id is derived from the
+/// very address that changed, so it can never match a moved device.
+#[tokio::test]
+async fn relocator_skips_a_provider_no_candidate_could_ever_prove() {
+    use bifrost::connection::relocate::lost_devices;
+
+    let (_app, state) = helpers::test_app_with_password_and_state().await;
+    let enc = state
+        .encrypt_credentials(
+            r#"{"host":"127.0.0.1:1","brand":"androidtv","hw_id":"host:10.0.0.5"}"#,
+        )
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO providers (id, provider_type, name, credentials) VALUES ('tv','smarttv','Dongle',?)",
+    )
+    .bind(&enc)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    assert!(
+        lost_devices(&state).await.is_empty(),
+        "unreachable, but no scan could ever produce a provable candidate"
+    );
+
+    // Give it a real hardware id and it becomes relocatable again.
+    let enc = state
+        .encrypt_credentials(
+            r#"{"host":"127.0.0.1:1","brand":"androidtv","hw_id":"mac:aabbccddeeff"}"#,
+        )
+        .unwrap();
+    sqlx::query("UPDATE providers SET credentials = ? WHERE id = 'tv'")
+        .bind(&enc)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(lost_devices(&state).await.len(), 1);
+}
+
 /// A cloud-only provider declares no `LanBinding`, so the relocator ignores it
 /// entirely — there is no stored LAN address to go stale.
 #[tokio::test]

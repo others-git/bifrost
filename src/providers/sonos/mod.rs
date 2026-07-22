@@ -29,7 +29,7 @@ use crate::models::media::{
 use crate::providers::discovery::{DeviceDiscovery, SsdpDiscovery};
 use crate::providers::{
     CredentialField, Credentials, FieldKind, LanBinding, MediaConnectionMode, MediaProvider,
-    MediaProviderFactory,
+    MediaProviderFactory, is_portable_hw_id,
 };
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -141,6 +141,16 @@ fn topology_cache() -> &'static std::sync::Mutex<HashMap<String, Vec<String>>> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Vec<String>>>> =
         std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// The one HTTP client config every Sonos caller shares (see the `"sonos"`
+/// [`crate::providers::cached_client`] key): no auth, no per-device config, so
+/// one warm pool serves the provider and the LAN binding's identity read alike.
+fn build_sonos_client() -> Result<Client> {
+    Ok(Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?)
 }
 
 /// A Sonos player UUID is `RINCON_<mac><suffix>` — the 12-hex MAC follows the
@@ -325,12 +335,7 @@ impl SonosProvider {
         // shares one pooled client (keyed `"sonos"`) — keeping UPnP/SOAP
         // connections warm across the many per-request rebuilds rather than
         // re-handshaking each call. See [`crate::providers::cached_client`].
-        let client = crate::providers::cached_client("sonos", || {
-            Ok(Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(5))
-                .timeout(std::time::Duration::from_secs(10))
-                .build()?)
-        })?;
+        let client = crate::providers::cached_client("sonos", build_sonos_client)?;
         Ok(Self {
             client,
             seed_url: seed_url.into(),
@@ -1576,15 +1581,19 @@ impl LanBinding for SonosLanBinding {
         SONOS_PORT
     }
 
+    fn can_verify(&self, _creds: &Credentials, known_hw: &[String]) -> bool {
+        known_hw.iter().any(|h| is_portable_hw_id(h))
+    }
+
     async fn is_same_device(&self, host: &str, _creds: &Credentials, known_hw: &[String]) -> bool {
         if known_hw.is_empty() {
             return false; // nothing to compare against
         }
         let base = crate::providers::base_url(host, "http", Some(SONOS_PORT));
-        let Ok(client) = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-        else {
+        // The same pooled client the provider itself uses — a per-call
+        // `Client::builder()` would open a fresh connection pool for every
+        // candidate and drift from the provider's own timeouts.
+        let Ok(client) = crate::providers::cached_client("sonos", build_sonos_client) else {
             return false;
         };
         let Ok(resp) = client

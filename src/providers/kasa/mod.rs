@@ -42,7 +42,7 @@ use crate::providers::discovery::{
 };
 use crate::providers::{
     CredentialField, Credentials, FieldKind, LanBinding, PowerProvider, PowerProviderFactory,
-    mac_hw_id,
+    is_portable_hw_id, mac_hw_id,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
@@ -458,6 +458,10 @@ impl LanBinding for KasaLanBinding {
 
     fn probe_port(&self, _creds: &Credentials) -> u16 {
         KASA_PORT
+    }
+
+    fn can_verify(&self, _creds: &Credentials, known_hw: &[String]) -> bool {
+        known_hw.iter().any(|h| is_portable_hw_id(h))
     }
 
     async fn is_same_device(&self, host: &str, _creds: &Credentials, known_hw: &[String]) -> bool {

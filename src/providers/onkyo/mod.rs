@@ -25,6 +25,7 @@ use crate::models::media::{
 use crate::providers::discovery::{DeviceDiscovery, DiscoveredDevice, ScanOptions, udp_probe};
 use crate::providers::{
     CredentialField, Credentials, FieldKind, LanBinding, MediaProvider, MediaProviderFactory,
+    is_portable_hw_id,
 };
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -934,6 +935,10 @@ impl LanBinding for OnkyoLanBinding {
 
     fn probe_port(&self, creds: &Credentials) -> u16 {
         creds_port(creds)
+    }
+
+    fn can_verify(&self, _creds: &Credentials, known_hw: &[String]) -> bool {
+        known_hw.iter().any(|h| is_portable_hw_id(h))
     }
 
     async fn is_same_device(

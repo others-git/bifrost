@@ -106,10 +106,12 @@ impl NanoleafProvider {
     pub fn new(host: impl AsRef<str>, auth_token: Option<String>) -> Result<Self> {
         let host = host.as_ref().to_string();
         let base = base_url(&host, "http", Some(NANOLEAF_PORT));
-        // One pooled client per controller (keyed by base URL, no auth in the
-        // headers — the token lives in the path), so per-request rebuilds reuse a
-        // warm connection. Bounded so a powered-off controller fails fast.
-        let client = cached_client(&format!("nanoleaf:{base}"), || {
+        // One pooled client for every controller: nothing here varies per host
+        // (no auth headers — the token lives in the path — and the base URL is
+        // on the struct), so a per-host key would only mint duplicate clients
+        // that live for the process. Bounded so a powered-off controller fails
+        // fast.
+        let client = cached_client("nanoleaf", || {
             Ok(Client::builder()
                 .connect_timeout(Duration::from_secs(10))
                 .timeout(Duration::from_secs(15))
@@ -412,6 +414,10 @@ impl LanBinding for NanoleafLanBinding {
 
     fn probe_port(&self, _creds: &Credentials) -> u16 {
         NANOLEAF_PORT
+    }
+
+    fn can_verify(&self, creds: &Credentials, _known_hw: &[String]) -> bool {
+        cred_str(creds, "auth_token").is_some()
     }
 
     async fn is_same_device(&self, host: &str, creds: &Credentials, _known_hw: &[String]) -> bool {
