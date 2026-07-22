@@ -20,7 +20,7 @@ use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
 const PAIR_PORT: u16 = 6467;
-const REMOTE_PORT: u16 = 6466;
+pub(crate) const REMOTE_PORT: u16 = 6466;
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// rustls `ServerCertVerifier` that trusts any certificate (TOFU). Signature

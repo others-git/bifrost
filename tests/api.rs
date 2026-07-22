@@ -1472,7 +1472,7 @@ async fn smarttv_pair_remote_begin_unreachable_returns_502() {
 /// discovery-carried hw_id for an Android TV. A wrong identity is refused.
 #[tokio::test]
 async fn smarttv_relocator_rebinds_only_to_an_identity_proven_host() {
-    use bifrost::connection::relocate::{lost_tvs, relocate_with_candidates};
+    use bifrost::connection::relocate::{lost_devices, relocate_with_candidates};
     use bifrost::providers::discovery::DiscoveredDevice;
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1527,9 +1527,9 @@ async fn smarttv_relocator_rebinds_only_to_an_identity_proven_host() {
     .unwrap();
 
     // Detected as lost, with the device row supplying the expected identity.
-    let lost = lost_tvs(&state).await;
+    let lost = lost_devices(&state).await;
     assert_eq!(lost.len(), 1);
-    assert_eq!(lost[0].expected_hw, "mac:aabbccddeeff");
+    assert_eq!(lost[0].known_hw, vec!["mac:aabbccddeeff".to_string()]);
     assert_eq!(lost[0].host, "127.0.0.1:1");
 
     // A different TV at a candidate host (wrong MAC) is refused.
@@ -1561,7 +1561,7 @@ async fn smarttv_relocator_rebinds_only_to_an_identity_proven_host() {
 
     // The true TV is adopted (an hw-mismatched candidate is skipped cheaply),
     // and the auth cookie survives the rewrite.
-    let lost = lost_tvs(&state).await;
+    let lost = lost_devices(&state).await;
     relocate_with_candidates(
         &state,
         lost,
@@ -1599,7 +1599,7 @@ async fn smarttv_relocator_rebinds_only_to_an_identity_proven_host() {
     .execute(&state.db)
     .await
     .unwrap();
-    let lost = lost_tvs(&state).await;
+    let lost = lost_devices(&state).await;
     assert_eq!(lost.len(), 1, "only the dongle should be lost now");
     assert_eq!(lost[0].provider_id, "tv2");
     relocate_with_candidates(
@@ -1615,6 +1615,116 @@ async fn smarttv_relocator_rebinds_only_to_an_identity_proven_host() {
     assert_eq!(
         creds_host(&stored_creds(&state.db, "tv2").await),
         "192.0.2.7"
+    );
+}
+
+/// The relocator is provider-agnostic: it heals ANY type that declares a
+/// `LanBinding`, reading the address from that type's own credential field
+/// (`device_ip` for Kasa, not `host`) and proving identity through the type's
+/// own check — here a plug's `get_sysinfo` MAC against its recorded `hw_id`.
+#[tokio::test]
+async fn relocator_heals_a_non_tv_provider_through_its_own_host_field() {
+    use bifrost::connection::relocate::{lost_devices, relocate_with_candidates};
+    use bifrost::providers::discovery::DiscoveredDevice;
+
+    let (_app, state) = helpers::test_app_with_password_and_state().await;
+    let stored_ip = |enc: &str| {
+        let j = state.decrypt_credentials(enc).unwrap();
+        serde_json::from_str::<serde_json::Value>(&j).unwrap()["device_ip"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    async fn creds_of(db: &sqlx::SqlitePool, id: &str) -> String {
+        sqlx::query_scalar::<_, String>("SELECT credentials FROM providers WHERE id = ?")
+            .bind(id)
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    let enc = state
+        .encrypt_credentials(r#"{"device_ip":"127.0.0.1:1"}"#)
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO providers (id, provider_type, name, credentials) VALUES ('k1','kasa','Raven Lights',?)",
+    )
+    .bind(&enc)
+    .execute(&state.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO power_devices (id, provider_id, device_id, name, kind, hw_id)
+         VALUES ('p1','k1','main','Raven Lights','outlet','mac:aabbccddeeff')",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    // Lost, with the identity read from the POWER table (not media) and the
+    // address read from `device_ip` (not `host`).
+    let lost = lost_devices(&state).await;
+    assert_eq!(lost.len(), 1);
+    assert_eq!(lost[0].provider_type, "kasa");
+    assert_eq!(lost[0].host, "127.0.0.1:1");
+    assert_eq!(lost[0].known_hw, vec!["mac:aabbccddeeff".to_string()]);
+
+    // A candidate carrying a DIFFERENT hardware id is refused; the plug is not
+    // reachable to interrogate live either, so nothing is adopted.
+    let healed = relocate_with_candidates(
+        &state,
+        lost,
+        &[DiscoveredDevice {
+            host: "192.0.2.50".into(),
+            label: None,
+            credentials: serde_json::json!({"device_ip": "192.0.2.50", "hw_id": "mac:112233445566"}),
+        }],
+    )
+    .await;
+    assert!(healed.is_empty());
+    assert_eq!(
+        stored_ip(&creds_of(&state.db, "k1").await),
+        "127.0.0.1:1",
+        "a wrong-identity candidate must never be adopted"
+    );
+
+    // The real plug, found by the broadcast leg that stamps its MAC, is adopted.
+    let lost = lost_devices(&state).await;
+    let healed = relocate_with_candidates(
+        &state,
+        lost,
+        &[DiscoveredDevice {
+            host: "192.0.2.51".into(),
+            label: None,
+            credentials: serde_json::json!({"device_ip": "192.0.2.51", "hw_id": "mac:aabbccddeeff"}),
+        }],
+    )
+    .await;
+    assert_eq!(healed, vec!["k1".to_string()]);
+    assert_eq!(stored_ip(&creds_of(&state.db, "k1").await), "192.0.2.51");
+}
+
+/// A cloud-only provider declares no `LanBinding`, so the relocator ignores it
+/// entirely — there is no stored LAN address to go stale.
+#[tokio::test]
+async fn relocator_ignores_providers_with_no_lan_binding() {
+    use bifrost::connection::relocate::lost_devices;
+
+    let (_app, state) = helpers::test_app_with_password_and_state().await;
+    let enc = state
+        .encrypt_credentials(r#"{"host":"127.0.0.1:1","token":"t"}"#)
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO providers (id, provider_type, name, credentials) VALUES ('h1','ha','Home Assistant',?)",
+    )
+    .bind(&enc)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    assert!(
+        lost_devices(&state).await.is_empty(),
+        "a user-typed server URL is not a discovered device address"
     );
 }
 

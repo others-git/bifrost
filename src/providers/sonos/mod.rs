@@ -28,7 +28,8 @@ use crate::models::media::{
 };
 use crate::providers::discovery::{DeviceDiscovery, SsdpDiscovery};
 use crate::providers::{
-    CredentialField, FieldKind, MediaConnectionMode, MediaProvider, MediaProviderFactory,
+    CredentialField, Credentials, FieldKind, LanBinding, MediaConnectionMode, MediaProvider,
+    MediaProviderFactory,
 };
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -1551,6 +1552,58 @@ fn absolutize_art(uri: Option<String>, base_url: &str) -> Option<String> {
 
 pub struct SonosProviderFactory;
 
+/// The seed player is reached at a stored IP, so a DHCP change strands the
+/// household. Identity is the player UUID in its `device_description.xml`
+/// (`RINCON_<mac>` → the same `hw_id` discovery records).
+///
+/// A candidate matching **any** of the household's known players is accepted,
+/// not just the original seed: a Sonos provider row is an entry point, not a
+/// device — topology fans out from whichever player answers — so re-seeding on a
+/// sibling is exactly as correct and heals a household whose original seed was
+/// unplugged rather than re-addressed.
+struct SonosLanBinding;
+
+/// UPnP port every Sonos player serves.
+const SONOS_PORT: u16 = 1400;
+
+#[async_trait]
+impl LanBinding for SonosLanBinding {
+    fn host_field(&self) -> &'static str {
+        "host"
+    }
+
+    fn probe_port(&self, _creds: &Credentials) -> u16 {
+        SONOS_PORT
+    }
+
+    async fn is_same_device(&self, host: &str, _creds: &Credentials, known_hw: &[String]) -> bool {
+        if known_hw.is_empty() {
+            return false; // nothing to compare against
+        }
+        let base = crate::providers::base_url(host, "http", Some(SONOS_PORT));
+        let Ok(client) = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+        else {
+            return false;
+        };
+        let Ok(resp) = client
+            .get(format!("{base}/xml/device_description.xml"))
+            .send()
+            .await
+        else {
+            return false;
+        };
+        let Ok(body) = resp.text().await else {
+            return false;
+        };
+        // <UDN>uuid:RINCON_<mac>01400</UDN>
+        xml_tag(&body, "UDN")
+            .and_then(|udn| sonos_hw_id(udn.trim().trim_start_matches("uuid:")))
+            .is_some_and(|hw| known_hw.contains(&hw))
+    }
+}
+
 impl MediaProviderFactory for SonosProviderFactory {
     fn provider_type(&self) -> &'static str {
         "sonos"
@@ -1585,6 +1638,10 @@ impl MediaProviderFactory for SonosProviderFactory {
         )))
     }
 
+    fn lan_binding(&self) -> Option<Box<dyn LanBinding>> {
+        Some(Box::new(SonosLanBinding))
+    }
+
     fn connection_mode(&self) -> MediaConnectionMode {
         // Push: GENA event subscriptions for instant updates, with a heartbeat
         // poll baseline (see `event_stream`).
@@ -1599,6 +1656,49 @@ mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn lan_binding_proves_identity_by_the_players_udn() {
+        use crate::providers::LanBinding as _;
+        let b = SonosLanBinding;
+        assert_eq!(b.host_field(), "host");
+        assert_eq!(b.probe_port(&serde_json::Map::new()), SONOS_PORT);
+
+        let player = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xml/device_description.xml"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "<root><device><UDN>uuid:RINCON_949F3E12345601400</UDN></device></root>",
+            ))
+            .mount(&player)
+            .await;
+        let host = player.uri(); // full http://127.0.0.1:PORT — kept verbatim
+        let creds = serde_json::Map::new();
+
+        assert!(
+            b.is_same_device(&host, &creds, &["mac:949f3e123456".to_string()])
+                .await
+        );
+        // Any known household player counts — the row is an entry point, and
+        // topology fans out from whichever player answers.
+        assert!(
+            b.is_same_device(
+                &host,
+                &creds,
+                &[
+                    "mac:aaaaaaaaaaaa".to_string(),
+                    "mac:949f3e123456".to_string()
+                ]
+            )
+            .await
+        );
+        // A stranger's player is refused, as is an empty identity set.
+        assert!(
+            !b.is_same_device(&host, &creds, &["mac:112233445566".to_string()])
+                .await
+        );
+        assert!(!b.is_same_device(&host, &creds, &[]).await);
+    }
 
     #[test]
     fn sonos_hw_id_extracts_mac_from_rincon_uuid() {

@@ -131,6 +131,54 @@ pub fn cached_client(
     Ok(client)
 }
 
+// ── LAN-addressed devices (host relocation) ─────────────────────────────────
+
+/// A provider's decrypted credential object.
+pub type Credentials = serde_json::Map<String, serde_json::Value>;
+
+/// Read a credential string field, trimmed and non-empty.
+pub fn cred_str<'a>(creds: &'a Credentials, key: &str) -> Option<&'a str> {
+    creds
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// Declares that a provider type reaches its device at a **stored LAN address**,
+/// which makes it self-healable when that address changes — a power outage
+/// routinely hands every device on the network a fresh DHCP lease, and a
+/// provider pinned to the old IP silently drops off every surface until someone
+/// re-configures it by hand.
+///
+/// Only address-pinned LAN providers implement this. A **cloud** provider has no
+/// local address to go stale, and a LAN provider that addresses devices **by
+/// MAC** and re-resolves them on every scan (Govee LAN, LIFX LAN) already heals
+/// itself. Home Assistant is deliberately excluded: its host is a server URL the
+/// user typed, not a discovered device, and there's nothing to prove identity
+/// against.
+///
+/// The relocator ([`crate::connection::relocate`]) owns the watch loop, the
+/// reachability probe, the scan, and the credential rewrite; a binding answers
+/// only the two questions it alone can. `is_same_device` is the safety
+/// property — rebinding onto a neighbour's device is strictly worse than
+/// staying lost, so anything short of proof must answer `false`.
+#[async_trait]
+pub trait LanBinding: Send + Sync {
+    /// Credential key holding the device address (`host`, `bridge_ip`, …).
+    fn host_field(&self) -> &'static str;
+
+    /// TCP port whose silence means "the stored address is dead". Takes the
+    /// credentials because one type can address more than one protocol (a
+    /// Bravia answers on 80, a bare Android TV only on 6466).
+    fn probe_port(&self, creds: &Credentials) -> u16;
+
+    /// Is `host` the very device these credentials belong to? `known_hw` carries
+    /// the hardware ids Bifrost recorded for this provider's devices (empty when
+    /// it has none). Every error, timeout, and ambiguity answers `false`.
+    async fn is_same_device(&self, host: &str, creds: &Credentials, known_hw: &[String]) -> bool;
+}
+
 // ── Core provider trait ─────────────────────────────────────────────────────
 
 /// A light group defined inside the provider's own ecosystem (e.g. a Hue
@@ -363,6 +411,14 @@ pub trait MediaProviderFactory: Send + Sync {
     fn discoverer(&self) -> Option<Box<dyn DeviceDiscovery>> {
         None
     }
+
+    /// Stored-LAN-address binding, enabling self-healing after a DHCP change.
+    /// Default: none — cloud providers, MAC-addressed LAN providers that
+    /// re-resolve every scan, and user-typed server URLs have no stale address
+    /// to heal, so the relocator skips them. See [`LanBinding`].
+    fn lan_binding(&self) -> Option<Box<dyn LanBinding>> {
+        None
+    }
 }
 
 /// Factory for one power provider type. A `provider_type` may register a power
@@ -386,6 +442,14 @@ pub trait PowerProviderFactory: Send + Sync {
     /// Network auto-detect, for providers with LAN devices to find (mirrors
     /// `ProviderFactory`/`MediaProviderFactory`). `None` = no scan button.
     fn discoverer(&self) -> Option<Box<dyn DeviceDiscovery>> {
+        None
+    }
+
+    /// Stored-LAN-address binding, enabling self-healing after a DHCP change.
+    /// Default: none — cloud providers, MAC-addressed LAN providers that
+    /// re-resolve every scan, and user-typed server URLs have no stale address
+    /// to heal, so the relocator skips them. See [`LanBinding`].
+    fn lan_binding(&self) -> Option<Box<dyn LanBinding>> {
         None
     }
 }
@@ -584,6 +648,14 @@ pub trait ProviderFactory: Send + Sync {
     fn discoverer(&self) -> Option<Box<dyn DeviceDiscovery>> {
         None
     }
+
+    /// Stored-LAN-address binding, enabling self-healing after a DHCP change.
+    /// Default: none — cloud providers, MAC-addressed LAN providers that
+    /// re-resolve every scan, and user-typed server URLs have no stale address
+    /// to heal, so the relocator skips them. See [`LanBinding`].
+    fn lan_binding(&self) -> Option<Box<dyn LanBinding>> {
+        None
+    }
 }
 
 // ── Registry ────────────────────────────────────────────────────────────────
@@ -761,6 +833,30 @@ impl ProviderRegistry {
         self.power_factories
             .get(provider_type)
             .and_then(|f| f.discoverer())
+    }
+
+    /// The stored-LAN-address binding for a provider type, if it has one.
+    /// Looks across the light, media, and power factory maps (same order as
+    /// [`Self::discoverer`] — a type registered in several maps declares the
+    /// binding once, on whichever factory owns its transport).
+    pub fn lan_binding(&self, provider_type: &str) -> Option<Box<dyn LanBinding>> {
+        if let Some(b) = self
+            .factories
+            .get(provider_type)
+            .and_then(|f| f.lan_binding())
+        {
+            return Some(b);
+        }
+        if let Some(b) = self
+            .media_factories
+            .get(provider_type)
+            .and_then(|f| f.lan_binding())
+        {
+            return Some(b);
+        }
+        self.power_factories
+            .get(provider_type)
+            .and_then(|f| f.lan_binding())
     }
 
     /// How the runtime should keep this media provider type's state fresh.
@@ -1065,6 +1161,36 @@ pub(crate) mod tests {
             .err()
             .expect("expected an error");
         assert!(err.to_string().contains("nonexistent"));
+    }
+
+    #[test]
+    fn lan_binding_is_declared_by_address_pinned_types_only() {
+        let reg = default_registry();
+        // Every provider that reaches its device at a STORED LAN address opts
+        // in, across all three factory maps (light, media, power) — that's what
+        // makes the host relocator provider-agnostic.
+        for t in ["hue", "nanoleaf", "kasa", "onkyo", "sonos", "smarttv"] {
+            let b = reg
+                .lan_binding(t)
+                .unwrap_or_else(|| panic!("{t} is address-pinned and must declare a LanBinding"));
+            assert!(
+                !b.host_field().is_empty(),
+                "{t} must name its host credential field"
+            );
+            assert!(
+                reg.discoverer(t).is_some(),
+                "{t} needs a discoverer for the relocator to find it again"
+            );
+        }
+        // Cloud providers and MAC-addressed LAN providers re-resolve themselves;
+        // HA's host is a user-typed server URL, not a discovered device.
+        for t in ["govee", "lifx", "ha"] {
+            assert!(
+                reg.lan_binding(t).is_none(),
+                "{t} has no stored device address to heal"
+            );
+        }
+        assert!(reg.lan_binding("nonexistent").is_none());
     }
 
     #[test]

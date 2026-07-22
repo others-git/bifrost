@@ -24,8 +24,8 @@ use crate::providers::discovery::{
     DeviceDiscovery, MdnsDiscovery, TcpPortSweepDiscovery, UnionDiscovery,
 };
 use crate::providers::{
-    CredentialField, FieldKind, LightProvider, ProviderFactory, base_url, cached_client,
-    hsv_to_rgb, rgb_to_hs,
+    CredentialField, Credentials, FieldKind, LanBinding, LightProvider, ProviderFactory, base_url,
+    cached_client, cred_str, hsv_to_rgb, rgb_to_hs,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
@@ -396,6 +396,35 @@ impl LightProvider for NanoleafProvider {
 
 pub struct NanoleafProviderFactory;
 
+/// The controller is reached at a stored IP, so a DHCP change strands it.
+///
+/// Identity proof is the **auth token**: the Open API exposes no MAC (only a
+/// serial), so Nanoleaf devices carry no `hw_id` at all — but a token is minted
+/// by one controller and rejected by every other, so an authenticated read
+/// answers the same question a MAC comparison would.
+struct NanoleafLanBinding;
+
+#[async_trait]
+impl LanBinding for NanoleafLanBinding {
+    fn host_field(&self) -> &'static str {
+        "host"
+    }
+
+    fn probe_port(&self, _creds: &Credentials) -> u16 {
+        NANOLEAF_PORT
+    }
+
+    async fn is_same_device(&self, host: &str, creds: &Credentials, _known_hw: &[String]) -> bool {
+        let Some(token) = cred_str(creds, "auth_token") else {
+            return false; // unpaired: nothing to prove identity with
+        };
+        match NanoleafProvider::new(host, Some(token.to_string())) {
+            Ok(p) => p.fetch_info(token).await.is_ok(),
+            Err(_) => false,
+        }
+    }
+}
+
 impl ProviderFactory for NanoleafProviderFactory {
     fn provider_type(&self) -> &'static str {
         "nanoleaf"
@@ -420,6 +449,10 @@ impl ProviderFactory for NanoleafProviderFactory {
             Box::new(MdnsDiscovery::new("_nanoleafapi._tcp.local", "")),
             Box::new(TcpPortSweepDiscovery::new(16021, "Nanoleaf", "")),
         ])))
+    }
+
+    fn lan_binding(&self) -> Option<Box<dyn LanBinding>> {
+        Some(Box::new(NanoleafLanBinding))
     }
 
     fn credentials_schema(&self) -> &'static [CredentialField] {
@@ -453,6 +486,37 @@ mod tests {
     use super::*;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn lan_binding_proves_identity_with_the_auth_token() {
+        use crate::providers::LanBinding as _;
+        let b = NanoleafLanBinding;
+        assert_eq!(b.host_field(), "host");
+        assert_eq!(b.probe_port(&serde_json::Map::new()), NANOLEAF_PORT);
+
+        // The Open API exposes no MAC, so the token is the identity: the
+        // controller that issued it serves the read; any other rejects it.
+        let ours = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/tok/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(info_json("hs", "")))
+            .mount(&ours)
+            .await;
+        let stranger = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&stranger)
+            .await;
+
+        let creds: Credentials = json!({"auth_token": "tok"}).as_object().unwrap().clone();
+        assert!(b.is_same_device(&ours.uri(), &creds, &[]).await);
+        assert!(!b.is_same_device(&stranger.uri(), &creds, &[]).await);
+        // Unpaired → nothing to prove identity with.
+        assert!(
+            !b.is_same_device(&ours.uri(), &serde_json::Map::new(), &[])
+                .await
+        );
+    }
 
     fn info_json(color_mode: &str, select: &str) -> Value {
         json!({

@@ -29,8 +29,8 @@ use crate::models::media::{
 };
 use crate::models::remote::{RemoteCommandInfo, RemoteDevice, RemoteKey, RemoteState};
 use crate::providers::{
-    CredentialField, FieldKind, MediaProvider, MediaProviderFactory, RemoteProvider,
-    RemoteProviderFactory,
+    CredentialField, Credentials, FieldKind, LanBinding, MediaProvider, MediaProviderFactory,
+    RemoteProvider, RemoteProviderFactory, cred_str,
     discovery::{
         DeviceDiscovery, HttpSweepDiscovery, MdnsDiscovery, SsdpDiscovery, TcpPortSweepDiscovery,
         UnionDiscovery,
@@ -675,6 +675,42 @@ impl RemoteProvider for SmartTv {
 
 pub struct SmartTvMediaFactory;
 
+/// The TV is reached at a stored IP, so a DHCP change strands it.
+///
+/// Identity: an Android/Google TV found by mDNS carries its Bluetooth MAC, which
+/// the relocator's generic hardware-id match uses directly. A Bravia found by
+/// the ScalarWeb legs carries none, so it proves itself live — the stored `auth`
+/// cookie rides along and a different TV mismatches or rejects it.
+struct SmartTvLanBinding;
+
+#[async_trait]
+impl LanBinding for SmartTvLanBinding {
+    fn host_field(&self) -> &'static str {
+        "host"
+    }
+
+    fn probe_port(&self, creds: &Credentials) -> u16 {
+        // A bare Android TV serves nothing on 80 — only the ATV remote port.
+        match cred_str(creds, "brand") {
+            Some("androidtv") => atv::client::REMOTE_PORT,
+            _ => 80,
+        }
+    }
+
+    async fn is_same_device(&self, host: &str, creds: &Credentials, known_hw: &[String]) -> bool {
+        if cred_str(creds, "brand") == Some("androidtv") {
+            return false; // no HTTP identity endpoint — mDNS `hw_id` is the proof
+        }
+        let auth = cred_str(creds, "auth").map(str::to_string);
+        for hw in known_hw {
+            if bravia_identity_matches(host, auth.clone(), hw).await {
+                return true;
+            }
+        }
+        false
+    }
+}
+
 impl MediaProviderFactory for SmartTvMediaFactory {
     fn provider_type(&self) -> &'static str {
         "smarttv"
@@ -690,6 +726,9 @@ impl MediaProviderFactory for SmartTvMediaFactory {
     }
     fn discoverer(&self) -> Option<Box<dyn DeviceDiscovery>> {
         Some(smarttv_discoverer())
+    }
+    fn lan_binding(&self) -> Option<Box<dyn LanBinding>> {
+        Some(Box::new(SmartTvLanBinding))
     }
 }
 
@@ -713,6 +752,43 @@ impl RemoteProviderFactory for SmartTvRemoteFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lan_binding_probes_the_port_the_brand_actually_serves() {
+        use crate::providers::LanBinding as _;
+        let b = SmartTvLanBinding;
+        assert_eq!(b.host_field(), "host");
+        // A bare Android TV serves nothing on 80 — probing it there would read
+        // every healthy dongle as lost.
+        let atv = serde_json::json!({"brand": "androidtv"})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(b.probe_port(&atv), atv::client::REMOTE_PORT);
+        // Bravia (the default when unstamped) answers ScalarWeb over HTTP.
+        assert_eq!(b.probe_port(&serde_json::Map::new()), 80);
+        let bravia = serde_json::json!({"brand": "bravia"})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(b.probe_port(&bravia), 80);
+    }
+
+    #[tokio::test]
+    async fn lan_binding_has_no_live_check_for_a_bare_android_tv() {
+        use crate::providers::LanBinding as _;
+        // There is no HTTP identity endpoint on a dongle — the mDNS-carried
+        // hardware id is the only proof, handled by the relocator itself.
+        let atv = serde_json::json!({"brand": "androidtv"})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(
+            !SmartTvLanBinding
+                .is_same_device("192.0.2.1", &atv, &["mac:aabbccddeeff".to_string()])
+                .await
+        );
+    }
 
     #[test]
     fn pairing_client_name_is_instance_distinct() {

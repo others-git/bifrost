@@ -1536,9 +1536,42 @@ impl HueProvider {
 // ── Factory ─────────────────────────────────────────────────────────────────
 
 use crate::providers::discovery::{DeviceDiscovery, SsdpDiscovery};
-use crate::providers::{CredentialField, FieldKind, ProviderFactory, SensorProviderFactory};
+use crate::providers::{
+    CredentialField, Credentials, FieldKind, LanBinding, ProviderFactory, SensorProviderFactory,
+    cred_str,
+};
 
 pub struct HueProviderFactory;
+
+/// The bridge is reached at a stored IP, so a DHCP change strands it.
+///
+/// Identity proof is the **app key**, not a MAC: a key is minted by one bridge
+/// and rejected by every other, and Bifrost never records the bridge's own
+/// hardware id (`lights.hw_id` holds each *bulb's* Zigbee MAC, which says
+/// nothing about which bridge is answering). So a candidate proves itself by
+/// serving an authenticated read.
+struct HueLanBinding;
+
+#[async_trait]
+impl LanBinding for HueLanBinding {
+    fn host_field(&self) -> &'static str {
+        "bridge_ip"
+    }
+
+    fn probe_port(&self, _creds: &Credentials) -> u16 {
+        443 // Hue is HTTPS-only
+    }
+
+    async fn is_same_device(&self, host: &str, creds: &Credentials, _known_hw: &[String]) -> bool {
+        let Some(app_key) = cred_str(creds, "app_key") else {
+            return false;
+        };
+        match HueProvider::new(host, app_key) {
+            Ok(p) => p.ping().await.is_ok(),
+            Err(_) => false,
+        }
+    }
+}
 
 impl ProviderFactory for HueProviderFactory {
     fn provider_type(&self) -> &'static str {
@@ -1558,6 +1591,10 @@ impl ProviderFactory for HueProviderFactory {
             "Hue bridge",
             "bridge_ip",
         )))
+    }
+
+    fn lan_binding(&self) -> Option<Box<dyn LanBinding>> {
+        Some(Box::new(HueLanBinding))
     }
 
     fn build(&self, credentials_json: &str) -> Result<Box<dyn crate::providers::LightProvider>> {
@@ -1682,6 +1719,42 @@ mod tests {
 
     async fn mock_provider(server: &MockServer) -> HueProvider {
         HueProvider::new_for_test(server.uri(), "test-app-key").unwrap()
+    }
+
+    #[tokio::test]
+    async fn lan_binding_proves_identity_with_the_app_key() {
+        use crate::providers::LanBinding as _;
+        let b = HueLanBinding;
+        assert_eq!(b.host_field(), "bridge_ip");
+        assert_eq!(b.probe_port(&serde_json::Map::new()), 443);
+
+        // A bridge that accepts OUR app key is ours; one that rejects it isn't.
+        // (The bridge's own MAC is never stored, so the key IS the identity.)
+        let ours = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/clip/v2/resource/device"))
+            .and(header("hue-application-key", "test-app-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+            .mount(&ours)
+            .await;
+        let stranger = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/clip/v2/resource/device"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&stranger)
+            .await;
+
+        let creds: Credentials = serde_json::json!({"app_key": "test-app-key"})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(b.is_same_device(&ours.uri(), &creds, &[]).await);
+        assert!(!b.is_same_device(&stranger.uri(), &creds, &[]).await);
+        // No key stored → nothing to prove identity with.
+        assert!(
+            !b.is_same_device(&ours.uri(), &serde_json::Map::new(), &[])
+                .await
+        );
     }
 
     #[tokio::test]

@@ -23,7 +23,9 @@ use crate::models::media::{
     PlayState, TransportCmd,
 };
 use crate::providers::discovery::{DeviceDiscovery, DiscoveredDevice, ScanOptions, udp_probe};
-use crate::providers::{CredentialField, FieldKind, MediaProvider, MediaProviderFactory};
+use crate::providers::{
+    CredentialField, Credentials, FieldKind, LanBinding, MediaProvider, MediaProviderFactory,
+};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -322,12 +324,7 @@ impl OnkyoProvider {
             .ok_or_else(|| anyhow!("onkyo credentials missing host"))?
             .trim()
             .to_string();
-        let port = creds["port"].as_u64().map(|p| p as u16).unwrap_or_else(|| {
-            creds["port"]
-                .as_str()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(DEFAULT_PORT)
-        });
+        let port = creds.as_object().map(creds_port).unwrap_or(DEFAULT_PORT);
         Ok(Self::new(host, port))
     }
 
@@ -881,14 +878,23 @@ impl DeviceDiscovery for OnkyoDiscovery {
             if !seen.insert(host.clone()) {
                 continue;
             }
-            let model = rest
-                .split('/')
+            // ECN payload is `<model>/<port>/<area>/<mac>` — the MAC is the
+            // receiver's hardware id, which is what lets the host relocator
+            // prove a candidate at a new address is this same receiver.
+            let mut fields = rest.split('/');
+            let model = fields
                 .next()
                 .filter(|m| !m.is_empty())
                 .map(|m| m.to_string());
+            let hw_id = fields.nth(2).and_then(crate::providers::mac_hw_id);
+            let mut creds = serde_json::Map::new();
+            creds.insert("host".into(), host.clone().into());
+            if let Some(hw) = hw_id {
+                creds.insert("hw_id".into(), hw.into());
+            }
             out.push(DiscoveredDevice {
                 label: model.map(|m| format!("Onkyo {m}")),
-                credentials: serde_json::json!({ "host": host }),
+                credentials: serde_json::Value::Object(creds),
                 host,
             });
         }
@@ -899,6 +905,46 @@ impl DeviceDiscovery for OnkyoDiscovery {
 // ── Factory ─────────────────────────────────────────────────────────────────
 
 pub struct OnkyoProviderFactory;
+
+/// eISCP port from credentials — a number or a numeric string, defaulting to
+/// [`DEFAULT_PORT`]. Shared by [`OnkyoProvider::from_credentials`] and the LAN
+/// binding's reachability probe so both read the port the same way.
+fn creds_port(creds: &Credentials) -> u16 {
+    let port = creds.get("port");
+    port.and_then(|v| v.as_u64())
+        .map(|p| p as u16)
+        .or_else(|| port.and_then(|v| v.as_str()).and_then(|s| s.parse().ok()))
+        .unwrap_or(DEFAULT_PORT)
+}
+
+/// The receiver is reached at a stored IP, so a DHCP change strands it.
+///
+/// Identity comes from the discovery reply itself: an `ECNQSTN` answer carries
+/// the receiver's MAC, which [`OnkyoDiscovery`] stamps as the candidate's
+/// `hw_id` — so the relocator's generic hardware-id match already proves it, and
+/// there is no live check to add. (Interrogating a candidate directly would mean
+/// opening a persistent [`OnkyoLink`] to a device that may not be ours.)
+struct OnkyoLanBinding;
+
+#[async_trait]
+impl LanBinding for OnkyoLanBinding {
+    fn host_field(&self) -> &'static str {
+        "host"
+    }
+
+    fn probe_port(&self, creds: &Credentials) -> u16 {
+        creds_port(creds)
+    }
+
+    async fn is_same_device(
+        &self,
+        _host: &str,
+        _creds: &Credentials,
+        _known_hw: &[String],
+    ) -> bool {
+        false // proven by the discovery-carried `hw_id` instead
+    }
+}
 
 impl MediaProviderFactory for OnkyoProviderFactory {
     fn provider_type(&self) -> &'static str {
@@ -941,6 +987,10 @@ impl MediaProviderFactory for OnkyoProviderFactory {
 
     fn discoverer(&self) -> Option<Box<dyn DeviceDiscovery>> {
         Some(Box::new(OnkyoDiscovery::broadcast()))
+    }
+
+    fn lan_binding(&self) -> Option<Box<dyn LanBinding>> {
+        Some(Box::new(OnkyoLanBinding))
     }
 }
 
@@ -1715,10 +1765,50 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].host, "127.0.0.1");
         assert_eq!(found[0].label.as_deref(), Some("Onkyo TX-NR686"));
+        // The ECN reply's MAC is stamped as the candidate's hardware id — the
+        // proof the host relocator matches a moved receiver on.
+        assert_eq!(
+            found[0].credentials,
+            serde_json::json!({ "host": "127.0.0.1", "hw_id": "mac:001122334455" })
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_omits_hw_id_when_the_ecn_reply_carries_no_mac() {
+        // Older/partial firmware answers without the MAC field; discovery still
+        // works, it just can't offer an identity to relocate on.
+        let addr = spawn_discovery_responder("ECNTX-NR686/60128/DX").await;
+        let found = OnkyoDiscovery::to(addr)
+            .scan(&ScanOptions::new(Duration::from_millis(300)))
+            .await
+            .unwrap();
         assert_eq!(
             found[0].credentials,
             serde_json::json!({ "host": "127.0.0.1" })
         );
+    }
+
+    #[test]
+    fn lan_binding_reads_the_port_from_credentials() {
+        use crate::providers::MediaProviderFactory as _;
+        let b = OnkyoProviderFactory
+            .lan_binding()
+            .expect("onkyo is LAN-pinned");
+        assert_eq!(b.host_field(), "host");
+        let empty = serde_json::Map::new();
+        assert_eq!(b.probe_port(&empty), DEFAULT_PORT);
+        // A configured port (number or numeric string) is probed instead — the
+        // same reading `from_credentials` does.
+        let numeric = serde_json::json!({"port": 60129})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(b.probe_port(&numeric), 60129);
+        let text = serde_json::json!({"port": "60130"})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(b.probe_port(&text), 60130);
     }
 
     #[tokio::test]

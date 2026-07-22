@@ -230,10 +230,9 @@ pub async fn run() -> Result<()> {
     tokio::spawn(api::kiosks::run_scheduler(Arc::clone(&state)));
     // Sensor automations: edge-triggered rules over the sensor push streams.
     tokio::spawn(api::automations::run_engine(Arc::clone(&state)));
-    // Smart-TV host relocation: re-find a TV whose DHCP lease changed (~30s watch).
-    tokio::spawn(connection::relocate::smarttv_relocate_loop(Arc::clone(
-        &state,
-    )));
+    // LAN host relocation: re-find any address-pinned device whose DHCP lease
+    // changed (~30s watch).
+    tokio::spawn(connection::relocate::relocate_loop(Arc::clone(&state)));
 
     let app = build_app(Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;

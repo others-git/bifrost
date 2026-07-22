@@ -41,7 +41,8 @@ use crate::providers::discovery::{
     host_credentials, local_ipv4, subnet_bases, udp_probe,
 };
 use crate::providers::{
-    CredentialField, FieldKind, PowerProvider, PowerProviderFactory, mac_hw_id,
+    CredentialField, Credentials, FieldKind, LanBinding, PowerProvider, PowerProviderFactory,
+    mac_hw_id,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
@@ -210,6 +211,12 @@ impl KasaProvider {
         Self::new(ip)
     }
 
+    /// One `get_sysinfo` round-trip — the plug's whole readable state (name,
+    /// model, MAC, relay). Every read path goes through here.
+    async fn sysinfo(&self) -> Result<Sysinfo> {
+        parse_sysinfo_reply(tcp_query(self.addr, &sysinfo_query(), self.timeout).await?)
+    }
+
     #[cfg(test)]
     fn new_for_test(addr: SocketAddr) -> Self {
         let mut p = Self::new_with_addr(addr);
@@ -225,8 +232,7 @@ impl PowerProvider for KasaProvider {
     }
 
     async fn discover(&self) -> Result<Vec<PowerDevice>> {
-        let reply = tcp_query(self.addr, &sysinfo_query(), self.timeout).await?;
-        let info = parse_sysinfo_reply(reply)?;
+        let info = self.sysinfo().await?;
         Ok(vec![PowerDevice {
             id: Uuid::new_v4(),
             // One physical plug per provider entry; stable identifier is "main"
@@ -246,8 +252,7 @@ impl PowerProvider for KasaProvider {
     }
 
     async fn get_state(&self, _device_id: &str) -> Result<PowerState> {
-        let reply = tcp_query(self.addr, &sysinfo_query(), self.timeout).await?;
-        let info = parse_sysinfo_reply(reply)?;
+        let info = self.sysinfo().await?;
         Ok(PowerState {
             on: info.on(),
             reachable: Some(true),
@@ -439,6 +444,41 @@ impl DeviceDiscovery for KasaTcpSweepDiscovery {
 
 pub struct KasaPowerFactory;
 
+/// A plug is reached at a stored IP, so a DHCP change strands it. The legacy
+/// protocol is unauthenticated, so identity is the plug's own MAC: `get_sysinfo`
+/// on the candidate must report the hardware id already recorded for this
+/// provider's device row.
+struct KasaLanBinding;
+
+#[async_trait]
+impl LanBinding for KasaLanBinding {
+    fn host_field(&self) -> &'static str {
+        "device_ip"
+    }
+
+    fn probe_port(&self, _creds: &Credentials) -> u16 {
+        KASA_PORT
+    }
+
+    async fn is_same_device(&self, host: &str, _creds: &Credentials, known_hw: &[String]) -> bool {
+        if known_hw.is_empty() {
+            return false; // nothing to compare against
+        }
+        // Discovery yields a bare IP; an explicit `ip:port` is honoured too.
+        let Some(addr) = host.parse::<SocketAddr>().ok().or_else(|| {
+            host.parse::<Ipv4Addr>()
+                .ok()
+                .map(|ip| SocketAddr::from((ip, KASA_PORT)))
+        }) else {
+            return false;
+        };
+        match KasaProvider::new_with_addr(addr).sysinfo().await {
+            Ok(info) => info.hw_id().is_some_and(|hw| known_hw.contains(&hw)),
+            Err(_) => false,
+        }
+    }
+}
+
 impl PowerProviderFactory for KasaPowerFactory {
     fn provider_type(&self) -> &'static str {
         "kasa"
@@ -471,6 +511,10 @@ impl PowerProviderFactory for KasaPowerFactory {
             Box::new(KasaBroadcastDiscovery::new()),
             Box::new(KasaTcpSweepDiscovery::new()),
         ])))
+    }
+
+    fn lan_binding(&self) -> Option<Box<dyn LanBinding>> {
+        Some(Box::new(KasaLanBinding))
     }
 }
 
@@ -508,6 +552,37 @@ mod tests {
         // plaintext bytes must NOT encode identically once the key has moved.
         let encoded = xor_encode(b"aaaa");
         assert_ne!(encoded[0], encoded[1], "key must advance between bytes");
+    }
+
+    // ── LAN binding (host relocation) ──
+
+    #[tokio::test]
+    async fn lan_binding_proves_identity_by_the_plugs_own_mac() {
+        use crate::providers::LanBinding as _;
+        let plug = spawn_mock_plug("Raven Lights", true).await;
+        let b = KasaLanBinding;
+        assert_eq!(b.host_field(), "device_ip");
+        assert_eq!(b.probe_port(&serde_json::Map::new()), KASA_PORT);
+
+        let creds = serde_json::Map::new();
+        let host = plug.addr.to_string();
+        // The mock reports AA:BB:CC:DD:EE:FF.
+        assert!(
+            b.is_same_device(&host, &creds, &["mac:aabbccddeeff".to_string()])
+                .await
+        );
+        // A different plug's id must never match.
+        assert!(
+            !b.is_same_device(&host, &creds, &["mac:112233445566".to_string()])
+                .await
+        );
+        // Nothing recorded to compare against → refuse rather than guess.
+        assert!(!b.is_same_device(&host, &creds, &[]).await);
+        // An unreachable candidate is refused, not adopted on optimism.
+        assert!(
+            !b.is_same_device("127.0.0.1:1", &creds, &["mac:aabbccddeeff".to_string()])
+                .await
+        );
     }
 
     // ── mock TCP device ──
