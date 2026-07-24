@@ -23,6 +23,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/discover-all", get(discover_all))
         .route("/hue/pair", post(hue_pair))
         .route("/nanoleaf/pair", post(nanoleaf_pair))
+        .route("/plex/pair", post(plex_pair))
         .route("/smarttv/pair", post(smarttv_pair))
         .route("/{id}", delete(remove_provider))
         .route("/{id}/config", get(provider_config))
@@ -280,6 +281,7 @@ async fn list_providers(State(state): State<Arc<AppState>>, _: Session) -> impl 
                         Some(crate::providers::ProviderDomain::Media) => "media",
                         Some(crate::providers::ProviderDomain::Power) => "power",
                         Some(crate::providers::ProviderDomain::Integration) => "integration",
+                        Some(crate::providers::ProviderDomain::Feed) => "feed",
                         _ => "light",
                     }
                     .to_string();
@@ -384,7 +386,13 @@ async fn add_provider(
     // third check exists (every other power-registering type today, HA, is
     // also a light/media factory and is already covered above).
     let is_power_only = !is_light && !is_media && state.registry.is_known_power(&req.provider_type);
-    if !is_light && !is_media && !is_power_only {
+    // A feed source (Plex) serves no device domain at all — fourth branch,
+    // same pattern.
+    let is_feed_only = !is_light
+        && !is_media
+        && !is_power_only
+        && state.registry.is_known_feed(&req.provider_type);
+    if !is_light && !is_media && !is_power_only && !is_feed_only {
         return (
             StatusCode::BAD_REQUEST,
             format!(
@@ -407,6 +415,11 @@ async fn add_provider(
         state
             .registry
             .build_power(&req.provider_type, &creds_json)
+            .map(|_| ())
+    } else if is_feed_only {
+        state
+            .registry
+            .build_feed(&req.provider_type, &creds_json)
             .map(|_| ())
     } else {
         state
@@ -586,17 +599,32 @@ async fn update_credentials(
     }
     let creds_json = serde_json::Value::Object(merged).to_string();
 
-    // Smoke-test before persisting, like add_provider does.
+    // Smoke-test before persisting, like add_provider does. Dispatch across
+    // every domain a type can be registered under — a power-only (Kasa) or
+    // feed-only (Plex) type has no light/media factory, and the light-map
+    // fallback would reject its perfectly valid credentials as "unknown type".
     let build_check = if state.registry.is_known_media(&provider_type) {
         state
             .registry
             .build_media(&provider_type, &creds_json)
             .map(|_| ())
-    } else {
+    } else if state.registry.is_known(&provider_type) {
         state
             .registry
             .build(&provider_type, &creds_json)
             .map(|_| ())
+    } else if state.registry.is_known_power(&provider_type) {
+        state
+            .registry
+            .build_power(&provider_type, &creds_json)
+            .map(|_| ())
+    } else if state.registry.is_known_feed(&provider_type) {
+        state
+            .registry
+            .build_feed(&provider_type, &creds_json)
+            .map(|_| ())
+    } else {
+        Err(anyhow::anyhow!("unknown provider type: {provider_type}"))
     };
     if let Err(e) = build_check {
         return (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response();
@@ -663,8 +691,9 @@ async fn provider_status(
         return Json(ConnectionStatus::from_state(&cs)).into_response();
     }
 
-    // No background manager. On-demand media providers (e.g. Sonos) are read
-    // live per request, so they're operational, not broken — report "ready".
+    // No background manager. On-demand media providers (e.g. Sonos) and feed
+    // sources (Plex) are read live per request, so they're operational, not
+    // broken — report "ready".
     let provider_type: Option<String> =
         sqlx::query("SELECT provider_type FROM providers WHERE id = ?")
             .bind(&id)
@@ -675,7 +704,7 @@ async fn provider_status(
             .map(|r| r.get("provider_type"));
 
     let label = match provider_type {
-        Some(t) if state.registry.is_known_media(&t) => "ready",
+        Some(t) if state.registry.is_known_media(&t) || state.registry.is_known_feed(&t) => "ready",
         _ => "not_managed",
     };
     Json(serde_json::json!({ "state": label })).into_response()
@@ -1100,6 +1129,65 @@ async fn nanoleaf_pair(_: Session, Json(req): Json<NanoleafPairRequest>) -> impl
             Json(serde_json::json!({ "error": "controller_unreachable", "message": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+// ── Plex link-code pairing (plex.tv/link) ───────────────────────────────────
+
+#[derive(Deserialize)]
+struct PlexPairRequest {
+    /// Present (with `client_id`) when polling an already-minted code; absent
+    /// to mint a new one.
+    #[serde(default)]
+    pin_id: Option<i64>,
+    #[serde(default)]
+    client_id: Option<String>,
+    /// plex.tv base URL override (used by tests to point at a mock).
+    #[serde(default)]
+    base: Option<String>,
+}
+
+/// Two-phase Plex account linking, the friendly alternative to pasting an
+/// X-Plex-Token by hand: a first call (no `pin_id`) mints a 4-char code the
+/// user enters at plex.tv/link; subsequent calls with `pin_id` + `client_id`
+/// poll until the account token arrives (`status: paired`), which the form
+/// stores as the provider's `token` credential.
+async fn plex_pair(_: Session, Json(req): Json<PlexPairRequest>) -> impl IntoResponse {
+    use crate::providers::plex;
+
+    let base = req.base.unwrap_or_else(|| plex::PLEX_TV_BASE.to_string());
+    match (req.pin_id, req.client_id) {
+        (Some(pin_id), Some(client_id)) => {
+            match plex::pair_check(&base, pin_id, &client_id).await {
+                Ok(Some(token)) => {
+                    tracing::info!(target: "bifrost::feeds", "Plex account linked via plex.tv/link");
+                    Json(serde_json::json!({ "status": "paired", "token": token })).into_response()
+                }
+                Ok(None) => Json(serde_json::json!({ "status": "pending" })).into_response(),
+                Err(e) => (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({ "error": "link_failed", "message": e.to_string() })),
+                )
+                    .into_response(),
+            }
+        }
+        _ => match plex::pair_begin(&base).await {
+            Ok(start) => Json(serde_json::json!({
+                "status": "code_displayed",
+                "code": start.code,
+                "pin_id": start.id,
+                "client_id": start.client_id,
+                "message": "Enter the code at plex.tv/link, then wait a moment.",
+            }))
+            .into_response(),
+            Err(e) => (
+                StatusCode::BAD_GATEWAY,
+                Json(
+                    serde_json::json!({ "error": "plex_tv_unreachable", "message": e.to_string() }),
+                ),
+            )
+                .into_response(),
+        },
     }
 }
 

@@ -1,5 +1,6 @@
 pub mod automation;
 pub mod dashboard;
+pub mod feed;
 pub mod generic;
 pub mod media;
 pub mod palette;

@@ -235,8 +235,9 @@ export interface Provider {
   provider_type: string;
   /** Human-facing type name, e.g. "Sonos". */
   type_name: string;
-  /** UI category: a single device domain, or "integration" (e.g. Home Assistant). */
-  domain: "light" | "media" | "power" | "integration";
+  /** UI category: a single device domain, "integration" (e.g. Home Assistant),
+   * or "feed" (a content feed source, e.g. Plex). */
+  domain: "light" | "media" | "power" | "integration" | "feed";
   name: string;
   enabled: boolean;
   /** When set, discovering this provider removes devices it no longer reports. */
@@ -267,7 +268,7 @@ export interface ProviderType {
    * single-domain device providers; "integration" is a higher-level platform
    * adapter (e.g. Home Assistant) that can surface many device kinds.
    */
-  kind: "light" | "media" | "power" | "integration";
+  kind: "light" | "media" | "power" | "integration" | "feed";
   /** Whether the UI should offer a "Scan network" button for this type. */
   supports_discovery: boolean;
   schema: CredentialField[];
@@ -2131,6 +2132,24 @@ export async function pairNanoleaf(host: string): Promise<NanoleafPairResult> {
   return res.json();
 }
 
+export type PlexPairResult =
+  | { status: "code_displayed"; code: string; pin_id: number; client_id: string; message: string }
+  | { status: "paired"; token: string }
+  | { status: "pending" }
+  | { error: string; message: string };
+
+/** Plex account linking via plex.tv/link — the friendly alternative to pasting
+ * an X-Plex-Token. Call with no args to mint a 4-char code, then poll with the
+ * returned pin_id + client_id until `paired` delivers the token. */
+export async function pairPlex(pinId?: number, clientId?: string): Promise<PlexPairResult> {
+  const res = await fetch("/api/providers/plex/pair", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(pinId != null ? { pin_id: pinId, client_id: clientId } : {}),
+  });
+  return res.json();
+}
+
 export type SmartTvPairResult =
   | { status: "pin_displayed"; message: string }
   | { status: "paired"; auth: string }
@@ -2303,4 +2322,70 @@ export async function reorderDashboards(ids: string[]): Promise<void> {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ ids }),
   });
+}
+
+// ── Content feeds (recently-added widget) ────────────────────────────────────
+
+/** A configured feed-source provider row (a Plex server). */
+export interface FeedSource {
+  id: string;
+  name: string;
+  provider_type: string;
+  /** Human-facing type name ("Plex"). */
+  type_name: string;
+}
+
+/** One library/section a feed source offers (a Plex library). */
+export interface FeedLibrary {
+  id: string;
+  name: string;
+  /** Provider-native kind ("movie" / "show" / "artist" / …) — label only. */
+  kind: string;
+}
+
+/** One rolled-up "recently added" tile. Episodes of a show collapse into one
+ * entry (`count` > 1) wearing the show's poster, timed by the newest. */
+export interface FeedEntry {
+  id: string;
+  title: string;
+  subtitle: string | null;
+  kind: string;
+  /** Unix seconds when the (newest grouped) item was added. */
+  added_at: number;
+  /** Provider-relative poster path — render via {@link feedImageUrl}. */
+  image_path: string | null;
+  group_key: string | null;
+  /** Opens this item in the source's own app (app.plex.tv details URL). */
+  deep_link: string | null;
+  count: number;
+}
+
+export async function getFeedSources(): Promise<FeedSource[]> {
+  const res = await fetch("/api/feeds/sources");
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function getFeedLibraries(providerId: string): Promise<FeedLibrary[]> {
+  const res = await fetch(`/api/feeds/${providerId}/libraries`);
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function getFeedRecent(
+  providerId: string,
+  libraryId: string,
+  limit: number,
+): Promise<FeedEntry[] | null> {
+  const res = await fetch(
+    `/api/feeds/${providerId}/recent?library=${encodeURIComponent(libraryId)}&limit=${limit}`,
+  );
+  if (!res.ok) return null;
+  return res.json();
+}
+
+/** Poster proxy URL: the server fetches from the source with its own token
+ * (the browser never holds it) and downscales to `w`×`h`. */
+export function feedImageUrl(providerId: string, path: string, w: number, h: number): string {
+  return `/api/feeds/${providerId}/image?path=${encodeURIComponent(path)}&w=${w}&h=${h}`;
 }

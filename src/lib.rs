@@ -302,6 +302,20 @@ pub fn start_manager_for(
         return;
     }
 
+    // Feed sources (Plex) are read on demand by `api::feeds` behind its short
+    // response cache — no state to keep fresh, so no manager at all.
+    if state.registry.is_known_feed(provider_type)
+        && state.registry.connection_mode(provider_type).is_none()
+        && state
+            .registry
+            .media_connection_mode(provider_type)
+            .is_none()
+        && !state.registry.is_known_power(provider_type)
+    {
+        tracing::info!("feed provider {provider_id} ({provider_type}) reads on demand");
+        return;
+    }
+
     match state.registry.connection_mode(provider_type) {
         Some(ConnectionMode::Sse) => {
             // The SSE stream is Hue-specific; the HueConnectionManager is the

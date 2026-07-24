@@ -17,10 +17,12 @@ The table below is the **full set of supported devices** and how each connects.
 | Govee | Light | Lights | Cloud API + LAN (UDP) | Poll (≈2 min) | API key and/or LAN interface |
 | LIFX | Light | Lights | Cloud API + LAN (UDP) | Poll (≈2 min) | Account token and/or LAN interface |
 | Nanoleaf | Light | Panels (Shapes, Canvas, Light Panels) | LAN (Open API, HTTP) | Poll (≈2 min) | Controller IP + power-button token |
+| TP-Link Kasa | Power | Smart plugs / switches (pre-KLAP firmware) | LAN (port 9999) | Poll (≈2 min) | Plug IP |
 | Onkyo / Integra | Media | Receivers + zones | LAN (eISCP) | Push | Receiver IP |
 | Sonos | Media | Speakers | LAN (UPnP) | Push (events + poll) | Any player's IP |
 | Smart TV | Media + Remote | TVs (Sony Bravia) | LAN (vendor HTTP API) | Poll | Auto-discovered IP + PIN pairing |
 | Home Assistant | Integration | Lights · media · power · remotes · sensors · everything else (generic) | REST + WebSocket | WebSocket push | Base URL + long-lived token |
+| Plex | Feed | None — a content feed ("recently added" library items for Boards) | LAN (HTTP API) | Poll (widget, ≈1 min) | Server URL + X-Plex-Token |
 
 ---
 
@@ -53,6 +55,12 @@ fan-outs don't drop commands.
 - **Setup** Click **Scan network** — the controller answers over mDNS (with its name) or the port sweep — or enter its **IP address** manually (find it in the Nanoleaf app, or on your router). Then **pair**: hold the controller's **power button for ~5–7 seconds** until the LED starts flashing, and pair (the same "press the button" flow as a Hue bridge). Pairing mints an **auth token** stored as the provider's credential; you can also paste a token you already have.
 - **Capabilities** RGB color (hue/saturation), color temperature (1200–6500 K), brightness, and **effects** — the controller's own effect list (e.g. "Northern Lights", "Windmill"). An effect is Bifrost's third light mode; **brightness stays live while an effect plays** (a brightness change never cancels the running effect). No native rooms.
 - **De-dup** The Open API exposes no MAC (only a serial), so a Home Assistant copy of the same panels **isn't shadowed automatically** (auto-shadowing is exact-MAC only) — shadow the HA duplicate manually from the Devices page if you run both.
+
+## TP-Link Kasa
+
+- **Category** Power · **Transport** LAN only — the legacy Kasa protocol (JSON over TCP port 9999); no cloud account, no credentials beyond the plug's IP · **Live** polling.
+- **Setup** Click **Scan network** (the same broadcast the Kasa app uses, plus a port sweep) or enter the plug's IP. One provider row per plug.
+- **Limitation** Plugs on **KLAP firmware** (2021+, or any plug that has been linked to a TP-Link cloud account) use an authenticated protocol Bifrost doesn't speak — they simply won't answer the scan. Older/never-cloud-linked plugs work as-is.
 
 ## Onkyo / Integra
 
@@ -149,6 +157,19 @@ hardware MAC and **hides the HA copy under the native one** — *native always
 wins* — so you control each device through its richest provider. (When HA exposes
 a capability the native provider lacks, that capability gets built natively rather
 than deferring to the hidden HA copy.)
+
+---
+
+## Plex
+
+A **feed source**, not a device provider: it surfaces no controllable devices.
+Adding a Plex Media Server powers the Boards **"Recently added"** widget — a
+poster shelf of the newest items in a library of your choosing (new episodes of
+one show roll up into a single tile).
+
+- **Category** Feed · **Transport** LAN HTTP against your own server · **Live** the widget polls about once a minute (the hub caches, so many kiosks cost one upstream read).
+- **Setup** the server URL (e.g. `http://192.168.1.10:32400`) + your account token — click **Link**, enter the 4-character code at [plex.tv/link](https://plex.tv/link) from any signed-in device, and the token fills in by itself. (Prefer doing it by hand? Pasting an **X-Plex-Token** still works: open any library item in Plex Web → ⋯ → Get Info → View XML, and copy the `X-Plex-Token` value from that page's URL.)
+- **Privacy** the token stays on the hub, encrypted like every credential; posters are proxied through the hub so the browser never talks to Plex directly.
 
 ---
 

@@ -10,6 +10,7 @@ import {
   syncProviderGroups,
   pairHueBridge,
   pairNanoleaf,
+  pairPlex,
   pairSmartTv,
   pairSmartTvRemote,
   scanForDevices,
@@ -201,7 +202,16 @@ export function SettingsPage({ onNavigate: _onNavigate, initialAdd, onConsumeAdd
             confirmLabel: "Remove",
             danger: true,
           }
-        : {
+        : provider.domain === "feed"
+          ? {
+              // A feed source owns no device rows — removing it just stops the
+              // board widgets that read from it.
+              title: "Remove feed source",
+              message: `Remove ${provider.name}? Board widgets using this feed will stop showing items.`,
+              confirmLabel: "Remove",
+              danger: true,
+            }
+          : {
             title: "Remove provider",
             message: `Remove this provider? Associated ${
               provider.domain === "media"
@@ -1792,6 +1802,7 @@ function ProviderCard({
             {provider.type_name}
             {provider.domain === "media" ? " · Audio" : ""}
             {provider.domain === "integration" ? " · Integration" : ""}
+            {provider.domain === "feed" ? " · Feed" : ""}
             {deviceCount > 0 && (
               <span style={{ color: "var(--bf-faint)" }}>
                 {" "}
@@ -1811,6 +1822,60 @@ function ProviderCard({
 
       {credsEditor}
     </div>
+  );
+}
+
+/// Plex account linking (plex.tv/link), shared by the add-provider and
+/// edit-credentials forms: mints a 4-char code, then polls plex.tv until the
+/// user has entered it and the account token arrives — the friendly
+/// alternative to pasting an X-Plex-Token by hand (which still works).
+function usePlexLink(onToken: (token: string) => void, setMsg: (m: string) => void) {
+  const [pin, setPin] = useState<{ pin_id: number; client_id: string; code: string } | null>(null);
+  const [starting, setStarting] = useState(false);
+
+  useEffect(() => {
+    if (!pin) return;
+    const t = setInterval(async () => {
+      const r = await pairPlex(pin.pin_id, pin.client_id);
+      if ("status" in r && r.status === "paired") {
+        setPin(null);
+        onToken(r.token);
+        setMsg("✓ Linked with your Plex account.");
+      } else if ("error" in r) {
+        // Expired code or plex.tv unreachable — stop polling, offer a retry.
+        setPin(null);
+        setMsg(`Linking failed: ${r.message}`);
+      }
+    }, 3000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pin]);
+
+  async function begin() {
+    setStarting(true);
+    setMsg("");
+    const r = await pairPlex();
+    setStarting(false);
+    if ("status" in r && r.status === "code_displayed") {
+      setPin({ pin_id: r.pin_id, client_id: r.client_id, code: r.code });
+    } else if ("error" in r) {
+      setMsg(`Could not reach plex.tv: ${r.message}`);
+    }
+  }
+
+  return { pin, starting, begin };
+}
+
+/// The "enter this code at plex.tv/link" line shown while a link is pending.
+function PlexLinkCode({ code }: { code: string }) {
+  return (
+    <span style={{ fontSize: "0.85rem", color: "var(--bf-text)" }}>
+      Enter code <b style={{ letterSpacing: "0.18em" }}>{code}</b> at{" "}
+      <a href="https://plex.tv/link" target="_blank" rel="noreferrer" style={{ color: ACCENT }}>
+        plex.tv/link
+      </a>
+      {" — waiting for the link…"}
+    </span>
   );
 }
 
@@ -1852,6 +1917,9 @@ function EditCredentialsForm({
   function setField(name: string, value: string) {
     setCredentials((prev) => ({ ...prev, [name]: value }));
   }
+
+  // Plex account linking (plex.tv/link) — fills the token field on success.
+  const plexLink = usePlexLink((tok) => setField("token", tok), setPairMsg);
 
   async function handlePair() {
     setPairing(true);
@@ -1904,6 +1972,7 @@ function EditCredentialsForm({
       {schema.map((field) => {
         const isHueAppKey = provider.provider_type === "hue" && field.name === "app_key";
         const isNanoleafToken = provider.provider_type === "nanoleaf" && field.name === "auth_token";
+        const isPlexToken = provider.provider_type === "plex" && field.name === "token";
         const isSecret = field.kind === "password";
         // Secret fields keep their stored value when left blank, so they're
         // only required when we couldn't decrypt the existing credentials.
@@ -1942,8 +2011,19 @@ function EditCredentialsForm({
                   {pairing ? "Pairing…" : "Pair"}
                 </Button>
               )}
+              {isPlexToken && (
+                <Button
+                  variant="ghost"
+                  type="button"
+                  onClick={plexLink.begin}
+                  disabled={plexLink.starting}
+                >
+                  {plexLink.starting ? "Linking…" : plexLink.pin ? "New code" : "Link"}
+                </Button>
+              )}
             </div>
-            {(isHueAppKey || isNanoleafToken) && pairMsg && (
+            {isPlexToken && plexLink.pin && <PlexLinkCode code={plexLink.pin.code} />}
+            {(isHueAppKey || isNanoleafToken || isPlexToken) && pairMsg && (
               <span style={{ fontSize: "0.78rem", color: pairMsg.startsWith("✓") ? "var(--bf-good)" : "#fa0" }}>
                 {pairMsg}
               </span>
@@ -2004,6 +2084,8 @@ function AddProviderForm({
   // Smart-TV PIN pairing: once the TV shows a PIN, collect it here for step 2.
   const [tvPin, setTvPin] = useState("");
   const [tvPinStep, setTvPinStep] = useState(false);
+  // Plex account linking (plex.tv/link) — fills the token field on success.
+  const plexLink = usePlexLink((tok) => setField("token", tok), setPairMsg);
   const [scanning, setScanning] = useState(false);
   const [scanned, setScanned] = useState(false);
   const [found, setFound] = useState<DiscoveredDevice[]>([]);
@@ -2162,7 +2244,7 @@ function AddProviderForm({
           value={selectedType}
           onChange={pickType}
           style={{ width: "100%" }}
-          options={(["light", "media", "power", "integration"] as const).flatMap((kind) =>
+          options={(["light", "media", "power", "integration", "feed"] as const).flatMap((kind) =>
             types
               .filter((t) => t.kind === kind)
               .map((t) => ({
@@ -2175,7 +2257,9 @@ function AddProviderForm({
                       ? "Media"
                       : kind === "power"
                         ? "Power"
-                        : "Integrations",
+                        : kind === "feed"
+                          ? "Feeds"
+                          : "Integrations",
               })),
           )}
         />
@@ -2218,6 +2302,8 @@ function AddProviderForm({
         const isTvAuth = selectedType === "smarttv" && field.name === "auth";
         // A Nanoleaf token comes from power-button pairing, not manual entry.
         const isNanoleafToken = selectedType === "nanoleaf" && field.name === "auth_token";
+        // A Plex token can be linked via plex.tv/link (or pasted manually).
+        const isPlexToken = selectedType === "plex" && field.name === "token";
         return (
           <label key={field.name} style={labelStyle}>
             <span>
@@ -2280,7 +2366,18 @@ function AddProviderForm({
                   {pairing ? "Pairing…" : "Pair"}
                 </Button>
               )}
+              {isPlexToken && (
+                <Button
+                  variant="ghost"
+                  type="button"
+                  onClick={plexLink.begin}
+                  disabled={plexLink.starting}
+                >
+                  {plexLink.starting ? "Linking…" : plexLink.pin ? "New code" : "Link"}
+                </Button>
+              )}
             </div>
+            {isPlexToken && plexLink.pin && <PlexLinkCode code={plexLink.pin.code} />}
             {isTvAuth && tvPinStep && (
               <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.4rem" }}>
                 <input
@@ -2300,7 +2397,7 @@ function AddProviderForm({
                 </Button>
               </div>
             )}
-            {(isHueAppKey || isTvAuth || isNanoleafToken) && pairMsg && (
+            {(isHueAppKey || isTvAuth || isNanoleafToken || isPlexToken) && pairMsg && (
               <span
                 style={{
                   fontSize: "0.78rem",

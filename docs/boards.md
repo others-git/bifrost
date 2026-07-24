@@ -51,6 +51,17 @@ anywhere.
 - **Weather** — current conditions from a Home Assistant weather entity: a
   condition icon, the temperature, and humidity. Uses whatever weather
   integration Home Assistant already has — no extra setup or API key.
+- **Recently added** — the newest items in a media library (needs a **feed
+  source** such as Plex, added under Settings → Providers), as a wide **poster
+  shelf** or a tall **vertical list** — pick the layout, the source, the
+  library, and how many tiles to show; new episodes of one
+  show roll up into a single tile ("3 new episodes") so a binge import can't
+  flood the shelf. Optionally load **more on scroll** — extra items past the
+  visible set, revealed by dragging the shelf/list (the widget itself never
+  grows). Optionally, **tapping a poster opens that item on a TV** —
+  pick which TV (any device with a remote) and which app to open; items launch
+  straight to their detail page where the app supports it, and the TV wakes
+  from standby if needed.
 - **Clock** and **Label** — a clock, or text to title and section a board.
 
 Every widget updates **live** — change a light elsewhere and the board reflects it

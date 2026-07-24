@@ -7,6 +7,7 @@ pub mod kasa;
 pub mod lifx;
 pub mod nanoleaf;
 pub mod onkyo;
+pub mod plex;
 pub mod shelly;
 pub mod smarttv;
 pub mod sonos;
@@ -185,6 +186,14 @@ pub fn host_port(raw: &str) -> Option<u16> {
         return None; // bare IPv6 literal, not a port
     }
     port.parse().ok()
+}
+
+/// Is `path` a server-relative asset path a feed provider may fetch? Anything
+/// else (an absolute URL, a protocol-relative `//host`, an empty string) is
+/// rejected so the poster proxy (`api::feeds`) can never be steered at another
+/// host — the path is always joined onto the provider's own stored base URL.
+pub fn is_safe_asset_path(path: &str) -> bool {
+    path.starts_with('/') && !path.starts_with("//") && !path.contains("://")
 }
 
 /// Read a credential string field, trimmed and non-empty.
@@ -633,6 +642,48 @@ pub trait GenericProviderFactory: Send + Sync {
     fn build(&self, credentials_json: &str) -> Result<Box<dyn GenericProvider>>;
 }
 
+/// A **content feed source** (Plex today) — surfaces "recently added" items
+/// from a media library, not controllable devices. The leanest provider kind
+/// after sensors: read-only, nothing persisted, no connection manager, no
+/// discovery scan, no LAN relocation (the host is a server URL the user typed,
+/// like Home Assistant's). Every read is on demand, behind `api::feeds`' short
+/// response cache.
+#[async_trait]
+pub trait FeedProvider: Send + Sync {
+    fn name(&self) -> &str;
+    /// The source's libraries/sections, for the widget config's picker.
+    async fn libraries(&self) -> Result<Vec<crate::models::feed::FeedLibrary>>;
+    /// The newest `limit` items added to one library, newest first. Raw items —
+    /// grouping into tiles is the shared api layer's job
+    /// ([`crate::models::feed::rollup`]).
+    async fn recent(
+        &self,
+        library_id: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::models::feed::FeedItem>>;
+    /// Fetch a poster by its provider-relative `image_path`, returning
+    /// `(bytes, mime)`. The provider attaches its own auth — the browser never
+    /// holds the source's token; `api::feeds` proxies through this. `width`/
+    /// `height` request a server-side downscale where the source supports one.
+    async fn image(
+        &self,
+        path: &str,
+        width: Option<u32>,
+        height: Option<u32>,
+    ) -> Result<(Vec<u8>, String)>;
+}
+
+/// Factory for one feed provider type (see [`PowerProviderFactory`] for the
+/// registration pattern).
+pub trait FeedProviderFactory: Send + Sync {
+    fn provider_type(&self) -> &'static str;
+    fn display_name(&self) -> &'static str {
+        self.provider_type()
+    }
+    fn build(&self, credentials_json: &str) -> Result<Box<dyn FeedProvider>>;
+    fn credentials_schema(&self) -> &'static [CredentialField];
+}
+
 // ── Credential schema (for the setup UI) ───────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -735,6 +786,7 @@ pub struct ProviderRegistry {
     sensor_factories: HashMap<&'static str, Box<dyn SensorProviderFactory>>,
     remote_factories: HashMap<&'static str, Box<dyn RemoteProviderFactory>>,
     generic_factories: HashMap<&'static str, Box<dyn GenericProviderFactory>>,
+    feed_factories: HashMap<&'static str, Box<dyn FeedProviderFactory>>,
 }
 
 impl ProviderRegistry {
@@ -746,6 +798,7 @@ impl ProviderRegistry {
             sensor_factories: HashMap::new(),
             remote_factories: HashMap::new(),
             generic_factories: HashMap::new(),
+            feed_factories: HashMap::new(),
         }
     }
 
@@ -851,6 +904,29 @@ impl ProviderRegistry {
         self.remote_factories.contains_key(provider_type)
     }
 
+    /// Register a feed source type (a content feed, not a device domain).
+    pub fn register_feed<F: FeedProviderFactory + 'static>(&mut self, factory: F) {
+        self.feed_factories
+            .insert(factory.provider_type(), Box::new(factory));
+    }
+
+    /// Build a live feed provider from a type string + decrypted credentials JSON.
+    pub fn build_feed(
+        &self,
+        provider_type: &str,
+        credentials_json: &str,
+    ) -> Result<Box<dyn FeedProvider>> {
+        self.feed_factories
+            .get(provider_type)
+            .ok_or_else(|| anyhow!("unknown feed provider type: {provider_type}"))?
+            .build(credentials_json)
+    }
+
+    /// Returns true if `provider_type` is a feed source.
+    pub fn is_known_feed(&self, provider_type: &str) -> bool {
+        self.feed_factories.contains_key(provider_type)
+    }
+
     /// Build a live media provider from a type string + decrypted credentials JSON.
     pub fn build_media(
         &self,
@@ -877,7 +953,10 @@ impl ProviderRegistry {
         if let Some(f) = self.media_factories.get(provider_type) {
             return Some(f.display_name());
         }
-        self.power_factories
+        if let Some(f) = self.power_factories.get(provider_type) {
+            return Some(f.display_name());
+        }
+        self.feed_factories
             .get(provider_type)
             .map(|f| f.display_name())
     }
@@ -958,7 +1037,10 @@ impl ProviderRegistry {
         if let Some(f) = self.media_factories.get(provider_type) {
             return Some(f.credentials_schema());
         }
-        self.power_factories
+        if let Some(f) = self.power_factories.get(provider_type) {
+            return Some(f.credentials_schema());
+        }
+        self.feed_factories
             .get(provider_type)
             .map(|f| f.credentials_schema())
     }
@@ -981,9 +1063,12 @@ impl ProviderRegistry {
         if self.media_factories.contains_key(provider_type) {
             return Some(ProviderDomain::Media);
         }
-        self.power_factories
+        if self.power_factories.contains_key(provider_type) {
+            return Some(ProviderDomain::Power);
+        }
+        self.feed_factories
             .get(provider_type)
-            .map(|_| ProviderDomain::Power)
+            .map(|_| ProviderDomain::Feed)
     }
 
     /// All registered provider types for the "Add provider" UI, **one entry per
@@ -1034,6 +1119,25 @@ impl ProviderRegistry {
                         schema: f.credentials_schema().to_vec(),
                     }),
             )
+            // Feed sources are always their own entry — a feed type never
+            // doubles as a device provider today, but the filter keeps the
+            // one-entry-per-type invariant if one ever does.
+            .chain(
+                self.feed_factories
+                    .values()
+                    .filter(|f| {
+                        !self.factories.contains_key(f.provider_type())
+                            && !self.media_factories.contains_key(f.provider_type())
+                            && !self.power_factories.contains_key(f.provider_type())
+                    })
+                    .map(|f| ProviderTypeInfo {
+                        provider_type: f.provider_type(),
+                        display_name: f.display_name(),
+                        kind: ProviderDomain::Feed,
+                        supports_discovery: false,
+                        schema: f.credentials_schema().to_vec(),
+                    }),
+            )
             .collect();
         types.sort_by_key(|t| t.provider_type);
         types
@@ -1055,6 +1159,9 @@ pub enum ProviderDomain {
     /// a smart plug under "Lights".
     Power,
     Integration,
+    /// A content feed source (e.g. Plex) — surfaces "recently added" library
+    /// items for the Boards feed widget, not controllable devices.
+    Feed,
 }
 
 impl Default for ProviderRegistry {
@@ -1112,6 +1219,9 @@ pub fn default_registry() -> ProviderRegistry {
     // domain only (strictly on/off). The first power-only provider type; see
     // `all_types()`'s doc comment for the add-provider-menu gap it surfaced.
     r.register_power(kasa::KasaPowerFactory);
+    // Plex — the first feed source: read-only "recently added" library items
+    // for the Boards feed widget. No devices, no manager, no relocation.
+    r.register_feed(plex::PlexFeedFactory);
     r
 }
 
@@ -1138,6 +1248,16 @@ pub(crate) mod tests {
             mac_hw_id("00:17:88:01:0b:12:34:56"),
             Some("mac:001788010b123456".to_string())
         );
+    }
+
+    #[test]
+    fn asset_paths_must_be_server_relative() {
+        assert!(is_safe_asset_path("/library/metadata/1/thumb/2"));
+        assert!(!is_safe_asset_path("http://evil.example/steal"));
+        assert!(!is_safe_asset_path("https://evil.example/steal"));
+        assert!(!is_safe_asset_path("//evil.example/steal"));
+        assert!(!is_safe_asset_path("library/metadata/1"));
+        assert!(!is_safe_asset_path(""));
     }
 
     #[test]
@@ -1248,14 +1368,54 @@ pub(crate) mod tests {
             );
         }
         // Cloud providers and MAC-addressed LAN providers re-resolve themselves;
-        // HA's host is a user-typed server URL, not a discovered device.
-        for t in ["govee", "lifx", "ha"] {
+        // HA's and Plex's hosts are user-typed server URLs, not discovered
+        // devices.
+        for t in ["govee", "lifx", "ha", "plex"] {
             assert!(
                 reg.lan_binding(t).is_none(),
                 "{t} has no stored device address to heal"
             );
         }
         assert!(reg.lan_binding("nonexistent").is_none());
+    }
+
+    #[test]
+    fn default_registry_lists_plex_as_a_feed_only_type() {
+        // A feed source is a provider row like any other (encrypted creds, the
+        // add menu) but serves NO device domain: it must reach the menu under
+        // its own Feed category while staying out of the device machinery —
+        // no scan button, no connection manager mode, no relocation.
+        let reg = default_registry();
+        assert!(reg.is_known_feed("plex"));
+        assert!(
+            reg.build_feed("plex", r#"{"host":"192.168.1.10","token":"t"}"#)
+                .is_ok()
+        );
+        assert!(!reg.is_known("plex"), "plex serves no light domain");
+        assert!(!reg.is_known_media("plex"), "plex serves no media domain");
+        assert!(!reg.is_known_power("plex"), "plex serves no power domain");
+
+        let entry = reg
+            .all_types()
+            .into_iter()
+            .find(|t| t.provider_type == "plex")
+            .expect("plex must appear in the add-provider menu");
+        assert_eq!(entry.kind, ProviderDomain::Feed);
+        assert_eq!(entry.display_name, "Plex");
+        assert!(
+            !entry.supports_discovery,
+            "feed sources have no scan button"
+        );
+        assert_eq!(reg.ui_domain("plex"), Some(ProviderDomain::Feed));
+        assert!(reg.discoverer("plex").is_none());
+        assert!(
+            reg.connection_mode("plex").is_none() && reg.media_connection_mode("plex").is_none(),
+            "a feed source needs no connection manager"
+        );
+        assert!(
+            reg.schema("plex").is_some_and(|s| !s.is_empty()),
+            "the add-provider form needs plex's credential fields"
+        );
     }
 
     #[test]

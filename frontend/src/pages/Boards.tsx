@@ -30,6 +30,18 @@ import {
   uploadBoardBackground,
   deleteBoardBackgroundMedia,
   getKiosks,
+  getFeedRecent,
+  feedImageUrl,
+  getFeedSources,
+  getFeedLibraries,
+  getRemoteDevices,
+  getRemoteApps,
+  sendRemoteCommand,
+  type FeedEntry,
+  type FeedSource,
+  type FeedLibrary,
+  type RemoteDevice,
+  type RemoteApp,
   type Dashboard,
   type GenericDevice,
   type Kiosk,
@@ -59,7 +71,7 @@ import { RestoreHomeButton } from "./Dashboard";
 import { GlyphButton, RoomCard, RoomControlButton, litHexes, roomMembers } from "../components/RoomCard";
 import { EFFECT_ACCENT, activeEffect } from "../components/lightControl";
 import { OptionCheckList, deviceSelectOptions, type RoomedDevice } from "../components/deviceOptions";
-import { pickableLights, pickableMedia, pickablePower } from "../deviceSelectors";
+import { pickableLights, pickableMedia, pickablePower, pickableRemotes } from "../deviceSelectors";
 import { CornerFiligree } from "../components/ornament";
 import { BACKGROUND_PRESETS, BoardBackground, type BoardBackgroundCfg } from "../components/BoardBackground";
 import { MatchThemeContext, useMatchTheme } from "../components/appearance";
@@ -193,7 +205,7 @@ const GAP = 8;
 // Fixed row height only for the phone fallback's stacked, view-only list.
 const ROW_H = 42;
 
-type WidgetType = "room" | "device" | "button" | "group" | "now_playing" | "scene" | "macro" | "control" | "sensor" | "device_status" | "weather" | "clock" | "label" | "exit";
+type WidgetType = "room" | "device" | "button" | "group" | "now_playing" | "scene" | "macro" | "control" | "sensor" | "device_status" | "weather" | "clock" | "label" | "feed" | "exit";
 
 // The kiosk-exit control is a special built-in widget: present on every board,
 // movable (positioned in edit mode) but not user-addable or removable. It renders
@@ -827,7 +839,7 @@ const PREVIEW_PRESETS: { label: string; w: number; h: number }[] = [
  * `cqmin`, the label via its own cqmin font) — so BoardGrid must NOT apply the
  * canvas `zoom` to them, or they'd double-scale. Everything else is a fixed-px
  * shared Control component that needs the zoom. */
-const SELF_SCALING_WIDGETS = new Set(["clock", "sensor", "device_status", "weather", "now_playing", "label"]);
+const SELF_SCALING_WIDGETS = new Set(["clock", "sensor", "device_status", "weather", "now_playing", "label", "feed"]);
 
 /** Widgets whose fixed-px content scales to FILL its tile — no dead space under
  * the button rows. Instead of the global canvas zoom, WidgetBox measures the
@@ -1449,6 +1461,7 @@ function WidgetContent({
   if (w.type === "sensor") return <SensorWidget cfg={cfg} generic={generic} />;
   if (w.type === "device_status") return <DeviceStatusWidget cfg={cfg} generic={generic} />;
   if (w.type === "weather") return <WeatherWidget cfg={cfg} generic={generic} />;
+  if (w.type === "feed") return <FeedWidget cfg={cfg} edit={edit} />;
 
   if (w.type === "room") {
     return (
@@ -2669,6 +2682,257 @@ function WeatherWidget({ cfg, generic }: { cfg: Record<string, unknown>; generic
   );
 }
 
+// The "Recently added" feed: a poster shelf of the newest items in a media
+// library (a Plex library today). Data comes from `/api/feeds` — posters ride
+// the server's token-holding proxy, episodes arrive pre-rolled-up by show —
+// and can't ride SSE, so it slow-polls like the generic readouts (the server
+// caches responses, so a wall of kiosks costs one upstream read per window).
+const FEED_POLL_MS = 60_000;
+
+/** Coarse relative age for a feed tile ("2h ago"). Refreshed by the poll. */
+function timeAgo(unixSecs: number): string {
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - unixSecs));
+  if (s < 3600) return `${Math.max(1, Math.floor(s / 60))}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  const d = Math.floor(s / 86400);
+  if (d < 30) return `${d}d ago`;
+  const mo = Math.floor(d / 30);
+  return mo < 12 ? `${mo}mo ago` : `${Math.floor(mo / 12)}y ago`;
+}
+
+function FeedWidget({ cfg, edit }: { cfg: Record<string, unknown>; edit: boolean }) {
+  const providerId = cfg.provider_id as string | undefined;
+  const libraryId = cfg.library_id as string | undefined;
+  // `limit` sizes the tiles (how many fit the box); `overflow` loads extra
+  // items past them, revealed by dragging the body — deeper history without a
+  // bigger footprint. The fetch is capped at the server's own max (30).
+  const shown = Math.max(1, Math.min(Number(cfg.limit) || 6, 12));
+  const overflow = Math.max(0, Math.min(Number(cfg.overflow) || 0, 24));
+  const limit = Math.min(shown + overflow, 30);
+  const tap = (cfg.tap ?? null) as { remote_id?: string; activity?: string } | null;
+  const [entries, setEntries] = useState<FeedEntry[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  // Mouse drag-to-scroll bookkeeping (touch scrolls natively via touchAction).
+  // `moved` suppresses the click a drag would otherwise end in, so browsing
+  // the overflow can never accidentally fire the tap-to-open-on-TV action.
+  const dragState = useRef<{ x: number; y: number; sl: number; st: number; moved: boolean } | null>(null);
+
+  useEffect(() => {
+    if (!providerId || !libraryId) return;
+    let live = true;
+    const load = () =>
+      getFeedRecent(providerId, libraryId, limit).then((e) => {
+        if (!live) return;
+        setFailed(e === null);
+        if (e !== null) setEntries(e);
+      });
+    load();
+    const t = setInterval(load, FEED_POLL_MS);
+    return () => { live = false; clearInterval(t); };
+  }, [providerId, libraryId, limit]);
+
+  // Tap-to-play: launch the item's deep link (or the configured app as the
+  // fallback) on the configured TV via the SAME remote command plane as the
+  // remote's own app launcher — wake-from-standby and market-wrapping of bare
+  // packages come with it. No tap config = a display-only shelf.
+  const openOnTv = (entry: FeedEntry) => {
+    if (edit || !tap?.remote_id) return;
+    const activity = entry.deep_link ?? tap.activity;
+    if (activity) void sendRemoteCommand(tap.remote_id, { launch_app: { activity } });
+  };
+
+  const label = (cfg.name as string) || (cfg.library_name as string) || "";
+  // Two arrangements of the same tiles: the poster shelf (one row of covers)
+  // and a vertical list (thumb + text rows) for tall, narrow placements.
+  const vertical = cfg.layout === "column";
+  const message = failed && entries === null ? "Feed unavailable" : entries === null ? "Loading…" : entries.length === 0 ? "Nothing new" : null;
+  return (
+    <Plate accents={[color.violet]} on style={{ gap: "clamp(3px, 1.5cqmin, 10px)" }}>
+      {cfg.hide_header !== true && (
+        <span style={{ ...TILE_LABEL, position: "relative", color: T.text, fontSize: "clamp(0.62rem, 4.5cqmin, 0.95rem)" }}>
+          Recently added{label ? ` · ${label}` : ""}
+        </span>
+      )}
+      {message ? (
+        <div style={{ position: "relative", flex: 1, display: "grid", placeItems: "center", color: T.faint, fontSize: "0.78rem" }}>
+          {message}
+        </div>
+      ) : (
+        (() => {
+          // With overflow loaded, exactly `shown` tiles are sized to the box
+          // and the rest continue past its edge in a scrollable track (drag on
+          // mouse, native pan on touch). Without it, the old fit-everything grid.
+          const scrolls = (entries?.length ?? 0) > shown;
+          const gap = "clamp(6px, 2.5cqmin, 16px)";
+          const track = `calc((100% - ${shown - 1} * ${gap}) / ${shown})`;
+          return (
+            <div
+              onPointerDown={(e) => {
+                // Always reset first: a press is the start of a fresh gesture,
+                // so an aborted drag's `moved` can never suppress a later tap.
+                dragState.current = null;
+                if (!scrolls || e.pointerType !== "mouse") return;
+                const el = e.currentTarget;
+                dragState.current = { x: e.clientX, y: e.clientY, sl: el.scrollLeft, st: el.scrollTop, moved: false };
+              }}
+              onPointerMove={(e) => {
+                const d = dragState.current;
+                if (!d || e.pointerType !== "mouse" || e.buttons === 0) return;
+                const dx = e.clientX - d.x;
+                const dy = e.clientY - d.y;
+                if (Math.abs(dx) + Math.abs(dy) > 5) d.moved = true;
+                const el = e.currentTarget;
+                if (vertical) el.scrollTop = d.st - dy;
+                else el.scrollLeft = d.sl - dx;
+              }}
+              onClickCapture={(e) => {
+                // A drag that ends over a tile must browse, not launch.
+                if (dragState.current?.moved) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                }
+                dragState.current = null;
+              }}
+              style={{
+                position: "relative",
+                flex: 1,
+                minHeight: 0,
+                display: "grid",
+                ...(scrolls
+                  ? vertical
+                    ? { gridAutoFlow: "row" as const, gridAutoRows: track, overflowY: "auto" as const, overflowX: "hidden" as const, touchAction: "pan-y" }
+                    : { gridAutoFlow: "column" as const, gridAutoColumns: track, overflowX: "auto" as const, overflowY: "hidden" as const, touchAction: "pan-x" }
+                  : {
+                      overflow: "hidden" as const,
+                      ...(vertical
+                        ? { gridTemplateRows: `repeat(${Math.max(1, entries?.length ?? 1)}, minmax(0, 1fr))` }
+                        : { gridTemplateColumns: `repeat(${Math.max(1, entries?.length ?? 1)}, minmax(0, 1fr))` }),
+                    }),
+                gap,
+                padding: "clamp(2px, 1cqmin, 8px)",
+                scrollbarWidth: scrolls ? ("none" as const) : undefined,
+              }}
+            >
+              {(entries ?? []).map((e) => (
+                <FeedTile
+                  key={e.id}
+                  providerId={providerId!}
+                  entry={e}
+                  vertical={vertical}
+                  tappable={!edit && !!tap?.remote_id}
+                  onOpen={openOnTv}
+                />
+              ))}
+            </div>
+          );
+        })()
+      )}
+    </Plate>
+  );
+}
+
+/** One feed tile: cover art (2:3, proxied + downscaled server-side) with
+ * title / subtitle / added-time lines — stacked under the poster on the shelf,
+ * beside a thumb in the vertical list. Becomes a button when the widget has a
+ * tap target. */
+function FeedTile({
+  providerId,
+  entry,
+  vertical,
+  tappable,
+  onOpen,
+}: {
+  providerId: string;
+  entry: FeedEntry;
+  vertical: boolean;
+  tappable: boolean;
+  onOpen: (entry: FeedEntry) => void;
+}) {
+  const [imgFailed, setImgFailed] = useState(false);
+  const Tag: "button" | "div" = tappable ? "button" : "div";
+  const poster = (
+    <div
+      style={{
+        position: "relative",
+        borderRadius: radius.md,
+        overflow: "hidden",
+        border: `1px solid ${T.border}`,
+        background: alpha(color.violet, 0.06),
+        // Shelf: the poster takes the tile's spare height at its natural 2:3.
+        // List: rows are short, so a 2:3 box goes needle-thin — a SQUARE box
+        // instead, with the cover-crop trimming the poster's top/bottom, reads
+        // half again wider without costing the row any height.
+        ...(vertical ? { height: "100%", aspectRatio: "1 / 1", flexShrink: 0 } : { flex: 1, minHeight: 0 }),
+      }}
+    >
+      {entry.image_path && !imgFailed ? (
+        <img
+          src={feedImageUrl(providerId, entry.image_path, 240, 360)}
+          alt=""
+          loading="lazy"
+          draggable={false}
+          onError={() => setImgFailed(true)}
+          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }}
+        />
+      ) : (
+        <span
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "grid",
+            placeItems: "center",
+            color: T.faint,
+            fontSize: "clamp(20px, 14cqmin, 48px)",
+            lineHeight: 0,
+          }}
+        >
+          <Glyph name="tv" size="1em" />
+        </span>
+      )}
+    </div>
+  );
+  return (
+    <Tag
+      onClick={tappable ? () => onOpen(entry) : undefined}
+      title={tappable ? `Open ${entry.title} on the TV` : entry.title}
+      style={{
+        display: "flex",
+        flexDirection: vertical ? "row" : "column",
+        alignItems: vertical ? "stretch" : undefined,
+        gap: vertical ? "clamp(6px, 2cqmin, 12px)" : "clamp(2px, 1cqmin, 6px)",
+        minWidth: 0,
+        minHeight: 0,
+        background: "none",
+        border: "none",
+        padding: 0,
+        font: "inherit",
+        color: "inherit",
+        textAlign: "left",
+        cursor: tappable ? "pointer" : "default",
+      }}
+    >
+      {poster}
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: vertical ? "center" : undefined,
+          gap: vertical ? "clamp(1px, 0.6cqmin, 4px)" : "clamp(2px, 1cqmin, 6px)",
+          minWidth: 0,
+        }}
+      >
+        <span style={{ ...ELLIPSIS, maxWidth: "100%", fontWeight: 600, color: T.text, fontSize: "clamp(0.6rem, 4.2cqmin, 0.9rem)" }}>
+          {entry.title}
+        </span>
+        <span style={{ ...ELLIPSIS, maxWidth: "100%", color: T.dim, fontSize: "clamp(0.55rem, 3.6cqmin, 0.8rem)" }}>
+          {entry.subtitle ? `${entry.subtitle} · ` : ""}
+          {timeAgo(entry.added_at)}
+        </span>
+      </div>
+    </Tag>
+  );
+}
+
 // ── Board create / edit: name + aspect ratio ──────────────────────────────────
 
 const ASPECT_PRESETS = ["16:9", "16:10", "18.5:9", "4:3", "3:2", "21:9", "1:1", "9:16"];
@@ -3059,6 +3323,42 @@ function WidgetEditorModal({
   const [labelAlign, setLabelAlign] = useState<string>((cfg.align as string) ?? "left");
   const [labelValign, setLabelValign] = useState<string>((cfg.valign as string) ?? "middle");
 
+  // feed (recently added) — source + library are loaded live from the feed
+  // API; the optional tap target reuses the remote fleet + per-TV app catalog.
+  const [feedSources, setFeedSources] = useState<FeedSource[]>([]);
+  const [feedSource, setFeedSource] = useState<string>(
+    existing?.type === "feed" ? ((cfg.provider_id as string) ?? "") : "",
+  );
+  const [feedLibs, setFeedLibs] = useState<FeedLibrary[]>([]);
+  const [feedLibrary, setFeedLibrary] = useState<string>((cfg.library_id as string) ?? "");
+  const [feedLimit, setFeedLimit] = useState<string>(String((cfg.limit as number) ?? 6));
+  const [feedOverflow, setFeedOverflow] = useState<string>(String((cfg.overflow as number) ?? 0));
+  const [feedLayout, setFeedLayout] = useState<string>((cfg.layout as string) ?? "shelf");
+  const feedTapCfg = (cfg.tap ?? null) as { remote_id?: string; app?: string } | null;
+  const [feedRemotes, setFeedRemotes] = useState<RemoteDevice[]>([]);
+  const [feedTapRemote, setFeedTapRemote] = useState<string>(feedTapCfg?.remote_id ?? "");
+  const [feedApps, setFeedApps] = useState<RemoteApp[]>([]);
+  const [feedTapApp, setFeedTapApp] = useState<string>(feedTapCfg?.app ?? "");
+  useEffect(() => {
+    if (type !== "feed") return;
+    getFeedSources().then((s) => {
+      setFeedSources(s);
+      setFeedSource((cur) => cur || (s[0]?.id ?? ""));
+    });
+    getRemoteDevices().then((r) => setFeedRemotes(pickableRemotes(r)));
+  }, [type]);
+  useEffect(() => {
+    if (type !== "feed" || !feedSource) return;
+    getFeedLibraries(feedSource).then(setFeedLibs);
+  }, [type, feedSource]);
+  useEffect(() => {
+    if (type !== "feed" || !feedTapRemote) {
+      setFeedApps([]);
+      return;
+    }
+    getRemoteApps(feedTapRemote).then(setFeedApps);
+  }, [type, feedTapRemote]);
+
   // sensor — "<provider_id>|<device_id>" composite + the control key.
   const [sensorDev, setSensorDev] = useState<string>(
     cfg.provider_id && cfg.device_id ? `${cfg.provider_id}|${cfg.device_id}` : "",
@@ -3105,7 +3405,7 @@ function WidgetEditorModal({
     d === "light" ? selLights : d === "power" ? selPower : selMedia;
 
   // The tile widgets whose layout is header row + control body.
-  const headerHideable = type === "device" || type === "group" || type === "now_playing" || type === "room";
+  const headerHideable = type === "device" || type === "group" || type === "now_playing" || type === "room" || type === "feed";
 
   function save() {
     const nm = name.trim() || undefined;
@@ -3199,6 +3499,36 @@ function WidgetEditorModal({
       const [pid, did] = sensorDev.split("|");
       if (!pid || !did) return;
       onSave({ type, config: { provider_id: pid, device_id: did, name: nm }, w: 12, h: 8 });
+    } else if (type === "feed") {
+      if (!feedSource || !feedLibrary) return;
+      // `activity` is what a tap actually launches when an item carries no
+      // deep link: the catalog's vendor launch URI when known, else the bare
+      // package (the remote plane market-wraps those itself).
+      const app = feedApps.find((a) => a.package === feedTapApp);
+      onSave({
+        type,
+        config: {
+          provider_id: feedSource,
+          library_id: feedLibrary,
+          library_name:
+            feedLibs.find((l) => l.id === feedLibrary)?.name ?? (cfg.library_name as string),
+          limit: Math.max(1, Math.min(Number(feedLimit) || 6, 12)),
+          ...(Number(feedOverflow) > 0 ? { overflow: Number(feedOverflow) } : {}),
+          name: nm,
+          ...(feedLayout === "column" ? { layout: "column" } : {}),
+          ...(feedTapRemote
+            ? {
+                tap: {
+                  remote_id: feedTapRemote,
+                  ...(feedTapApp ? { app: feedTapApp, activity: app?.activity ?? feedTapApp } : {}),
+                },
+              }
+            : {}),
+        },
+        // Default footprint fits the arrangement: wide shelf vs tall column.
+        w: feedLayout === "column" ? 10 : 24,
+        h: feedLayout === "column" ? 20 : 10,
+      });
     } else if (type === "clock") {
       onSave({ type, config: { format: clockFormat, scale: Number(clockScale) || 1, name: nm }, w: 12, h: 8 });
     } else if (type === "label") {
@@ -3212,11 +3542,28 @@ function WidgetEditorModal({
     <Modal title={existing ? "Configure widget" : "Add widget"} onClose={onClose} width={460}>
       {!existing && (
         <Field label="Type">
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem" }}>
-            {(["room", "device", "button", "group", "now_playing", "scene", "macro", "control", "sensor", "device_status", "weather", "clock", "label"] as WidgetType[]).map((t) => (
-              <button key={t} onClick={() => setType(t)} style={{ ...CHIP, ...(type === t ? CHIP_ON : {}) }}>
-                {WIDGET_LABELS[t]}
-              </button>
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+            {WIDGET_GROUPS.map((g) => (
+              <div key={g.label}>
+                <div
+                  style={{
+                    fontSize: "0.62rem",
+                    color: T.faint,
+                    textTransform: "uppercase",
+                    letterSpacing: "0.09em",
+                    marginBottom: "0.28rem",
+                  }}
+                >
+                  {g.label}
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem" }}>
+                  {g.types.map((t) => (
+                    <button key={t} onClick={() => setType(t)} style={{ ...CHIP, ...(type === t ? CHIP_ON : {}) }}>
+                      {WIDGET_LABELS[t]}
+                    </button>
+                  ))}
+                </div>
+              </div>
             ))}
           </div>
         </Field>
@@ -3551,6 +3898,88 @@ function WidgetEditorModal({
         </Field>
       )}
 
+      {type === "feed" && (
+        <>
+          <Field label="Source">
+            <Select
+              value={feedSource}
+              onChange={(v) => { setFeedSource(v); setFeedLibrary(""); }}
+              options={feedSources.map((s) => ({ value: s.id, label: `${s.name} (${s.type_name})` }))}
+              placeholder={
+                feedSources.length
+                  ? "Choose a source"
+                  : "No feed sources — add one under Settings → Providers"
+              }
+            />
+          </Field>
+          <Field label="Library">
+            <Select
+              value={feedLibrary}
+              onChange={setFeedLibrary}
+              options={feedLibs.map((l) => ({ value: l.id, label: l.name }))}
+              placeholder={
+                !feedSource
+                  ? "Pick a source first"
+                  : feedLibs.length
+                    ? "Choose a library"
+                    : "Loading libraries…"
+              }
+            />
+          </Field>
+          <Field label="Layout">
+            <Segmented
+              value={feedLayout}
+              onChange={setFeedLayout}
+              options={[
+                { value: "shelf", label: "Poster shelf" },
+                { value: "column", label: "Vertical list" },
+              ]}
+            />
+          </Field>
+          <Field label="Items shown">
+            <Segmented
+              value={feedLimit}
+              onChange={setFeedLimit}
+              options={["4", "5", "6", "8", "10", "12"].map((v) => ({ value: v, label: v }))}
+            />
+          </Field>
+          <Field label="More on scroll (drag the shelf to reveal them)">
+            <Segmented
+              value={feedOverflow}
+              onChange={setFeedOverflow}
+              options={[
+                { value: "0", label: "Off" },
+                { value: "6", label: "+6" },
+                { value: "12", label: "+12" },
+                { value: "24", label: "+24" },
+              ]}
+            />
+          </Field>
+          <Field label="Tapping a poster">
+            <Select
+              value={feedTapRemote}
+              onChange={(v) => { setFeedTapRemote(v); setFeedTapApp(""); }}
+              options={[
+                { value: "", label: "Does nothing (display only)" },
+                ...feedRemotes.map((r) => ({ value: r.id, label: `Opens it on ${r.name}` })),
+              ]}
+            />
+          </Field>
+          {feedTapRemote && (
+            <Field label="App to open (fallback when an item has no direct link)">
+              <Select
+                value={feedTapApp}
+                onChange={setFeedTapApp}
+                options={feedApps.map((a) => ({ value: a.package, label: a.name }))}
+                placeholder={
+                  feedApps.length ? "Choose the app" : "No apps known for this TV yet"
+                }
+              />
+            </Field>
+          )}
+        </>
+      )}
+
       {type === "clock" && (
         <>
           <Field label="Format">
@@ -3732,6 +4161,16 @@ function EmptyState({ onCreate, text, cta = "+ Create board" }: { onCreate: () =
   );
 }
 
+/** The Add-widget type picker's sections — every addable WidgetType (all but
+ * the built-in `exit`) appears in exactly one group. */
+const WIDGET_GROUPS: { label: string; types: WidgetType[] }[] = [
+  { label: "Controls", types: ["room", "device", "group", "button", "control"] },
+  { label: "Actions", types: ["scene", "macro"] },
+  { label: "Media", types: ["now_playing", "feed"] },
+  { label: "Readings", types: ["sensor", "device_status", "weather"] },
+  { label: "Display", types: ["clock", "label"] },
+];
+
 const WIDGET_LABELS: Record<WidgetType, string> = {
   room: "Room",
   device: "Device tile",
@@ -3746,6 +4185,7 @@ const WIDGET_LABELS: Record<WidgetType, string> = {
   weather: "Weather",
   clock: "Clock",
   label: "Label / heading",
+  feed: "Recently added",
   exit: "Exit",
 };
 

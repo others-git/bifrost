@@ -13364,3 +13364,355 @@ async fn segments_on_provider_without_support_returns_502() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 }
+
+// ── Content feeds (recently-added widget) ────────────────────────────────────
+
+#[tokio::test]
+async fn feeds_routes_without_session_return_401() {
+    let app = helpers::test_app_with_password().await;
+    for uri in [
+        "/api/feeds/sources",
+        "/api/feeds/some-id/libraries",
+        "/api/feeds/some-id/recent?library=1",
+        "/api/feeds/some-id/image?path=%2Fx",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{uri}");
+    }
+}
+
+/// Stand up the app with a Plex feed source added through the real
+/// add-provider flow (so the credential encrypt/build path is exercised),
+/// pointed at a wiremock Plex server. Returns (app, cookie, provider_id).
+async fn app_with_plex(server_uri: &str) -> (Router, String, String) {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/providers",
+            &cookie,
+            &format!(
+                r#"{{"name":"Plex","provider_type":"plex","credentials":{{"host":"{server_uri}","token":"tok"}}}}"#
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED, "add plex provider");
+    let body = helpers::response_json(resp).await;
+    let id = body["id"].as_str().unwrap().to_string();
+    (app, cookie, id)
+}
+
+#[tokio::test]
+async fn feed_provider_type_is_offered_and_addable() {
+    use wiremock::MockServer;
+    let server = MockServer::start().await;
+    let (app, cookie, id) = app_with_plex(&server.uri()).await;
+
+    // The add menu lists plex under its own "feed" kind…
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/providers/types", &cookie))
+        .await
+        .unwrap();
+    let types = helpers::response_json(resp).await;
+    let plex = types
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["provider_type"] == "plex")
+        .expect("plex in /api/providers/types");
+    assert_eq!(plex["kind"], "feed");
+
+    // …the configured row reads as domain "feed"…
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/providers", &cookie))
+        .await
+        .unwrap();
+    let rows = helpers::response_json(resp).await;
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id.as_str())
+        .expect("plex row listed");
+    assert_eq!(row["domain"], "feed");
+
+    // …and with no manager it still reports operational, not broken.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get(
+            &format!("/api/providers/{id}/status"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    let status = helpers::response_json(resp).await;
+    assert_eq!(status["state"], "ready");
+
+    // The feed source appears in the widget config's source list.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/feeds/sources", &cookie))
+        .await
+        .unwrap();
+    let sources = helpers::response_json(resp).await;
+    let src = sources.as_array().unwrap();
+    assert_eq!(src.len(), 1);
+    assert_eq!(src[0]["id"], id.as_str());
+    assert_eq!(src[0]["type_name"], "Plex");
+}
+
+#[tokio::test]
+async fn feed_libraries_and_recent_serve_rolled_up_tiles() {
+    use wiremock::matchers::{header as h, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            serde_json::json!({ "MediaContainer": { "machineIdentifier": "m-int" } }),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/library/sections"))
+        .and(h("X-Plex-Token", "tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "MediaContainer": { "Directory": [
+                { "key": "2", "title": "TV Shows", "type": "show" },
+            ]}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/library/sections/2/recentlyAdded"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "MediaContainer": { "Metadata": [
+                { "ratingKey": "10", "type": "episode", "title": "Ep A",
+                  "grandparentTitle": "Show X", "grandparentRatingKey": "1",
+                  "grandparentThumb": "/library/metadata/1/thumb/1",
+                  "parentIndex": 1, "index": 3, "addedAt": 300 },
+                { "ratingKey": "11", "type": "episode", "title": "Ep B",
+                  "grandparentTitle": "Show X", "grandparentRatingKey": "1",
+                  "grandparentThumb": "/library/metadata/1/thumb/1",
+                  "parentIndex": 1, "index": 2, "addedAt": 200 },
+                { "ratingKey": "12", "type": "movie", "title": "Solo Film",
+                  "thumb": "/library/metadata/12/thumb/1", "year": 2024, "addedAt": 250 },
+            ]}
+        })))
+        .mount(&server)
+        .await;
+
+    let (app, cookie, id) = app_with_plex(&server.uri()).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get(
+            &format!("/api/feeds/{id}/libraries"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let libs = helpers::response_json(resp).await;
+    assert_eq!(libs[0]["name"], "TV Shows");
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get(
+            &format!("/api/feeds/{id}/recent?library=2&limit=6"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let entries = helpers::response_json(resp).await;
+    let entries = entries.as_array().unwrap();
+    // Two episodes of Show X collapse into one tile (newest first), the
+    // movie stays its own tile between them by timestamp.
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["title"], "Show X");
+    assert_eq!(entries[0]["count"], 2);
+    assert_eq!(entries[0]["subtitle"], "2 new episodes");
+    assert_eq!(entries[1]["title"], "Solo Film");
+    assert_eq!(entries[1]["count"], 1);
+}
+
+#[tokio::test]
+async fn feed_image_proxy_serves_bytes_and_contains_paths() {
+    use wiremock::matchers::{header as h, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/library/metadata/1/thumb/1"))
+        .and(h("X-Plex-Token", "tok"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(b"posterbytes".to_vec())
+                .insert_header("content-type", "image/jpeg"),
+        )
+        .mount(&server)
+        .await;
+
+    let (app, cookie, id) = app_with_plex(&server.uri()).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get(
+            &format!("/api/feeds/{id}/image?path=%2Flibrary%2Fmetadata%2F1%2Fthumb%2F1"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CONTENT_TYPE).unwrap(),
+        "image/jpeg"
+    );
+    assert!(
+        resp.headers()
+            .get(header::CACHE_CONTROL)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("immutable")
+    );
+    let bytes = http_body_util::BodyExt::collect(resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    assert_eq!(bytes.as_ref(), b"posterbytes");
+
+    // An absolute or protocol-relative path must be rejected before any fetch
+    // — the proxy joins onto the provider's own base URL only (no SSRF).
+    for bad in ["http%3A%2F%2Fevil.example%2Fx", "%2F%2Fevil.example%2Fx"] {
+        let resp = app
+            .clone()
+            .oneshot(helpers::authed_get(
+                &format!("/api/feeds/{id}/image?path={bad}"),
+                &cookie,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{bad}");
+    }
+}
+
+#[tokio::test]
+async fn feed_recent_on_unknown_provider_returns_404() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get(
+            "/api/feeds/nope/recent?library=1",
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn plex_pair_flow_mints_a_code_then_polls_to_a_token() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let plex_tv = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/pins"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .set_body_json(serde_json::json!({ "id": 42, "code": "WXYZ", "authToken": null })),
+        )
+        .mount(&plex_tv)
+        .await;
+    // First poll: still pending; second: linked.
+    Mock::given(method("GET"))
+        .and(path("/api/v2/pins/42"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "id": 42, "code": "WXYZ", "authToken": null })),
+        )
+        .up_to_n_times(1)
+        .mount(&plex_tv)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/pins/42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            serde_json::json!({ "id": 42, "code": "WXYZ", "authToken": "linked-token" }),
+        ))
+        .mount(&plex_tv)
+        .await;
+
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Unauthenticated → 401 (the code mints nothing without a session).
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers/plex/pair")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Begin: mints the code the user types at plex.tv/link.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/providers/plex/pair",
+            &cookie,
+            &format!(r#"{{"base":"{}"}}"#, plex_tv.uri()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["status"], "code_displayed");
+    assert_eq!(body["code"], "WXYZ");
+    let pin_id = body["pin_id"].as_i64().unwrap();
+    let client_id = body["client_id"].as_str().unwrap().to_string();
+
+    // Poll: pending until the user enters the code…
+    let poll_body = format!(
+        r#"{{"base":"{}","pin_id":{pin_id},"client_id":"{client_id}"}}"#,
+        plex_tv.uri()
+    );
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/providers/plex/pair",
+            &cookie,
+            &poll_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(helpers::response_json(resp).await["status"], "pending");
+
+    // …then the account token arrives, ready to store as the `token` credential.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/providers/plex/pair",
+            &cookie,
+            &poll_body,
+        ))
+        .await
+        .unwrap();
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["status"], "paired");
+    assert_eq!(body["token"], "linked-token");
+}
