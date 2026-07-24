@@ -1,6 +1,9 @@
 //! Content feeds API — "recently added" items from a feed source (Plex today),
-//! serving the Boards feed widget. Session-gated UI data, like the dashboards
-//! it feeds. Nothing is persisted: reads are live against the source, behind a
+//! serving the Boards feed widget. Gated like the dashboards it feeds, plus a
+//! paired kiosk's `bfr_key` cookie ([`SessionOrKiosk`]) — a wall fixture whose
+//! minted session lapsed must keep its posters (the kiosk speaks only to
+//! Bifrost; posters exist only through the proxy here).
+//! Nothing is persisted: reads are live against the source, behind a
 //! short response cache so a wall of kiosks polling the same widget doesn't
 //! hammer the server. Grouping (episodes → one show tile) happens HERE via the
 //! shared [`crate::models::feed::rollup`], so every source inherits it.
@@ -11,7 +14,7 @@
 //! so the proxy can't be steered at another host.
 
 use crate::AppState;
-use crate::api::auth::Session;
+use crate::api::auth::SessionOrKiosk;
 use crate::models::feed::{FeedEntry, rollup};
 use crate::providers::FeedProvider;
 use axum::{
@@ -55,7 +58,7 @@ struct FeedSource {
     type_name: String,
 }
 
-async fn list_sources(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
+async fn list_sources(State(state): State<Arc<AppState>>, _: SessionOrKiosk) -> impl IntoResponse {
     let rows = sqlx::query(
         "SELECT id, provider_type, name FROM providers WHERE enabled = 1 ORDER BY display_order, created_at",
     )
@@ -122,7 +125,7 @@ async fn build_feed_provider(
 
 async fn list_libraries(
     State(state): State<Arc<AppState>>,
-    _: Session,
+    _: SessionOrKiosk,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let provider = match build_feed_provider(&state, &id).await {
@@ -153,7 +156,7 @@ static RECENT_CACHE: std::sync::OnceLock<RecentCache> = std::sync::OnceLock::new
 
 async fn recent(
     State(state): State<Arc<AppState>>,
-    _: Session,
+    _: SessionOrKiosk,
     Path(id): Path<String>,
     Query(q): Query<RecentQuery>,
 ) -> impl IntoResponse {
@@ -206,7 +209,7 @@ struct ImageQuery {
 /// version stamp, so a given path's bytes never change.
 async fn image(
     State(state): State<Arc<AppState>>,
-    _: Session,
+    _: SessionOrKiosk,
     Path(id): Path<String>,
     Query(q): Query<ImageQuery>,
 ) -> impl IntoResponse {

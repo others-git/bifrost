@@ -13716,3 +13716,105 @@ async fn plex_pair_flow_mints_a_code_then_polls_to_a_token() {
     assert_eq!(body["status"], "paired");
     assert_eq!(body["token"], "linked-token");
 }
+
+#[tokio::test]
+async fn feeds_accept_a_kiosk_key_cookie_without_a_session() {
+    // A wall kiosk renders the feed widget with only its `bfr_key` cookie once
+    // its minted session lapses — the poster proxy and feed reads must keep
+    // working off the key alone (the kiosk speaks only to Bifrost, so a 401
+    // here blanks every poster on the wall).
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/api-keys",
+            &cookie,
+            r#"{"name":"kiosk"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let key = helpers::response_json(resp).await["key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let with_key_cookie = |uri: &str, k: &str| {
+        Request::builder()
+            .uri(uri)
+            .header(header::COOKIE, format!("bfr_key={k}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    // Key cookie alone (no session) → authorized.
+    let resp = app
+        .clone()
+        .oneshot(with_key_cookie("/api/feeds/sources", &key))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // A bogus key is still rejected.
+    let resp = app
+        .clone()
+        .oneshot(with_key_cookie("/api/feeds/sources", "bfr_not_a_real_key"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn dashboard_changes_announce_on_the_inventory_stream() {
+    // Board edits ride the shared SSE stream (payload "dashboards") so an open
+    // Boards view — a wall kiosk above all — re-reads the layout live instead
+    // of holding the stale board until someone navigates away and back.
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let mut rx = state.inventory_events.subscribe();
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/dashboards",
+            &cookie,
+            r#"{"name":"Wall"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let board_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(rx.recv().await.unwrap(), "dashboards", "create announces");
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/dashboards/{board_id}"),
+            &cookie,
+            r#"{"widgets":[{"id":"w1","type":"clock","x":0,"y":0,"w":8,"h":6,"config":{}}]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        rx.recv().await.unwrap(),
+        "dashboards",
+        "layout save announces"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_delete(
+            &format!("/api/dashboards/{board_id}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(rx.recv().await.unwrap(), "dashboards", "delete announces");
+}

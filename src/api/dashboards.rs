@@ -118,18 +118,21 @@ async fn create_handler(
     .execute(&state.db)
     .await
     {
-        Ok(_) => (
-            StatusCode::CREATED,
-            Json(Dashboard {
-                id,
-                name: name.to_string(),
-                position,
-                aspect,
-                background: serde_json::Value::Null,
-                widgets: Vec::new(),
-            }),
-        )
-            .into_response(),
+        Ok(_) => {
+            crate::api::notify_inventory(&state, "dashboards");
+            (
+                StatusCode::CREATED,
+                Json(Dashboard {
+                    id,
+                    name: name.to_string(),
+                    position,
+                    aspect,
+                    background: serde_json::Value::Null,
+                    widgets: Vec::new(),
+                }),
+            )
+                .into_response()
+        }
         Err(e) => {
             tracing::error!("db error creating dashboard: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -239,6 +242,9 @@ async fn update_handler(
             .execute(&state.db)
             .await;
     }
+    // Announce the change so every open Boards view — a wall kiosk above all —
+    // re-reads the board live instead of showing a stale layout until reload.
+    crate::api::notify_inventory(&state, "dashboards");
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -283,7 +289,10 @@ async fn put_bg_media(
         .execute(&state.db)
         .await
     {
-        Ok(r) if r.rows_affected() > 0 => StatusCode::NO_CONTENT.into_response(),
+        Ok(r) if r.rows_affected() > 0 => {
+            crate::api::notify_inventory(&state, "dashboards");
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(_) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => {
             tracing::error!("db error storing board background media: {e}");
@@ -337,6 +346,7 @@ async fn delete_bg_media(
         .bind(&id)
         .execute(&state.db)
         .await;
+    crate::api::notify_inventory(&state, "dashboards");
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -349,6 +359,7 @@ async fn delete_handler(
         .bind(&id)
         .execute(&state.db)
         .await;
+    crate::api::notify_inventory(&state, "dashboards");
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -370,5 +381,6 @@ async fn reorder_handler(
             .execute(&state.db)
             .await;
     }
+    crate::api::notify_inventory(&state, "dashboards");
     StatusCode::NO_CONTENT.into_response()
 }

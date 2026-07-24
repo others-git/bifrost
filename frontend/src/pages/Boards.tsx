@@ -293,14 +293,26 @@ export function BoardsPage() {
     });
   }, []);
 
+  // The SSE listener below must know whether we're editing without re-opening
+  // the stream on every toggle — a board reload mid-drag would clobber the
+  // user's in-progress layout, so remote board changes wait until Done.
+  const editRef = useRef(edit);
+  useEffect(() => { editRef.current = edit; }, [edit]);
+
   // Live device state via the shared `/api/events` SSE stream (instant push, same
   // as the Control page) — plus a slow poll for generic readouts (sensors), which
   // aren't pushed. Keeps an always-on wall display current without stale lag.
   useEffect(() => {
     const es = new EventSource("/api/events");
     // Inventory changes (rename/glyph/room/enable) refetch the device lists so
-    // widget labels stay current without a reload.
-    es.addEventListener("inventory", () => { reloadDevices(); });
+    // widget labels stay current without a reload. Board edits announce
+    // themselves on the same stream (payload "dashboards"): a kiosk showing a
+    // board picks up layout changes made from any other client live, instead
+    // of holding the stale board until someone exits and re-enters.
+    es.addEventListener("inventory", (raw) => {
+      reloadDevices();
+      if ((raw as MessageEvent).data === "dashboards" && !editRef.current) reloadBoards();
+    });
     es.addEventListener("light_state", (raw) => {
       const { device_id, patch } = JSON.parse((raw as MessageEvent).data) as {
         device_id: string;
@@ -2712,6 +2724,10 @@ function FeedWidget({ cfg, edit }: { cfg: Record<string, unknown>; edit: boolean
   const tap = (cfg.tap ?? null) as { remote_id?: string; activity?: string } | null;
   const [entries, setEntries] = useState<FeedEntry[] | null>(null);
   const [failed, setFailed] = useState(false);
+  // Bumped on every successful poll: tiles re-attempt a poster that failed to
+  // load, so a transient hiccup (kiosk boot races, a slow proxy fetch) costs
+  // one poll cycle, not the poster forever.
+  const [gen, setGen] = useState(0);
   // Mouse drag-to-scroll bookkeeping (touch scrolls natively via touchAction).
   // `moved` suppresses the click a drag would otherwise end in, so browsing
   // the overflow can never accidentally fire the tap-to-open-on-TV action.
@@ -2724,7 +2740,10 @@ function FeedWidget({ cfg, edit }: { cfg: Record<string, unknown>; edit: boolean
       getFeedRecent(providerId, libraryId, limit).then((e) => {
         if (!live) return;
         setFailed(e === null);
-        if (e !== null) setEntries(e);
+        if (e !== null) {
+          setEntries(e);
+          setGen((g) => g + 1);
+        }
       });
     load();
     const t = setInterval(load, FEED_POLL_MS);
@@ -2818,6 +2837,7 @@ function FeedWidget({ cfg, edit }: { cfg: Record<string, unknown>; edit: boolean
                   key={e.id}
                   providerId={providerId!}
                   entry={e}
+                  gen={gen}
                   vertical={vertical}
                   tappable={!edit && !!tap?.remote_id}
                   onOpen={openOnTv}
@@ -2838,17 +2858,24 @@ function FeedWidget({ cfg, edit }: { cfg: Record<string, unknown>; edit: boolean
 function FeedTile({
   providerId,
   entry,
+  gen,
   vertical,
   tappable,
   onOpen,
 }: {
   providerId: string;
   entry: FeedEntry;
+  /** Poll generation — a failed poster re-attempts when it changes. */
+  gen: number;
   vertical: boolean;
   tappable: boolean;
   onOpen: (entry: FeedEntry) => void;
 }) {
   const [imgFailed, setImgFailed] = useState(false);
+  // A load failure hides the img (broken-image glyphs read as damage), but only
+  // until the next poll — permanent give-up turned one transient error at kiosk
+  // boot into a poster that never appeared.
+  useEffect(() => { setImgFailed(false); }, [gen]);
   const Tag: "button" | "div" = tappable ? "button" : "div";
   const poster = (
     <div
@@ -2865,11 +2892,14 @@ function FeedTile({
         ...(vertical ? { height: "100%", aspectRatio: "1 / 1", flexShrink: 0 } : { flex: 1, minHeight: 0 }),
       }}
     >
+      {/* Eager, not `loading="lazy"`: a lazy image in a box that transiently
+          computes zero size (kiosk WebView, container-query layout settling)
+          can be deferred indefinitely — and a board shows a handful of small
+          thumbs, so laziness buys nothing. */}
       {entry.image_path && !imgFailed ? (
         <img
           src={feedImageUrl(providerId, entry.image_path, 240, 360)}
           alt=""
-          loading="lazy"
           draggable={false}
           onError={() => setImgFailed(true)}
           style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }}

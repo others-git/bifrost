@@ -159,6 +159,36 @@ impl FromRequestParts<Arc<AppState>> for Session {
     }
 }
 
+/// Request extractor admitting an authenticated session **or** a paired
+/// kiosk's `bfr_key` cookie (validated exactly like a public-API Bearer key,
+/// so it grants nothing the key doesn't already have). For read surfaces a
+/// wall kiosk renders directly (the feed widget's data + poster proxy): the
+/// kiosk talks only to Bifrost, and its *key* is its durable identity — the
+/// session it mints from that key can lapse mid-run, and a lapsed session
+/// must not blank a wall fixture that is still holding a valid key.
+pub struct SessionOrKiosk;
+
+impl FromRequestParts<Arc<AppState>> for SessionOrKiosk {
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        if require_session(state, &parts.headers).await.is_some() {
+            return Ok(SessionOrKiosk);
+        }
+        if let Some(key) = kiosk_cookie_key(&parts.headers)
+            && crate::api::apikeys::validate_key(state, &key)
+                .await
+                .is_some()
+        {
+            return Ok(SessionOrKiosk);
+        }
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
 fn extract_session(headers: &HeaderMap) -> Option<String> {
     extract_cookie(headers, SESSION_COOKIE)
 }
