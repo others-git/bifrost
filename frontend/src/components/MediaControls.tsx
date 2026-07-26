@@ -386,7 +386,11 @@ export function MediaEditor({
       ) : (
         <MediaControls device={device} onLocalPatch={onLocalPatch} />
       )}
-      {onSetEnabled && (
+      {/* No DisableRow under the AIO TV control: it sits right below the key
+          grid where a mis-tap silently disables the TV (and on the Scry tab
+          the whole surface is gestures). Disabling a TV lives on the Devices
+          page; plain audio devices keep the quiet footer link. */}
+      {onSetEnabled && !pairedRemoteId && (
         <DisableRow
           enabled={device.enabled !== false}
           onSetEnabled={(en) => { onSetEnabled(en); if (!en) onClose(); }}

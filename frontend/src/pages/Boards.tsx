@@ -2782,8 +2782,14 @@ function FeedWidget({ cfg, edit }: { cfg: Record<string, unknown>; edit: boolean
           // and the rest continue past its edge in a scrollable track (drag on
           // mouse, native pan on touch). Without it, the old fit-everything grid.
           const scrolls = (entries?.length ?? 0) > shown;
-          const gap = "clamp(6px, 2.5cqmin, 16px)";
-          const track = `calc((100% - ${shown - 1} * ${gap}) / ${shown})`;
+          // Scroll-mode track math is PLAIN px + % on purpose: a container-query
+          // unit inside the track `calc()` collapsed every tile to a sliver on
+          // the wall tablet's WebView (posters painted into 1px boxes — found
+          // via the kiosk screenshot tool). The non-scroll grid keeps the cqmin
+          // gap; the fixed 8px here is visually indistinguishable at tile scale.
+          const gapPx = 8;
+          const gap = scrolls ? `${gapPx}px` : "clamp(6px, 2.5cqmin, 16px)";
+          const track = `calc((100% - ${(shown - 1) * gapPx}px) / ${shown})`;
           return (
             <div
               onPointerDown={(e) => {
