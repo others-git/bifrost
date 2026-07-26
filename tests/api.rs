@@ -13859,3 +13859,126 @@ async fn api_responses_are_no_store_except_content_addressed_media() {
         "no-store"
     );
 }
+
+#[tokio::test]
+async fn kiosk_screenshot_roundtrips_and_gates() {
+    // The remote-eyes debug flow: controller sends the `screenshot` command,
+    // the kiosk uploads its capture (bfr_key cookie), the controller reads it
+    // back (session). One latest-wins image per kiosk.
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "wall tablet").await;
+
+    // Register the kiosk row.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/kiosks/checkin")
+                .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let kiosk_id = list[0]["id"].as_str().unwrap().to_string();
+    assert!(list[0]["screenshot_at"].is_null(), "no capture yet");
+
+    // The `screenshot` command is a valid controller command.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/kiosks/{kiosk_id}/command"),
+            &cookie,
+            r#"{"command":"screenshot"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Upload: kiosk key cookie + an image mime. A junk mime is refused.
+    let upload = |mime: &'static str, body: &'static [u8], with_key: bool| {
+        let mut b = Request::builder()
+            .method("POST")
+            .uri("/api/kiosks/self/screenshot")
+            .header(header::CONTENT_TYPE, mime);
+        if with_key {
+            b = b.header(header::COOKIE, format!("bfr_key={key}"));
+        }
+        b.body(Body::from(body)).unwrap()
+    };
+    let resp = app
+        .clone()
+        .oneshot(upload("image/jpeg", b"fakejpegbytes", true))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = app
+        .clone()
+        .oneshot(upload("text/html", b"<html>", true))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let resp = app
+        .clone()
+        .oneshot(upload("image/jpeg", b"x", false))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Read back (session): bytes + mime + captured-at header; list shows the stamp.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get(
+            &format!("/api/kiosks/{kiosk_id}/screenshot"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CONTENT_TYPE).unwrap(),
+        "image/jpeg"
+    );
+    assert!(resp.headers().get("x-captured-at").is_some());
+    assert_eq!(
+        resp.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store",
+        "a debug capture must never be cached"
+    );
+    let bytes = http_body_util::BodyExt::collect(resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    assert_eq!(bytes.as_ref(), b"fakejpegbytes");
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(!list[0]["screenshot_at"].is_null(), "capture stamp visible");
+
+    // Unauthed read → 401.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/kiosks/{kiosk_id}/screenshot"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}

@@ -1747,6 +1747,10 @@ export interface Kiosk {
   /** What the override does while a target is on: force the screen awake
    * ("keep_on", the default) or force it asleep ("keep_off"). */
   aware_override_mode: AwareOverrideMode;
+  /** When the latest debug screenshot was captured (null = none yet). The
+   * Clients view polls this after sending the `screenshot` command; the image
+   * itself is `GET /api/kiosks/{id}/screenshot`. */
+  screenshot_at: string | null;
 }
 
 export type AwareOverrideMode = "keep_on" | "keep_off";
@@ -1767,7 +1771,7 @@ export async function getKiosks(): Promise<Kiosk[]> {
   return res.json();
 }
 
-export type KioskCommandVerb = "sleep" | "wake" | "lock" | "update";
+export type KioskCommandVerb = "sleep" | "wake" | "lock" | "update" | "screenshot";
 
 /** Queue a command the kiosk performs on its next check-in. */
 export async function kioskCommand(id: string, command: KioskCommandVerb): Promise<void> {

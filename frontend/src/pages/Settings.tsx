@@ -2965,6 +2965,8 @@ function KiosksSection({
   // kioskId → target version we pushed, so the row can show "Updating…" until the
   // kiosk re-checks-in reporting that version (it goes offline mid-install).
   const [updating, setUpdating] = useState<Record<string, string>>({});
+  // Kiosk whose display is being remotely captured (the Screenshot modal).
+  const [screenshotKiosk, setScreenshotKiosk] = useState<Kiosk | null>(null);
   async function load() {
     setKiosks(await getKiosks());
   }
@@ -3158,6 +3160,15 @@ function KiosksSection({
                 Lock
               </Button>
               <Button
+                variant="ghost"
+                onClick={() => setScreenshotKiosk(k)}
+                disabled={!k.online || !k.authorized}
+                title="Pull a capture of what this kiosk is showing right now"
+                style={{ padding: "0.3rem 0.7rem", fontSize: "0.78rem" }}
+              >
+                Screenshot
+              </Button>
+              <Button
                 variant="danger"
                 onClick={() => deauth(k)}
                 disabled={!k.authorized}
@@ -3201,7 +3212,68 @@ function KiosksSection({
           </div>
         ))}
       </div>
+      {screenshotKiosk && (
+        <KioskScreenshotModal kiosk={screenshotKiosk} onClose={() => setScreenshotKiosk(null)} />
+      )}
     </section>
+  );
+}
+
+// ── Kiosk display screenshot (remote debugging eyes) ─────────────────────────
+
+/** Request a fresh capture of a kiosk's display and show it when it lands.
+ * On open: send the `screenshot` command, then poll the clients list until
+ * `screenshot_at` moves past the value we opened with — the kiosk app grabs
+ * its WebView and uploads via `POST /api/kiosks/self/screenshot`. The previous
+ * capture (if any) shows immediately while the fresh one is in flight. */
+function KioskScreenshotModal({ kiosk, onClose }: { kiosk: Kiosk; onClose: () => void }) {
+  const [capturedAt, setCapturedAt] = useState<string | null>(kiosk.screenshot_at);
+  const [status, setStatus] = useState<"waiting" | "ready" | "timeout">("waiting");
+
+  useEffect(() => {
+    let live = true;
+    const baseline = kiosk.screenshot_at;
+    kioskCommand(kiosk.id, "screenshot").catch(() => {});
+    const started = Date.now();
+    const t = setInterval(async () => {
+      const row = (await getKiosks()).find((x) => x.id === kiosk.id);
+      if (!live) return;
+      if (row?.screenshot_at && row.screenshot_at !== baseline) {
+        setCapturedAt(row.screenshot_at);
+        setStatus("ready");
+        clearInterval(t);
+      } else if (Date.now() - started > 30_000) {
+        // Kiosk offline, or its app predates the screenshot command.
+        setStatus("timeout");
+        clearInterval(t);
+      }
+    }, 2000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [kiosk.id, kiosk.screenshot_at]);
+
+  return (
+    <Modal title={`${kiosk.name} — display`} onClose={onClose} width={760}>
+      {capturedAt ? (
+        <img
+          src={`/api/kiosks/${kiosk.id}/screenshot?ts=${encodeURIComponent(capturedAt)}`}
+          alt={`${kiosk.name} display capture`}
+          style={{ width: "100%", borderRadius: 8, border: "1px solid var(--bf-border)" }}
+        />
+      ) : (
+        <div style={{ color: "var(--bf-dim)", fontSize: "0.85rem", padding: "1.5rem 0", textAlign: "center" }}>
+          No capture yet.
+        </div>
+      )}
+      <div style={{ marginTop: "0.5rem", fontSize: "0.76rem", color: status === "timeout" ? "#fa0" : "var(--bf-dim)" }}>
+        {status === "waiting" && "Requesting a fresh capture from the kiosk…"}
+        {status === "ready" && `Captured ${capturedAt} (server time).`}
+        {status === "timeout" &&
+          "No fresh capture arrived — the kiosk may be offline, or its app predates the screenshot feature. Showing the last known capture, if any."}
+      </div>
+    </Modal>
   );
 }
 

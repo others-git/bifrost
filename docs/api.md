@@ -527,7 +527,9 @@ this view on the kiosk itself.
 | `PUT` | `/api/kiosks/self/viewport` | **kiosk cookie** | The kiosk-served web client reports its CSS viewport `{ w, h }` (100–20000 each) — feeds the Boards preview device list so a board can be scaled to a real tablet's exact pixel size |
 | `GET` | `/api/kiosks/stream` | **kiosk key** | Live SSE command channel — controller commands are pushed here instantly; the queued copy is the offline fallback |
 | `GET` | `/api/kiosks` | session | List kiosks: check-in status, assignments, schedule/presence config, battery telemetry |
-| `POST` | `/api/kiosks/{id}/command` | session | Queue `{ command }` — one of `sleep`, `wake`, `lock`, `update` |
+| `POST` | `/api/kiosks/{id}/command` | session | Queue `{ command }` — one of `sleep`, `wake`, `lock`, `update`, `screenshot` |
+| `POST` | `/api/kiosks/self/screenshot` | **kiosk cookie** | The app uploads its captured display (raw image body, `image/jpeg`/`png`/`webp`, ≤8 MB) in response to the `screenshot` command — latest capture wins |
+| `GET` | `/api/kiosks/{id}/screenshot` | session | The kiosk's latest display capture (`X-Captured-At` header carries its server-time stamp; `screenshot_at` in the list is the poll signal) — remote debugging eyes on a wall fixture |
 | `PUT` | `/api/kiosks/{id}/room` | session | Assign the kiosk to a Room (`{ room_id }`, null clears) — its voice context and presence source |
 | `PUT` | `/api/kiosks/{id}/board` | session | Set the board to auto-launch full-screen (`{ board_id }`, null clears) |
 | `PUT` | `/api/kiosks/{id}/plan` | session | Per-hour display plan: `{ enabled, hour_modes, timeout_secs? }` — `hour_modes` is 24 chars, one per local hour: `W` awake · `S` asleep · `A` aware (presence-controlled; `timeout_secs` is its screen-off timer, clamped 30–3600 s). Supersedes the legacy schedule/presence pair below |

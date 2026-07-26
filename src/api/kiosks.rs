@@ -59,8 +59,10 @@ const ONLINE_WINDOW_SECS: i64 = 90;
 /// Commands the app performs on check-in. (`deauth` is not here — it's an
 /// immediate key revocation, surfaced to the app as a 401, not a queued action.)
 /// `update` tells the kiosk to pull the cached APK from the hub and self-install
-/// (see [`crate::api::kiosk_update`]).
-const VALID_COMMANDS: [&str; 4] = ["sleep", "wake", "lock", "update"];
+/// (see [`crate::api::kiosk_update`]). `screenshot` asks the app to capture its
+/// WebView and upload it to `POST /self/screenshot` — the remote eyes on a wall
+/// fixture whose WebView is otherwise uninspectable.
+const VALID_COMMANDS: [&str; 5] = ["sleep", "wake", "lock", "update", "screenshot"];
 
 pub fn router() -> Router<Arc<AppState>> {
     use crate::api::kiosk_update as upd;
@@ -69,6 +71,13 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/self", get(self_info))
         .route("/self/viewport", axum::routing::put(set_self_viewport))
         .route("/self/noise", post(report_noise))
+        .route(
+            "/self/screenshot",
+            post(upload_screenshot)
+                // Default axum body cap (2MB) is tight for a tablet-resolution
+                // PNG; screenshots are one-latest-wins debug artifacts.
+                .layer(axum::extract::DefaultBodyLimit::max(SCREENSHOT_MAX_BYTES)),
+        )
         .route("/stream", get(stream))
         .route("/", get(list))
         // OTA relay: session triggers/inspects the cache; key-auth endpoints feed
@@ -88,8 +97,107 @@ pub fn router() -> Router<Arc<AppState>> {
             "/{id}/aware-override",
             axum::routing::put(set_aware_override),
         )
+        .route("/{id}/screenshot", get(get_screenshot))
         .route("/{id}/deauth", post(deauth))
         .route("/{id}", delete(forget))
+}
+
+// ── Debug screenshots (remote eyes on an uninspectable WebView) ──────────────
+
+/// Screenshot upload cap — a tablet-resolution PNG worst case, far below a
+/// photo. One latest-wins image per kiosk, so storage can't accumulate.
+const SCREENSHOT_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+const SCREENSHOT_MIMES: [&str; 3] = ["image/jpeg", "image/png", "image/webp"];
+
+/// `POST /api/kiosks/self/screenshot` — the kiosk app uploads its captured
+/// display (same `bfr_key` cookie auth as `/self`), in response to the
+/// controller's `screenshot` command. Raw bytes, typed by `Content-Type`;
+/// replaces the previous capture.
+async fn upload_screenshot(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let Some(key) = crate::api::auth::kiosk_cookie_key(&headers) else {
+        return StatusCode::UNAUTHORIZED;
+    };
+    let Some(key_id) = crate::api::apikeys::validate_key(&state, &key).await else {
+        return StatusCode::UNAUTHORIZED;
+    };
+    let mime = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            s.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase()
+        })
+        .unwrap_or_default();
+    if !SCREENSHOT_MIMES.contains(&mime.as_str()) {
+        return StatusCode::UNSUPPORTED_MEDIA_TYPE;
+    }
+    if body.is_empty() {
+        return StatusCode::UNPROCESSABLE_ENTITY;
+    }
+    match sqlx::query(
+        "UPDATE kiosks SET screenshot = ?, screenshot_mime = ?, screenshot_at = datetime('now')
+         WHERE api_key_id = ?",
+    )
+    .bind(body.as_ref())
+    .bind(&mime)
+    .bind(&key_id)
+    .execute(&state.db)
+    .await
+    {
+        Ok(r) if r.rows_affected() > 0 => {
+            tracing::debug!(target: "bifrost::kiosk", bytes = body.len(), %mime, "kiosk screenshot uploaded");
+            // Announce so the controller UI polling for the capture sees it land.
+            crate::api::notify_inventory(&state, "kiosks");
+            StatusCode::NO_CONTENT
+        }
+        Ok(_) => StatusCode::NOT_FOUND,
+        Err(e) => {
+            tracing::error!("db error storing kiosk screenshot: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
+/// `GET /api/kiosks/{id}/screenshot` (session) — the latest capture, with its
+/// timestamp in `X-Captured-At`. Never cached (the api-wide `no-store` default
+/// applies): this is a live debugging surface.
+async fn get_screenshot(
+    State(state): State<Arc<AppState>>,
+    _: Session,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let row =
+        sqlx::query("SELECT screenshot, screenshot_mime, screenshot_at FROM kiosks WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+    let shot = row.and_then(|r| {
+        let bytes: Option<Vec<u8>> = r.get("screenshot");
+        let mime: Option<String> = r.get("screenshot_mime");
+        let at: Option<String> = r.get("screenshot_at");
+        Some((bytes?, mime?, at.unwrap_or_default()))
+    });
+    match shot {
+        Some((bytes, mime, at)) => (
+            [
+                (axum::http::header::CONTENT_TYPE.as_str(), mime),
+                ("x-captured-at", at),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -378,6 +486,9 @@ struct KioskRow {
     /// What the override does while a target is on: force the screen awake
     /// (`keep_on`) or force it asleep (`keep_off`).
     aware_override_mode: AwareOverrideMode,
+    /// When the latest debug screenshot was captured (mig 0064) — the Clients
+    /// view polls this to know a requested capture has landed. Null = none yet.
+    screenshot_at: Option<String>,
 }
 
 /// `GET /api/kiosks` (session) — the clients view: every registered kiosk with
@@ -390,6 +501,7 @@ async fn list(State(state): State<Arc<AppState>>, _: Session) -> impl IntoRespon
                 battery_level, battery_charging, battery_voltage_mv, battery_current_ua,
                 battery_temp_dc, power_source, viewport_w, viewport_h, hour_modes,
                 mic_presence, mic_sensitivity, mic_level, aware_override_targets,
+                screenshot_at,
                 api_key_id IS NOT NULL AS authorized,
                 (last_seen > datetime('now', '-{ONLINE_WINDOW_SECS} seconds')) AS online
          FROM kiosks ORDER BY name"
@@ -435,6 +547,7 @@ async fn list(State(state): State<Arc<AppState>>, _: Session) -> impl IntoRespon
                         mic_level: r.get("mic_level"),
                         aware_override_targets,
                         aware_override_mode,
+                        screenshot_at: r.get("screenshot_at"),
                     }
                 })
                 .collect::<Vec<_>>(),
