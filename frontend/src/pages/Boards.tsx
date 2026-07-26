@@ -2851,6 +2851,21 @@ function FeedWidget({ cfg, edit }: { cfg: Record<string, unknown>; edit: boolean
   );
 }
 
+/** A poster `<img>` that errors without its request ever reaching the hub is
+ * invisible server-side — and a wall kiosk has no reachable console. So the
+ * first few failures per page life re-try the same URL as a `fetch`, whose
+ * arrival and outcome the hub journals (`bifrost::feeds`): probe succeeds →
+ * the failure is in the img layer (decode/render); probe fails → the request
+ * layer; nothing journaled at all → the error never fired client-side. */
+let posterProbes = 0;
+function probeFailedPoster(src: string) {
+  if (posterProbes >= 5) return;
+  posterProbes += 1;
+  fetch(src, { cache: "no-store" })
+    .then((r) => console.error(`feed poster <img> failed; probe fetch → HTTP ${r.status}`, src))
+    .catch((e) => console.error("feed poster <img> failed; probe fetch also failed", src, e));
+}
+
 /** One feed tile: cover art (2:3, proxied + downscaled server-side) with
  * title / subtitle / added-time lines — stacked under the poster on the shelf,
  * beside a thumb in the vertical list. Becomes a button when the widget has a
@@ -2901,7 +2916,10 @@ function FeedTile({
           src={feedImageUrl(providerId, entry.image_path, 240, 360)}
           alt=""
           draggable={false}
-          onError={() => setImgFailed(true)}
+          onError={(ev) => {
+            setImgFailed(true);
+            probeFailedPoster((ev.currentTarget as HTMLImageElement).src);
+          }}
           style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }}
         />
       ) : (
