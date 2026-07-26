@@ -1,9 +1,28 @@
 // Minimal service worker for an installable, fast-loading PWA shell.
-// - API and SSE (/api/*) are never cached — device control must be live.
-// - HTML navigations: network-first (new deploys load), cached shell offline.
-// - Hashed static assets (JS/CSS/fonts/icons): cache-first.
+//
+// Caching contract (the WebView-safe rules — see also `cache_control_for` on
+// the server, which is the HTTP-layer half of the same policy):
+// - API and SSE (/api/*): never touched — device control must be live.
+// - Document loads: network-first; the cached shell is an OFFLINE fallback
+//   only. Detection covers `mode === "navigate"` AND `destination ===
+//   "document"` — a WebView's app-driven main-frame load doesn't always
+//   present as `navigate`, and the old mode-only check dropped those loads
+//   into the generic cache-first branch below, serving a STALE SHELL forever
+//   (old hashed bundle pinned, reloads useless). That one-line gap is how a
+//   wall kiosk kept running a weeks-old build.
+// - Hashed assets (/assets/*): cache-first — content-addressed, so staleness
+//   is impossible by construction.
+// - Everything else (manifest, icons, favicon): passthrough — the server's
+//   own no-store headers rule.
+//
+// CACHE is versioned: bumping it makes `activate` drop every entry the old
+// worker ever pinned, and the update itself always reaches clients — the
+// browser refetches sw.js bypassing both this worker and the HTTP cache
+// (server serves it no-store), even on a page that was being served a stale
+// shell. After claiming, controlled pages are re-navigated once so a client
+// pinned by the old worker recovers without anyone touching it.
 
-const CACHE = "bifrost-shell-v1";
+const CACHE = "bifrost-shell-v2";
 
 self.addEventListener("install", () => self.skipWaiting());
 
@@ -12,7 +31,21 @@ self.addEventListener("activate", (event) => {
     caches
       .keys()
       .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
-      .then(() => self.clients.claim()),
+      .then(() => self.clients.claim())
+      .then(() => self.clients.matchAll({ type: "window" }))
+      .then((clients) =>
+        Promise.all(
+          clients.map((c) => {
+            // Force pages the OLD worker served (possibly a stale shell) onto
+            // the fresh one. One-shot per activation; same-origin only.
+            try {
+              return c.navigate(c.url).catch(() => {});
+            } catch {
+              return Promise.resolve();
+            }
+          }),
+        ),
+      ),
   );
 });
 
@@ -23,7 +56,8 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
   if (url.pathname.startsWith("/api")) return; // never cache API / SSE
 
-  if (req.mode === "navigate") {
+  const isDocument = req.mode === "navigate" || req.destination === "document";
+  if (isDocument) {
     event.respondWith(
       fetch(req)
         .then((res) => {
@@ -35,6 +69,10 @@ self.addEventListener("fetch", (event) => {
     );
     return;
   }
+
+  // Only content-addressed assets are cache-first; anything else follows the
+  // server's headers untouched.
+  if (!url.pathname.startsWith("/assets/")) return;
 
   event.respondWith(
     caches.match(req).then(

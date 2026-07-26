@@ -205,8 +205,13 @@ struct ImageQuery {
 }
 
 /// Poster proxy: fetch a provider-relative asset with the provider's own token
-/// and re-serve the bytes. Immutable-cached — a Plex thumb path carries a
-/// version stamp, so a given path's bytes never change.
+/// and re-serve the bytes. Cached client-side for a bounded day — NOT
+/// `immutable`: the URL is nominally content-addressed (Plex thumb paths carry
+/// a version stamp), but the *delivered body* can transiently degrade (the
+/// upstream transcoder mid-indexing), and a kiosk WebView has no cache
+/// eviction of its own — an `immutable` blank poster survived every deploy
+/// for a year. A bounded age keeps the poll cheap while letting any bad entry
+/// age out on its own.
 async fn image(
     State(state): State<Arc<AppState>>,
     _: SessionOrKiosk,
@@ -234,10 +239,7 @@ async fn image(
             (
                 [
                     (header::CONTENT_TYPE, mime),
-                    (
-                        header::CACHE_CONTROL,
-                        "private, max-age=31536000, immutable".to_string(),
-                    ),
+                    (header::CACHE_CONTROL, "private, max-age=86400".to_string()),
                 ],
                 bytes,
             )

@@ -2385,7 +2385,13 @@ export async function getFeedRecent(
 }
 
 /** Poster proxy URL: the server fetches from the source with its own token
- * (the browser never holds it) and downscales to `w`×`h`. */
+ * (the browser never holds it) and downscales to `w`×`h`.
+ *
+ * `r` is a cache-generation stamp: posters were once served `immutable`, and a
+ * kiosk WebView that cached a degenerate body under that policy re-serves it
+ * from disk for a year with no eviction path of its own — bump `r` to orphan
+ * every previously-cached poster URL across all clients at once. */
+const POSTER_REV = 2;
 export function feedImageUrl(providerId: string, path: string, w: number, h: number): string {
-  return `/api/feeds/${providerId}/image?path=${encodeURIComponent(path)}&w=${w}&h=${h}`;
+  return `/api/feeds/${providerId}/image?path=${encodeURIComponent(path)}&w=${w}&h=${h}&r=${POSTER_REV}`;
 }

@@ -13576,13 +13576,18 @@ async fn feed_image_proxy_serves_bytes_and_contains_paths() {
         resp.headers().get(header::CONTENT_TYPE).unwrap(),
         "image/jpeg"
     );
+    // Bounded, never `immutable`: a kiosk WebView has no cache eviction of
+    // its own, so a transiently-degenerate poster body cached immutable
+    // outlived every deploy. A day self-heals.
+    let cc = resp
+        .headers()
+        .get(header::CACHE_CONTROL)
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(
-        resp.headers()
-            .get(header::CACHE_CONTROL)
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .contains("immutable")
+        cc.contains("max-age=86400") && !cc.contains("immutable"),
+        "got: {cc}"
     );
     let bytes = http_body_util::BodyExt::collect(resp.into_body())
         .await
@@ -13817,4 +13822,40 @@ async fn dashboard_changes_announce_on_the_inventory_stream() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     assert_eq!(rx.recv().await.unwrap(), "dashboards", "delete announces");
+}
+
+#[tokio::test]
+async fn api_responses_are_no_store_except_content_addressed_media() {
+    // Live device/feed state must never be served from any cache a kiosk
+    // WebView (or proxy) keeps — every /api response defaults to `no-store`.
+    // The deliberate exceptions set their own bounded policies: the feed
+    // poster proxy (max-age=86400, never immutable) and board background
+    // media (immutable, busted by its `?v=` stamp) — verified in their own
+    // tests.
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/instance")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/lights", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
 }

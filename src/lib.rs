@@ -104,8 +104,19 @@ struct FrontendAssets;
 
 /// Build the Axum router wired to the given state. Exported for integration tests.
 pub fn build_app(state: Arc<AppState>) -> Router {
+    // API responses default to `no-store` — live device state must never be
+    // served from any cache (browser, WebView, or proxy) — while a handler
+    // that deliberately sets its own policy wins: the poster proxy caches for
+    // a bounded day (never `immutable` — a WebView with no eviction path of
+    // its own once pinned a degenerate poster for a year) and board
+    // background media stays `immutable` behind its client-side `?v=` stamp.
+    // `if_not_present` is what makes those exceptions possible.
+    let api_no_store = tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
     Router::new()
-        .nest("/api", api::router())
+        .nest("/api", api::router().layer(api_no_store))
         // MCP (Streamable HTTP, Bearer-gated) — the third surface over the
         // shared service layer, alongside /api (session) and /api/v1 (Bearer).
         .nest_service("/mcp", api::mcp::service(Arc::clone(&state)))
@@ -479,16 +490,20 @@ async fn serve_frontend(uri: axum::http::Uri) -> axum::response::Response {
     }
 }
 
-/// Cache policy for an embedded frontend asset. Vite fingerprints everything under
-/// `assets/` (e.g. `index-abc123.js`), so those are immutable and cache forever;
-/// the HTML entry and other unhashed files must **revalidate every load** so a new
-/// deploy's bundle is picked up — kiosk WebViews otherwise serve a stale
-/// `index.html` (pinned to an old bundle hash) indefinitely.
+/// Cache policy for an embedded frontend asset. Exactly one class may cache:
+/// Vite fingerprints everything under `assets/` (e.g. `index-abc123.js`), so
+/// those are content-addressed — staleness is impossible by construction — and
+/// cache forever. **Everything else is `no-store`**: the HTML entry, `sw.js`,
+/// the manifest, icons. `no-cache` (revalidate) was not strict enough for the
+/// kiosk WebViews this app lives on — a revalidation that can't complete lets
+/// a cache serve what it has, and a wall fixture that pins a stale entry
+/// silently outlives every deploy. These files are small and fetched rarely;
+/// correctness on an appliance beats the round-trip.
 fn cache_control_for(path: &str) -> &'static str {
     if path.starts_with("assets/") {
         "public, max-age=31536000, immutable"
     } else {
-        "no-cache"
+        "no-store"
     }
 }
 
@@ -497,7 +512,7 @@ mod frontend_cache_tests {
     use super::cache_control_for;
 
     #[test]
-    fn hashed_assets_are_immutable_html_entry_is_revalidated() {
+    fn hashed_assets_are_immutable_everything_else_is_no_store() {
         assert_eq!(
             cache_control_for("assets/index-abc123.js"),
             "public, max-age=31536000, immutable"
@@ -506,10 +521,12 @@ mod frontend_cache_tests {
             cache_control_for("assets/index-abc123.css"),
             "public, max-age=31536000, immutable"
         );
-        // The entry HTML and other unhashed files must always revalidate.
-        assert_eq!(cache_control_for("index.html"), "no-cache");
-        assert_eq!(cache_control_for("favicon.svg"), "no-cache");
-        assert_eq!(cache_control_for("manifest.webmanifest"), "no-cache");
+        // The entry HTML and every other unhashed file must never be cached at
+        // all — a kiosk WebView that pins a stale shell outlives every deploy.
+        assert_eq!(cache_control_for("index.html"), "no-store");
+        assert_eq!(cache_control_for("favicon.svg"), "no-store");
+        assert_eq!(cache_control_for("manifest.webmanifest"), "no-store");
+        assert_eq!(cache_control_for("sw.js"), "no-store");
     }
 }
 
