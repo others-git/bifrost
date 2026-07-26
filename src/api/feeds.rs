@@ -226,17 +226,23 @@ async fn image(
         Err(s) => return s.into_response(),
     };
     match provider.image(&q.path, q.w, q.h).await {
-        Ok((bytes, mime)) => (
-            [
-                (header::CONTENT_TYPE, mime),
-                (
-                    header::CACHE_CONTROL,
-                    "private, max-age=31536000, immutable".to_string(),
-                ),
-            ],
-            bytes,
-        )
-            .into_response(),
+        Ok((bytes, mime)) => {
+            // Success trace (debug → journal only): with the request log in
+            // [`SessionOrKiosk`], every poster's arrival AND outcome is
+            // reconstructable from the dev journal.
+            tracing::debug!(target: "bifrost::feeds", provider = %id, path = %q.path, bytes = bytes.len(), %mime, "poster served");
+            (
+                [
+                    (header::CONTENT_TYPE, mime),
+                    (
+                        header::CACHE_CONTROL,
+                        "private, max-age=31536000, immutable".to_string(),
+                    ),
+                ],
+                bytes,
+            )
+                .into_response()
+        }
         Err(e) => {
             tracing::warn!(target: "bifrost::feeds", provider = %id, "image proxy failed: {e:#}");
             StatusCode::BAD_GATEWAY.into_response()

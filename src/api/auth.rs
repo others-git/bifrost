@@ -175,7 +175,19 @@ impl FromRequestParts<Arc<AppState>> for SessionOrKiosk {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
+        // Journal-visible request trace (debug — the RUST_LOG console stays
+        // quiet). A kiosk's requests are attributable by its distinctive UA,
+        // which is what makes "are the wall tablet's poster fetches arriving
+        // at all, and how do they auth?" answerable from Settings → Developer
+        // instead of guesswork — the exact question a poster-less kiosk poses.
+        let is_kiosk_ua = parts
+            .headers
+            .get(axum::http::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ua| ua.contains("BifrostKiosk"));
+        let path = parts.uri.path().to_string();
         if require_session(state, &parts.headers).await.is_some() {
+            tracing::debug!(target: "bifrost::feeds", kiosk_ua = is_kiosk_ua, %path, auth = "session", "feed request");
             return Ok(SessionOrKiosk);
         }
         if let Some(key) = kiosk_cookie_key(&parts.headers)
@@ -183,8 +195,20 @@ impl FromRequestParts<Arc<AppState>> for SessionOrKiosk {
                 .await
                 .is_some()
         {
+            tracing::debug!(target: "bifrost::feeds", kiosk_ua = is_kiosk_ua, %path, auth = "kiosk_key", "feed request");
             return Ok(SessionOrKiosk);
         }
+        // The rejection would otherwise be invisible: extractor 401s never
+        // reach a handler, so a kiosk whose cookies stopped flowing looked
+        // identical to a kiosk that never asked.
+        tracing::warn!(
+            target: "bifrost::feeds",
+            kiosk_ua = is_kiosk_ua,
+            %path,
+            has_session_cookie = extract_session(&parts.headers).is_some(),
+            has_key_cookie = kiosk_cookie_key(&parts.headers).is_some(),
+            "feed request rejected (no valid session or kiosk key)"
+        );
         Err(StatusCode::UNAUTHORIZED)
     }
 }
