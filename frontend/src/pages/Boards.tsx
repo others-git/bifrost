@@ -2910,7 +2910,11 @@ function FeedTile({
         // List: rows are short, so a 2:3 box goes needle-thin — a SQUARE box
         // instead, with the cover-crop trimming the poster's top/bottom, reads
         // half again wider without costing the row any height.
-        ...(vertical ? { height: "100%", aspectRatio: "1 / 1", flexShrink: 0 } : { flex: 1, minHeight: 0 }),
+        // Explicit width — never rely on flex `stretch` (see FeedTile's shell
+        // note: the wall tablet's WebView shrink-fits instead of stretching).
+        ...(vertical
+          ? { height: "100%", aspectRatio: "1 / 1", flexShrink: 0 }
+          : { flex: 1, minHeight: 0, width: "100%" }),
       }}
     >
       {/* Eager, not `loading="lazy"`: a lazy image in a box that transiently
@@ -2946,16 +2950,21 @@ function FeedTile({
     </div>
   );
   return (
+    // The tappable tile is a <button>, but the button is a dumb BLOCK shell —
+    // an inner div owns the flex layout. A button that is itself the flex
+    // container shrink-fits its children on the wall tablet's WebView instead
+    // of stretching them: the poster box rendered as a 1px line with the
+    // titles overflowing sideways (caught by the kiosk screenshot tool).
     <Tag
       onClick={tappable ? () => onOpen(entry) : undefined}
       title={tappable ? `Open ${entry.title} on the TV` : entry.title}
       style={{
-        display: "flex",
-        flexDirection: vertical ? "row" : "column",
-        alignItems: vertical ? "stretch" : undefined,
-        gap: vertical ? "clamp(6px, 2cqmin, 12px)" : "clamp(2px, 1cqmin, 6px)",
+        display: "block",
+        width: "100%",
+        height: "100%",
         minWidth: 0,
         minHeight: 0,
+        overflow: "hidden",
         background: "none",
         border: "none",
         padding: 0,
@@ -2965,23 +2974,37 @@ function FeedTile({
         cursor: tappable ? "pointer" : "default",
       }}
     >
-      {poster}
       <div
         style={{
           display: "flex",
-          flexDirection: "column",
-          justifyContent: vertical ? "center" : undefined,
-          gap: vertical ? "clamp(1px, 0.6cqmin, 4px)" : "clamp(2px, 1cqmin, 6px)",
+          flexDirection: vertical ? "row" : "column",
+          alignItems: vertical ? "stretch" : undefined,
+          width: "100%",
+          height: "100%",
+          gap: vertical ? "clamp(6px, 2cqmin, 12px)" : "clamp(2px, 1cqmin, 6px)",
           minWidth: 0,
+          minHeight: 0,
         }}
       >
-        <span style={{ ...ELLIPSIS, maxWidth: "100%", fontWeight: 600, color: T.text, fontSize: "clamp(0.6rem, 4.2cqmin, 0.9rem)" }}>
-          {entry.title}
-        </span>
-        <span style={{ ...ELLIPSIS, maxWidth: "100%", color: T.dim, fontSize: "clamp(0.55rem, 3.6cqmin, 0.8rem)" }}>
-          {entry.subtitle ? `${entry.subtitle} · ` : ""}
-          {timeAgo(entry.added_at)}
-        </span>
+        {poster}
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: vertical ? "center" : undefined,
+            gap: vertical ? "clamp(1px, 0.6cqmin, 4px)" : "clamp(2px, 1cqmin, 6px)",
+            minWidth: 0,
+            ...(vertical ? { flex: 1 } : { width: "100%" }),
+          }}
+        >
+          <span style={{ ...ELLIPSIS, maxWidth: "100%", fontWeight: 600, color: T.text, fontSize: "clamp(0.6rem, 4.2cqmin, 0.9rem)" }}>
+            {entry.title}
+          </span>
+          <span style={{ ...ELLIPSIS, maxWidth: "100%", color: T.dim, fontSize: "clamp(0.55rem, 3.6cqmin, 0.8rem)" }}>
+            {entry.subtitle ? `${entry.subtitle} · ` : ""}
+            {timeAgo(entry.added_at)}
+          </span>
+        </div>
       </div>
     </Tag>
   );
