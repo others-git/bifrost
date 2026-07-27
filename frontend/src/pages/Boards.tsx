@@ -71,7 +71,7 @@ import { RestoreHomeButton } from "./Dashboard";
 import { GlyphButton, RoomCard, RoomControlButton, litHexes, roomMembers } from "../components/RoomCard";
 import { EFFECT_ACCENT, activeEffect } from "../components/lightControl";
 import { OptionCheckList, deviceSelectOptions, type RoomedDevice } from "../components/deviceOptions";
-import { pickableLights, pickableMedia, pickablePower, pickableRemotes } from "../deviceSelectors";
+import { pickableLights, pickableMedia, pickablePower, pickableRemotes, remoteDisplayName } from "../deviceSelectors";
 import { CornerFiligree } from "../components/ornament";
 import { BACKGROUND_PRESETS, BoardBackground, type BoardBackgroundCfg } from "../components/BoardBackground";
 import { MatchThemeContext, useMatchTheme } from "../components/appearance";
@@ -4038,7 +4038,7 @@ function WidgetEditorModal({
               onChange={(v) => { setFeedTapRemote(v); setFeedTapApp(""); }}
               options={[
                 { value: "", label: "Does nothing (display only)" },
-                ...feedRemotes.map((r) => ({ value: r.id, label: `Opens it on ${r.name}` })),
+                ...feedRemotes.map((r) => ({ value: r.id, label: `Opens it on ${remoteDisplayName(r, media)}` })),
               ]}
             />
           </Field>

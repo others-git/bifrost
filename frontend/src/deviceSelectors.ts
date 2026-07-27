@@ -38,3 +38,11 @@ export const pickableSensors = (sensors: SensorDevice[]): SensorDevice[] =>
 /** Remotes offerable as a control target (server already de-dups by group). */
 export const pickableRemotes = (remotes: RemoteDevice[]): RemoteDevice[] =>
   remotes.filter((r) => isEnabled(r));
+
+/** A remote's user-facing name. Remote rows can't be renamed — they carry the
+ * discovered name ("BRAVIA") — but a TV remote is half of a composite whose
+ * friendly name lives on the paired MEDIA device, and the backend resolves
+ * that pairing onto media rows as `remote_id`. Every picker that offers a
+ * remote labels it through this, so the user's names show everywhere. */
+export const remoteDisplayName = (remote: RemoteDevice, media: MediaDevice[]): string =>
+  media.find((m) => m.remote_id === remote.id)?.name ?? remote.name;

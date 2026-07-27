@@ -47,6 +47,7 @@ import {
   pickableMedia,
   pickablePower,
   pickableRemotes,
+  remoteDisplayName,
   pickableSensors,
 } from "../deviceSelectors";
 import { Modal } from "./dialogs";
@@ -322,7 +323,9 @@ export function useAutomationData() {
       media: new Map(media.map((m) => [m.id, m.name])),
       power: new Map(power.map((p) => [p.id, p.name])),
       scene: new Map(scenes.map((s) => [s.id, s.name])),
-      remote: new Map(remotes.map((r) => [r.id, r.name])),
+      // Remotes label through their paired TV's friendly name (remote rows
+      // themselves can't be renamed) — same rule as every remote picker.
+      remote: new Map(remotes.map((r) => [r.id, remoteDisplayName(r, media)])),
     }),
     [rooms, lights, media, power, scenes, remotes],
   );
