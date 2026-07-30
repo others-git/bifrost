@@ -135,6 +135,7 @@ function Plate({
   accents,
   on = false,
   charge = 1,
+  flash = false,
   as = "div",
   style,
   children,
@@ -143,6 +144,8 @@ function Plate({
   accents?: string[];
   on?: boolean;
   charge?: number;
+  /** Sensor flash tier: the plate's accent chrome (ring + filigree) blinks. */
+  flash?: boolean;
   as?: "div" | "button";
   style?: React.CSSProperties;
   children: React.ReactNode;
@@ -169,7 +172,7 @@ function Plate({
           the arms jut past the line at each corner — the "spiked corner". */}
       <span
         aria-hidden
-        className="bf-plate-chrome"
+        className={flash ? "bf-plate-chrome bifrost-sensor-flash" : "bf-plate-chrome"}
         style={{
           position: "absolute",
           inset: 3.5,
@@ -188,8 +191,16 @@ function Plate({
       />
       {/* display:contents wrapper: the filigree's corners keep positioning
           against the plate, but the chrome-hiding rule can reach them. */}
+      {/* The filigree can't blink via display:contents (no box to animate), so
+          the flash class rides an inner absolutely-filling span instead. */}
       <span className="bf-plate-chrome" style={{ display: "contents" }}>
-        <CornerFiligree colors={on ? hexes : undefined} />
+        {flash ? (
+          <span aria-hidden className="bifrost-sensor-flash" style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+            <CornerFiligree colors={on ? hexes : undefined} />
+          </span>
+        ) : (
+          <CornerFiligree colors={on ? hexes : undefined} />
+        )}
       </span>
       {children}
     </Tag>
@@ -2236,11 +2247,12 @@ function RoomWidget({
 /** How urgent a reading is against its configured thresholds. `bad_direction`
  * says which way trouble lies: a waste drawer alarms HIGH (filling up), a
  * litter reservoir alarms LOW (running out). */
-type Severity = "none" | "warn" | "alert";
+type Severity = "none" | "warn" | "alert" | "flash";
 function sensorSeverity(v: number | null, cfg: Record<string, unknown>): Severity {
   if (v === null) return "none";
   const high = (cfg.bad_direction as string) !== "low";
   const trips = (t: unknown) => typeof t === "number" && (high ? v >= t : v <= t);
+  if (trips(cfg.flash_at)) return "flash";
   if (trips(cfg.alert_at)) return "alert";
   if (trips(cfg.warn_at)) return "warn";
   return "none";
@@ -2249,7 +2261,11 @@ const SEVERITY_ACCENT: Record<Severity, string> = {
   none: color.gold,
   warn: color.goldBright,
   alert: color.rose,
+  flash: color.rose, // alert's colour — the extra urgency is carried by the blink
 };
+const SEVERITY_RANK: Record<Severity, number> = { none: 0, warn: 1, alert: 2, flash: 3 };
+/** className for a reading's accent-lit part — blinking at the flash tier. */
+const flashClass = (sev: Severity) => (sev === "flash" ? "bifrost-sensor-flash" : undefined);
 
 /** Numeric parse + display formatting for a readout value. `decimals` pins the
  * precision; default trims float noise ("90.0" → "90"). */
@@ -2281,6 +2297,7 @@ function GaugeArc({
   accent,
   value,
   unit,
+  flash,
   width = "clamp(56px, 62cqmin, 180px)",
   valueSize = "clamp(0.9rem, 16cqmin, 2.2rem)",
 }: {
@@ -2288,6 +2305,7 @@ function GaugeArc({
   accent: string;
   value: string;
   unit?: string | null;
+  flash?: boolean;
   width?: string;
   valueSize?: string;
 }) {
@@ -2300,6 +2318,7 @@ function GaugeArc({
         <circle cx="50" cy="50" r={R} fill="none" stroke={T.hairline} strokeWidth="5" strokeLinecap="butt"
           strokeDasharray={`${C * SWEEP} ${C}`} />
         <circle cx="50" cy="50" r={R} fill="none" stroke={accent} strokeWidth="5" strokeLinecap="butt"
+          className={flash ? "bifrost-sensor-flash" : undefined}
           strokeDasharray={`${C * SWEEP * frac} ${C}`}
           style={{ filter: `drop-shadow(0 0 6px ${alpha(accent, 0.7)})`, transition: "stroke-dasharray 0.6s ease" }} />
       </svg>
@@ -2342,11 +2361,13 @@ function QuarterMarks({ vertical }: { vertical: boolean }) {
 function Vial({
   frac,
   accent,
+  flash,
   width = "100%",
   height = "100%",
 }: {
   frac: number;
   accent: string;
+  flash?: boolean;
   width?: string;
   height?: string;
 }) {
@@ -2364,6 +2385,7 @@ function Vial({
       }}
     >
       <div
+        className={flash ? "bifrost-sensor-flash" : undefined}
         style={{
           position: "absolute",
           left: 0,
@@ -2383,7 +2405,7 @@ function Vial({
 
 /** Horizontal fill trough: square, quarter-marked, no numeral — like [Vial]
  * turned on its side. Fills the caller's block. */
-function BarFill({ frac, accent, height = "100%" }: { frac: number; accent: string; height?: string }) {
+function BarFill({ frac, accent, flash, height = "100%" }: { frac: number; accent: string; flash?: boolean; height?: string }) {
   return (
     <div
       style={{
@@ -2398,6 +2420,7 @@ function BarFill({ frac, accent, height = "100%" }: { frac: number; accent: stri
       }}
     >
       <div
+        className={flash ? "bifrost-sensor-flash" : undefined}
         style={{
           position: "absolute",
           left: 0,
@@ -2419,8 +2442,9 @@ function BarFill({ frac, accent, height = "100%" }: { frac: number; accent: stri
  * generic device's control, in a configurable display style: `number` (big
  * figure), `gauge` (arc meter), `vial` (vertical vessel), `bar` (horizontal
  * fill), `state` (glyph + word). Optional thresholds escalate the accent
- * (gold → bright gold → rose) and the plate's bloom, so a full waste drawer
- * shouts across the room. `cfg.provider_id`/`device_id`/`key` + display opts. */
+ * (gold → bright gold → rose) and the plate's bloom — and past `flash_at`, the
+ * top tier, the accent-lit part blinks in alert's rose — so a full waste
+ * drawer shouts across the room. `cfg.provider_id`/`device_id`/`key` + opts. */
 function SensorWidget({ cfg, generic }: { cfg: Record<string, unknown>; generic: GenericDevice[] }) {
   const dev = generic.find((d) => d.provider_id === cfg.provider_id && d.device_id === cfg.device_id);
   const ctrl = dev?.controls.find((c) => c.key === cfg.key);
@@ -2430,12 +2454,14 @@ function SensorWidget({ cfg, generic }: { cfg: Record<string, unknown>; generic:
   const shown = formatReading(v, cfg.decimals);
   const severity = sensorSeverity(n, cfg);
   const accent = SEVERITY_ACCENT[severity];
+  const flashing = severity === "flash";
   const frac = sensorFraction(n, cfg);
   const style = (cfg.display as string) ?? "number";
   const plate = {
     accents: [accent],
     on: severity !== "none",
-    charge: severity === "alert" ? 1 : 0.55,
+    charge: SEVERITY_RANK[severity] >= SEVERITY_RANK.alert ? 1 : 0.55,
+    flash: flashing,
   };
   const labelEl = (
     <div style={{ ...ELLIPSIS, maxWidth: "100%", fontSize: "clamp(0.68rem, 7cqmin, 1.2rem)", color: T.dim }}>{label}</div>
@@ -2444,7 +2470,7 @@ function SensorWidget({ cfg, generic }: { cfg: Record<string, unknown>; generic:
   if (style === "gauge" && frac !== null) {
     return (
       <Plate {...plate} style={{ alignItems: "center", justifyContent: "center", gap: "0.15rem" }}>
-        <GaugeArc frac={frac} accent={accent} value={shown} unit={ctrl?.unit} />
+        <GaugeArc frac={frac} accent={accent} value={shown} unit={ctrl?.unit} flash={flashing} />
         {labelEl}
       </Plate>
     );
@@ -2456,7 +2482,7 @@ function SensorWidget({ cfg, generic }: { cfg: Record<string, unknown>; generic:
       <Plate {...plate} style={{ alignItems: "center", gap: "clamp(0.2rem, 3cqmin, 0.6rem)" }}>
         {labelEl}
         <div style={{ position: "relative", flex: 1, minHeight: 0, width: "min(45cqw, 85%)", paddingBottom: "clamp(4px, 2cqmin, 10px)" }}>
-          <Vial frac={frac} accent={accent} />
+          <Vial frac={frac} accent={accent} flash={flashing} />
         </div>
       </Plate>
     );
@@ -2466,7 +2492,7 @@ function SensorWidget({ cfg, generic }: { cfg: Record<string, unknown>; generic:
       <Plate {...plate} style={{ gap: "clamp(0.2rem, 3cqmin, 0.6rem)", padding: "clamp(8px, 8cqmin, 22px)" }}>
         {labelEl}
         <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
-          <BarFill frac={frac} accent={accent} />
+          <BarFill frac={frac} accent={accent} flash={flashing} />
         </div>
       </Plate>
     );
@@ -2474,8 +2500,8 @@ function SensorWidget({ cfg, generic }: { cfg: Record<string, unknown>; generic:
   if (style === "state") {
     const lit = v !== undefined && v !== null && String(v).toLowerCase() !== "off" && v !== false;
     return (
-      <Plate accents={[accent]} on={lit} charge={0.7} style={{ alignItems: "center", justifyContent: "center", gap: "0.2rem" }}>
-        <span style={{ color: lit ? accent : T.dim, fontSize: "clamp(18px, 30cqmin, 64px)", lineHeight: 0 }}>
+      <Plate accents={[accent]} on={lit} charge={0.7} flash={flashing} style={{ alignItems: "center", justifyContent: "center", gap: "0.2rem" }}>
+        <span className={flashClass(severity)} style={{ color: lit ? accent : T.dim, fontSize: "clamp(18px, 30cqmin, 64px)", lineHeight: 0 }}>
           <Glyph name={(cfg.glyph as string) || "value"} size="1em" />
         </span>
         <span style={{ fontSize: "clamp(0.8rem, 11cqmin, 1.6rem)", fontWeight: 600, color: T.text, textTransform: "capitalize" }}>{shown}</span>
@@ -2502,6 +2528,7 @@ type ReadingCfg = {
   display?: string; // auto (default) | number | gauge | vial | bar | state
   warn_at?: number;
   alert_at?: number;
+  flash_at?: number;
   bad_direction?: string;
   min?: number;
   max?: number;
@@ -2523,14 +2550,13 @@ function DeviceStatusWidget({ cfg, generic }: { cfg: Record<string, unknown>; ge
     .map((rc) => ({ rc, ctrl: dev.controls.find((c) => c.key === rc.key) }))
     .filter((x): x is { rc: ReadingCfg; ctrl: NonNullable<typeof x.ctrl> } => !!x.ctrl);
 
-  const rank: Record<Severity, number> = { none: 0, warn: 1, alert: 2 };
   // Object holder rather than a `let`: TS control-flow narrowing doesn't track
   // assignments made inside the map callback below.
   const acc = { worst: "none" as Severity };
   const blocks = items.map(({ rc, ctrl }) => {
     const n = sensorNumber(ctrl.value);
     const sev = sensorSeverity(n, rc as unknown as Record<string, unknown>);
-    if (rank[sev] > rank[acc.worst]) acc.worst = sev;
+    if (SEVERITY_RANK[sev] > SEVERITY_RANK[acc.worst]) acc.worst = sev;
     const accent = SEVERITY_ACCENT[sev];
     const frac = sensorFraction(n, rc as unknown as Record<string, unknown>);
     const shown = formatReading(ctrl.value, rc.decimals);
@@ -2562,7 +2588,7 @@ function DeviceStatusWidget({ cfg, generic }: { cfg: Record<string, unknown>; ge
         <div key={rc.key} style={{ ...cell, alignItems: "stretch", gridColumn: "1 / -1" }}>
           {labelEl}
           <div style={{ position: "relative", flex: 1, minHeight: "clamp(12px, 5cqmin, 30px)" }}>
-            <BarFill frac={frac} accent={accent} />
+            <BarFill frac={frac} accent={accent} flash={sev === "flash"} />
           </div>
         </div>
       );
@@ -2574,7 +2600,7 @@ function DeviceStatusWidget({ cfg, generic }: { cfg: Record<string, unknown>; ge
           {/* Width is the CELL's share (card width / reading count) — the
               widget size drives the instrument, not a fixed clamp. */}
           <div style={{ position: "relative", flex: 1, minHeight: 0, width: "70%" }}>
-            <Vial frac={frac} accent={accent} />
+            <Vial frac={frac} accent={accent} flash={sev === "flash"} />
           </div>
         </div>
       );
@@ -2583,7 +2609,7 @@ function DeviceStatusWidget({ cfg, generic }: { cfg: Record<string, unknown>; ge
       const lit = ctrl.value !== undefined && ctrl.value !== null && String(ctrl.value).toLowerCase() !== "off" && ctrl.value !== false;
       return (
         <div key={rc.key} style={{ ...cell, justifyContent: "center" }}>
-          <span style={{ color: lit ? accent : T.dim, fontSize: "clamp(18px, 12cqmin, 44px)", lineHeight: 0 }}>
+          <span className={flashClass(sev)} style={{ color: lit ? accent : T.dim, fontSize: "clamp(18px, 12cqmin, 44px)", lineHeight: 0 }}>
             <Glyph name="value" size="1em" />
           </span>
           <span style={{ color: T.text, fontWeight: 600, textTransform: "capitalize", fontSize: "clamp(0.8rem, 7cqmin, 1.4rem)" }}>{shown}</span>
@@ -2599,6 +2625,7 @@ function DeviceStatusWidget({ cfg, generic }: { cfg: Record<string, unknown>; ge
             accent={accent}
             value={shown}
             unit={ctrl.unit}
+            flash={sev === "flash"}
             width="clamp(64px, 32cqmin, 210px)"
             valueSize="clamp(0.85rem, 8cqmin, 1.8rem)"
           />
@@ -2627,7 +2654,8 @@ function DeviceStatusWidget({ cfg, generic }: { cfg: Record<string, unknown>; ge
     <Plate
       accents={[SEVERITY_ACCENT[acc.worst]]}
       on={acc.worst !== "none"}
-      charge={acc.worst === "alert" ? 1 : 0.6}
+      charge={SEVERITY_RANK[acc.worst] >= SEVERITY_RANK.alert ? 1 : 0.6}
+      flash={acc.worst === "flash"}
       style={{ gap: "clamp(4px, 2cqmin, 12px)" }}
     >
       {cfg.hide_name !== true && (
@@ -3448,6 +3476,7 @@ function WidgetEditorModal({
   const [sensorMax, setSensorMax] = useState<string>(cfg.max != null ? String(cfg.max) : "");
   const [sensorWarn, setSensorWarn] = useState<string>(cfg.warn_at != null ? String(cfg.warn_at) : "");
   const [sensorAlert, setSensorAlert] = useState<string>(cfg.alert_at != null ? String(cfg.alert_at) : "");
+  const [sensorFlash, setSensorFlash] = useState<string>(cfg.flash_at != null ? String(cfg.flash_at) : "");
   const [sensorBadDir, setSensorBadDir] = useState<string>((cfg.bad_direction as string) ?? "high");
   // device status card: which readouts to show, each with its own display +
   // alert config (legacy `keys` configs seed plain entries).
@@ -3552,6 +3581,7 @@ function WidgetEditorModal({
           ...(num(sensorMax) !== undefined ? { max: num(sensorMax) } : {}),
           ...(num(sensorWarn) !== undefined ? { warn_at: num(sensorWarn) } : {}),
           ...(num(sensorAlert) !== undefined ? { alert_at: num(sensorAlert) } : {}),
+          ...(num(sensorFlash) !== undefined ? { flash_at: num(sensorFlash) } : {}),
           ...(sensorBadDir !== "high" ? { bad_direction: sensorBadDir } : {}),
         },
         w: 8,
@@ -3855,10 +3885,11 @@ function WidgetEditorModal({
             </Field>
           )}
           {sensorDisplay !== "state" && (
-            <Field label="Alerts (accent escalates gold → rose)">
+            <Field label="Alerts (accent escalates gold → rose; flash blinks)">
               <div style={{ display: "flex", gap: "0.4rem", alignItems: "center", flexWrap: "wrap" }}>
                 <input value={sensorWarn} onChange={(e) => setSensorWarn(e.target.value)} placeholder="warn at" style={{ ...INPUT, width: 84 }} />
                 <input value={sensorAlert} onChange={(e) => setSensorAlert(e.target.value)} placeholder="alert at" style={{ ...INPUT, width: 84 }} />
+                <input value={sensorFlash} onChange={(e) => setSensorFlash(e.target.value)} placeholder="flash at" style={{ ...INPUT, width: 84 }} />
                 <Segmented
                   value={sensorBadDir}
                   onChange={setSensorBadDir}
@@ -3941,6 +3972,12 @@ function WidgetEditorModal({
                     defaultValue={r.alert_at != null ? String(r.alert_at) : ""}
                     onBlur={(e) => patchReading(r.key, { alert_at: num(e.target.value) })}
                     placeholder="alert at"
+                    style={{ ...INPUT, width: 78 }}
+                  />
+                  <input
+                    defaultValue={r.flash_at != null ? String(r.flash_at) : ""}
+                    onBlur={(e) => patchReading(r.key, { flash_at: num(e.target.value) })}
+                    placeholder="flash at"
                     style={{ ...INPUT, width: 78 }}
                   />
                   <Segmented
