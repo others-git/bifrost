@@ -16,6 +16,7 @@ import { S } from "./styles";
 import { color, font, navAurora as NAV_AURORA, alpha } from "./theme";
 import { useViewport } from "./useViewport";
 import { useAutoReloadOnNewBuild } from "./useAutoReload";
+import { useEvents } from "./useEvents";
 import { VoiceFeedback } from "./components/VoiceFeedback";
 import { PushToTalk } from "./components/PushToTalk";
 
@@ -127,13 +128,10 @@ export function App() {
   // the SSE stream — refresh the app-level lights list live, so a rename made
   // on the Devices page (or on another client entirely) shows on Control /
   // Floor Plan without a reload.
-  useEffect(() => {
-    if (page === "loading" || page === "setup" || page === "login") return;
-    const es = new EventSource("/api/events");
-    es.addEventListener("inventory", () => { refreshLights(); });
-    return () => es.close();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page === "loading" || page === "setup" || page === "login"]);
+  useEvents(
+    { inventory: () => refreshLights() },
+    { enabled: page !== "loading" && page !== "setup" && page !== "login" },
+  );
 
   async function refreshLights() {
     const result = await lightsWithKioskAuth();

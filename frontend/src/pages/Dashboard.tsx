@@ -29,6 +29,7 @@ import { CornerFiligree } from "../components/ornament";
 import { PageHeader } from "../components/PageHeader";
 import { useDialogs, type Dialogs } from "../components/dialogs";
 import { useMediaQuery, useViewport } from "../useViewport";
+import { useEvents } from "../useEvents";
 
 interface Props {
   lights: Light[];
@@ -64,10 +65,9 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
 
   // Real-time state: light_state (Hue SSE), audio_state (Onkyo push), and
   // power_state (HA WebSocket push).
-  useEffect(() => {
-    const es = new EventSource("/api/events");
-    es.addEventListener("light_state", (raw) => {
-      const { device_id, patch } = JSON.parse((raw as MessageEvent).data) as {
+  useEvents({
+    light_state: (raw) => {
+      const { device_id, patch } = JSON.parse(raw.data) as {
         device_id: string;
         patch: LightStatePatch;
       };
@@ -76,9 +76,9 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
           l.device_id === device_id ? { ...l, last_state: mergePatch(l.last_state, patch) } : l,
         ),
       );
-    });
-    es.addEventListener("media_state", (raw) => {
-      const ev = JSON.parse((raw as MessageEvent).data) as {
+    },
+    media_state: (raw) => {
+      const ev = JSON.parse(raw.data) as {
         provider_id: string;
         device_id: string;
         state: MediaDevice["state"];
@@ -90,9 +90,9 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
             : d,
         ),
       );
-    });
-    es.addEventListener("power_state", (raw) => {
-      const ev = JSON.parse((raw as MessageEvent).data) as {
+    },
+    power_state: (raw) => {
+      const ev = JSON.parse(raw.data) as {
         provider_id: string;
         device_id: string;
         state: PowerDevice["state"];
@@ -104,10 +104,8 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
             : d,
         ),
       );
-    });
-    es.onerror = () => {};
-    return () => es.close();
-  }, []);
+    },
+  });
 
   function onLightUpdate(id: string, state: LightState) {
     setLocalLights((prev) => prev.map((l) => (l.id === id ? { ...l, last_state: state } : l)));

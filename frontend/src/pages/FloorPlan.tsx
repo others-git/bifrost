@@ -50,6 +50,7 @@ import { ACCENT, S } from "../styles";
 import { alpha, color, font, glassCard, glow, labelType, radius } from "../theme";
 import { Glyph } from "../components/glyphs";
 import { Button, Switch as SharedSwitch } from "../components/controls";
+import { useEvents } from "../useEvents";
 
 type Tool = "view" | "floor" | "wall" | "erase" | "place" | "room" | "paint";
 
@@ -208,10 +209,12 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
     });
   }, [lights]);
 
-  useEffect(() => {
-    const es = new EventSource("/api/events");
-    es.addEventListener("light_state", (raw) => {
-      const { device_id, patch } = JSON.parse((raw as MessageEvent).data) as {
+  // Handler closes over `lights`; useEvents always calls the latest closure
+  // (via its internal ref) without tearing down and reopening the shared
+  // connection on every `lights` change.
+  useEvents({
+    light_state: (raw) => {
+      const { device_id, patch } = JSON.parse(raw.data) as {
         device_id: string;
         patch: LightStatePatch;
       };
@@ -222,10 +225,8 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
         next.set(light.id, mergePatch(next.get(light.id) ?? light.last_state, patch));
         return next;
       });
-    });
-    es.onerror = () => {};
-    return () => es.close();
-  }, [lights]);
+    },
+  });
 
   async function loadPlans() {
     const list = await getPlans();

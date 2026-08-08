@@ -1,5 +1,24 @@
 // Typed wrappers for every REST endpoint Bifrost exposes.
 
+// Every call below goes through `timedFetch`, not the raw global `fetch`. A
+// hung request (dead connection, WebView network stall) used to sit forever,
+// pinning a browser connection-pool slot with no error and no retry — on a
+// kiosk left open for hours that's enough, combined with a stuck SSE
+// connection, to exhaust the 6-connections-per-origin budget and leave every
+// subsequent button press queued indefinitely. Aborting on a timeout frees
+// the slot immediately instead.
+const rawFetch = fetch;
+const DEFAULT_TIMEOUT_MS = 20_000;
+async function timedFetch(input: string, init?: RequestInit, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Response> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await rawFetch(input, { ...init, signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 export interface LightState {
   on: boolean;
   brightness?: number;
@@ -88,21 +107,21 @@ export interface Light {
 /** Enable/disable a device of any domain (lights / audio / power). Disabled =
  * tracked, still in its room, but no commands and hidden from room control. */
 export async function setLightEnabled(id: string, enabled: boolean): Promise<void> {
-  await fetch(`/api/lights/${id}/enabled`, {
+  await timedFetch(`/api/lights/${id}/enabled`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ enabled }),
   });
 }
 export async function setMediaEnabled(id: string, enabled: boolean): Promise<void> {
-  await fetch(`/api/media/devices/${id}/enabled`, {
+  await timedFetch(`/api/media/devices/${id}/enabled`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ enabled }),
   });
 }
 export async function setPowerEnabled(id: string, enabled: boolean): Promise<void> {
-  await fetch(`/api/power/devices/${id}/enabled`, {
+  await timedFetch(`/api/power/devices/${id}/enabled`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ enabled }),
@@ -112,21 +131,21 @@ export async function setPowerEnabled(id: string, enabled: boolean): Promise<voi
 /** Override (or clear, with `null`) a device's glyph. Mirrors the enabled
  * setters: one per domain, same `{glyph}` body, type default when cleared. */
 export async function setLightGlyph(id: string, glyph: string | null): Promise<void> {
-  await fetch(`/api/lights/${id}/glyph`, {
+  await timedFetch(`/api/lights/${id}/glyph`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ glyph }),
   });
 }
 export async function setMediaGlyph(id: string, glyph: string | null): Promise<void> {
-  await fetch(`/api/media/devices/${id}/glyph`, {
+  await timedFetch(`/api/media/devices/${id}/glyph`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ glyph }),
   });
 }
 export async function setPowerGlyph(id: string, glyph: string | null): Promise<void> {
-  await fetch(`/api/power/devices/${id}/glyph`, {
+  await timedFetch(`/api/power/devices/${id}/glyph`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ glyph }),
@@ -135,7 +154,7 @@ export async function setPowerGlyph(id: string, glyph: string | null): Promise<v
 
 /** Set a device's friendly name (`null`/empty reverts to the provider's name). */
 async function setDeviceName(path: string, name: string | null): Promise<void> {
-  await fetch(path, {
+  await timedFetch(path, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name }),
@@ -152,21 +171,21 @@ export const setPowerName = (id: string, name: string | null) =>
  * the link → device becomes visible again). The de-dup auto-reconciler handles
  * exact hardware matches; this is the no-hw_id fallback and user override. */
 export async function setLightShadow(id: string, shadowed_by: string | null): Promise<void> {
-  await fetch(`/api/lights/${id}/shadow`, {
+  await timedFetch(`/api/lights/${id}/shadow`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ shadowed_by }),
   });
 }
 export async function setMediaShadow(id: string, shadowed_by: string | null): Promise<void> {
-  await fetch(`/api/media/devices/${id}/shadow`, {
+  await timedFetch(`/api/media/devices/${id}/shadow`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ shadowed_by }),
   });
 }
 export async function setPowerShadow(id: string, shadowed_by: string | null): Promise<void> {
-  await fetch(`/api/power/devices/${id}/shadow`, {
+  await timedFetch(`/api/power/devices/${id}/shadow`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ shadowed_by }),
@@ -177,7 +196,7 @@ export async function setPowerShadow(id: string, shadowed_by: string | null): Pr
  * Unlike shadowing, the companion's capabilities are routed/overlaid onto the
  * primary, not discarded. */
 export async function setMediaCompanion(id: string, primary_id: string | null): Promise<void> {
-  await fetch(`/api/media/devices/${id}/companion`, {
+  await timedFetch(`/api/media/devices/${id}/companion`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ primary_id }),
@@ -188,28 +207,28 @@ export async function setMediaCompanion(id: string, primary_id: string | null): 
  * paired remote) becomes a standalone device again. A later Discover may
  * re-pair auto-paired remotes; manual merges stay undone. */
 export async function dissolveComposite(id: string): Promise<void> {
-  await fetch(`/api/media/devices/${id}/dissolve`, { method: "POST" });
+  await timedFetch(`/api/media/devices/${id}/dissolve`, { method: "POST" });
 }
 
 /** Assign a device to a room from the device side (`null` removes it from its
  * room). Sets *direct* membership — room links (synced provider groups) are
  * managed on the Rooms page. */
 export async function setLightRoom(id: string, room_id: string | null): Promise<void> {
-  await fetch(`/api/lights/${id}/room`, {
+  await timedFetch(`/api/lights/${id}/room`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ room_id }),
   });
 }
 export async function setMediaRoom(id: string, room_id: string | null): Promise<void> {
-  await fetch(`/api/media/devices/${id}/room`, {
+  await timedFetch(`/api/media/devices/${id}/room`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ room_id }),
   });
 }
 export async function setPowerRoom(id: string, room_id: string | null): Promise<void> {
-  await fetch(`/api/power/devices/${id}/room`, {
+  await timedFetch(`/api/power/devices/${id}/room`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ room_id }),
@@ -223,7 +242,7 @@ export async function setMediaReceiver(
   receiver_id: string | null,
   receiver_source: string | null,
 ): Promise<void> {
-  await fetch(`/api/media/devices/${id}/receiver`, {
+  await timedFetch(`/api/media/devices/${id}/receiver`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ receiver_id, receiver_source }),
@@ -284,7 +303,7 @@ export interface DiscoveredDevice {
 
 /** Scan the LAN for devices of a provider type that supports auto-detect. */
 export async function scanForDevices(providerType: string): Promise<DiscoveredDevice[]> {
-  const res = await fetch(`/api/providers/scan/${providerType}`, { method: "POST" });
+  const res = await timedFetch(`/api/providers/scan/${providerType}`, { method: "POST" }, 45_000);
   if (!res.ok) return [];
   return res.json();
 }
@@ -301,7 +320,7 @@ export interface FoundDevice {
 /** Scan every discoverable provider type at once for unconfigured devices —
  * the "found devices" flow (no provider type to pick first). */
 export async function discoverAllDevices(): Promise<FoundDevice[]> {
-  const res = await fetch("/api/providers/discover-all");
+  const res = await timedFetch("/api/providers/discover-all", undefined, 45_000);
   if (!res.ok) return [];
   return res.json();
 }
@@ -317,7 +336,7 @@ export interface AppSettings {
 }
 
 export async function getSettings(): Promise<AppSettings> {
-  const res = await fetch("/api/settings");
+  const res = await timedFetch("/api/settings");
   if (!res.ok) return { expanded_lan_scan: [] };
   return res.json();
 }
@@ -325,7 +344,7 @@ export async function getSettings(): Promise<AppSettings> {
 /** Dev-mode only: a provider's debug diagnostics (raw upstream capabilities, the
  * ones we don't model yet, etc.). 404s when dev mode is off. */
 export async function getDevProviderDebug(id: string): Promise<unknown | null> {
-  const res = await fetch(`/api/dev/providers/${id}/debug`);
+  const res = await timedFetch(`/api/dev/providers/${id}/debug`);
   if (!res.ok) return null;
   return res.json();
 }
@@ -359,7 +378,7 @@ export interface GenericDevice {
 
 /** Live list of generic devices across every provider that serves them (HA). */
 export async function getGenericDevices(): Promise<GenericDevice[]> {
-  const res = await fetch("/api/generic/devices");
+  const res = await timedFetch("/api/generic/devices");
   if (!res.ok) return [];
   return res.json();
 }
@@ -372,7 +391,7 @@ export async function setGenericControl(
   key: string,
   value: unknown,
 ): Promise<string | null> {
-  const res = await fetch("/api/generic/devices/control", {
+  const res = await timedFetch("/api/generic/devices/control", {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ provider_id: providerId, device_id: deviceId, key, value }),
@@ -399,7 +418,7 @@ export interface DeviceRaw {
 }
 
 export async function getDeviceRaw(providerId: string, deviceId: string): Promise<DeviceRaw | null> {
-  const res = await fetch(`/api/dev/devices/${providerId}/${encodeURIComponent(deviceId)}/raw`);
+  const res = await timedFetch(`/api/dev/devices/${providerId}/${encodeURIComponent(deviceId)}/raw`);
   if (!res.ok) return null;
   return res.json();
 }
@@ -414,7 +433,7 @@ export interface ControlRoute {
 
 /** Dev-mode only: which member device wins each control for a composite, + why. */
 export async function getCompositeRouting(id: string): Promise<ControlRoute[]> {
-  const res = await fetch(`/api/dev/media/${id}/routing`);
+  const res = await timedFetch(`/api/dev/media/${id}/routing`);
   if (!res.ok) return [];
   return res.json();
 }
@@ -430,14 +449,14 @@ export interface DevProvider {
 
 /** Dev-mode only: server build/runtime info (version, build profile, counts). */
 export async function getDevInfo(): Promise<Record<string, unknown> | null> {
-  const res = await fetch("/api/dev/info");
+  const res = await timedFetch("/api/dev/info");
   if (!res.ok) return null;
   return res.json();
 }
 
 /** Dev-mode only: the provider list with debug-availability flags. */
 export async function getDevProviders(): Promise<DevProvider[]> {
-  const res = await fetch("/api/dev/providers");
+  const res = await timedFetch("/api/dev/providers");
   if (!res.ok) return [];
   const body = await res.json();
   return body.providers ?? [];
@@ -449,7 +468,7 @@ export async function getDevProviders(): Promise<DevProvider[]> {
 export async function updateSettings(
   settings: Partial<AppSettings>,
 ): Promise<AppSettings | { error: string }> {
-  const res = await fetch("/api/settings", {
+  const res = await timedFetch("/api/settings", {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(settings),
@@ -466,25 +485,25 @@ export interface ConnectionStatus {
 }
 
 export async function getHealth(): Promise<{ ok: boolean; version: string; uptime_secs: number }> {
-  const res = await fetch("/api/health");
+  const res = await timedFetch("/api/health");
   if (!res.ok) return { ok: false, version: "", uptime_secs: 0 };
   return res.json();
 }
 
 /** Per-process build nonce — changes on every server restart/redeploy. */
 export async function getInstance(): Promise<{ instance_id: string; version: string } | null> {
-  const res = await fetch(`/api/instance?_=${Date.now()}`, { cache: "no-store" });
+  const res = await timedFetch(`/api/instance?_=${Date.now()}`, { cache: "no-store" });
   if (!res.ok) return null;
   return res.json();
 }
 
 export async function getSetupStatus(): Promise<{ setup_complete: boolean }> {
-  const res = await fetch("/api/setup/status");
+  const res = await timedFetch("/api/setup/status");
   return res.json();
 }
 
 export async function postSetup(password: string): Promise<{ ok: true } | { error: string }> {
-  const res = await fetch("/api/setup", {
+  const res = await timedFetch("/api/setup", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ password }),
@@ -494,7 +513,7 @@ export async function postSetup(password: string): Promise<{ ok: true } | { erro
 }
 
 export async function login(password: string): Promise<boolean> {
-  const res = await fetch("/api/auth/login", {
+  const res = await timedFetch("/api/auth/login", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ password }),
@@ -503,18 +522,18 @@ export async function login(password: string): Promise<boolean> {
 }
 
 export async function logout(): Promise<void> {
-  await fetch("/api/auth/logout", { method: "POST" });
+  await timedFetch("/api/auth/logout", { method: "POST" });
 }
 
 /** Trade a paired kiosk's `bfr_key` cookie (set by the kiosk app) for a dashboard
  * session, so an authorized wall fixture skips the password login. */
 export async function kioskLogin(): Promise<boolean> {
-  const res = await fetch("/api/auth/kiosk", { method: "POST" });
+  const res = await timedFetch("/api/auth/kiosk", { method: "POST" });
   return res.ok;
 }
 
 export async function getLights(): Promise<Light[] | "unauthorized"> {
-  const res = await fetch("/api/lights");
+  const res = await timedFetch("/api/lights");
   if (res.status === 401) return "unauthorized";
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
@@ -522,13 +541,13 @@ export async function getLights(): Promise<Light[] | "unauthorized"> {
 
 /** Live read — round-trips to the device and refreshes the cache. */
 export async function getLight(id: string): Promise<Light | null> {
-  const res = await fetch(`/api/lights/${id}`);
+  const res = await timedFetch(`/api/lights/${id}`);
   if (!res.ok) return null;
   return res.json();
 }
 
 export async function setLightState(id: string, state: LightState): Promise<string | null> {
-  const res = await fetch(`/api/lights/${id}`, {
+  const res = await timedFetch(`/api/lights/${id}`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(state),
@@ -539,7 +558,7 @@ export async function setLightState(id: string, state: LightState): Promise<stri
 
 /** Set per-segment colours on a strip (write-only; not reflected in light state). */
 export async function setLightSegments(id: string, segments: SegmentColor[]): Promise<void> {
-  await fetch(`/api/lights/${id}/segments`, {
+  await timedFetch(`/api/lights/${id}/segments`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ segments }),
@@ -646,20 +665,20 @@ export interface MediaCommand {
 }
 
 export async function getMediaDevices(): Promise<MediaDevice[]> {
-  const res = await fetch("/api/media/devices");
+  const res = await timedFetch("/api/media/devices");
   if (!res.ok) return [];
   return res.json();
 }
 
 /** Live read — round-trips to the device and refreshes the cache. */
 export async function getMediaDevice(id: string): Promise<MediaDevice | null> {
-  const res = await fetch(`/api/media/devices/${id}`);
+  const res = await timedFetch(`/api/media/devices/${id}`);
   if (!res.ok) return null;
   return res.json();
 }
 
 export async function setMediaState(id: string, cmd: MediaCommand): Promise<string | null> {
-  const res = await fetch(`/api/media/devices/${id}/state`, {
+  const res = await timedFetch(`/api/media/devices/${id}/state`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(cmd),
@@ -670,7 +689,7 @@ export async function setMediaState(id: string, cmd: MediaCommand): Promise<stri
 
 /** List a device's saved favorites (live read from the provider). */
 export async function getMediaFavorites(id: string): Promise<MediaFavorite[]> {
-  const res = await fetch(`/api/media/devices/${id}/favorites`);
+  const res = await timedFetch(`/api/media/devices/${id}/favorites`);
   if (!res.ok) return [];
   return res.json();
 }
@@ -680,7 +699,7 @@ export async function playMediaFavorite(
   id: string,
   favoriteId: string,
 ): Promise<string | null> {
-  const res = await fetch(`/api/media/devices/${id}/favorites/play`, {
+  const res = await timedFetch(`/api/media/devices/${id}/favorites/play`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ favorite_id: favoriteId }),
@@ -695,7 +714,7 @@ export async function groupMediaDevice(
   id: string,
   coordinatorId: string,
 ): Promise<string | null> {
-  const res = await fetch(`/api/media/devices/${id}/group`, {
+  const res = await timedFetch(`/api/media/devices/${id}/group`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ coordinator_id: coordinatorId }),
@@ -706,7 +725,7 @@ export async function groupMediaDevice(
 
 /** Remove `id` from any playback group, returning it to standalone playback. */
 export async function ungroupMediaDevice(id: string): Promise<string | null> {
-  const res = await fetch(`/api/media/devices/${id}/ungroup`, { method: "POST" });
+  const res = await timedFetch(`/api/media/devices/${id}/ungroup`, { method: "POST" });
   if (res.ok) return null;
   return (await res.text()) || `HTTP ${res.status}`;
 }
@@ -761,7 +780,7 @@ export interface RemoteCommandInfo {
 
 /** The remote's expanded (native) command catalogue — empty when it has none. */
 export async function getRemoteCommands(id: string): Promise<RemoteCommandInfo[]> {
-  const res = await fetch(`/api/remote/devices/${id}/commands`);
+  const res = await timedFetch(`/api/remote/devices/${id}/commands`);
   if (!res.ok) return [];
   return res.json();
 }
@@ -772,7 +791,7 @@ export async function setRemoteCommandPin(
   token: string,
   pinned: boolean,
 ): Promise<string | null> {
-  const res = await fetch(`/api/remote/devices/${id}/commands/pin`, {
+  const res = await timedFetch(`/api/remote/devices/${id}/commands/pin`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ token, pinned }),
@@ -792,20 +811,20 @@ export interface RemoteApp {
 }
 
 export async function getRemoteDevices(): Promise<RemoteDevice[]> {
-  const res = await fetch("/api/remote/devices");
+  const res = await timedFetch("/api/remote/devices");
   if (!res.ok) return [];
   return res.json();
 }
 
 /** Live read — round-trips to the device for fresh power / current-app. */
 export async function getRemoteState(id: string): Promise<RemoteState | null> {
-  const res = await fetch(`/api/remote/devices/${id}`);
+  const res = await timedFetch(`/api/remote/devices/${id}`);
   if (!res.ok) return null;
   return res.json();
 }
 
 export async function sendRemoteCommand(id: string, cmd: RemoteCommand): Promise<string | null> {
-  const res = await fetch(`/api/remote/devices/${id}/command`, {
+  const res = await timedFetch(`/api/remote/devices/${id}/command`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(cmd),
@@ -816,7 +835,7 @@ export async function sendRemoteCommand(id: string, cmd: RemoteCommand): Promise
 
 /** A remote's launchable apps (pinned first, then recents). */
 export async function getRemoteApps(id: string): Promise<RemoteApp[]> {
-  const res = await fetch(`/api/remote/devices/${id}/apps`);
+  const res = await timedFetch(`/api/remote/devices/${id}/apps`);
   if (!res.ok) return [];
   return res.json();
 }
@@ -826,7 +845,7 @@ export async function setRemoteAppPin(
   pkg: string,
   pinned: boolean,
 ): Promise<string | null> {
-  const res = await fetch(`/api/remote/devices/${id}/apps/pin`, {
+  const res = await timedFetch(`/api/remote/devices/${id}/apps/pin`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ package: pkg, pinned }),
@@ -874,20 +893,20 @@ export interface PowerDevice {
 }
 
 export async function getPowerDevices(): Promise<PowerDevice[]> {
-  const res = await fetch("/api/power/devices");
+  const res = await timedFetch("/api/power/devices");
   if (!res.ok) return [];
   return res.json();
 }
 
 /** Live read — round-trips to the device and refreshes the cache. */
 export async function getPowerDevice(id: string): Promise<PowerDevice | null> {
-  const res = await fetch(`/api/power/devices/${id}`);
+  const res = await timedFetch(`/api/power/devices/${id}`);
   if (!res.ok) return null;
   return res.json();
 }
 
 export async function setPowerState(id: string, on: boolean): Promise<string | null> {
-  const res = await fetch(`/api/power/devices/${id}/state`, {
+  const res = await timedFetch(`/api/power/devices/${id}/state`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ on }),
@@ -939,41 +958,41 @@ export interface SensorDevice {
 }
 
 export async function getSensors(): Promise<SensorDevice[]> {
-  const res = await fetch("/api/sensors/devices");
+  const res = await timedFetch("/api/sensors/devices");
   if (!res.ok) return [];
   return res.json();
 }
 
 export async function setSensorEnabled(id: string, enabled: boolean): Promise<void> {
-  await fetch(`/api/sensors/devices/${id}/enabled`, {
+  await timedFetch(`/api/sensors/devices/${id}/enabled`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ enabled }),
   });
 }
 export async function setSensorGlyph(id: string, glyph: string | null): Promise<void> {
-  await fetch(`/api/sensors/devices/${id}/glyph`, {
+  await timedFetch(`/api/sensors/devices/${id}/glyph`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ glyph }),
   });
 }
 export async function setSensorName(id: string, name: string | null): Promise<void> {
-  await fetch(`/api/sensors/devices/${id}/name`, {
+  await timedFetch(`/api/sensors/devices/${id}/name`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name }),
   });
 }
 export async function setSensorShadow(id: string, shadowed_by: string | null): Promise<void> {
-  await fetch(`/api/sensors/devices/${id}/shadow`, {
+  await timedFetch(`/api/sensors/devices/${id}/shadow`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ shadowed_by }),
   });
 }
 export async function setSensorRoom(id: string, room_id: string | null): Promise<void> {
-  await fetch(`/api/sensors/devices/${id}/room`, {
+  await timedFetch(`/api/sensors/devices/${id}/room`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ room_id }),
@@ -1056,7 +1075,7 @@ export interface Automation {
 export type AutomationBody = Omit<Automation, "id" | "last_fired_at">;
 
 export async function getAutomations(): Promise<Automation[]> {
-  const res = await fetch("/api/automations");
+  const res = await timedFetch("/api/automations");
   if (!res.ok) return [];
   return res.json();
 }
@@ -1068,7 +1087,7 @@ async function ruleResult(res: Response): Promise<Automation | string> {
 }
 
 export async function createAutomation(body: AutomationBody): Promise<Automation | string> {
-  const res = await fetch("/api/automations", {
+  const res = await timedFetch("/api/automations", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -1077,7 +1096,7 @@ export async function createAutomation(body: AutomationBody): Promise<Automation
 }
 
 export async function updateAutomation(id: string, body: AutomationBody): Promise<Automation | string> {
-  const res = await fetch(`/api/automations/${id}`, {
+  const res = await timedFetch(`/api/automations/${id}`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -1086,7 +1105,7 @@ export async function updateAutomation(id: string, body: AutomationBody): Promis
 }
 
 export async function deleteAutomation(id: string): Promise<void> {
-  await fetch(`/api/automations/${id}`, { method: "DELETE" });
+  await timedFetch(`/api/automations/${id}`, { method: "DELETE" });
 }
 
 // ── Dev event journal ─────────────────────────────────────────────────────────
@@ -1109,18 +1128,18 @@ export async function getDevEvents(
   const params = new URLSearchParams({ after: String(after) });
   if (target) params.set("target", target);
   if (level) params.set("level", level);
-  const res = await fetch(`/api/dev/events?${params}`);
+  const res = await timedFetch(`/api/dev/events?${params}`);
   if (!res.ok) return null;
   return res.json();
 }
 
 export async function clearDevEvents(): Promise<void> {
-  await fetch("/api/dev/events/clear", { method: "POST" });
+  await timedFetch("/api/dev/events/clear", { method: "POST" });
 }
 
 /** Run an automation's actions right now (skipping trigger and conditions). */
 export async function runAutomation(id: string): Promise<boolean> {
-  const res = await fetch(`/api/automations/${id}/run`, { method: "POST" });
+  const res = await timedFetch(`/api/automations/${id}/run`, { method: "POST" });
   return res.ok;
 }
 
@@ -1143,14 +1162,14 @@ export async function discoverProvider(
   opts?: { prune?: boolean },
 ): Promise<{ discovered: number; pruned: number }> {
   const q = opts?.prune === undefined ? "" : `?prune=${opts.prune}`;
-  const res = await fetch(`/api/providers/${id}/discover${q}`, { method: "POST" });
+  const res = await timedFetch(`/api/providers/${id}/discover${q}`, { method: "POST" }, 45_000);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
 /** Set whether discovering this provider prunes devices it no longer reports. */
 export async function setProviderPrune(id: string, prune: boolean): Promise<void> {
-  await fetch(`/api/providers/${id}/prune`, {
+  await timedFetch(`/api/providers/${id}/prune`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ prune }),
@@ -1159,7 +1178,7 @@ export async function setProviderPrune(id: string, prune: boolean): Promise<void
 
 /** Persist the Devices-page ordering of provider groups (full id list, top → bottom). */
 export async function setProviderOrder(order: string[]): Promise<void> {
-  await fetch("/api/providers/order", {
+  await timedFetch("/api/providers/order", {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ order }),
@@ -1167,19 +1186,19 @@ export async function setProviderOrder(order: string[]): Promise<void> {
 }
 
 export async function getProviders(): Promise<Provider[]> {
-  const res = await fetch("/api/providers");
+  const res = await timedFetch("/api/providers");
   if (!res.ok) return [];
   return res.json();
 }
 
 export async function getProviderTypes(): Promise<ProviderType[]> {
-  const res = await fetch("/api/providers/types");
+  const res = await timedFetch("/api/providers/types");
   if (!res.ok) return [];
   return res.json();
 }
 
 export async function getProviderStatus(id: string): Promise<ConnectionStatus> {
-  const res = await fetch(`/api/providers/${id}/status`);
+  const res = await timedFetch(`/api/providers/${id}/status`);
   if (!res.ok) return { state: "unknown" };
   return res.json();
 }
@@ -1189,7 +1208,7 @@ export async function addProvider(
   provider_type: string,
   credentials: Record<string, string>,
 ): Promise<{ id: string } | { error: string }> {
-  const res = await fetch("/api/providers", {
+  const res = await timedFetch("/api/providers", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name, provider_type, credentials }),
@@ -1199,7 +1218,7 @@ export async function addProvider(
 }
 
 export async function removeProvider(id: string): Promise<void> {
-  await fetch(`/api/providers/${id}`, { method: "DELETE" });
+  await timedFetch(`/api/providers/${id}`, { method: "DELETE" });
 }
 
 /** A provider's current non-secret configuration, used to prefill the edit form. */
@@ -1213,7 +1232,7 @@ export interface ProviderConfig {
 }
 
 export async function getProviderConfig(id: string): Promise<ProviderConfig | null> {
-  const res = await fetch(`/api/providers/${id}/config`);
+  const res = await timedFetch(`/api/providers/${id}/config`);
   if (!res.ok) return null;
   return res.json();
 }
@@ -1226,7 +1245,7 @@ export async function updateProviderCredentials(
   id: string,
   credentials: Record<string, string>,
 ): Promise<{ ok: true } | { error: string }> {
-  const res = await fetch(`/api/providers/${id}/credentials`, {
+  const res = await timedFetch(`/api/providers/${id}/credentials`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ credentials }),
@@ -1251,14 +1270,14 @@ export interface Scene {
 }
 
 export async function getScenes(): Promise<Scene[]> {
-  const res = await fetch("/api/scenes");
+  const res = await timedFetch("/api/scenes");
   if (!res.ok) return [];
   return res.json();
 }
 
 /** Mark (or clear) a home scene as the single "Restore Home" default. */
 export async function setDefaultScene(id: string, isDefault: boolean): Promise<void> {
-  await fetch(`/api/scenes/${id}/default`, {
+  await timedFetch(`/api/scenes/${id}/default`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ default: isDefault }),
@@ -1267,7 +1286,7 @@ export async function setDefaultScene(id: string, isDefault: boolean): Promise<v
 
 /** One-tap "Restore Home": apply the default home scene. Throws if none is set. */
 export async function restoreDefaultHome(): Promise<{ applied: number; failed: number }> {
-  const res = await fetch("/api/scenes/restore-default", { method: "POST" });
+  const res = await timedFetch("/api/scenes/restore-default", { method: "POST" });
   if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
   return res.json();
 }
@@ -1278,7 +1297,7 @@ export async function createScene(
   name: string,
   roomId?: string,
 ): Promise<{ id: string; lights: number; power: number }> {
-  const res = await fetch("/api/scenes", {
+  const res = await timedFetch("/api/scenes", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name, room_id: roomId ?? null }),
@@ -1292,7 +1311,7 @@ export async function createScene(
 export async function recaptureScene(
   id: string,
 ): Promise<{ id: string; lights: number; power: number }> {
-  const res = await fetch(`/api/scenes/${id}/recapture`, { method: "POST" });
+  const res = await timedFetch(`/api/scenes/${id}/recapture`, { method: "POST" });
   if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
   return res.json();
 }
@@ -1301,7 +1320,7 @@ export async function activateScene(
   id: string,
   lightIds?: string[],
 ): Promise<{ applied: number; failed: number }> {
-  const res = await fetch(`/api/scenes/${id}/activate`, {
+  const res = await timedFetch(`/api/scenes/${id}/activate`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(lightIds ? { light_ids: lightIds } : {}),
@@ -1311,7 +1330,7 @@ export async function activateScene(
 }
 
 export async function removeScene(id: string): Promise<void> {
-  await fetch(`/api/scenes/${id}`, { method: "DELETE" });
+  await timedFetch(`/api/scenes/${id}`, { method: "DELETE" });
 }
 
 // ── Colour palettes (imported provider scenes, e.g. Hue scenes) ──────────────
@@ -1330,14 +1349,14 @@ export interface Palette {
 }
 
 export async function getPalettes(): Promise<Palette[]> {
-  const res = await fetch("/api/palettes");
+  const res = await timedFetch("/api/palettes");
   if (!res.ok) return [];
   return res.json();
 }
 
 /** Pull stored provider scenes (Hue scenes) in as reusable palettes. */
 export async function importPalettes(): Promise<{ imported: number }> {
-  const res = await fetch("/api/palettes/import", { method: "POST" });
+  const res = await timedFetch("/api/palettes/import", { method: "POST" });
   if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
   return res.json();
 }
@@ -1347,7 +1366,7 @@ export async function applyPalette(
   id: string,
   roomId: string,
 ): Promise<{ applied: number; failed: number }> {
-  const res = await fetch(`/api/palettes/${id}/apply`, {
+  const res = await timedFetch(`/api/palettes/${id}/apply`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ room_id: roomId }),
@@ -1357,7 +1376,7 @@ export async function applyPalette(
 }
 
 export async function removePalette(id: string): Promise<void> {
-  await fetch(`/api/palettes/${id}`, { method: "DELETE" });
+  await timedFetch(`/api/palettes/${id}`, { method: "DELETE" });
 }
 
 // ── Rooms ────────────────────────────────────────────────────────────────────
@@ -1424,7 +1443,7 @@ export interface RoomControl {
 
 /** Replace the room's configured quick-control buttons (add/edit/remove/reorder). */
 export async function setRoomControls(roomId: string, controls: RoomControl[]): Promise<void> {
-  const res = await fetch(`/api/rooms/${roomId}/controls`, {
+  const res = await timedFetch(`/api/rooms/${roomId}/controls`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ controls }),
@@ -1443,7 +1462,7 @@ export async function setRoomMediaDevices(
   roomId: string,
   devices: RoomMediaMember[],
 ): Promise<void> {
-  await fetch(`/api/rooms/${roomId}/media`, {
+  await timedFetch(`/api/rooms/${roomId}/media`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ devices }),
@@ -1455,7 +1474,7 @@ export async function setRoomMediaState(
   roomId: string,
   cmd: { volume?: number; mute?: boolean },
 ): Promise<void> {
-  await fetch(`/api/rooms/${roomId}/media/state`, {
+  await timedFetch(`/api/rooms/${roomId}/media/state`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(cmd),
@@ -1479,19 +1498,19 @@ export interface ProviderGroupInfo {
 }
 
 export async function getRooms(): Promise<Room[]> {
-  const res = await fetch("/api/rooms");
+  const res = await timedFetch("/api/rooms");
   if (!res.ok) return [];
   return res.json();
 }
 
 export async function getProviderGroups(): Promise<ProviderGroupInfo[]> {
-  const res = await fetch("/api/provider-groups");
+  const res = await timedFetch("/api/provider-groups");
   if (!res.ok) return [];
   return res.json();
 }
 
 export async function createRoom(name: string, light_ids: string[]): Promise<{ id: string }> {
-  const res = await fetch("/api/rooms", {
+  const res = await timedFetch("/api/rooms", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name, light_ids }),
@@ -1502,7 +1521,7 @@ export async function createRoom(name: string, light_ids: string[]): Promise<{ i
 
 /** Merge `sourceRoomId` into `targetRoomId` (links, lights, scenes, plan regions move; source is deleted). */
 export async function mergeRooms(targetRoomId: string, sourceRoomId: string): Promise<void> {
-  const res = await fetch(`/api/rooms/${targetRoomId}/merge`, {
+  const res = await timedFetch(`/api/rooms/${targetRoomId}/merge`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ source_room_id: sourceRoomId }),
@@ -1511,12 +1530,12 @@ export async function mergeRooms(targetRoomId: string, sourceRoomId: string): Pr
 }
 
 export async function removeRoom(id: string): Promise<void> {
-  await fetch(`/api/rooms/${id}`, { method: "DELETE" });
+  await timedFetch(`/api/rooms/${id}`, { method: "DELETE" });
 }
 
 /** Enable or disable a room (disabled rooms are hidden from Dashboard/Floor Plan). */
 export async function setRoomEnabled(id: string, enabled: boolean): Promise<void> {
-  await fetch(`/api/rooms/${id}/enabled`, {
+  await timedFetch(`/api/rooms/${id}/enabled`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ enabled }),
@@ -1525,7 +1544,7 @@ export async function setRoomEnabled(id: string, enabled: boolean): Promise<void
 
 /** Replace the room's DIRECT lights (linked members are unaffected). */
 export async function setRoomDirectLights(id: string, light_ids: string[]): Promise<void> {
-  await fetch(`/api/rooms/${id}/lights`, {
+  await timedFetch(`/api/rooms/${id}/lights`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ light_ids }),
@@ -1533,7 +1552,7 @@ export async function setRoomDirectLights(id: string, light_ids: string[]): Prom
 }
 
 export async function setRoomLinks(id: string, provider_group_ids: string[]): Promise<void> {
-  await fetch(`/api/rooms/${id}/links`, {
+  await timedFetch(`/api/rooms/${id}/links`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ provider_group_ids }),
@@ -1542,7 +1561,7 @@ export async function setRoomLinks(id: string, provider_group_ids: string[]): Pr
 
 /** Replace the room's explicit sensor membership (linked members are unaffected). */
 export async function setRoomSensors(id: string, sensor_ids: string[]): Promise<void> {
-  await fetch(`/api/rooms/${id}/sensors`, {
+  await timedFetch(`/api/rooms/${id}/sensors`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ sensor_ids }),
@@ -1552,7 +1571,7 @@ export async function setRoomSensors(id: string, sensor_ids: string[]): Promise<
 /** Replace the room's presence opt-outs: the listed sensors stop counting toward
  * occupancy (everything else counts by default, including sensors synced later). */
 export async function setRoomPresence(id: string, excluded_sensor_ids: string[]): Promise<void> {
-  await fetch(`/api/rooms/${id}/presence`, {
+  await timedFetch(`/api/rooms/${id}/presence`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ excluded_sensor_ids }),
@@ -1561,7 +1580,7 @@ export async function setRoomPresence(id: string, excluded_sensor_ids: string[])
 
 /** Replace the room's power-device membership (switches/plugs/fans). */
 export async function setRoomPowerDevices(id: string, power_device_ids: string[]): Promise<void> {
-  await fetch(`/api/rooms/${id}/power`, {
+  await timedFetch(`/api/rooms/${id}/power`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ power_device_ids }),
@@ -1576,7 +1595,7 @@ export async function setRoomPowerDevices(id: string, power_device_ids: string[]
  * remote session, so the TV hears and acts on it. Needs a configured TTS
  * endpoint + a paired remote. */
 export async function assistantSay(deviceId: string, text: string): Promise<string | null> {
-  const res = await fetch(`/api/media/devices/${deviceId}/assistant`, {
+  const res = await timedFetch(`/api/media/devices/${deviceId}/assistant`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ text }),
@@ -1589,7 +1608,7 @@ export async function setRoomState(
   id: string,
   state: LightStatePatch,
 ): Promise<{ applied: number; failed: number }> {
-  const res = await fetch(`/api/rooms/${id}/state`, {
+  const res = await timedFetch(`/api/rooms/${id}/state`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(state),
@@ -1609,7 +1628,7 @@ export interface ApiKey {
 }
 
 export async function getApiKeys(): Promise<ApiKey[]> {
-  const res = await fetch("/api/api-keys");
+  const res = await timedFetch("/api/api-keys");
   if (!res.ok) return [];
   return res.json();
 }
@@ -1618,7 +1637,7 @@ export async function getApiKeys(): Promise<ApiKey[]> {
 export async function createApiKey(
   name: string,
 ): Promise<{ id: string; name: string; key: string; prefix: string }> {
-  const res = await fetch("/api/api-keys", {
+  const res = await timedFetch("/api/api-keys", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name }),
@@ -1628,7 +1647,7 @@ export async function createApiKey(
 }
 
 export async function revokeApiKey(id: string): Promise<void> {
-  await fetch(`/api/api-keys/${id}`, { method: "DELETE" });
+  await timedFetch(`/api/api-keys/${id}`, { method: "DELETE" });
 }
 
 /**
@@ -1641,7 +1660,7 @@ export async function createEnrollmentToken(): Promise<{
   expires_at: string;
   expires_in_secs: number;
 }> {
-  const res = await fetch("/api/enrollment", {
+  const res = await timedFetch("/api/enrollment", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: "{}",
@@ -1664,7 +1683,7 @@ export interface AiEndpoint {
 }
 
 export async function getAiEndpoints(): Promise<AiEndpoint[]> {
-  const res = await fetch("/api/ai-endpoints");
+  const res = await timedFetch("/api/ai-endpoints");
   if (!res.ok) return [];
   return res.json();
 }
@@ -1673,7 +1692,7 @@ export async function putAiEndpoint(
   role: AiRole,
   body: { base_url: string; model: string; api_key?: string | null; enabled: boolean },
 ): Promise<void> {
-  const res = await fetch(`/api/ai-endpoints/${role}`, {
+  const res = await timedFetch(`/api/ai-endpoints/${role}`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -1682,12 +1701,12 @@ export async function putAiEndpoint(
 }
 
 export async function deleteAiEndpoint(role: AiRole): Promise<void> {
-  await fetch(`/api/ai-endpoints/${role}`, { method: "DELETE" });
+  await timedFetch(`/api/ai-endpoints/${role}`, { method: "DELETE" });
 }
 
 /** Probe an endpoint's reachability (`GET {base_url}/models`). */
 export async function testAiEndpoint(role: AiRole): Promise<{ ok: boolean; message: string }> {
-  const res = await fetch(`/api/ai-endpoints/${role}/test`, { method: "POST" });
+  const res = await timedFetch(`/api/ai-endpoints/${role}/test`, { method: "POST" });
   if (!res.ok) return { ok: false, message: `HTTP ${res.status}` };
   return res.json();
 }
@@ -1758,7 +1777,7 @@ export type AwareOverrideMode = "keep_on" | "keep_off";
 /** Report this client's CSS viewport to the hub (kiosk WebView only — auth'd by
  * the `bfr_key` cookie the WebView carries). Fire-and-forget. */
 export async function reportKioskViewport(w: number, h: number): Promise<void> {
-  await fetch("/api/kiosks/self/viewport", {
+  await timedFetch("/api/kiosks/self/viewport", {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ w: Math.round(w), h: Math.round(h) }),
@@ -1766,7 +1785,7 @@ export async function reportKioskViewport(w: number, h: number): Promise<void> {
 }
 
 export async function getKiosks(): Promise<Kiosk[]> {
-  const res = await fetch("/api/kiosks");
+  const res = await timedFetch("/api/kiosks");
   if (!res.ok) return [];
   return res.json();
 }
@@ -1775,7 +1794,7 @@ export type KioskCommandVerb = "sleep" | "wake" | "lock" | "update" | "screensho
 
 /** Queue a command the kiosk performs on its next check-in. */
 export async function kioskCommand(id: string, command: KioskCommandVerb): Promise<void> {
-  const res = await fetch(`/api/kiosks/${id}/command`, {
+  const res = await timedFetch(`/api/kiosks/${id}/command`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ command }),
@@ -1785,7 +1804,7 @@ export async function kioskCommand(id: string, command: KioskCommandVerb): Promi
 
 /** Assign the kiosk to a Room (its voice context), or clear with null. */
 export async function setKioskRoom(id: string, room_id: string | null): Promise<void> {
-  const res = await fetch(`/api/kiosks/${id}/room`, {
+  const res = await timedFetch(`/api/kiosks/${id}/room`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ room_id }),
@@ -1795,7 +1814,7 @@ export async function setKioskRoom(id: string, room_id: string | null): Promise<
 
 /** Set the kiosk's auto-launch board (full-screen on load), or clear with null. */
 export async function setKioskBoard(id: string, board_id: string | null): Promise<void> {
-  const res = await fetch(`/api/kiosks/${id}/board`, {
+  const res = await timedFetch(`/api/kiosks/${id}/board`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ board_id }),
@@ -1810,7 +1829,7 @@ export async function setKioskSchedule(
   id: string,
   schedule: { enabled: boolean; sleep_at: string | null; wake_at: string | null },
 ): Promise<void> {
-  const res = await fetch(`/api/kiosks/${id}/schedule`, {
+  const res = await timedFetch(`/api/kiosks/${id}/schedule`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(schedule),
@@ -1825,7 +1844,7 @@ export async function setKioskPresence(
   id: string,
   presence: { enabled: boolean; timeout_secs?: number },
 ): Promise<void> {
-  const res = await fetch(`/api/kiosks/${id}/presence`, {
+  const res = await timedFetch(`/api/kiosks/${id}/presence`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(presence),
@@ -1839,7 +1858,7 @@ export async function setKioskMic(
   id: string,
   mic: { enabled: boolean; sensitivity?: string },
 ): Promise<void> {
-  const res = await fetch(`/api/kiosks/${id}/mic`, {
+  const res = await timedFetch(`/api/kiosks/${id}/mic`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(mic),
@@ -1857,7 +1876,7 @@ export async function setKioskAwareOverride(
   targets: ControlTarget[],
   mode: AwareOverrideMode,
 ): Promise<void> {
-  const res = await fetch(`/api/kiosks/${id}/aware-override`, {
+  const res = await timedFetch(`/api/kiosks/${id}/aware-override`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ targets, mode }),
@@ -1876,7 +1895,7 @@ export async function setKioskPlan(
   id: string,
   plan: { enabled: boolean; hour_modes: string; timeout_secs?: number },
 ): Promise<void> {
-  const res = await fetch(`/api/kiosks/${id}/plan`, {
+  const res = await timedFetch(`/api/kiosks/${id}/plan`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(plan),
@@ -1888,18 +1907,18 @@ export async function setKioskPlan(
  * cookie. Null when not served on a registered kiosk (no/unknown key). Lets a
  * kiosk-served Boards page auto-launch its configured board. */
 export async function getKioskSelf(): Promise<{ id: string; name: string; default_board_id: string | null } | null> {
-  const res = await fetch("/api/kiosks/self");
+  const res = await timedFetch("/api/kiosks/self");
   if (!res.ok) return null;
   return res.json();
 }
 
 /** Revoke the kiosk's key — it must re-enroll via QR. */
 export async function kioskDeauth(id: string): Promise<void> {
-  await fetch(`/api/kiosks/${id}/deauth`, { method: "POST" });
+  await timedFetch(`/api/kiosks/${id}/deauth`, { method: "POST" });
 }
 
 export async function forgetKiosk(id: string): Promise<void> {
-  await fetch(`/api/kiosks/${id}`, { method: "DELETE" });
+  await timedFetch(`/api/kiosks/${id}`, { method: "DELETE" });
 }
 
 // ── Kiosk OTA update source (the hub relays GitHub releases to LAN kiosks) ────
@@ -1919,7 +1938,7 @@ export interface KioskUpdateManifest {
 }
 
 export async function getKioskUpdateConfig(): Promise<KioskUpdateConfig> {
-  const res = await fetch("/api/kiosks/update/config");
+  const res = await timedFetch("/api/kiosks/update/config");
   if (!res.ok) return { repo: "", asset: "" };
   return res.json();
 }
@@ -1928,7 +1947,7 @@ export async function setKioskUpdateConfig(
   repo: string,
   asset: string,
 ): Promise<KioskUpdateConfig | { error: string }> {
-  const res = await fetch("/api/kiosks/update/config", {
+  const res = await timedFetch("/api/kiosks/update/config", {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ repo, asset }),
@@ -1939,7 +1958,7 @@ export async function setKioskUpdateConfig(
 
 /** The currently-cached APK manifest on the hub (null until a fetch is run). */
 export async function getKioskUpdateStatus(): Promise<{ cached: KioskUpdateManifest | null }> {
-  const res = await fetch("/api/kiosks/update");
+  const res = await timedFetch("/api/kiosks/update");
   if (!res.ok) return { cached: null };
   return res.json();
 }
@@ -1948,7 +1967,7 @@ export async function getKioskUpdateStatus(): Promise<{ cached: KioskUpdateManif
 export async function refreshKioskUpdate(): Promise<
   { manifest: KioskUpdateManifest; downloaded: boolean } | { error: string }
 > {
-  const res = await fetch("/api/kiosks/update", { method: "POST" });
+  const res = await timedFetch("/api/kiosks/update", { method: "POST" }, 60_000);
   if (res.ok) return res.json();
   return { error: (await res.text()) || `HTTP ${res.status}` };
 }
@@ -2012,13 +2031,13 @@ export interface PlanDetail {
 }
 
 export async function getPlans(): Promise<PlanSummary[]> {
-  const res = await fetch("/api/plans");
+  const res = await timedFetch("/api/plans");
   if (!res.ok) return [];
   return res.json();
 }
 
 export async function createPlan(name: string, width: number, height: number): Promise<{ id: string }> {
-  const res = await fetch("/api/plans", {
+  const res = await timedFetch("/api/plans", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name, width, height }),
@@ -2028,17 +2047,17 @@ export async function createPlan(name: string, width: number, height: number): P
 }
 
 export async function getPlan(id: string): Promise<PlanDetail> {
-  const res = await fetch(`/api/plans/${id}`);
+  const res = await timedFetch(`/api/plans/${id}`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
 export async function removePlan(id: string): Promise<void> {
-  await fetch(`/api/plans/${id}`, { method: "DELETE" });
+  await timedFetch(`/api/plans/${id}`, { method: "DELETE" });
 }
 
 export async function putPlanLayout(id: string, tiles: [number, number][], walls: Wall[]): Promise<void> {
-  const res = await fetch(`/api/plans/${id}/layout`, {
+  const res = await timedFetch(`/api/plans/${id}/layout`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ tiles, walls }),
@@ -2048,7 +2067,7 @@ export async function putPlanLayout(id: string, tiles: [number, number][], walls
 
 /** Resize the plan grid. The server prunes content outside the new bounds. */
 export async function putPlanSize(id: string, width: number, height: number): Promise<void> {
-  const res = await fetch(`/api/plans/${id}/size`, {
+  const res = await timedFetch(`/api/plans/${id}/size`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ width, height }),
@@ -2057,7 +2076,7 @@ export async function putPlanSize(id: string, width: number, height: number): Pr
 }
 
 export async function putPlanLights(id: string, placements: Placement[]): Promise<void> {
-  const res = await fetch(`/api/plans/${id}/lights`, {
+  const res = await timedFetch(`/api/plans/${id}/lights`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ placements }),
@@ -2066,7 +2085,7 @@ export async function putPlanLights(id: string, placements: Placement[]): Promis
 }
 
 export async function putPlanAudio(id: string, placements: MediaPlacement[]): Promise<void> {
-  const res = await fetch(`/api/plans/${id}/media`, {
+  const res = await timedFetch(`/api/plans/${id}/media`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ placements }),
@@ -2078,7 +2097,7 @@ export async function putPlanRooms(
   id: string,
   rooms: { id: string; name: string; tiles: [number, number][] }[],
 ): Promise<void> {
-  const res = await fetch(`/api/plans/${id}/rooms`, {
+  const res = await timedFetch(`/api/plans/${id}/rooms`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ rooms }),
@@ -2113,7 +2132,7 @@ export type HuePairResult =
 
 /** One Hue link-button pairing attempt. 409 means the button wasn't pressed yet. */
 export async function pairHueBridge(bridgeIp: string): Promise<HuePairResult> {
-  const res = await fetch("/api/providers/hue/pair", {
+  const res = await timedFetch("/api/providers/hue/pair", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ bridge_ip: bridgeIp }),
@@ -2128,7 +2147,7 @@ export type NanoleafPairResult =
 /** One Nanoleaf pairing attempt. 409 means the controller isn't in pairing
  * mode yet (hold its power button ~5-7s until the LED flashes). */
 export async function pairNanoleaf(host: string): Promise<NanoleafPairResult> {
-  const res = await fetch("/api/providers/nanoleaf/pair", {
+  const res = await timedFetch("/api/providers/nanoleaf/pair", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ host }),
@@ -2146,7 +2165,7 @@ export type PlexPairResult =
  * an X-Plex-Token. Call with no args to mint a 4-char code, then poll with the
  * returned pin_id + client_id until `paired` delivers the token. */
 export async function pairPlex(pinId?: number, clientId?: string): Promise<PlexPairResult> {
-  const res = await fetch("/api/providers/plex/pair", {
+  const res = await timedFetch("/api/providers/plex/pair", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(pinId != null ? { pin_id: pinId, client_id: clientId } : {}),
@@ -2162,7 +2181,7 @@ export type SmartTvPairResult =
 /** Smart-TV (Bravia) PIN pairing. Call with no `pin` to make the TV show a PIN,
  * then again with that `pin` to receive the `auth` token. */
 export async function pairSmartTv(host: string, pin?: string): Promise<SmartTvPairResult> {
-  const res = await fetch("/api/providers/smarttv/pair", {
+  const res = await timedFetch("/api/providers/smarttv/pair", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ host, pin: pin || undefined }),
@@ -2179,7 +2198,7 @@ export type AtvPairResult =
  * transport for Android/Google TV Bravias). Call with no `code` to make the TV
  * show a 6-digit code, then again with that code to store the client cert. */
 export async function pairSmartTvRemote(providerId: string, code?: string): Promise<AtvPairResult> {
-  const res = await fetch(`/api/providers/${providerId}/smarttv/pair-remote`, {
+  const res = await timedFetch(`/api/providers/${providerId}/smarttv/pair-remote`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ code: code || undefined }),
@@ -2234,7 +2253,7 @@ export function lightHex(l: Light): string {
 export async function syncProviderGroups(
   id: string,
 ): Promise<{ synced: number; rooms_created: number; rooms_linked: number }> {
-  const res = await fetch(`/api/providers/${id}/sync-groups`, { method: "POST" });
+  const res = await timedFetch(`/api/providers/${id}/sync-groups`, { method: "POST" });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -2266,19 +2285,19 @@ export interface Dashboard {
 }
 
 export async function getDashboards(): Promise<Dashboard[]> {
-  const res = await fetch("/api/dashboards");
+  const res = await timedFetch("/api/dashboards");
   if (!res.ok) return [];
   return res.json();
 }
 
 export async function getDashboard(id: string): Promise<Dashboard | null> {
-  const res = await fetch(`/api/dashboards/${id}`);
+  const res = await timedFetch(`/api/dashboards/${id}`);
   if (!res.ok) return null;
   return res.json();
 }
 
 export async function createDashboard(name: string, aspect?: string): Promise<Dashboard> {
-  const res = await fetch("/api/dashboards", {
+  const res = await timedFetch("/api/dashboards", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name, aspect }),
@@ -2293,7 +2312,7 @@ export async function updateDashboard(
   id: string,
   patch: { name?: string; aspect?: string; widgets?: Widget[]; background?: unknown },
 ): Promise<void> {
-  const res = await fetch(`/api/dashboards/${id}`, {
+  const res = await timedFetch(`/api/dashboards/${id}`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(patch),
@@ -2303,25 +2322,25 @@ export async function updateDashboard(
 
 /** Upload a board's background media (image / gif / short video loop). */
 export async function uploadBoardBackground(id: string, file: File): Promise<void> {
-  const res = await fetch(`/api/dashboards/${id}/background/media`, {
-    method: "PUT",
-    headers: { "content-type": file.type },
-    body: file,
-  });
+  const res = await timedFetch(
+    `/api/dashboards/${id}/background/media`,
+    { method: "PUT", headers: { "content-type": file.type }, body: file },
+    60_000,
+  );
   if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
 }
 
 /** Remove a board's uploaded background media. */
 export async function deleteBoardBackgroundMedia(id: string): Promise<void> {
-  await fetch(`/api/dashboards/${id}/background/media`, { method: "DELETE" });
+  await timedFetch(`/api/dashboards/${id}/background/media`, { method: "DELETE" });
 }
 
 export async function deleteDashboard(id: string): Promise<void> {
-  await fetch(`/api/dashboards/${id}`, { method: "DELETE" });
+  await timedFetch(`/api/dashboards/${id}`, { method: "DELETE" });
 }
 
 export async function reorderDashboards(ids: string[]): Promise<void> {
-  await fetch("/api/dashboards/reorder", {
+  await timedFetch("/api/dashboards/reorder", {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ ids }),
@@ -2365,13 +2384,13 @@ export interface FeedEntry {
 }
 
 export async function getFeedSources(): Promise<FeedSource[]> {
-  const res = await fetch("/api/feeds/sources");
+  const res = await timedFetch("/api/feeds/sources");
   if (!res.ok) return [];
   return res.json();
 }
 
 export async function getFeedLibraries(providerId: string): Promise<FeedLibrary[]> {
-  const res = await fetch(`/api/feeds/${providerId}/libraries`);
+  const res = await timedFetch(`/api/feeds/${providerId}/libraries`);
   if (!res.ok) return [];
   return res.json();
 }
@@ -2381,7 +2400,7 @@ export async function getFeedRecent(
   libraryId: string,
   limit: number,
 ): Promise<FeedEntry[] | null> {
-  const res = await fetch(
+  const res = await timedFetch(
     `/api/feeds/${providerId}/recent?library=${encodeURIComponent(libraryId)}&limit=${limit}`,
   );
   if (!res.ok) return null;

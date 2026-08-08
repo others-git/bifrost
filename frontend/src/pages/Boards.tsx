@@ -6,6 +6,7 @@
 // View mode renders live, interactive widgets; phones get a stacked read view.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEvents } from "../useEvents";
 import {
   activateScene,
   createDashboard,
@@ -313,28 +314,28 @@ export function BoardsPage() {
   // Live device state via the shared `/api/events` SSE stream (instant push, same
   // as the Control page) — plus a slow poll for generic readouts (sensors), which
   // aren't pushed. Keeps an always-on wall display current without stale lag.
-  useEffect(() => {
-    const es = new EventSource("/api/events");
+  useEvents({
     // Inventory changes (rename/glyph/room/enable) refetch the device lists so
     // widget labels stay current without a reload. Board edits announce
-    // themselves on the same stream (payload "dashboards"): a kiosk showing a
-    // board picks up layout changes made from any other client live, instead
-    // of holding the stale board until someone exits and re-enters.
-    es.addEventListener("inventory", (raw) => {
+    // themselves on the same stream (payload {"table":"dashboards"}): a kiosk
+    // showing a board picks up layout changes made from any other client live,
+    // instead of holding the stale board until someone exits and re-enters.
+    inventory: (raw) => {
       reloadDevices();
-      if ((raw as MessageEvent).data === "dashboards" && !editRef.current) reloadBoards();
-    });
-    es.addEventListener("light_state", (raw) => {
-      const { device_id, patch } = JSON.parse((raw as MessageEvent).data) as {
+      const { table } = JSON.parse(raw.data) as { table: string };
+      if (table === "dashboards" && !editRef.current) reloadBoards();
+    },
+    light_state: (raw) => {
+      const { device_id, patch } = JSON.parse(raw.data) as {
         device_id: string;
         patch: LightStatePatch;
       };
       setLights((prev) =>
         prev.map((l) => (l.device_id === device_id ? { ...l, last_state: mergePatch(l.last_state, patch) } : l)),
       );
-    });
-    es.addEventListener("media_state", (raw) => {
-      const ev = JSON.parse((raw as MessageEvent).data) as {
+    },
+    media_state: (raw) => {
+      const ev = JSON.parse(raw.data) as {
         provider_id: string;
         device_id: string;
         state: MediaDevice["state"];
@@ -342,9 +343,9 @@ export function BoardsPage() {
       setMedia((prev) =>
         prev.map((d) => (d.provider_id === ev.provider_id && d.device_id === ev.device_id ? { ...d, state: ev.state } : d)),
       );
-    });
-    es.addEventListener("power_state", (raw) => {
-      const ev = JSON.parse((raw as MessageEvent).data) as {
+    },
+    power_state: (raw) => {
+      const ev = JSON.parse(raw.data) as {
         provider_id: string;
         device_id: string;
         state: PowerDevice["state"];
@@ -352,10 +353,12 @@ export function BoardsPage() {
       setPower((prev) =>
         prev.map((d) => (d.provider_id === ev.provider_id && d.device_id === ev.device_id ? { ...d, state: ev.state } : d)),
       );
-    });
-    es.onerror = () => {};
+    },
+  });
+
+  useEffect(() => {
     const t = setInterval(() => { getGenericDevices().then(setGeneric); }, 20000);
-    return () => { es.close(); clearInterval(t); };
+    return () => clearInterval(t);
   }, []);
 
   const board = boards.find((b) => b.id === activeId) ?? null;

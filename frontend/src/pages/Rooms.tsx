@@ -45,6 +45,7 @@ import { Modal, useDialogs, type Dialogs } from "../components/dialogs";
 import { PageHeader } from "../components/PageHeader";
 import { Select } from "../components/Select";
 import { useViewport } from "../useViewport";
+import { useEvents } from "../useEvents";
 import { S, pageShell, tileGrid } from "../styles";
 import { alpha, color, font, nicheStyle, radius } from "../theme";
 import { Button } from "../components/controls";
@@ -94,23 +95,16 @@ export function RoomsPage() {
   // Live occupancy: a motion event should flip the rune (and the Presence
   // section's readings) without a reload. Debounced — a busy sensor evening
   // shouldn't hammer the rooms endpoint.
-  useEffect(() => {
-    const es = new EventSource("/api/events");
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const refresh = () => {
-      clearTimeout(timer);
-      timer = setTimeout(async () => {
-        setRooms(await getRooms());
-        setSensors(await getSensors());
-      }, 400);
-    };
-    es.addEventListener("sensor_state", refresh);
-    es.addEventListener("inventory", refresh);
-    return () => {
-      clearTimeout(timer);
-      es.close();
-    };
-  }, []);
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(refreshTimer.current), []);
+  const refresh = () => {
+    clearTimeout(refreshTimer.current);
+    refreshTimer.current = setTimeout(async () => {
+      setRooms(await getRooms());
+      setSensors(await getSensors());
+    }, 400);
+  };
+  useEvents({ sensor_state: refresh, inventory: refresh });
 
   async function handleRemove(id: string, name: string) {
     const ok = await dialogs.confirm({

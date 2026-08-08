@@ -17,6 +17,7 @@ import { SelectRow } from "../components/SelectRow";
 import { PageHeader, SectionLabel } from "../components/PageHeader";
 import { Glyph } from "../components/glyphs";
 import { useViewport } from "../useViewport";
+import { useEvents } from "../useEvents";
 import { T, domain, color, alpha } from "../theme";
 import { pageShell } from "../styles";
 
@@ -97,10 +98,9 @@ export function MediaPage() {
 
   // Receiver-initiated changes (volume knob, track changes) arrive as full
   // snapshots — replace, don't merge.
-  useEffect(() => {
-    const es = new EventSource("/api/events");
-    es.addEventListener("media_state", (raw) => {
-      const ev = JSON.parse((raw as MessageEvent).data) as {
+  useEvents({
+    media_state: (raw) => {
+      const ev = JSON.parse(raw.data) as {
         provider_id: string;
         device_id: string;
         state: MediaDevice["state"];
@@ -112,10 +112,8 @@ export function MediaPage() {
             : d,
         ),
       );
-    });
-    es.onerror = () => {};
-    return () => es.close();
-  }, []);
+    },
+  });
 
   function patchLocal(id: string, patch: Partial<MediaDevice["state"]>) {
     setDevices((prev) =>
