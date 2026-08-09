@@ -403,3 +403,26 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         providers,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::clean_name;
+
+    #[test]
+    fn clean_name_trims_and_treats_blank_as_a_clear() {
+        // Absent stays absent; a blank or whitespace-only name is a clear.
+        assert_eq!(clean_name(None), None);
+        assert_eq!(clean_name(Some(String::new())), None);
+        assert_eq!(clean_name(Some("   \t ".to_string())), None);
+
+        // A real name is kept, trimmed of surrounding whitespace.
+        assert_eq!(
+            clean_name(Some("  Kitchen lamp  ".to_string())),
+            Some("Kitchen lamp".to_string())
+        );
+        assert_eq!(
+            clean_name(Some("Kitchen lamp".to_string())),
+            Some("Kitchen lamp".to_string())
+        );
+    }
+}

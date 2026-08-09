@@ -14,13 +14,16 @@ permissions:
 
 jobs:
   release:
-    name: Test, build image, publish
+    name: Build image, publish
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      # ── Test gate (same checks as CI) ────────────────────────────────────
+      # No test gate here: a release tag always rides a commit that was
+      # already gated twice — scripts/release.sh runs fmt·clippy·test locally
+      # before it will tag, and the same push to main triggers ci.yml on this
+      # exact SHA. Re-running the suite a third time only delayed the build.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -34,20 +37,9 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
 
       - name: Cache Cargo registry + build artifacts
         uses: Swatinem/rust-cache@v2
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Clippy (deny warnings)
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Tests
-        run: cargo test
 
       # ── Static Linux binary ──────────────────────────────────────────────
       # musl target → a fully static binary that runs on any Linux (incl.

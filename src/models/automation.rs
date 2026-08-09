@@ -128,9 +128,11 @@ pub enum RuleCondition {
     },
 }
 
-/// Parse `"HH:MM"` into minutes-since-midnight. `None` for malformed input.
+/// Parse `"HH:MM"` into minutes-since-midnight (0..=1439). Tolerant of
+/// surrounding whitespace; `None` for malformed or out-of-range input.
+/// The one shared clock parser — kiosk schedules use it too.
 pub fn parse_hhmm(s: &str) -> Option<u16> {
-    let (h, m) = s.split_once(':')?;
+    let (h, m) = s.trim().split_once(':')?;
     let h: u16 = h.parse().ok()?;
     let m: u16 = m.parse().ok()?;
     (h < 24 && m < 60).then_some(h * 60 + m)
@@ -478,11 +480,15 @@ mod tests {
 
     #[test]
     fn parse_hhmm_accepts_valid_and_rejects_garbage() {
+        assert_eq!(parse_hhmm("00:00"), Some(0));
         assert_eq!(parse_hhmm("06:30"), Some(390));
         assert_eq!(parse_hhmm("23:59"), Some(1439));
+        assert_eq!(parse_hhmm(" 9:05 "), Some(545)); // trimmed, single-digit hour
         assert_eq!(parse_hhmm("24:00"), None);
+        assert_eq!(parse_hhmm("12:60"), None);
         assert_eq!(parse_hhmm("6"), None);
         assert_eq!(parse_hhmm("aa:bb"), None);
+        assert_eq!(parse_hhmm(""), None);
     }
 
     #[test]

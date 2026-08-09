@@ -2012,7 +2012,8 @@ mod tests {
         .execute(&state.db)
         .await
         .unwrap();
-        tokio::time::sleep(Duration::from_millis(1100)).await;
+        // Backdate the armed timer instead of sleeping past it in real time.
+        engine.pending.get_mut("r1").unwrap().fire_at = Instant::now();
         fire_due_timers(&state, &mut engine).await;
         assert!(fired(&state, "r1").await, "due timer must fire");
         assert!(engine.pending.is_empty());
@@ -2067,7 +2068,8 @@ mod tests {
         .execute(&state.db)
         .await
         .unwrap();
-        tokio::time::sleep(Duration::from_millis(1100)).await;
+        // Backdate the armed timer instead of sleeping past it in real time.
+        engine.pending.get_mut("r1").unwrap().fire_at = Instant::now();
         fire_due_timers(&state, &mut engine).await;
         assert!(
             fired(&state, "r1").await,

@@ -27,6 +27,7 @@ use crate::AppState;
 use crate::api::apikeys::require_api_key;
 use crate::api::auth::Session;
 use crate::api::rooms::ControlTarget;
+use crate::models::automation::parse_hhmm;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -908,16 +909,8 @@ async fn set_plan(
     }
 }
 
-/// Parse a "HH:MM" 24-hour clock string into minutes-since-midnight (0..=1439).
-/// Tolerant of surrounding whitespace; rejects anything out of range or malformed.
-fn parse_hhmm(s: &str) -> Option<u16> {
-    let (h, m) = s.trim().split_once(':')?;
-    let h: u16 = h.parse().ok()?;
-    let m: u16 = m.parse().ok()?;
-    (h < 24 && m < 60).then_some(h * 60 + m)
-}
-
 /// Format minutes-since-midnight back to a zero-padded "HH:MM".
+/// (The parse direction is the shared `models::automation::parse_hhmm`.)
 fn fmt_hhmm(min: u16) -> String {
     format!("{:02}:{:02}", min / 60, min % 60)
 }
@@ -1562,7 +1555,8 @@ async fn forget(
 
 #[cfg(test)]
 mod tests {
-    use super::{AwareOverrideMode, desired_awake_at, fmt_hhmm, parse_aware_override, parse_hhmm};
+    use super::{AwareOverrideMode, desired_awake_at, fmt_hhmm, parse_aware_override};
+    use crate::models::automation::parse_hhmm;
 
     #[test]
     fn parse_aware_override_reads_both_stored_shapes() {
@@ -1583,23 +1577,8 @@ mod tests {
         assert_eq!(parse_aware_override(Some("junk".into())).1.len(), 0);
     }
 
-    #[test]
-    fn parse_hhmm_accepts_valid_clock_times() {
-        assert_eq!(parse_hhmm("00:00"), Some(0));
-        assert_eq!(parse_hhmm("07:30"), Some(450));
-        assert_eq!(parse_hhmm("23:59"), Some(1439));
-        assert_eq!(parse_hhmm(" 9:05 "), Some(545)); // trimmed, single-digit hour
-    }
-
-    #[test]
-    fn parse_hhmm_rejects_malformed_or_out_of_range() {
-        assert_eq!(parse_hhmm("24:00"), None);
-        assert_eq!(parse_hhmm("12:60"), None);
-        assert_eq!(parse_hhmm("12"), None);
-        assert_eq!(parse_hhmm("noon"), None);
-        assert_eq!(parse_hhmm(""), None);
-    }
-
+    // parse_hhmm's own coverage lives with the shared fn in models::automation;
+    // the roundtrip below still exercises it against fmt_hhmm.
     #[test]
     fn fmt_hhmm_zero_pads_and_roundtrips() {
         assert_eq!(fmt_hhmm(0), "00:00");
