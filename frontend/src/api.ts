@@ -1044,7 +1044,12 @@ export type AutomationTrigger =
   | { kind: "device"; domain: TriggerDeviceDomain; device_id: string; event: SensorTrigger }
   /** A macro: no event input at all — runs only on demand (an AIO board
    * button, `runAutomation`, voice). */
-  | { kind: "manual" };
+  | { kind: "manual" }
+  /** A timer: the kiosk display plan's paintable 24-hour timeline, restricted
+   * to 'W' (on) and 'S' (off) hours and to pure-power actions — On hours power
+   * the targets on (attributes untouched, so a light keeps its colour), Off
+   * hours power them off. */
+  | { kind: "schedule"; hour_modes: string };
 
 /** One step of a rule's "then": actions optionally gated by the step's own
  * conditions (empty = always runs, given the rule-level gate passed). Two

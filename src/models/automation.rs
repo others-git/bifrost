@@ -1,9 +1,12 @@
 //! Automations — the "when this, then that" layer. An automation's **trigger
-//! input** is a tagged enum ([`AutomationTrigger`]) so new input kinds
-//! (schedules, device state, …) can join without reshaping storage; the only
-//! kind today is a **sensor event**, which is edge-triggered: it fires on a
-//! state *transition* (motion appearing, a value crossing a threshold), never
-//! on a level, so it can't re-fire every report.
+//! input** is a tagged enum ([`AutomationTrigger`]) so new input kinds can
+//! join without reshaping storage: a sensor event, a Room's occupancy, a
+//! device's power, a manual macro, or a painted 24-hour **schedule**
+//! ([`AutomationTrigger::Schedule`] — the kiosk display plan's timeline,
+//! shared here as [`PlanMode`]). Event inputs are edge-triggered: they fire on
+//! a state *transition* (motion appearing, a value crossing a threshold),
+//! never on a level, so they can't re-fire every report — and the schedule
+//! evaluator detects the plan's own transitions, keeping that property.
 //! Conditions gate the fire (time window, other sensors' current readings);
 //! actions replay through the **shared service layer** (rooms / lights / power
 //! / scenes) — the same fns behind session, `/api/v1`, and MCP — never a
@@ -126,6 +129,47 @@ pub enum RuleCondition {
         device_id: String,
         on: bool,
     },
+}
+
+/// One hour's mode in a painted 24-hour plan — the shared vocabulary of the
+/// kiosk display plan and the automation schedule trigger: **On** (forced
+/// active: screen awake / actions applied), **Off** (forced inactive: screen
+/// asleep / things put back — beats an occupied room), **Aware** (follows a
+/// room's presence verdict).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum PlanMode {
+    On,
+    Off,
+    Aware,
+}
+
+/// The plan's mode for a local hour. `None` for a malformed plan or an
+/// out-of-range hour — callers fall back to whatever legacy policy they have.
+pub fn plan_mode(hour_modes: &str, hour: usize) -> Option<PlanMode> {
+    match hour_modes.as_bytes().get(hour)? {
+        b'W' => Some(PlanMode::On),
+        b'S' => Some(PlanMode::Off),
+        b'A' => Some(PlanMode::Aware),
+        _ => None,
+    }
+}
+
+/// The desired active state for a plan hour. On/Off are absolute; an Aware
+/// hour follows the room's presence verdict and governs nothing when the room
+/// has no presence input (`None` — leave things alone).
+pub fn plan_desired(mode: PlanMode, present: Option<bool>) -> Option<bool> {
+    match mode {
+        PlanMode::On => Some(true),
+        PlanMode::Off => Some(false),
+        PlanMode::Aware => present,
+    }
+}
+
+/// Whether a stored plan is exactly 24 mode characters ('W'/'S'/'A') — the
+/// shared write-side validation for `kiosks.hour_modes` and the schedule
+/// trigger's `hour_modes`.
+pub fn is_valid_hour_plan(hour_modes: &str) -> bool {
+    hour_modes.len() == 24 && hour_modes.bytes().all(|b| matches!(b, b'W' | b'S' | b'A'))
 }
 
 /// Parse `"HH:MM"` into minutes-since-midnight (0..=1439). Tolerant of
@@ -297,6 +341,16 @@ pub enum AutomationTrigger {
     /// The engine never event-fires it, and `run` skips conditions like any
     /// hand-run rule, so a manual rule is purely "a named list of actions".
     Manual {},
+    /// A **timer**: the kiosk display plan's paintable 24-hour timeline
+    /// ([`plan_mode`]/[`plan_desired`]), restricted to On/Off hours (no
+    /// Aware) and to **pure power** actions ([`is_power_only`]) over rooms,
+    /// lights, and switches. An On hour beginning powers the targets on — a
+    /// power-only write, so a light comes back in whatever colour it last
+    /// wore — and an Off hour beginning powers the same targets off. The
+    /// engine detects the plan's own transitions, so this still fires like an
+    /// edge — never re-applies every tick, and a manual change mid-hour
+    /// sticks until the next boundary.
+    Schedule { hour_modes: String },
 }
 
 impl AutomationTrigger {
@@ -328,16 +382,35 @@ impl AutomationTrigger {
         }
     }
 
-    /// The transition event — `None` for a manual (macro) rule, which has no
-    /// event input to match.
+    /// The transition event — `None` for a manual (macro) rule or a schedule,
+    /// which have no event input to match.
     pub fn event(&self) -> Option<&SensorTrigger> {
         match self {
             AutomationTrigger::Sensor { event, .. }
             | AutomationTrigger::Room { event, .. }
             | AutomationTrigger::Device { event, .. } => Some(event),
-            AutomationTrigger::Manual {} => None,
+            AutomationTrigger::Manual {} | AutomationTrigger::Schedule { .. } => None,
         }
     }
+
+    /// The painted plan, if this is a schedule (timer) input.
+    pub fn schedule(&self) -> Option<&str> {
+        match self {
+            AutomationTrigger::Schedule { hour_modes } => Some(hour_modes),
+            _ => None,
+        }
+    }
+}
+
+/// Whether an embedded light state is a **pure power** command — no
+/// brightness/colour/temperature/effect clause. All a schedule (timer) rule's
+/// room/light actions may carry: the timer only switches power, so a light
+/// keeps (and comes back in) whatever look it last had.
+pub fn is_power_only(state: &LightState) -> bool {
+    state.brightness.is_none()
+        && state.color.is_none()
+        && state.color_temp_mirek.is_none()
+        && state.effect.is_none()
 }
 
 /// One device's pre-fire state, captured for a timed hold ("put things back
@@ -634,6 +707,80 @@ mod tests {
         assert!(matches!(a, RuleAction::Power { ref device_id, on: false } if device_id == "p1"));
         let s = serde_json::to_string(&SensorTrigger::RoseAbove { value: 25.5 }).unwrap();
         assert!(s.contains(r#""kind":"rose_above""#));
+    }
+
+    #[test]
+    fn plan_mode_reads_the_painted_hour_and_rejects_garbage() {
+        let plan = format!("{}{}{}", "S".repeat(8), "A".repeat(10), "W".repeat(6));
+        assert_eq!(plan_mode(&plan, 0), Some(PlanMode::Off));
+        assert_eq!(plan_mode(&plan, 8), Some(PlanMode::Aware));
+        assert_eq!(plan_mode(&plan, 23), Some(PlanMode::On));
+        assert_eq!(plan_mode(&plan, 24), None); // out of range
+        assert_eq!(plan_mode("XXXX", 1), None); // not a mode char
+        assert_eq!(plan_mode("", 0), None);
+    }
+
+    #[test]
+    fn plan_desired_is_absolute_except_aware_which_follows_presence() {
+        assert_eq!(plan_desired(PlanMode::On, None), Some(true));
+        assert_eq!(plan_desired(PlanMode::On, Some(false)), Some(true));
+        assert_eq!(plan_desired(PlanMode::Off, Some(true)), Some(false));
+        assert_eq!(plan_desired(PlanMode::Aware, Some(true)), Some(true));
+        assert_eq!(plan_desired(PlanMode::Aware, Some(false)), Some(false));
+        assert_eq!(plan_desired(PlanMode::Aware, None), None); // nothing governs
+    }
+
+    #[test]
+    fn hour_plan_validation_requires_exactly_24_mode_chars() {
+        assert!(is_valid_hour_plan(&"W".repeat(24)));
+        assert!(is_valid_hour_plan(&format!(
+            "{}{}",
+            "S".repeat(12),
+            "A".repeat(12)
+        )));
+        assert!(!is_valid_hour_plan(&"W".repeat(23)));
+        assert!(!is_valid_hour_plan(&"W".repeat(25)));
+        assert!(!is_valid_hour_plan(&format!("{}x", "W".repeat(23))));
+        assert!(!is_valid_hour_plan(""));
+    }
+
+    #[test]
+    fn schedule_trigger_round_trips_and_has_no_event_input() {
+        let t: AutomationTrigger = serde_json::from_str(&format!(
+            r#"{{"kind":"schedule","hour_modes":"{}"}}"#,
+            "W".repeat(24)
+        ))
+        .unwrap();
+        assert_eq!(t.event(), None); // a plan transition, not a sensor edge
+        assert_eq!(t.sensor_id(), None);
+        assert_eq!(t.room_id(), None);
+        assert_eq!(t.device(), None);
+        assert_eq!(t.schedule().map(str::len), Some(24));
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(json.contains(r#""kind":"schedule""#));
+    }
+
+    #[test]
+    fn is_power_only_admits_bare_power_and_rejects_attribute_clauses() {
+        let power = LightState {
+            on: true,
+            ..Default::default()
+        };
+        assert!(is_power_only(&power));
+        assert!(is_power_only(&LightState {
+            on: false,
+            ..Default::default()
+        }));
+        assert!(!is_power_only(&LightState {
+            on: true,
+            brightness: Some(40.0),
+            ..Default::default()
+        }));
+        assert!(!is_power_only(&LightState {
+            on: true,
+            effect: Some("candle".into()),
+            ..Default::default()
+        }));
     }
 
     #[test]

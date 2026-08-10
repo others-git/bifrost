@@ -64,6 +64,28 @@ the ▶ Run control, or voice. This is how one press does several things at once
 — "movie night" turns off the lights and opens Hulu on the bedroom TV. Because
 it never event-fires, a macro also skips conditions; it's purely its actions.
 
+### Timer (a painted schedule)
+
+Pick **Timer** instead of **Trigger** at the top of the editor and the "when"
+becomes the same paintable 24-hour timeline the kiosk display plan uses, with
+two modes per hub-local hour: **On** and **Off**. The "then" is simply the
+rooms, lights, and switches the timer powers — picked from one checklist, no
+verbs or clauses.
+
+A timer only switches **power**: when an On hour begins the targets turn on,
+and when an Off hour begins they turn off. The writes carry no colour or
+brightness, so a lamp you keep blue comes back blue at the next On edge — a
+timer never restyles anything.
+
+It's still edge-driven: nothing re-applies while an hour holds, so a manual
+change mid-window sticks until the next boundary. Conditions gate the On edge
+like any other fire; the Off edge always runs (off is the safety direction).
+After a restart the plan reconciles the On direction — an evening reboot still
+lights the porch — but never forces things off at boot; the next real Off edge
+squares that. (Neither "put things back" nor cooldown is offered on a timer:
+the plan brings its own off direction, and a timer already fires at most once
+an hour.)
+
 ---
 
 ## Conditions ("only if")
@@ -176,6 +198,7 @@ act on the device, and watch the decision happen.
 | Fridge door alarm | When *Fridge contact* **stays open for 5 min** · then *Kitchen light on* (blink your attention) |
 | Dark-day lamp | When *Office lux* **drops below 15** · only *Mon–Fri* *08:00–17:00* · then *Desk lamp on* |
 | Doorbell spotlight | When *Porch motion* **detects motion** · then *Porch at 100%* · **put things back after 5 min** |
+| Evening porch light | Timer: **on 18–23** · powers *Porch* (off again at 23:00, colour untouched) |
 
 ---
 

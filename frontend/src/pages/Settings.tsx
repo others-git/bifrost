@@ -83,7 +83,8 @@ import { ACCENT, S, pageShell, tileGrid } from "../styles";
 import { pickableLights, pickableMedia, pickablePower } from "../deviceSelectors";
 import { Button, Segmented, Switch } from "../components/controls";
 import { OptionCheckList } from "../components/deviceOptions";
-import { alpha, color } from "../theme";
+import { HourPlanEditor, type HourPlanMode } from "../components/HourPlan";
+import { color } from "../theme";
 import { Glyph } from "../components/glyphs";
 import { speak } from "../tts";
 import { copyText } from "../clipboard";
@@ -2714,12 +2715,22 @@ function cmpVersion(a: string, b: string): number {
  * when unset; editing a time commits on blur. The scheduler emits the same
  * sleep/wake commands a human would, so a manual wake mid-window is respected
  * until the next boundary. */
+/** The kiosk reading of the shared hour-plan modes: W/S are the screen forced
+ * on/off, A follows the assigned room's presence. */
+const KIOSK_PLAN_MODES: HourPlanMode[] = [
+  { mode: "W", label: "Awake", hint: "screen always on", color: color.gold },
+  { mode: "A", label: "Aware", hint: "follows room presence — wake on motion, off when empty", color: color.good },
+  { mode: "S", label: "Asleep", hint: "screen always off (beats an occupied room)", color: color.violet, fill: 0.32 },
+];
+
 /** Per-kiosk display plan: a paintable 24-hour timeline where every local
  * hour is one of three modes — Awake (screen forced on), Aware (presence-
  * controlled: wake on motion, off after the no-motion timer), Asleep (screen
  * forced off, beats an occupied room). One picture replaces the old sleep
  * window + presence toggle pair; painting saves as `hour_modes` (mig 0059) and
- * supersedes the legacy fields on this kiosk. */
+ * supersedes the legacy fields on this kiosk. The timeline itself is the
+ * shared `HourPlanEditor` — the automation editor's timer paints the same
+ * control. */
 function KioskDisplayPlan({
   k,
   dialogs,
@@ -2732,13 +2743,10 @@ function KioskDisplayPlan({
   const [enabled, setEnabled] = useState(k.schedule_enabled);
   const [plan, setPlan] = useState<string>(() => seedHourPlan(k));
   const [mins, setMins] = useState(Math.round((k.presence_timeout_secs ?? 600) / 60));
-  const [brush, setBrush] = useState<KioskHourMode>("A");
   const [busy, setBusy] = useState(false);
-  const barRef = useRef<HTMLDivElement>(null);
-  // Painting mutates a ref alongside state so pointer-up saves the fresh plan,
-  // not a stale render's copy.
+  // The freshest painted plan for handlers outside the editor's own stroke
+  // (the enable switch, the timeout blur) — state may lag mid-paint.
   const planRef = useRef(plan);
-  const painting = useRef(false);
 
   // Re-sync when the parent reloads the kiosk list (another edit, a check-in).
   useEffect(() => {
@@ -2765,22 +2773,6 @@ function KioskDisplayPlan({
     }
   }
 
-  function paintAt(clientX: number) {
-    const r = barRef.current?.getBoundingClientRect();
-    if (!r || r.width === 0) return;
-    const i = Math.max(0, Math.min(23, Math.floor(((clientX - r.left) / r.width) * 24)));
-    if (planRef.current[i] === brush) return;
-    planRef.current = planRef.current.slice(0, i) + brush + planRef.current.slice(i + 1);
-    setPlan(planRef.current);
-  }
-
-  const MODES: { mode: KioskHourMode; label: string; hint: string; c: string }[] = [
-    { mode: "W", label: "Awake", hint: "screen always on", c: color.gold },
-    { mode: "A", label: "Aware", hint: "follows room presence — wake on motion, off when empty", c: color.good },
-    { mode: "S", label: "Asleep", hint: "screen always off (beats an occupied room)", c: color.violet },
-  ];
-  const modeColor = (m: string) => MODES.find((x) => x.mode === m)?.c ?? color.faint;
-  const nowHour = new Date().getHours();
   const anyAware = plan.includes("A");
 
   const numInput = {
@@ -2805,118 +2797,48 @@ function KioskDisplayPlan({
         paddingTop: "0.5rem",
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
-        <span style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem", color: "var(--bf-dim)" }}>
-          <Glyph name="wx_moon" size={15} /> Display plan
-        </span>
-        <Switch
-          on={enabled}
-          disabled={busy}
-          onChange={(v) => {
-            setEnabled(v);
-            save({ enabled: v, hour_modes: planRef.current, timeout_secs: mins * 60 });
-          }}
-        />
-        {/* Brush chips double as the legend. */}
-        <span style={{ display: "inline-flex", gap: "0.3rem", opacity: enabled ? 1 : 0.55 }}>
-          {MODES.map(({ mode, label, hint, c }) => (
-            <button
-              key={mode}
-              onClick={() => setBrush(mode)}
-              title={hint}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "0.3rem",
-                padding: "0.15rem 0.5rem",
-                borderRadius: 999,
-                fontSize: "0.72rem",
-                cursor: "pointer",
-                color: brush === mode ? "var(--bf-text)" : "var(--bf-dim)",
-                background: brush === mode ? alpha(c, 0.22) : "transparent",
-                border: `1px solid ${brush === mode ? c : "var(--bf-hairline, #333)"}`,
+      <HourPlanEditor
+        plan={plan}
+        modes={KIOSK_PLAN_MODES}
+        disabled={busy || !enabled}
+        initialBrush="A"
+        onChange={(next) => {
+          planRef.current = next;
+          setPlan(next);
+        }}
+        onCommit={(next) => save({ enabled, hour_modes: next, timeout_secs: mins * 60 })}
+        leading={
+          <>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem", color: "var(--bf-dim)" }}>
+              <Glyph name="wx_moon" size={15} /> Display plan
+            </span>
+            <Switch
+              on={enabled}
+              disabled={busy}
+              onChange={(v) => {
+                setEnabled(v);
+                save({ enabled: v, hour_modes: planRef.current, timeout_secs: mins * 60 });
               }}
-            >
-              <span style={{ width: 8, height: 8, borderRadius: 2, background: alpha(c, 0.85), flexShrink: 0 }} />
-              {label}
-            </button>
-          ))}
-        </span>
-        <span style={{ opacity: enabled && anyAware ? 1 : 0.55, display: "inline-flex", alignItems: "center", gap: "0.35rem" }}>
-          aware: off after
-          <input
-            type="number"
-            min={1}
-            max={60}
-            value={mins}
-            disabled={busy}
-            onChange={(e) => setMins(Math.max(1, Number(e.target.value) || 1))}
-            onBlur={() => save({ enabled, hour_modes: planRef.current, timeout_secs: mins * 60 })}
-            style={numInput}
-          />
-          min empty
-        </span>
-      </div>
-
-      {/* The 24-hour timeline — click or drag to paint with the selected mode.
-          One contiguous strip (touching square cells, hairline hour seams),
-          flanked AM · PM. */}
-      <div style={{ opacity: enabled ? 1 : 0.45, display: "flex", alignItems: "flex-end", gap: "0.4rem" }}>
-        <span style={{ fontSize: "0.62rem", color: "var(--bf-dim)", letterSpacing: "0.08em", paddingBottom: 8 }}>AM</span>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(24, 1fr)", marginBottom: 2 }}>
-            {Array.from({ length: 24 }, (_, i) => (
-              <span key={i} style={{ textAlign: "center", fontSize: "0.6rem", color: i === nowHour ? "var(--bf-text)" : "var(--bf-faint)" }}>
-                {i}
-              </span>
-            ))}
-          </div>
-          <div
-            ref={barRef}
-            onPointerDown={(e) => {
-              if (busy || !enabled) return;
-              e.preventDefault();
-              (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
-              painting.current = true;
-              paintAt(e.clientX);
-            }}
-            onPointerMove={(e) => {
-              if (painting.current) paintAt(e.clientX);
-            }}
-            onPointerUp={() => {
-              if (!painting.current) return;
-              painting.current = false;
-              save({ enabled, hour_modes: planRef.current, timeout_secs: mins * 60 });
-            }}
-            onPointerCancel={() => {
-              painting.current = false;
-            }}
-            title="Click or drag to paint hours with the selected mode"
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(24, 1fr)",
-              border: "1px solid var(--bf-hairline, #333)",
-              touchAction: "none",
-              cursor: enabled ? "pointer" : "default",
-            }}
-          >
-            {plan.split("").map((m, i) => (
-              <span
-                key={i}
-                style={{
-                  height: 26,
-                  background: alpha(modeColor(m), m === "S" ? 0.32 : 0.5),
-                  // Hairline hour seams instead of per-cell chrome; the current
-                  // hour wears an INSET ring so touching neighbours don't overlap.
-                  borderRight: i < 23 ? "1px solid rgba(0,0,0,0.35)" : "none",
-                  boxShadow: i === nowHour ? "inset 0 0 0 1px var(--bf-text)" : undefined,
-                }}
-              />
-            ))}
-          </div>
-        </div>
-        <span style={{ fontSize: "0.62rem", color: "var(--bf-dim)", letterSpacing: "0.08em", paddingBottom: 8 }}>PM</span>
-      </div>
+            />
+          </>
+        }
+        trailing={
+          <span style={{ opacity: enabled && anyAware ? 1 : 0.55, display: "inline-flex", alignItems: "center", gap: "0.35rem" }}>
+            aware: off after
+            <input
+              type="number"
+              min={1}
+              max={60}
+              value={mins}
+              disabled={busy}
+              onChange={(e) => setMins(Math.max(1, Number(e.target.value) || 1))}
+              onBlur={() => save({ enabled, hour_modes: planRef.current, timeout_secs: mins * 60 })}
+              style={numInput}
+            />
+            min empty
+          </span>
+        }
+      />
       <div style={{ display: "flex", justifyContent: "space-between" }}>
         <span style={{ opacity: 0.7 }}>hub local time — paint with the selected mode</span>
         {enabled && anyAware && !k.room_id && (

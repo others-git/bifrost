@@ -27,7 +27,9 @@ use crate::AppState;
 use crate::api::apikeys::require_api_key;
 use crate::api::auth::Session;
 use crate::api::rooms::ControlTarget;
-use crate::models::automation::parse_hhmm;
+use crate::models::automation::{
+    PlanMode, is_valid_hour_plan, parse_hhmm, plan_desired, plan_mode,
+};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -862,12 +864,7 @@ async fn set_plan(
     Path(id): Path<String>,
     Json(req): Json<SetPlanRequest>,
 ) -> impl IntoResponse {
-    if req.hour_modes.len() != 24
-        || !req
-            .hour_modes
-            .bytes()
-            .all(|b| matches!(b, b'W' | b'S' | b'A'))
-    {
+    if !is_valid_hour_plan(&req.hour_modes) {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
             "hour_modes must be exactly 24 characters of W (awake), S (asleep), A (aware)",
@@ -929,39 +926,6 @@ fn desired_awake_at(sleep: u16, wake: u16, now: u16) -> bool {
         false
     };
     !asleep
-}
-
-/// One hour's display mode from the painted plan (mig 0059).
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum PlanMode {
-    /// Screen forced on.
-    Awake,
-    /// Screen forced off — beats an occupied room, same as legacy quiet hours.
-    Asleep,
-    /// Presence-controlled: wake on motion, off after the no-motion timer.
-    Aware,
-}
-
-/// The plan's mode for a local hour. `None` for a malformed plan or an
-/// out-of-range hour — the caller falls back to the legacy policy pair.
-fn plan_mode(hour_modes: &str, hour: usize) -> Option<PlanMode> {
-    match hour_modes.as_bytes().get(hour)? {
-        b'W' => Some(PlanMode::Awake),
-        b'S' => Some(PlanMode::Asleep),
-        b'A' => Some(PlanMode::Aware),
-        _ => None,
-    }
-}
-
-/// The desired screen state for a plan hour. Awake/Asleep are absolute; an
-/// Aware hour follows the room's presence verdict and governs nothing when the
-/// room has no presence input (`None` — leave the kiosk alone).
-fn plan_desired(mode: PlanMode, present: Option<bool>) -> Option<bool> {
-    match mode {
-        PlanMode::Awake => Some(true),
-        PlanMode::Asleep => Some(false),
-        PlanMode::Aware => present,
-    }
 }
 
 /// Combine the two display-power policies into a single desired-awake verdict.
@@ -1644,29 +1608,6 @@ mod tests {
         assert_eq!(c(None, None), None);
     }
 
-    #[test]
-    fn plan_mode_reads_the_hour_and_rejects_junk() {
-        use super::{PlanMode, plan_mode};
-        let plan = "SSSSSSAAWWWWWWWWWWAAAASS"; // 24 chars
-        assert_eq!(plan_mode(plan, 0), Some(PlanMode::Asleep));
-        assert_eq!(plan_mode(plan, 6), Some(PlanMode::Aware));
-        assert_eq!(plan_mode(plan, 12), Some(PlanMode::Awake));
-        assert_eq!(plan_mode(plan, 23), Some(PlanMode::Asleep));
-        // Out of range / malformed → None (caller falls back to legacy).
-        assert_eq!(plan_mode(plan, 24), None);
-        assert_eq!(plan_mode("XXXX", 1), None);
-        assert_eq!(plan_mode("", 0), None);
-    }
-
-    #[test]
-    fn plan_desired_awake_asleep_absolute_aware_follows_presence() {
-        use super::{PlanMode, plan_desired};
-        // Absolute hours ignore the room entirely.
-        assert_eq!(plan_desired(PlanMode::Awake, Some(false)), Some(true));
-        assert_eq!(plan_desired(PlanMode::Asleep, Some(true)), Some(false));
-        // Aware follows presence — and governs nothing without sensors.
-        assert_eq!(plan_desired(PlanMode::Aware, Some(true)), Some(true));
-        assert_eq!(plan_desired(PlanMode::Aware, Some(false)), Some(false));
-        assert_eq!(plan_desired(PlanMode::Aware, None), None);
-    }
+    // plan_mode / plan_desired / is_valid_hour_plan coverage lives with the
+    // shared fns in models::automation (the schedule trigger uses them too).
 }

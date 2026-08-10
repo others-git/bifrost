@@ -47,6 +47,8 @@ export function AutomationsPage() {
   // Group by trigger subject, in subject-name order.
   const subjectName = useCallback(
     (key: string) => {
+      if (key === "manual") return "Macros";
+      if (key === "schedule") return "Timers";
       if (key.startsWith("room:")) return names.room.get(key.slice(5)) ?? "room";
       if (key.startsWith("device:")) {
         const rest = key.slice(7);
@@ -70,6 +72,8 @@ export function AutomationsPage() {
   }, [automations, subjectName]);
 
   const subjectFor = (key: string): TriggerSubject => {
+    if (key === "manual") return { type: "manual" };
+    if (key === "schedule") return { type: "schedule" };
     if (key.startsWith("room:")) return { type: "room", id: key.slice(5) };
     if (key.startsWith("device:")) {
       const rest = key.slice(7);
@@ -123,7 +127,8 @@ export function AutomationsPage() {
           <p style={{ margin: "0 0 0.4rem" }}>No automations yet.</p>
           <p style={{ margin: 0, fontSize: "0.85rem" }}>
             An automation runs actions when a room or sensor changes — motion turns
-            a room on, fifteen empty minutes turn it off, a dark room brightens.
+            a room on, fifteen empty minutes turn it off, a dark room brightens —
+            or on a painted timer schedule.
           </p>
         </div>
       )}

@@ -7,6 +7,10 @@
 //! `clear_for` ("no motion for N minutes") rules. Rules are re-read from the
 //! DB per event, so an edit takes effect immediately; subscriptions are
 //! rebuilt periodically so providers added later join without a restart.
+//! Schedule (timer) rules ride the same loop: [`evaluate_schedules`] turns
+//! each painted hour plan into an active verdict and acts on ITS edges —
+//! powering the rule's targets on when an On hour begins and off when an Off
+//! hour begins (pure power both ways, so a light keeps its look).
 //! Actions replay through the shared service layer (`apply_room_state`,
 //! `apply_light_state`, `apply_power_state`, `apply_scene_entries`) — an
 //! automation is just another caller, like session/v1/MCP.
@@ -18,7 +22,7 @@ use crate::api::auth::Session;
 use crate::connection::SensorEvent;
 use crate::models::automation::{
     ActionStep, Automation, AutomationTrigger, RestoreEntry, RuleAction, RuleCondition,
-    SensorTrigger, TriggerDeviceDomain,
+    SensorTrigger, TriggerDeviceDomain, is_valid_hour_plan, plan_desired, plan_mode,
 };
 
 /// The table a device-trigger domain lives in (fixed identifiers — injection-free).
@@ -190,6 +194,50 @@ async fn validate_body(state: &AppState, body: &AutomationBody) -> Result<(), Sa
             {
                 return Err(SaveRuleOutcome::BadRequest(
                     "that room has no motion or occupancy sensors, so it can't trigger".into(),
+                ));
+            }
+        }
+        AutomationTrigger::Schedule { hour_modes } => {
+            // Timers paint On/Off only — Aware ('A') is a kiosk display mode,
+            // not an automation one.
+            if !is_valid_hour_plan(hour_modes) || hour_modes.contains('A') {
+                return Err(SaveRuleOutcome::BadRequest(
+                    "a timer plan must be exactly 24 hours of on / off".into(),
+                ));
+            }
+            // A timer only switches power: On hours power its targets on, Off
+            // hours power them off. Attribute clauses (brightness, colour,
+            // scenes, app launches) would be re-imposed at every boundary,
+            // clobbering whatever look the light had — reject them loudly.
+            for action in body.steps.iter().flat_map(|s| s.actions.iter()) {
+                let power_only = match action {
+                    RuleAction::Power { .. } => true,
+                    RuleAction::Light { state, .. } | RuleAction::Room { state, .. } => {
+                        crate::models::automation::is_power_only(state)
+                    }
+                    RuleAction::Scene { .. }
+                    | RuleAction::App { .. }
+                    | RuleAction::Toggle { .. } => false,
+                };
+                if !power_only {
+                    return Err(SaveRuleOutcome::BadRequest(
+                        "a timer only switches power — pick rooms, lights, or switches".into(),
+                    ));
+                }
+            }
+            // The plan already brings its own off direction; a timed hold on
+            // top would fight it.
+            if body.restore_secs.is_some() {
+                return Err(SaveRuleOutcome::BadRequest(
+                    "a timer rule already turns its devices off when its off hours begin".into(),
+                ));
+            }
+            // A timer fires at most once an hour by construction; a cooldown
+            // could only silently swallow a later On window's turn-on while
+            // its Off edge still ran.
+            if body.cooldown_secs != 0 {
+                return Err(SaveRuleOutcome::BadRequest(
+                    "a timer fires at most once an hour — cooldown doesn't apply".into(),
                 ));
             }
         }
@@ -433,6 +481,13 @@ pub(crate) struct EngineState {
     pub device_prev: HashMap<(TriggerDeviceDomain, String), bool>,
     /// rule id → armed stay timer.
     pub pending: HashMap<String, PendingStay>,
+    /// schedule (timer) rule id → last computed plan-active verdict, for the
+    /// plan's own edge detection.
+    pub schedule_prev: HashMap<String, bool>,
+    /// The local hour the schedule evaluator last completed a pass for — plan
+    /// edges only happen on hour changes, so the ordinary 5s ticks in between
+    /// skip the rule-table read entirely.
+    pub schedule_hour: Option<usize>,
 }
 
 /// A sensor row as the engine needs it.
@@ -493,16 +548,21 @@ async fn rules_for_sensor(state: &AppState, sensor_id: &str) -> Vec<Automation> 
 
 /// Every enabled non-sensor rule. Non-sensor triggers have no lookup column
 /// (`sensor_id IS NULL`), so callers match in code — rules number in the
-/// dozens, not thousands.
-async fn non_sensor_rules(state: &AppState) -> Vec<Automation> {
+/// dozens, not thousands. `Err` when the read failed: a caller that mutates
+/// engine state on a rule's *absence* (the schedule evaluator's verdict map)
+/// must never mistake a failed read for "no rules".
+async fn non_sensor_rules_checked(state: &AppState) -> Result<Vec<Automation>, ()> {
     sqlx::query("SELECT * FROM automations WHERE sensor_id IS NULL AND enabled = 1")
         .fetch_all(&state.db)
         .await
+        .map(|rows| rows.into_iter().map(row_to_automation).collect())
         .map_err(|e| tracing::error!("db error loading non-sensor rules: {e}"))
-        .unwrap_or_default()
-        .into_iter()
-        .map(row_to_automation)
-        .collect()
+}
+
+/// [`non_sensor_rules_checked`] for the per-event lookups, where a failed read
+/// just means this event matches nothing (no state is wiped by emptiness).
+async fn non_sensor_rules(state: &AppState) -> Vec<Automation> {
+    non_sensor_rules_checked(state).await.unwrap_or_default()
 }
 
 /// The rules listening to one room's occupancy.
@@ -1439,6 +1499,111 @@ pub(crate) async fn process_sensor_event(
     }
 }
 
+// ── Schedule (timer) rules ───────────────────────────────────────────────────
+
+/// The Off-edge pass: power every target of the rule's actions **off**,
+/// through the same shared service fns the On fire uses. Pure power — a light
+/// keeps its colour/brightness for the next On hour — and unconditional (step
+/// conditions gate the On direction; off is the safety direction). Non-power
+/// actions can't be stored on a timer (writes validate), so they're skipped.
+async fn execute_schedule_off(state: &AppState, rule: &Automation) {
+    tracing::debug!(target: "bifrost::automation", rule = %rule.id, name = %rule.name, "timer off: powering targets down");
+    let off = crate::models::LightState::default(); // on:false, no attributes
+    for action in rule.all_actions() {
+        match action {
+            RuleAction::Room { room_id, .. } => {
+                let members = crate::api::rooms::effective_members(state, room_id).await;
+                let (applied, failed) =
+                    crate::api::rooms::apply_room_state(state, room_id, &off, members).await;
+                tracing::debug!(target: "bifrost::automation", rule = %rule.id, room = %room_id, applied, failed, "timer off: room");
+            }
+            RuleAction::Light { light_id, .. } => {
+                let outcome = crate::api::lights::apply_light_state(state, light_id, &off).await;
+                tracing::debug!(target: "bifrost::automation", rule = %rule.id, light = %light_id, ok = matches!(outcome, crate::api::lights::SetLightOutcome::Ok), "timer off: light");
+            }
+            RuleAction::Power { device_id, .. } => {
+                let outcome = crate::api::power::apply_power_state(state, device_id, false).await;
+                tracing::debug!(target: "bifrost::automation", rule = %rule.id, device = %device_id, ok = matches!(outcome, crate::api::power::SetPowerOutcome::Ok), "timer off: power");
+            }
+            RuleAction::Scene { .. } | RuleAction::App { .. } | RuleAction::Toggle { .. } => {}
+        }
+    }
+}
+
+/// Evaluate every schedule (timer) rule at the current local hour. `force`
+/// evaluates even within an already-seen hour — the rule-edit path, where the
+/// plan set itself may have changed.
+pub(crate) async fn evaluate_schedules(state: &AppState, engine: &mut EngineState, force: bool) {
+    use chrono::Timelike;
+    evaluate_schedules_at(state, engine, chrono::Local::now().hour() as usize, force).await;
+}
+
+/// Evaluate schedule rules at `hour` and act on the plan's **edges**: going
+/// active (an On hour begins) fires the rule through the normal gate
+/// (conditions, cooldown) — its power-only actions turn the targets on;
+/// going inactive powers the same targets off ([`execute_schedule_off`]).
+/// A first observation while active reconciles like the kiosk scheduler (the
+/// porch light still comes on after an evening restart); a first observation
+/// while inactive does **nothing** — forcing everything off at every boot
+/// would stomp whatever a restart interrupted, and the plan's next real Off
+/// edge (tomorrow at the latest) squares things anyway. A rule that leaves
+/// the schedule set (disabled, deleted, retargeted) just stops being managed.
+pub(crate) async fn evaluate_schedules_at(
+    state: &AppState,
+    engine: &mut EngineState,
+    hour: usize,
+    force: bool,
+) {
+    if !force && engine.schedule_hour == Some(hour) {
+        return; // no boundary since the last pass — nothing can have edged
+    }
+    // A failed read is NOT "no rules": clearing the verdict map on emptiness
+    // would make the next tick treat every active timer as a first
+    // observation and re-fire it mid-hour, stomping manual overrides. Leave
+    // all engine state untouched and let a later pass retry.
+    let Ok(rules) = non_sensor_rules_checked(state).await else {
+        return;
+    };
+    engine.schedule_hour = Some(hour);
+    let rules: Vec<Automation> = rules
+        .into_iter()
+        .filter(|r| r.trigger.schedule().is_some())
+        .collect();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for rule in &rules {
+        let Some(hour_modes) = rule.trigger.schedule() else {
+            continue;
+        };
+        seen.insert(&rule.id);
+        // Off-only semantics for a stray 'A' (unreachable — writes validate).
+        let Some(active) = plan_mode(hour_modes, hour).and_then(|mode| plan_desired(mode, None))
+        else {
+            continue;
+        };
+        let prev = engine.schedule_prev.insert(rule.id.clone(), active);
+        if prev == Some(active) {
+            continue; // no plan edge
+        }
+        if active {
+            // Timers skip the cooldown gate: they fire at most once an hour by
+            // construction, and a cooldown spanning two On windows would
+            // silently kill the second window's turn-on while its Off edge
+            // still ran. Conditions still gate (and writes reject a nonzero
+            // cooldown on timers anyway).
+            tracing::debug!(target: "bifrost::automation", rule = %rule.id, hour, "timer on-edge: firing");
+            if conditions_hold(state, &rule.conditions).await {
+                execute_rule(state, rule).await;
+            }
+        } else if prev.is_some() {
+            execute_schedule_off(state, rule).await;
+        }
+    }
+    // Rules gone from the schedule set stop being tracked (and managed).
+    engine
+        .schedule_prev
+        .retain(|id, _| seen.contains(id.as_str()));
+}
+
 /// Fire any due stay timers. The subject must still hold the watched state (a
 /// missed cancel must not fire a stale timer) and the rule must still exist
 /// and be enabled (edits/deletes since arming win).
@@ -1715,13 +1880,19 @@ pub async fn run_engine(state: Arc<AppState>) {
                     None => break, // every stream closed — resubscribe
                 },
                 _ = tick.tick() => {
+                    evaluate_schedules(&state, &mut engine, false).await;
                     fire_due_timers(&state, &mut engine).await;
                     apply_due_restores(&state).await;
                 }
                 // A rule was created/edited: baseline its subject now (fill-only,
                 // so live readings and armed timers are untouched) — a rule made
                 // mid-flight must fire on the next edge, not after a restart.
-                _ = state.automations_changed.notified() => seed_engine(&state, &mut engine).await,
+                // Schedule rules reconcile immediately: a timer painted active
+                // for the current hour takes effect now, not at the next tick.
+                _ = state.automations_changed.notified() => {
+                    seed_engine(&state, &mut engine).await;
+                    evaluate_schedules(&state, &mut engine, true).await;
+                }
                 _ = &mut resubscribe => break,
             }
         }
@@ -2690,5 +2861,408 @@ mod tests {
         assert!(!in_cooldown(&mk(Some(&old), 60), now));
         assert!(!in_cooldown(&mk(None, 60), now)); // never fired
         assert!(!in_cooldown(&mk(Some(&recent), 0), now)); // no cooldown configured
+    }
+
+    // ── Schedule (timer) rules ───────────────────────────────────────────────
+
+    /// A 24-hour plan that is `mode` at `hour` and 'S' (off) everywhere else.
+    fn plan_only(hour: usize, mode: char) -> String {
+        let mut plan: Vec<u8> = vec![b'S'; 24];
+        plan[hour] = mode as u8;
+        String::from_utf8(plan).unwrap()
+    }
+
+    /// Point the test provider at a wiremock HA that accepts every power and
+    /// light service call, so the timer's on/off passes really run end to end
+    /// and land in the state cache.
+    async fn mock_ha(state: &AppState) -> wiremock::MockServer {
+        use wiremock::matchers::{method, path_regex};
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("POST"))
+            .and(path_regex(
+                r"^/api/services/(homeassistant|light)/turn_(on|off)$",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        let creds = state
+            .encrypt_credentials(&format!(r#"{{"base_url":"{}","token":"t"}}"#, server.uri()))
+            .unwrap();
+        sqlx::query("UPDATE providers SET credentials = ? WHERE id = 'p'")
+            .bind(&creds)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        server
+    }
+
+    async fn seed_power_device(state: &AppState, id: &str, on: bool) {
+        sqlx::query(
+            "INSERT INTO power_devices (id, provider_id, device_id, name, kind, last_state)
+             VALUES (?, 'p', ?, ?, 'switch', ?)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(id)
+        .bind(format!(r#"{{"on":{on}}}"#))
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    /// The cached power boolean the shared apply path writes on success.
+    async fn power_on(state: &AppState, id: &str) -> Option<bool> {
+        let raw: Option<String> =
+            sqlx::query_scalar("SELECT last_state FROM power_devices WHERE id = ?")
+                .bind(id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        serde_json::from_str::<serde_json::Value>(&raw?)
+            .ok()?
+            .get("on")?
+            .as_bool()
+    }
+
+    /// A schedule rule powering `pw1` on (inserted directly, like the other
+    /// engine tests — validation is covered separately via `create_rule`).
+    async fn seed_schedule_rule(state: &AppState, id: &str, plan: &str) {
+        let trigger = format!(r#"{{"kind":"schedule","hour_modes":"{plan}"}}"#);
+        sqlx::query(
+            "INSERT INTO automations (id, trigger_json, actions_json)
+             VALUES (?, ?, '[{\"conditions\":[],\"actions\":[{\"kind\":\"power\",\"device_id\":\"pw1\",\"on\":true}]}]')",
+        )
+        .bind(id)
+        .bind(&trigger)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn timer_on_edge_powers_on_and_off_edge_powers_off() {
+        let state = test_state().await;
+        let _server = mock_ha(&state).await;
+        seed_power_device(&state, "pw1", false).await;
+        seed_schedule_rule(&state, "r1", &plan_only(9, 'W')).await;
+        let mut engine = EngineState::default();
+
+        // 09:00 — first observation while active reconciles: fire → power on.
+        evaluate_schedules_at(&state, &mut engine, 9, false).await;
+        assert!(fired(&state, "r1").await, "an On hour must fire the rule");
+        assert_eq!(power_on(&state, "pw1").await, Some(true));
+
+        // Re-evaluating the same hour is a level, not an edge — no re-fire.
+        // (Forced, so the edge logic itself is exercised, not the hour gate.)
+        sqlx::query("UPDATE automations SET last_fired_at = NULL WHERE id = 'r1'")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        evaluate_schedules_at(&state, &mut engine, 9, true).await;
+        assert!(!fired(&state, "r1").await, "a held level must not re-fire");
+
+        // 10:00 (Off) — the same targets power off. Pure power both ways: the
+        // write carries no attribute clauses, so a coloured light would come
+        // back in its own colour next On hour.
+        evaluate_schedules_at(&state, &mut engine, 10, false).await;
+        assert_eq!(
+            power_on(&state, "pw1").await,
+            Some(false),
+            "the Off edge must power the targets down"
+        );
+    }
+
+    #[tokio::test]
+    async fn timer_first_observation_while_off_does_not_act() {
+        let state = test_state().await;
+        let _server = mock_ha(&state).await;
+        // Someone left the plug on before a restart.
+        seed_power_device(&state, "pw1", true).await;
+        seed_schedule_rule(&state, "r1", &"S".repeat(24)).await;
+        let mut engine = EngineState::default();
+
+        evaluate_schedules_at(&state, &mut engine, 10, false).await;
+        assert_eq!(
+            power_on(&state, "pw1").await,
+            Some(true),
+            "a boot inside Off hours must not stomp existing state"
+        );
+        assert!(!fired(&state, "r1").await, "an Off hour never fires");
+        // …but the verdict is recorded, so the NEXT On edge still fires.
+        evaluate_schedules_at(&state, &mut engine, 10, true).await;
+        assert_eq!(engine.schedule_prev.get("r1"), Some(&false));
+    }
+
+    #[tokio::test]
+    async fn disabling_a_timer_stops_managing_its_devices() {
+        let state = test_state().await;
+        let _server = mock_ha(&state).await;
+        seed_power_device(&state, "pw1", false).await;
+        seed_schedule_rule(&state, "r1", &"W".repeat(24)).await;
+        let mut engine = EngineState::default();
+        evaluate_schedules_at(&state, &mut engine, 0, false).await;
+        assert_eq!(power_on(&state, "pw1").await, Some(true));
+
+        sqlx::query("UPDATE automations SET enabled = 0 WHERE id = 'r1'")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        // Forced, mirroring the automations_changed poke a real disable fires.
+        evaluate_schedules_at(&state, &mut engine, 0, true).await;
+        assert_eq!(
+            power_on(&state, "pw1").await,
+            Some(true),
+            "disabling stops managing — it doesn't power anything off"
+        );
+        assert!(
+            !engine.schedule_prev.contains_key("r1"),
+            "a dropped rule leaves the verdict map"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_validates_the_timer_plan_and_power_only_actions() {
+        let state = test_state().await;
+        let power_step = |actions: Vec<RuleAction>| {
+            vec![ActionStep {
+                conditions: vec![],
+                actions,
+            }]
+        };
+        let body =
+            |hour_modes: &str, steps: Vec<ActionStep>, restore: Option<u32>| AutomationBody {
+                name: String::new(),
+                enabled: true,
+                trigger: AutomationTrigger::Schedule {
+                    hour_modes: hour_modes.into(),
+                },
+                conditions: vec![],
+                steps,
+                cooldown_secs: 0,
+                restore_secs: restore,
+            };
+        let power_on_action = || RuleAction::Power {
+            device_id: "nope".into(),
+            on: true,
+        };
+        let with_cooldown = |mut b: AutomationBody, secs: u32| {
+            b.cooldown_secs = secs;
+            b
+        };
+
+        // Malformed plans are rejected loudly…
+        assert!(matches!(
+            create_rule(
+                &state,
+                body("WS", power_step(vec![power_on_action()]), None)
+            )
+            .await,
+            SaveRuleOutcome::BadRequest(_)
+        ));
+        // …and so is Aware — a kiosk display mode, not a timer one.
+        assert!(matches!(
+            create_rule(
+                &state,
+                body(&"A".repeat(24), power_step(vec![power_on_action()]), None)
+            )
+            .await,
+            SaveRuleOutcome::BadRequest(_)
+        ));
+        // A timer only switches power: attribute clauses and scenes are out.
+        assert!(matches!(
+            create_rule(
+                &state,
+                body(
+                    &"W".repeat(24),
+                    power_step(vec![RuleAction::Light {
+                        light_id: "l1".into(),
+                        state: crate::models::LightState {
+                            on: true,
+                            brightness: Some(40.0),
+                            ..Default::default()
+                        },
+                    }]),
+                    None
+                )
+            )
+            .await,
+            SaveRuleOutcome::BadRequest(_)
+        ));
+        assert!(matches!(
+            create_rule(
+                &state,
+                body(
+                    &"W".repeat(24),
+                    power_step(vec![RuleAction::Scene {
+                        scene_id: "s1".into()
+                    }]),
+                    None
+                )
+            )
+            .await,
+            SaveRuleOutcome::BadRequest(_)
+        ));
+        // The plan brings its own off direction — no timed hold on top.
+        assert!(matches!(
+            create_rule(
+                &state,
+                body(
+                    &"W".repeat(24),
+                    power_step(vec![power_on_action()]),
+                    Some(600)
+                )
+            )
+            .await,
+            SaveRuleOutcome::BadRequest(_)
+        ));
+        // Cooldown doesn't apply either: it could only swallow a later On
+        // window's turn-on while its Off edge still ran.
+        assert!(matches!(
+            create_rule(
+                &state,
+                with_cooldown(
+                    body(&"W".repeat(24), power_step(vec![power_on_action()]), None),
+                    600
+                )
+            )
+            .await,
+            SaveRuleOutcome::BadRequest(_)
+        ));
+        // Pure power over a light + a switch saves.
+        assert!(matches!(
+            create_rule(
+                &state,
+                body(
+                    &format!("{}{}", "W".repeat(12), "S".repeat(12)),
+                    power_step(vec![
+                        power_on_action(),
+                        RuleAction::Light {
+                            light_id: "l1".into(),
+                            state: crate::models::LightState {
+                                on: true,
+                                ..Default::default()
+                            },
+                        },
+                    ]),
+                    None
+                )
+            )
+            .await,
+            SaveRuleOutcome::Ok(_)
+        ));
+    }
+
+    /// The cached light state the shared apply path writes on success.
+    async fn light_state(state: &AppState, id: &str) -> serde_json::Value {
+        let raw: String = sqlx::query_scalar("SELECT last_state FROM lights WHERE id = ?")
+            .bind(id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    #[tokio::test]
+    async fn timer_edges_power_room_members_and_lights_pure_power() {
+        let state = test_state().await;
+        let _server = mock_ha(&state).await;
+        // room1 carries a light + a switch; l2 is a standalone blue lamp.
+        sqlx::query("INSERT INTO rooms (id, name) VALUES ('room1', 'Den')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"INSERT INTO lights (id, provider_id, device_id, name, capabilities, last_state)
+               VALUES ('l1', 'p', 'light.l1', 'Lamp', '{}', '{"on":false}'),
+                      ('l2', 'p', 'light.l2', 'Blue lamp', '{}',
+                       '{"on":false,"color":{"x":0.2,"y":0.2,"brightness":0.5}}')"#,
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO room_lights (room_id, light_id) VALUES ('room1', 'l1')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        seed_power_device(&state, "pw1", false).await;
+        sqlx::query(
+            "INSERT INTO room_power_devices (room_id, power_device_id) VALUES ('room1', 'pw1')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"INSERT INTO automations (id, trigger_json, actions_json)
+               VALUES ('r1', ?, '[{"conditions":[],"actions":[
+                   {"kind":"room","room_id":"room1","state":{"on":true}},
+                   {"kind":"light","light_id":"l2","state":{"on":true}}]}]')"#,
+        )
+        .bind(format!(
+            r#"{{"kind":"schedule","hour_modes":"{}"}}"#,
+            plan_only(9, 'W')
+        ))
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let mut engine = EngineState::default();
+
+        // On edge: the room fans to its light + switch members; the standalone
+        // lamp powers on too, keeping its colour (pure-power write).
+        evaluate_schedules_at(&state, &mut engine, 9, false).await;
+        assert_eq!(light_state(&state, "l1").await["on"], true);
+        assert_eq!(power_on(&state, "pw1").await, Some(true));
+        let l2 = light_state(&state, "l2").await;
+        assert_eq!(l2["on"], true);
+        assert!(
+            l2["color"].is_object(),
+            "power-on must not strip colour: {l2}"
+        );
+
+        // Off edge: the same targets power down — and the blue lamp is still
+        // blue for the next On hour.
+        evaluate_schedules_at(&state, &mut engine, 10, false).await;
+        assert_eq!(light_state(&state, "l1").await["on"], false);
+        assert_eq!(power_on(&state, "pw1").await, Some(false));
+        let l2 = light_state(&state, "l2").await;
+        assert_eq!(l2["on"], false);
+        assert!(
+            l2["color"].is_object(),
+            "power-off must not strip colour: {l2}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hour_gate_and_failed_reads_leave_the_verdict_map_alone() {
+        let state = test_state().await;
+        let _server = mock_ha(&state).await;
+        seed_power_device(&state, "pw1", false).await;
+        seed_schedule_rule(&state, "r1", &"W".repeat(24)).await;
+        let mut engine = EngineState::default();
+        evaluate_schedules_at(&state, &mut engine, 9, false).await;
+        assert_eq!(engine.schedule_prev.get("r1"), Some(&true));
+
+        // Same hour, unforced: the pass skips outright (no rule-table read) —
+        // even a deleted rule stays tracked until a boundary or an edit poke.
+        sqlx::query("DELETE FROM automations WHERE id = 'r1'")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        evaluate_schedules_at(&state, &mut engine, 9, false).await;
+        assert_eq!(
+            engine.schedule_prev.get("r1"),
+            Some(&true),
+            "a same-hour tick must skip the pass"
+        );
+
+        // A failed rules read must leave the verdict map untouched — wiping it
+        // would make the next tick re-fire every active timer as a first
+        // observation, stomping manual overrides.
+        state.db.close().await;
+        evaluate_schedules_at(&state, &mut engine, 10, false).await;
+        assert_eq!(
+            engine.schedule_prev.get("r1"),
+            Some(&true),
+            "a failed read must not wipe verdicts"
+        );
     }
 }

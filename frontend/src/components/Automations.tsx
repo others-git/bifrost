@@ -1,7 +1,9 @@
 // Automation primitives shared by the Automations page and the Devices-page
 // per-sensor modal: the data hook, the sentence row, and the editor. An
-// automation's trigger subject is a sensor, a Room's occupancy, or a device's
-// power (a TV turning on); the editor
+// automation's "when" is either an event trigger — a sensor, a Room's
+// occupancy, a device's power (a TV turning on), or a manual macro — or a
+// timer: the shared paintable hour plan (`HourPlanEditor`, the same timeline
+// the kiosk display plan paints) with On / Off / Aware hours; the editor
 // is one modal ("When [subject] [does X] … then […]") — never a nested box.
 
 import { useEffect, useMemo, useState } from "react";
@@ -40,8 +42,9 @@ import {
   type SensorTrigger,
   type TriggerDeviceDomain,
 } from "../api";
-import { Button, Switch } from "./controls";
+import { Button, Segmented, Switch } from "./controls";
 import { OptionCheckList, deviceSelectOptions } from "./deviceOptions";
+import { HourPlanEditor, type HourPlanMode } from "./HourPlan";
 import {
   pickableLights,
   pickableMedia,
@@ -60,19 +63,30 @@ import { T, alpha, color } from "../theme";
 
 // ── Subjects & phrasing ───────────────────────────────────────────────────────
 
+/** The timer reading of the shared hour-plan modes (same colours and stored
+ * characters as the kiosk display plan, minus Aware — a display mode, not a
+ * timer one): On powers the targets on, Off powers them off. */
+const TIMER_PLAN_MODES: HourPlanMode[] = [
+  { mode: "W", label: "On", hint: "devices powered on", color: color.gold },
+  { mode: "S", label: "Off", hint: "devices powered off", color: color.violet, fill: 0.32 },
+];
+
 /** What an automation listens to: a sensor's reading or a Room's occupancy. */
 export type TriggerSubject =
   | { type: "sensor"; id: string; kind: SensorDevice["kind"] }
   | { type: "room"; id: string }
   | { type: "device"; domain: TriggerDeviceDomain; id: string }
   /** A macro — no event input; the rule runs only on demand. */
-  | { type: "manual" };
+  | { type: "manual" }
+  /** A timer — the editor's own paintable hour plan, not a picked subject. */
+  | { type: "schedule" };
 
 function subjectOf(trigger: AutomationTrigger, sensors: SensorDevice[]): TriggerSubject {
   if (trigger.kind === "room") return { type: "room", id: trigger.room_id };
   if (trigger.kind === "device")
     return { type: "device", domain: trigger.domain, id: trigger.device_id };
   if (trigger.kind === "manual") return { type: "manual" };
+  if (trigger.kind === "schedule") return { type: "schedule" };
   return {
     type: "sensor",
     id: trigger.sensor_id,
@@ -85,6 +99,7 @@ export function subjectKey(trigger: AutomationTrigger): string {
   if (trigger.kind === "room") return `room:${trigger.room_id}`;
   if (trigger.kind === "device") return `device:${trigger.domain}:${trigger.device_id}`;
   if (trigger.kind === "manual") return "manual";
+  if (trigger.kind === "schedule") return "schedule";
   return `sensor:${trigger.sensor_id}`;
 }
 
@@ -95,7 +110,7 @@ function isBoolKind(kind: SensorDevice["kind"]): boolean {
 
 /** The event phrasing, tuned per subject so the sentence reads naturally. */
 function eventOptions(subject: TriggerSubject): { value: string; label: string }[] {
-  if (subject.type === "manual") return [];
+  if (subject.type === "manual" || subject.type === "schedule") return [];
   if (subject.type === "room") {
     return [
       { value: "became_true", label: "becomes occupied" },
@@ -127,9 +142,24 @@ function eventOptions(subject: TriggerSubject): { value: string; label: string }
   ];
 }
 
+/** "on 18–23" — a stored plan compressed into its On segments (Off hours are
+ * the silence between them). */
+function scheduleText(hourModes: string): string {
+  const segs: string[] = [];
+  let i = 0;
+  while (i < 24) {
+    let j = i;
+    while (j < 24 && hourModes[j] === hourModes[i]) j++;
+    if (hourModes[i] === "W") segs.push(`on ${i}–${j}`);
+    i = j;
+  }
+  return segs.length > 0 ? `on a timer: ${segs.join(" · ")}` : "on a timer: always off";
+}
+
 /** The rendered event phrase for a stored trigger. */
 function triggerText(trigger: AutomationTrigger, sensors: SensorDevice[]): string {
   if (trigger.kind === "manual") return "run by hand (a button, voice, or the play icon)";
+  if (trigger.kind === "schedule") return scheduleText(trigger.hour_modes);
   const event = trigger.event;
   const label = (v: string) =>
     eventOptions(subjectOf(trigger, sensors)).find((o) => o.value === v)?.label ?? v;
@@ -594,7 +624,38 @@ function AutomationEditor({
 }) {
   const { rooms, lights, media, power, sensors } = data;
   const initialEvent =
-    initial && initial.trigger.kind !== "manual" ? initial.trigger.event : undefined;
+    initial && initial.trigger.kind !== "manual" && initial.trigger.kind !== "schedule"
+      ? initial.trigger.event
+      : undefined;
+  // The trigger *category*: an event trigger (a picked subject doing something)
+  // or a timer (a painted hour plan). A Segmented so future categories slot in.
+  const [category, setCategory] = useState<"trigger" | "timer">(
+    initial?.trigger.kind === "schedule" || initialSubject?.type === "schedule"
+      ? "timer"
+      : "trigger",
+  );
+  const isTimer = category === "timer";
+  // Timer state: the painted plan (default all Off — paint the On hours in)
+  // and the power targets, kept as picker keys and rebuilt into pure-power
+  // actions on save (derived back from the stored actions when editing).
+  const [plan, setPlan] = useState(
+    initial?.trigger.kind === "schedule" ? initial.trigger.hour_modes : "S".repeat(24),
+  );
+  const [timerTargets, setTimerTargets] = useState<string[]>(() =>
+    initial?.trigger.kind === "schedule"
+      ? (initial.steps ?? [])
+          .flatMap((s) => s.actions)
+          .flatMap((a) =>
+            a.kind === "room"
+              ? [`room:${a.room_id}`]
+              : a.kind === "light"
+                ? [`light:${a.light_id}`]
+                : a.kind === "power"
+                  ? [`power:${a.device_id}`]
+                  : [],
+          )
+      : [],
+  );
   const [subject, setSubject] = useState<TriggerSubject | undefined>(
     initial ? subjectOf(initial.trigger, sensors) : initialSubject,
   );
@@ -678,8 +739,22 @@ function AutomationEditor({
     return { kind: eventKind as "became_true" | "became_false" };
   }
 
+  /** A timer's "then", rebuilt from the target keys: one step of pure-power
+   * on-actions (the engine derives the Off direction from the same targets). */
+  function timerSteps(): ActionStep[] {
+    const actions: RuleAction[] = timerTargets.map((t) =>
+      t.startsWith("room:")
+        ? { kind: "room", room_id: t.slice(5), state: { on: true } }
+        : t.startsWith("light:")
+          ? { kind: "light", light_id: t.slice(6), state: { on: true } }
+          : { kind: "power", device_id: t.slice(6), on: true },
+    );
+    return [{ conditions: [], actions }];
+  }
+
   function builtTrigger(): AutomationTrigger | null {
-    if (!subject) return null;
+    if (isTimer) return { kind: "schedule", hour_modes: plan };
+    if (!subject || subject.type === "schedule") return null;
     if (subject.type === "manual") return { kind: "manual" };
     if (subject.type === "room") return { kind: "room", room_id: subject.id, event: builtEvent() };
     if (subject.type === "device")
@@ -717,15 +792,16 @@ function AutomationEditor({
       rooms,
     ),
   ];
-  const subjectValue = subject
-    ? subject.type === "manual"
-      ? "manual"
-      : subject.type === "room"
-        ? `room:${subject.id}`
-        : subject.type === "device"
-          ? `device:${subject.domain}:${subject.id}`
-          : `sensor:${subject.id}`
-    : undefined;
+  const subjectValue =
+    subject && subject.type !== "schedule"
+      ? subject.type === "manual"
+        ? "manual"
+        : subject.type === "room"
+          ? `room:${subject.id}`
+          : subject.type === "device"
+            ? `device:${subject.domain}:${subject.id}`
+            : `sensor:${subject.id}`
+      : undefined;
 
   // Gate subjects offered as conditions: anything except the trigger itself.
   const gateSensors = pickableSensors(sensors).filter(
@@ -751,45 +827,69 @@ function AutomationEditor({
       />
 
       <Field label="When">
-        <div style={ROW}>
-          <Select
-            value={subjectValue}
-            options={subjectOptions}
-            onChange={pickSubject}
-            placeholder="Pick a trigger"
-            width={200}
-            searchable
-            empty="No sensors yet — add a Hue or Home Assistant provider first"
-          />
-          {subject?.type !== "manual" && (
-            <Select
-              value={eventKind}
-              options={subject ? eventOptions(subject) : []}
-              onChange={setEventKind}
-              width={180}
-              disabled={!subject}
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+          <div style={ROW}>
+            <Segmented
+              value={category}
+              options={[
+                { value: "trigger", label: "Trigger" },
+                { value: "timer", label: "Timer" },
+              ]}
+              onChange={setCategory}
+              compact
             />
-          )}
-          {isStay && (
+          </div>
+          {isTimer ? (
             <>
-              <input
-                type="number"
-                min={1}
-                max={1440}
-                style={numInput}
-                value={stayMins}
-                onChange={(e) => setStayMins(Math.max(1, Number(e.target.value) || 1))}
-              />
-              <span style={{ color: T.dim, fontSize: "0.8rem" }}>minutes</span>
+              <HourPlanEditor plan={plan} modes={TIMER_PLAN_MODES} onChange={setPlan} />
+              <span style={{ color: T.faint, fontSize: "0.72rem" }}>
+                Hub local time. The devices below power on when an On hour begins and
+                off when an Off hour begins — power only, so a light comes back in
+                whatever colour it last had.
+              </span>
             </>
-          )}
-          {(eventKind === "rose_above" || eventKind === "dropped_below") && (
-            <input
-              type="number"
-              style={numInput}
-              value={threshold}
-              onChange={(e) => setThreshold(Number(e.target.value) || 0)}
-            />
+          ) : (
+            <div style={ROW}>
+              <Select
+                value={subjectValue}
+                options={subjectOptions}
+                onChange={pickSubject}
+                placeholder="Pick a trigger"
+                width={200}
+                searchable
+                empty="No sensors yet — add a Hue or Home Assistant provider first"
+              />
+              {subject?.type !== "manual" && subject?.type !== "schedule" && (
+                <Select
+                  value={eventKind}
+                  options={subject ? eventOptions(subject) : []}
+                  onChange={setEventKind}
+                  width={180}
+                  disabled={!subject}
+                />
+              )}
+              {isStay && (
+                <>
+                  <input
+                    type="number"
+                    min={1}
+                    max={1440}
+                    style={numInput}
+                    value={stayMins}
+                    onChange={(e) => setStayMins(Math.max(1, Number(e.target.value) || 1))}
+                  />
+                  <span style={{ color: T.dim, fontSize: "0.8rem" }}>minutes</span>
+                </>
+              )}
+              {(eventKind === "rose_above" || eventKind === "dropped_below") && (
+                <input
+                  type="number"
+                  style={numInput}
+                  value={threshold}
+                  onChange={(e) => setThreshold(Number(e.target.value) || 0)}
+                />
+              )}
+            </div>
           )}
         </div>
       </Field>
@@ -807,6 +907,32 @@ function AutomationEditor({
         />
       </Field>
 
+      {isTimer ? (
+        /* A timer only switches power, so its "then" is just the target list —
+           rooms, lights, and switches on the shared room-grouped checklist. */
+        <Field label="Then" hint="powered on during On hours, off during Off hours">
+          <OptionCheckList
+            options={[
+              ...rooms
+                .filter((r) => r.enabled)
+                .map((r) => ({ value: `room:${r.id}`, label: r.name, group: "Rooms" })),
+              ...deviceSelectOptions(
+                [
+                  ...pickableLights(lights).map((l) => ({ ...l, id: `light:${l.id}` })),
+                  ...pickablePower(power).map((p) => ({ ...p, id: `power:${p.id}` })),
+                ],
+                rooms,
+              ),
+            ]}
+            selected={timerTargets}
+            onToggle={(v) =>
+              setTimerTargets((cur) =>
+                cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v],
+              )
+            }
+          />
+        </Field>
+      ) : (
       <Field label="Then">
         <div style={{ display: "flex", flexDirection: "column", gap: steps.length > 1 ? "0.9rem" : "0.5rem" }}>
           {steps.map((step, i) => (
@@ -838,11 +964,14 @@ function AutomationEditor({
           </div>
         </div>
       </Field>
+      )}
 
       <hr style={hairline} />
 
       {/* Advanced settings — the rare knobs, collapsed so the common rule stays
-          short. */}
+          short. A timer has none: cooldown and the timed hold both conflict
+          with the plan's own on/off clock (the backend rejects them). */}
+      {!isTimer && (
       <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
         <button
           onClick={() => setAdvancedOpen((v) => !v)}
@@ -894,6 +1023,7 @@ function AutomationEditor({
           </>
         )}
       </div>
+      )}
 
       {error && <span style={{ color: T.bad, fontSize: "0.8rem" }}>{error}</span>}
       <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end", marginTop: "0.25rem" }}>
@@ -902,7 +1032,11 @@ function AutomationEditor({
         </Button>
         <Button
           variant="primary"
-          disabled={!subject || totalActions === 0}
+          disabled={
+            isTimer
+              ? timerTargets.length === 0
+              : !subject || subject.type === "schedule" || totalActions === 0
+          }
           onClick={() => {
             const trigger = builtTrigger();
             if (!trigger) return;
@@ -912,9 +1046,9 @@ function AutomationEditor({
               trigger,
               conditions,
               // Drop any empty step the user added but never filled.
-              steps: steps.filter((s) => s.actions.length > 0),
-              cooldown_secs: cooldownMins * 60,
-              restore_secs: restoreMins > 0 ? restoreMins * 60 : null,
+              steps: isTimer ? timerSteps() : steps.filter((s) => s.actions.length > 0),
+              cooldown_secs: isTimer ? 0 : cooldownMins * 60,
+              restore_secs: !isTimer && restoreMins > 0 ? restoreMins * 60 : null,
             });
           }}
         >
