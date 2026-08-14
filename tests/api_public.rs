@@ -5,6 +5,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use tower::ServiceExt;
 
+use bifrost::api::kiosks::SchedulerState;
 use helpers::{anon_json, bearer_get, bearer_json, create_api_key, wled_mock};
 
 #[tokio::test]
@@ -302,8 +303,6 @@ async fn kiosk_hour_plan_roundtrips_and_validates() {
 /// and killed the scheduler task; the pure plan helpers couldn't catch that).
 #[tokio::test]
 async fn scheduler_tick_enforces_the_hour_plan() {
-    use std::collections::HashMap;
-
     let (app, state) = helpers::test_app_with_password_and_state().await;
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
     let key = create_api_key(&app, &cookie, "wall tablet").await;
@@ -355,16 +354,201 @@ async fn scheduler_tick_enforces_the_hour_plan() {
         list[0]["pending_command"].clone()
     };
 
-    let mut desired = HashMap::new();
-    let mut present = HashMap::new();
+    let mut sched = SchedulerState::default();
 
     // An awake hour queues a wake…
-    bifrost::api::kiosks::scheduler_tick(&state, &mut desired, &mut present, 3, 3 * 60).await;
+    bifrost::api::kiosks::scheduler_tick(&state, &mut sched, 3, 3 * 60).await;
     assert_eq!(pending(app.clone(), cookie.clone()).await, "wake");
 
     // …and an asleep hour flips it to sleep (edge-triggered on the change).
-    bifrost::api::kiosks::scheduler_tick(&state, &mut desired, &mut present, 15, 15 * 60).await;
+    bifrost::api::kiosks::scheduler_tick(&state, &mut sched, 15, 15 * 60).await;
     assert_eq!(pending(app.clone(), cookie.clone()).await, "sleep");
+}
+
+/// The reconcile backstop: a display command is at-most-once, so anything that
+/// re-lights the panel after it lands (a tap, an OTA relaunch, a dropped
+/// command) used to leave the hub believing the kiosk was already asleep — for
+/// the rest of the Off block, i.e. all night. During a forced hour the pass now
+/// compares its verdict against the screen the kiosk itself reports and
+/// re-asserts.
+#[tokio::test]
+async fn a_forced_hour_reasserts_sleep_when_the_kiosk_reports_its_screen_on() {
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "wall tablet").await;
+
+    // The kiosk heartbeat, reporting a lit screen. Also consumes whatever is
+    // queued — exactly like the real app's 10s check-in.
+    let checkin = |app: Router, key: String| async move {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/kiosks/checkin")
+                    .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"screen_on":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    };
+    checkin(app.clone(), key.clone()).await;
+
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let id = list[0]["id"].as_str().unwrap().to_string();
+
+    // Asleep around the clock: inside one long Off block there is no later edge
+    // to fall back on.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/kiosks/{id}/plan"),
+            &cookie,
+            r#"{"enabled":true,"hour_modes":"SSSSSSSSSSSSSSSSSSSSSSSS"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let pending = |app: Router, cookie: String| async move {
+        let list = helpers::response_json(
+            app.oneshot(helpers::authed_get("/api/kiosks", &cookie))
+                .await
+                .unwrap(),
+        )
+        .await;
+        list[0]["pending_command"].clone()
+    };
+
+    // Zero grace: the reconcile window is a comfort feature, not the behaviour
+    // under test.
+    let mut sched = SchedulerState::with_grace(std::time::Duration::ZERO);
+
+    // The hour's edge queues the sleep…
+    bifrost::api::kiosks::scheduler_tick(&state, &mut sched, 2, 2 * 60).await;
+    assert_eq!(pending(app.clone(), cookie.clone()).await, "sleep");
+
+    // …the kiosk picks it up but its screen is still on (it woke again).
+    checkin(app.clone(), key.clone()).await;
+    assert_eq!(
+        pending(app.clone(), cookie.clone()).await,
+        serde_json::Value::Null
+    );
+
+    // Same hour, no edge — the backstop re-asserts anyway.
+    bifrost::api::kiosks::scheduler_tick(&state, &mut sched, 2, 2 * 60).await;
+    assert_eq!(pending(app.clone(), cookie.clone()).await, "sleep");
+}
+
+/// The backstop stops at forced hours. In an **Aware** hour presence is the
+/// authority and a manual override is meant to hold until the room's next flip,
+/// so a screen that disagrees is left alone.
+#[tokio::test]
+async fn an_aware_hour_leaves_a_disagreeing_screen_alone() {
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "wall tablet").await;
+
+    // A room whose occupancy sensor reads "detected" → presence governs.
+    sqlx::query(
+        "INSERT INTO providers (id, provider_type, name, credentials) VALUES ('p','wled','P','x')",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO rooms (id, name) VALUES ('r1','Living Room')")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO sensor_devices (id, provider_id, device_id, name, kind, last_state)
+         VALUES ('s1','p','d1','Motion','motion','{\"reading\":{\"bool\":true},\"reachable\":true}')",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO room_sensor_devices (room_id, sensor_device_id) VALUES ('r1','s1')")
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    // Heartbeat reporting a DARK screen (someone blanked it by hand).
+    let checkin = |app: Router, key: String| async move {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/kiosks/checkin")
+                    .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"screen_on":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    };
+    checkin(app.clone(), key.clone()).await;
+
+    let list = helpers::response_json(
+        app.clone()
+            .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let id = list[0]["id"].as_str().unwrap().to_string();
+
+    for (path, body) in [
+        (
+            format!("/api/kiosks/{id}/plan"),
+            r#"{"enabled":true,"hour_modes":"AAAAAAAAAAAAAAAAAAAAAAAA"}"#.to_string(),
+        ),
+        (
+            format!("/api/kiosks/{id}/room"),
+            r#"{"room_id":"r1"}"#.to_string(),
+        ),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(helpers::authed_json("PUT", &path, &cookie, &body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT, "{path}");
+    }
+
+    let pending = |app: Router, cookie: String| async move {
+        let list = helpers::response_json(
+            app.oneshot(helpers::authed_get("/api/kiosks", &cookie))
+                .await
+                .unwrap(),
+        )
+        .await;
+        list[0]["pending_command"].clone()
+    };
+
+    let mut sched = SchedulerState::with_grace(std::time::Duration::ZERO);
+
+    // Occupied room → wake, delivered on the next heartbeat.
+    bifrost::api::kiosks::scheduler_tick(&state, &mut sched, 10, 10 * 60).await;
+    assert_eq!(pending(app.clone(), cookie.clone()).await, "wake");
+    checkin(app.clone(), key.clone()).await;
+
+    // The screen is dark against an "awake" verdict — and stays that way.
+    bifrost::api::kiosks::scheduler_tick(&state, &mut sched, 10, 10 * 60).await;
+    assert_eq!(
+        pending(app.clone(), cookie.clone()).await,
+        serde_json::Value::Null
+    );
 }
 
 /// `PUT /api/kiosks/{id}/aware-override` — the HTTP contract: a valid mixed-
@@ -489,8 +673,6 @@ async fn aware_override_roundtrips_and_validates_domain() {
 /// moment the device is off again.
 #[tokio::test]
 async fn aware_override_forces_awake_while_the_target_device_is_on() {
-    use std::collections::HashMap;
-
     let (app, state) = helpers::test_app_with_password_and_state().await;
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
     let key = create_api_key(&app, &cookie, "wall tablet").await;
@@ -562,11 +744,10 @@ async fn aware_override_forces_awake_while_the_target_device_is_on() {
         list[0]["pending_command"].clone()
     };
 
-    let mut desired = HashMap::new();
-    let mut present = HashMap::new();
+    let mut sched = SchedulerState::default();
 
     // Device off, no room, no presence input → nothing governs this hour.
-    bifrost::api::kiosks::scheduler_tick(&state, &mut desired, &mut present, 10, 10 * 60).await;
+    bifrost::api::kiosks::scheduler_tick(&state, &mut sched, 10, 10 * 60).await;
     assert_eq!(
         pending(app.clone(), cookie.clone()).await,
         serde_json::Value::Null
@@ -577,7 +758,7 @@ async fn aware_override_forces_awake_while_the_target_device_is_on() {
         .execute(&state.db)
         .await
         .unwrap();
-    bifrost::api::kiosks::scheduler_tick(&state, &mut desired, &mut present, 11, 11 * 60).await;
+    bifrost::api::kiosks::scheduler_tick(&state, &mut sched, 11, 11 * 60).await;
     assert_eq!(pending(app.clone(), cookie.clone()).await, "wake");
 }
 
@@ -586,8 +767,6 @@ async fn aware_override_forces_awake_while_the_target_device_is_on() {
 /// with no presence input at all (which would otherwise leave it ungoverned).
 #[tokio::test]
 async fn aware_override_keep_off_forces_asleep_while_the_target_device_is_on() {
-    use std::collections::HashMap;
-
     let (app, state) = helpers::test_app_with_password_and_state().await;
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
     let key = create_api_key(&app, &cookie, "wall tablet").await;
@@ -658,11 +837,10 @@ async fn aware_override_keep_off_forces_asleep_while_the_target_device_is_on() {
         list[0]["pending_command"].clone()
     };
 
-    let mut desired = HashMap::new();
-    let mut present = HashMap::new();
+    let mut sched = SchedulerState::default();
 
     // Device off, no room, no presence input → nothing governs this hour.
-    bifrost::api::kiosks::scheduler_tick(&state, &mut desired, &mut present, 10, 10 * 60).await;
+    bifrost::api::kiosks::scheduler_tick(&state, &mut sched, 10, 10 * 60).await;
     assert_eq!(
         pending(app.clone(), cookie.clone()).await,
         serde_json::Value::Null
@@ -673,7 +851,7 @@ async fn aware_override_keep_off_forces_asleep_while_the_target_device_is_on() {
         .execute(&state.db)
         .await
         .unwrap();
-    bifrost::api::kiosks::scheduler_tick(&state, &mut desired, &mut present, 11, 11 * 60).await;
+    bifrost::api::kiosks::scheduler_tick(&state, &mut sched, 11, 11 * 60).await;
     assert_eq!(pending(app.clone(), cookie.clone()).await, "sleep");
 }
 

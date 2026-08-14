@@ -947,20 +947,61 @@ fn combined_desired_awake(schedule_awake: Option<bool>, present: Option<bool>) -
     schedule_awake
 }
 
+/// The scheduler's memory across passes. In-memory by design: a restart
+/// re-reconciles every governed kiosk on the first tick.
+pub struct SchedulerState {
+    /// How long a forced hour tolerates a disagreeing screen before
+    /// re-asserting. [`RECONCILE_GRACE`] in production; tests shorten it.
+    grace: Duration,
+    /// Last desired awake value acted on, per kiosk — the edge detector.
+    last_desired: std::collections::HashMap<String, bool>,
+    /// Last time each kiosk's room was seen occupied (the no-motion grace).
+    last_present: std::collections::HashMap<String, std::time::Instant>,
+    /// When a **forced** hour's verdict first disagreed with the screen the
+    /// kiosk actually reports — see the reconcile note on [`scheduler_tick`].
+    mismatch_since: std::collections::HashMap<String, std::time::Instant>,
+}
+
+impl Default for SchedulerState {
+    fn default() -> Self {
+        Self::with_grace(RECONCILE_GRACE)
+    }
+}
+
+impl SchedulerState {
+    /// Fresh state with an explicit reconcile grace — the seam tests drive the
+    /// backstop through without waiting out the real window.
+    pub fn with_grace(grace: Duration) -> Self {
+        Self {
+            grace,
+            last_desired: Default::default(),
+            last_present: Default::default(),
+            mismatch_since: Default::default(),
+        }
+    }
+}
+
+/// How long a forced hour tolerates the kiosk's screen disagreeing with the
+/// policy before the command is re-asserted. Long enough that walking up to the
+/// tablet at night and tapping it gives you a usable minute or two; short
+/// enough that a display left lit by a lost command doesn't burn all night.
+const RECONCILE_GRACE: Duration = Duration::from_secs(120);
+
+/// Reported screen state older than this isn't trusted for reconciliation (the
+/// kiosk heartbeat is 10s, so this is many missed beats — an offline tablet).
+const HEARTBEAT_FRESH_SECS: i64 = 60;
+
 /// Background loop enforcing each kiosk's display-power policies (scheduled quiet
 /// hours + presence-driven blanking) by emitting the existing `sleep`/`wake`
 /// commands. **Edge-triggered:** it tracks the last desired state per kiosk and
-/// sends only on a change, so a manual wake persists until a policy boundary. The
-/// tracking map is in-memory, so a restart re-reconciles every governed kiosk on
-/// the first tick. Presence keeps a per-kiosk "last seen occupied" instant to
-/// apply the no-motion timeout grace.
+/// sends only on a change, so a manual wake persists until a policy boundary —
+/// with a reconcile backstop for forced hours (see [`scheduler_tick`]). Presence
+/// keeps a per-kiosk "last seen occupied" instant to apply the no-motion timeout
+/// grace.
 pub async fn run_scheduler(state: Arc<AppState>) {
     use chrono::Timelike;
-    use std::collections::HashMap;
-    use std::time::Instant;
 
-    let mut last_desired: HashMap<String, bool> = HashMap::new();
-    let mut last_present: HashMap<String, Instant> = HashMap::new();
+    let mut sched = SchedulerState::default();
     let mut ticker = tokio::time::interval(Duration::from_secs(30));
     loop {
         // An occupancy flip (or a display-policy config edit) pokes an
@@ -973,8 +1014,7 @@ pub async fn run_scheduler(state: Arc<AppState>) {
         let now = chrono::Local::now();
         scheduler_tick(
             &state,
-            &mut last_desired,
-            &mut last_present,
+            &mut sched,
             now.hour() as usize,
             (now.hour() * 60 + now.minute()) as u16,
         )
@@ -987,21 +1027,38 @@ pub async fn run_scheduler(state: Arc<AppState>) {
 /// once dropped a column its row handler `get`s (sqlx panics on a missing
 /// column), which killed the scheduler task on its first governed row — no
 /// unit test of the pure helpers could see it.
+///
+/// **Edges, plus a reconcile backstop.** Sending only on a change is what lets a
+/// manual wake stick, but a display command is at-most-once: pushed to the live
+/// stream and left in `pending_command` for the next heartbeat. Anything that
+/// turns the screen back on afterwards — someone tapping the tablet, an OTA
+/// self-update relaunching the app, a missed command — leaves the hub believing
+/// the kiosk is already in the desired state, and inside a long Off block the
+/// next edge is the following *morning*: the panel burns all night. So during a
+/// **forced** hour (a painted On/Off hour, a legacy quiet-hours verdict, or a
+/// keep-off override — every case where presence does NOT govern) the pass also
+/// compares the verdict with the screen state the kiosk itself reports on its
+/// heartbeat, and re-asserts the command once the disagreement outlives
+/// [`RECONCILE_GRACE`]. Aware hours keep pure edge semantics: there, presence is
+/// the authority and a manual wake is meant to hold until the room's next flip.
 pub async fn scheduler_tick(
     state: &Arc<AppState>,
-    last_desired: &mut std::collections::HashMap<String, bool>,
-    last_present: &mut std::collections::HashMap<String, std::time::Instant>,
+    sched: &mut SchedulerState,
     hour: usize,
     now_min: u16,
 ) {
     use std::collections::HashSet;
     use std::time::{Duration as StdDuration, Instant};
 
-    // Any kiosk governed by *either* policy.
+    // Any kiosk governed by *either* policy. `seen_secs` ages the reported
+    // `screen_on` so a disconnected kiosk's last telemetry can't drive a
+    // reconcile.
     let rows = sqlx::query(
         "SELECT id, room_id, schedule_enabled, sleep_at, wake_at,
                     presence_enabled, presence_timeout_secs, hour_modes,
-                    aware_override_targets
+                    aware_override_targets, screen_on,
+                    CAST((julianday('now') - julianday(last_seen)) * 86400 AS INTEGER)
+                        AS seen_secs
              FROM kiosks
              WHERE schedule_enabled = 1 OR presence_enabled = 1",
     )
@@ -1061,13 +1118,16 @@ pub async fn scheduler_tick(
                     );
                     match crate::api::rooms::room_occupancy(state, &room_id).await {
                         Some(true) => {
-                            last_present.insert(id.clone(), Instant::now());
+                            sched.last_present.insert(id.clone(), Instant::now());
                             Some(true)
                         }
                         // Empty room: stay "present" until the grace elapses.
-                        Some(false) => {
-                            Some(last_present.get(&id).is_some_and(|t| t.elapsed() < timeout))
-                        }
+                        Some(false) => Some(
+                            sched
+                                .last_present
+                                .get(&id)
+                                .is_some_and(|t| t.elapsed() < timeout),
+                        ),
                         None => None, // no presence sensors → presence doesn't govern
                     }
                 }
@@ -1108,7 +1168,7 @@ pub async fn scheduler_tick(
             }
             match (overridden, ov_mode) {
                 (true, AwareOverrideMode::KeepOn) => {
-                    last_present.insert(id.clone(), Instant::now());
+                    sched.last_present.insert(id.clone(), Instant::now());
                     Some(true)
                 }
                 (true, AwareOverrideMode::KeepOff) => {
@@ -1133,7 +1193,30 @@ pub async fn scheduler_tick(
         };
         governed.insert(id.clone());
 
-        if last_desired.get(&id) == Some(&awake) {
+        // Does presence govern this hour? If not, the verdict is unconditional
+        // and the reconcile backstop applies (see the fn doc).
+        let forced = force_asleep
+            || matches!(mode, Some(PlanMode::On) | Some(PlanMode::Off))
+            || (mode.is_none() && present.is_none() && schedule_awake.is_some());
+        let fresh = row
+            .get::<Option<i64>, _>("seen_secs")
+            .is_some_and(|s| s <= HEARTBEAT_FRESH_SECS);
+        let reported_awake = row.get::<Option<i64>, _>("screen_on").map(|v| v != 0);
+        let disagrees = forced && fresh && reported_awake == Some(!awake);
+        let stale_since = if disagrees {
+            Some(
+                *sched
+                    .mismatch_since
+                    .entry(id.clone())
+                    .or_insert_with(Instant::now),
+            )
+        } else {
+            sched.mismatch_since.remove(&id);
+            None
+        };
+        let reassert = stale_since.is_some_and(|t| t.elapsed() >= sched.grace);
+
+        if sched.last_desired.get(&id) == Some(&awake) && !reassert {
             continue; // already in the desired state — nothing to send.
         }
         let cmd = if awake { "wake" } else { "sleep" };
@@ -1142,10 +1225,13 @@ pub async fn scheduler_tick(
                 tracing::debug!(
                     target: "bifrost::kiosk",
                     kiosk_id = %id, %cmd, now = %fmt_hhmm(now_min),
-                    schedule = ?schedule_awake, presence = ?present,
+                    schedule = ?schedule_awake, presence = ?present, reassert,
                     "display-power command"
                 );
-                last_desired.insert(id, awake);
+                sched.last_desired.insert(id.clone(), awake);
+                // Restart the grace: if the kiosk still doesn't comply we
+                // re-assert once per grace window rather than every tick.
+                sched.mismatch_since.remove(&id);
             }
             Err(e) => tracing::warn!(
                 target: "bifrost::kiosk", kiosk_id = %id,
@@ -1154,8 +1240,9 @@ pub async fn scheduler_tick(
         }
     }
     // Forget kiosks no longer governed, so re-enabling one reconciles it afresh.
-    last_desired.retain(|id, _| governed.contains(id));
-    last_present.retain(|id, _| governed.contains(id));
+    sched.last_desired.retain(|id, _| governed.contains(id));
+    sched.last_present.retain(|id, _| governed.contains(id));
+    sched.mismatch_since.retain(|id, _| governed.contains(id));
 }
 
 // ── Microphone presence: the kiosk mic as a room occupancy sensor ────────────

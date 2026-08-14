@@ -1742,9 +1742,8 @@ async fn seed_engine(state: &AppState, engine: &mut EngineState) {
     }
 }
 
-/// The background engine loop: merge every provider's sensor push stream,
-/// process events as they arrive, tick armed timers, and rebuild the
-/// subscription set periodically (providers added later join then).
+/// The background engine loop: merge every provider's push streams, process
+/// events as they arrive, and tick armed timers.
 pub async fn run_engine(state: Arc<AppState>) {
     use futures_util::StreamExt;
     use tokio_stream::wrappers::BroadcastStream;
@@ -1761,139 +1760,119 @@ pub async fn run_engine(state: Arc<AppState>) {
         Power(String, crate::connection::PowerEvent),
     }
 
-    loop {
-        let (sensor_rx, light_rx, media_rx, power_rx) = {
-            let connections = state.connections.lock().await;
-            (
-                connections.subscribe_all_sensor(),
-                connections.subscribe_all(),
-                connections.subscribe_all_media(),
-                connections.subscribe_all_power(),
-            )
-        };
-        if sensor_rx.is_empty() && light_rx.is_empty() && media_rx.is_empty() && power_rx.is_empty()
-        {
-            // No connected providers yet; check again shortly.
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            continue;
-        }
-        let mut streams: Vec<futures_util::stream::BoxStream<'static, EngineEvent>> = Vec::new();
-        for (provider_id, rx) in sensor_rx {
-            streams.push(
-                BroadcastStream::new(rx)
-                    .filter_map(|r| std::future::ready(r.ok()))
-                    .map(move |ev| EngineEvent::Sensor(provider_id.clone(), ev))
-                    .boxed(),
-            );
-        }
-        for rx in light_rx {
-            streams.push(
-                BroadcastStream::new(rx)
-                    .filter_map(|r| std::future::ready(r.ok()))
-                    .map(EngineEvent::Light)
-                    .boxed(),
-            );
-        }
-        for (provider_id, rx) in media_rx {
-            streams.push(
-                BroadcastStream::new(rx)
-                    .filter_map(|r| std::future::ready(r.ok()))
-                    .map(move |ev| EngineEvent::Media(provider_id.clone(), ev))
-                    .boxed(),
-            );
-        }
-        for (provider_id, rx) in power_rx {
-            streams.push(
-                BroadcastStream::new(rx)
-                    .filter_map(|r| std::future::ready(r.ok()))
-                    .map(move |ev| EngineEvent::Power(provider_id.clone(), ev))
-                    .boxed(),
-            );
-        }
-        let mut merged = futures_util::stream::select_all(streams);
-        let mut tick = tokio::time::interval(Duration::from_secs(5));
-        let resubscribe = tokio::time::sleep(Duration::from_secs(60));
-        tokio::pin!(resubscribe);
+    // Subscribed ONCE, on the registry's app-wide fan-in channels: they outlive
+    // every manager restart and carry providers added later, so the engine can
+    // never go deaf for a provider (see `ConnectionRegistry`).
+    let (sensor_rx, light_rx, media_rx, power_rx) = {
+        let connections = state.connections.lock().await;
+        (
+            connections.subscribe_sensors(),
+            connections.subscribe_lights(),
+            connections.subscribe_media(),
+            connections.subscribe_power(),
+        )
+    };
+    let streams: Vec<futures_util::stream::BoxStream<'static, EngineEvent>> = vec![
+        BroadcastStream::new(sensor_rx)
+            .filter_map(|r| std::future::ready(r.ok()))
+            .map(|(provider_id, ev)| EngineEvent::Sensor(provider_id, ev))
+            .boxed(),
+        BroadcastStream::new(light_rx)
+            .filter_map(|r| std::future::ready(r.ok()))
+            .map(EngineEvent::Light)
+            .boxed(),
+        BroadcastStream::new(media_rx)
+            .filter_map(|r| std::future::ready(r.ok()))
+            .map(|(provider_id, ev)| EngineEvent::Media(provider_id, ev))
+            .boxed(),
+        BroadcastStream::new(power_rx)
+            .filter_map(|r| std::future::ready(r.ok()))
+            .map(|(provider_id, ev)| EngineEvent::Power(provider_id, ev))
+            .boxed(),
+        // Never terminate: the fan-ins are alive for the process's life, but a
+        // pending arm keeps select_all honest if one is ever dropped.
+        futures_util::stream::pending().boxed(),
+    ];
+    let mut merged = futures_util::stream::select_all(streams);
+    let mut tick = tokio::time::interval(Duration::from_secs(5));
 
-        loop {
-            tokio::select! {
-                ev = merged.next() => match ev {
-                    Some(EngineEvent::Sensor(provider_id, event)) => {
-                        process_sensor_event(&state, &mut engine, &provider_id, &event).await;
-                    }
-                    Some(EngineEvent::Light(event)) => {
-                        // Light events aren't provider-tagged (the SSE feed
-                        // matches them the same way). Resolve the row once for
-                        // both consumers: the hold watch sees every patch (a
-                        // manual brightness/colour nudge has no `on`), the
-                        // device-trigger path only power edges. Skip the
-                        // lookup when neither can care.
-                        let watching = !state.hold_watch.inner.lock().await.is_empty();
-                        if event.patch.on.is_some() || watching {
-                            let row: Option<String> = sqlx::query_scalar(
-                                "SELECT id FROM lights WHERE device_id = ? AND enabled = 1 AND shadowed_by IS NULL",
-                            )
-                            .bind(&event.device_id)
-                            .fetch_optional(&state.db)
-                            .await
-                            .ok()
-                            .flatten();
-                            if let Some(id) = row {
-                                if watching {
-                                    observe_hold_light(&state, &id, &event.patch).await;
-                                }
-                                if let Some(on) = event.patch.on {
-                                    process_device_event(&state, &mut engine, TriggerDeviceDomain::Light, &id, on).await;
-                                }
+    loop {
+        tokio::select! {
+            ev = merged.next() => match ev {
+                Some(EngineEvent::Sensor(provider_id, event)) => {
+                    process_sensor_event(&state, &mut engine, &provider_id, &event).await;
+                }
+                Some(EngineEvent::Light(event)) => {
+                    // Light events aren't provider-tagged (the SSE feed
+                    // matches them the same way). Resolve the row once for
+                    // both consumers: the hold watch sees every patch (a
+                    // manual brightness/colour nudge has no `on`), the
+                    // device-trigger path only power edges. Skip the
+                    // lookup when neither can care.
+                    let watching = !state.hold_watch.inner.lock().await.is_empty();
+                    if event.patch.on.is_some() || watching {
+                        let row: Option<String> = sqlx::query_scalar(
+                            "SELECT id FROM lights WHERE device_id = ? AND enabled = 1 AND shadowed_by IS NULL",
+                        )
+                        .bind(&event.device_id)
+                        .fetch_optional(&state.db)
+                        .await
+                        .ok()
+                        .flatten();
+                        if let Some(id) = row {
+                            if watching {
+                                observe_hold_light(&state, &id, &event.patch).await;
+                            }
+                            if let Some(on) = event.patch.on {
+                                process_device_event(&state, &mut engine, TriggerDeviceDomain::Light, &id, on).await;
                             }
                         }
                     }
-                    Some(EngineEvent::Media(provider_id, event)) => {
-                        let row: Option<String> = sqlx::query_scalar(
-                            "SELECT id FROM media_devices WHERE provider_id = ? AND device_id = ? AND enabled = 1 AND shadowed_by IS NULL",
-                        )
-                        .bind(&provider_id)
-                        .bind(&event.device_id)
-                        .fetch_optional(&state.db)
-                        .await
-                        .ok()
-                        .flatten();
-                        if let Some(id) = row {
-                            process_device_event(&state, &mut engine, TriggerDeviceDomain::Media, &id, event.state.power).await;
-                        }
-                    }
-                    Some(EngineEvent::Power(provider_id, event)) => {
-                        let row: Option<String> = sqlx::query_scalar(
-                            "SELECT id FROM power_devices WHERE provider_id = ? AND device_id = ? AND enabled = 1 AND shadowed_by IS NULL",
-                        )
-                        .bind(&provider_id)
-                        .bind(&event.device_id)
-                        .fetch_optional(&state.db)
-                        .await
-                        .ok()
-                        .flatten();
-                        if let Some(id) = row {
-                            observe_hold_power(&state, &id, event.state.on).await;
-                            process_device_event(&state, &mut engine, TriggerDeviceDomain::Power, &id, event.state.on).await;
-                        }
-                    }
-                    None => break, // every stream closed — resubscribe
-                },
-                _ = tick.tick() => {
-                    evaluate_schedules(&state, &mut engine, false).await;
-                    fire_due_timers(&state, &mut engine).await;
-                    apply_due_restores(&state).await;
                 }
-                // A rule was created/edited: baseline its subject now (fill-only,
-                // so live readings and armed timers are untouched) — a rule made
-                // mid-flight must fire on the next edge, not after a restart.
-                // Schedule rules reconcile immediately: a timer painted active
-                // for the current hour takes effect now, not at the next tick.
-                _ = state.automations_changed.notified() => {
-                    seed_engine(&state, &mut engine).await;
-                    evaluate_schedules(&state, &mut engine, true).await;
+                Some(EngineEvent::Media(provider_id, event)) => {
+                    let row: Option<String> = sqlx::query_scalar(
+                        "SELECT id FROM media_devices WHERE provider_id = ? AND device_id = ? AND enabled = 1 AND shadowed_by IS NULL",
+                    )
+                    .bind(&provider_id)
+                    .bind(&event.device_id)
+                    .fetch_optional(&state.db)
+                    .await
+                    .ok()
+                    .flatten();
+                    if let Some(id) = row {
+                        process_device_event(&state, &mut engine, TriggerDeviceDomain::Media, &id, event.state.power).await;
+                    }
                 }
-                _ = &mut resubscribe => break,
+                Some(EngineEvent::Power(provider_id, event)) => {
+                    let row: Option<String> = sqlx::query_scalar(
+                        "SELECT id FROM power_devices WHERE provider_id = ? AND device_id = ? AND enabled = 1 AND shadowed_by IS NULL",
+                    )
+                    .bind(&provider_id)
+                    .bind(&event.device_id)
+                    .fetch_optional(&state.db)
+                    .await
+                    .ok()
+                    .flatten();
+                    if let Some(id) = row {
+                        observe_hold_power(&state, &id, event.state.on).await;
+                        process_device_event(&state, &mut engine, TriggerDeviceDomain::Power, &id, event.state.on).await;
+                    }
+                }
+                None => break, // unreachable: the pending arm never ends
+            },
+            _ = tick.tick() => {
+                evaluate_schedules(&state, &mut engine, false).await;
+                fire_due_timers(&state, &mut engine).await;
+                apply_due_restores(&state).await;
+            }
+            // A rule was created/edited: baseline its subject now (fill-only,
+            // so live readings and armed timers are untouched) — a rule made
+            // mid-flight must fire on the next edge, not after a restart.
+            // Schedule rules reconcile immediately: a timer painted active
+            // for the current hour takes effect now, not at the next tick.
+            _ = state.automations_changed.notified() => {
+                seed_engine(&state, &mut engine).await;
+                evaluate_schedules(&state, &mut engine, true).await;
             }
         }
     }

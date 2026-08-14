@@ -356,9 +356,28 @@ export function BoardsPage() {
     },
   });
 
+  // Generic (HA passthrough) readouts have no push channel, so the sensor /
+  // device-status / weather widgets ride this poll. Two guards for the wall
+  // tablet: never stack a second read on a slow one (the hub discovers these
+  // live, so a laggy HA can outrun the interval and the pile-up eats the
+  // browser's 6-connection budget), and refresh the moment the screen comes
+  // back rather than waiting out the interval on a just-woken board.
   useEffect(() => {
-    const t = setInterval(() => { getGenericDevices().then(setGeneric); }, 20000);
-    return () => clearInterval(t);
+    let inFlight = false;
+    const poll = () => {
+      if (inFlight || document.visibilityState === "hidden") return;
+      inFlight = true;
+      getGenericDevices()
+        .then(setGeneric)
+        .catch(() => {})
+        .finally(() => { inFlight = false; });
+    };
+    const t = setInterval(poll, 20000);
+    document.addEventListener("visibilitychange", poll);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", poll);
+    };
   }, []);
 
   const board = boards.find((b) => b.id === activeId) ?? null;

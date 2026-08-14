@@ -806,15 +806,82 @@ impl Drop for ConnectionEntry {
 }
 
 /// Owns one connection manager per provider. Thread-safe via `Mutex<ConnectionRegistry>`.
+///
+/// # Fan-in channels
+///
+/// Every provider entry owns its own broadcast channels, and **an entry is
+/// replaced wholesale whenever its manager is (re)started** — a credential
+/// edit, a pairing, an enable/disable, or a `relocate` rebind after the device
+/// took a new DHCP lease. A consumer holding a receiver on the *old* entry's
+/// sender simply stops receiving: the sender is dropped, its stream ends, and
+/// nothing about that looks like an error. A long-lived consumer (the SSE
+/// endpoint feeding a wall tablet, the automation engine) would go silently
+/// deaf for that provider until it happened to resubscribe.
+///
+/// So consumers never subscribe per provider. The registry owns **four stable
+/// app-wide fan-in channels** — one per device domain — created once and never
+/// replaced; each entry gets forwarder tasks (owned by the entry, so they die
+/// with it) piping its per-provider events into them, tagged with the provider
+/// row id. Subscribe once, receive every provider's events forever, including
+/// providers added or restarted long after subscribing.
 pub struct ConnectionRegistry {
     entries: HashMap<String, ConnectionEntry>,
+    light_fanin: broadcast::Sender<LightEvent>,
+    media_fanin: broadcast::Sender<(String, MediaEvent)>,
+    power_fanin: broadcast::Sender<(String, PowerEvent)>,
+    sensor_fanin: broadcast::Sender<(String, SensorEvent)>,
 }
+
+/// Fan-in depth. Generous: a slow consumer that lags loses events (broadcast
+/// drops the oldest) rather than blocking the forwarder, and a provider burst
+/// (an HA restart replaying every entity) must not cost the UI its updates.
+const FANIN_CAPACITY: usize = 512;
 
 impl ConnectionRegistry {
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            light_fanin: broadcast::channel(FANIN_CAPACITY).0,
+            media_fanin: broadcast::channel(FANIN_CAPACITY).0,
+            power_fanin: broadcast::channel(FANIN_CAPACITY).0,
+            sensor_fanin: broadcast::channel(FANIN_CAPACITY).0,
         }
+    }
+
+    /// Insert an entry, wiring its per-provider channels into the app-wide
+    /// fan-ins first. The one place entries are stored — every `start_*` goes
+    /// through here, so a new manager kind can't forget to forward.
+    fn install(&mut self, provider_id: String, mut entry: ConnectionEntry) {
+        entry.tasks.push(tokio::spawn(forward(
+            entry.events.subscribe(),
+            self.light_fanin.clone(),
+            |ev| ev,
+        )));
+        if let Some(tx) = &entry.media_events {
+            let id = provider_id.clone();
+            entry.tasks.push(tokio::spawn(forward(
+                tx.subscribe(),
+                self.media_fanin.clone(),
+                move |ev| (id.clone(), ev),
+            )));
+        }
+        if let Some(tx) = &entry.power_events {
+            let id = provider_id.clone();
+            entry.tasks.push(tokio::spawn(forward(
+                tx.subscribe(),
+                self.power_fanin.clone(),
+                move |ev| (id.clone(), ev),
+            )));
+        }
+        if let Some(tx) = &entry.sensor_events {
+            let id = provider_id.clone();
+            entry.tasks.push(tokio::spawn(forward(
+                tx.subscribe(),
+                self.sensor_fanin.clone(),
+                move |ev| (id.clone(), ev),
+            )));
+        }
+        self.entries.insert(provider_id, entry);
     }
 
     /// Spawn the Hue SSE loop and a DB writer task for the given provider.
@@ -839,7 +906,7 @@ impl ConnectionRegistry {
             db,
             occupancy,
         ));
-        self.entries.insert(
+        self.install(
             provider_id,
             ConnectionEntry {
                 state,
@@ -867,7 +934,7 @@ impl ConnectionRegistry {
         let events = mgr.events.clone();
         let poll_task = tokio::spawn(Arc::clone(&mgr).run());
         let db_task = tokio::spawn(db_writer_task(rx, db, inventory));
-        self.entries.insert(
+        self.install(
             provider_id,
             ConnectionEntry {
                 state,
@@ -899,7 +966,7 @@ impl ConnectionRegistry {
         let power_events = mgr.events.clone();
         let poll_task = tokio::spawn(Arc::clone(&mgr).run());
         let db_task = tokio::spawn(power_db_writer_task(rx, provider_id.clone(), db));
-        self.entries.insert(
+        self.install(
             provider_id,
             ConnectionEntry {
                 state,
@@ -976,7 +1043,7 @@ impl ConnectionRegistry {
         }
         // A dummy light channel keeps the entry shape uniform; nothing sends on it.
         let (events, _) = broadcast::channel(1);
-        self.entries.insert(
+        self.install(
             provider_id,
             ConnectionEntry {
                 state,
@@ -1005,7 +1072,7 @@ impl ConnectionRegistry {
         let db_task = tokio::spawn(media_db_writer_task(rx, provider_id.clone(), db));
         // A dummy light channel keeps the entry shape uniform; nothing sends on it.
         let (events, _) = broadcast::channel(1);
-        self.entries.insert(
+        self.install(
             provider_id,
             ConnectionEntry {
                 state,
@@ -1054,7 +1121,7 @@ impl ConnectionRegistry {
             db,
             occupancy,
         ));
-        self.entries.insert(
+        self.install(
             provider_id,
             ConnectionEntry {
                 state,
@@ -1090,7 +1157,7 @@ impl ConnectionRegistry {
             db,
             occupancy,
         ));
-        self.entries.insert(
+        self.install(
             provider_id,
             ConnectionEntry {
                 state: Arc::new(RwLock::new(ConnectionState::Connected {
@@ -1114,6 +1181,29 @@ impl ConnectionRegistry {
             .and_then(|e| e.sensor_events.clone())
     }
 
+    /// Subscribe to **every** provider's light events — now and for the life of
+    /// the process, across manager restarts (see the fan-in note on
+    /// [`ConnectionRegistry`]).
+    pub fn subscribe_lights(&self) -> broadcast::Receiver<LightEvent> {
+        self.light_fanin.subscribe()
+    }
+
+    /// Every provider's media events, tagged with the provider row id (so
+    /// consumers can match `media_devices` rows).
+    pub fn subscribe_media(&self) -> broadcast::Receiver<(String, MediaEvent)> {
+        self.media_fanin.subscribe()
+    }
+
+    /// Every provider's power events, tagged with the provider row id.
+    pub fn subscribe_power(&self) -> broadcast::Receiver<(String, PowerEvent)> {
+        self.power_fanin.subscribe()
+    }
+
+    /// Every provider's sensor events, tagged with the provider row id.
+    pub fn subscribe_sensors(&self) -> broadcast::Receiver<(String, SensorEvent)> {
+        self.sensor_fanin.subscribe()
+    }
+
     /// Abort tasks for the given provider. No-op if not managed.
     pub fn stop(&mut self, provider_id: &str) {
         self.entries.remove(provider_id); // Drop aborts the tasks.
@@ -1123,55 +1213,31 @@ impl ConnectionRegistry {
     pub fn get_state_lock(&self, provider_id: &str) -> Option<Arc<RwLock<ConnectionState>>> {
         self.entries.get(provider_id).map(|e| Arc::clone(&e.state))
     }
+}
 
-    /// Subscribe to every managed connection. Each returned receiver gets every
-    /// `LightEvent` broadcast by its manager. Used by the SSE endpoint.
-    pub fn subscribe_all(&self) -> Vec<broadcast::Receiver<LightEvent>> {
-        self.entries
-            .values()
-            .map(|e| e.events.subscribe())
-            .collect()
-    }
-
-    /// Subscribe to every media push channel, tagged with its provider row id
-    /// (so SSE consumers can match `media_devices` rows). Used by the SSE endpoint.
-    pub fn subscribe_all_media(&self) -> Vec<(String, broadcast::Receiver<MediaEvent>)> {
-        self.entries
-            .iter()
-            .filter_map(|(id, e)| {
-                e.media_events
-                    .as_ref()
-                    .map(|tx| (id.clone(), tx.subscribe()))
-            })
-            .collect()
-    }
-
-    /// Subscribe to every power push channel, tagged with its provider row id
-    /// (so SSE consumers can match `power_devices` rows). Only the HA push
-    /// manager emits power events today. Used by the SSE endpoint.
-    pub fn subscribe_all_power(&self) -> Vec<(String, broadcast::Receiver<PowerEvent>)> {
-        self.entries
-            .iter()
-            .filter_map(|(id, e)| {
-                e.power_events
-                    .as_ref()
-                    .map(|tx| (id.clone(), tx.subscribe()))
-            })
-            .collect()
-    }
-
-    /// Subscribe to every sensor push channel, tagged with its provider row id
-    /// (so SSE consumers can match `sensor_devices` rows). Emitted by the HA and
-    /// Hue push managers. Used by the SSE endpoint.
-    pub fn subscribe_all_sensor(&self) -> Vec<(String, broadcast::Receiver<SensorEvent>)> {
-        self.entries
-            .iter()
-            .filter_map(|(id, e)| {
-                e.sensor_events
-                    .as_ref()
-                    .map(|tx| (id.clone(), tx.subscribe()))
-            })
-            .collect()
+/// Pipe one entry's per-provider channel into an app-wide fan-in, tagging each
+/// event on the way (see the fan-in note on [`ConnectionRegistry`]). Lag drops
+/// events, never the forwarder — one slow consumer must not deafen every other
+/// one. Ends when the entry's sender is dropped, i.e. when the entry is
+/// replaced by a manager restart or stopped outright.
+async fn forward<T, U>(
+    mut rx: broadcast::Receiver<T>,
+    tx: broadcast::Sender<U>,
+    tag: impl Fn(T) -> U,
+) where
+    T: Clone + Send + 'static,
+    U: Clone + Send + 'static,
+{
+    loop {
+        match rx.recv().await {
+            Ok(ev) => {
+                let _ = tx.send(tag(ev));
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                warn!("connection event fan-in lagged; dropped {n} event(s)");
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
     }
 }
 
@@ -1385,6 +1451,77 @@ mod tests {
     use chrono::Utc;
     use std::sync::atomic::{AtomicU32, Ordering};
     use uuid::Uuid;
+
+    // ── Fan-in channels ──────────────────────────────────────────────────────
+
+    async fn test_db() -> SqlitePool {
+        use sqlx::sqlite::SqliteConnectOptions;
+        use std::str::FromStr;
+        let opts = SqliteConnectOptions::from_str(":memory:")
+            .unwrap()
+            .foreign_keys(true);
+        let db = SqlitePool::connect_with(opts).await.unwrap();
+        sqlx::migrate!("./migrations").run(&db).await.unwrap();
+        db
+    }
+
+    fn sensor_event(device_id: &str) -> SensorEvent {
+        SensorEvent {
+            device_id: device_id.to_string(),
+            state: SensorState::default(),
+        }
+    }
+
+    /// The staleness bug this fan-in exists to kill: a consumer that subscribed
+    /// BEFORE a provider's manager was restarted must keep receiving. Restarting
+    /// replaces the entry — and with it the per-provider sender — so a receiver
+    /// taken off that sender goes silently deaf forever (no error, no close the
+    /// consumer can see): a board that only a full page reload could revive.
+    #[tokio::test]
+    async fn a_subscriber_keeps_receiving_across_a_manager_restart() {
+        let db = test_db().await;
+        let occupancy: crate::api::rooms::OccupancySeen = Default::default();
+        let mut registry = ConnectionRegistry::new();
+        registry.ensure_sensor_push_channel("p1".into(), db.clone(), occupancy.clone());
+
+        // Subscribed once, up front — like the SSE endpoint and the engine.
+        let mut rx = registry.subscribe_sensors();
+
+        let tx = registry.sensor_sender("p1").unwrap();
+        tx.send(sensor_event("before")).unwrap();
+        let (provider, ev) = rx.recv().await.unwrap();
+        assert_eq!((provider.as_str(), ev.device_id.as_str()), ("p1", "before"));
+
+        // A credential edit / pairing / relocate rebind: same provider, brand
+        // new channels underneath.
+        registry.stop("p1");
+        registry.ensure_sensor_push_channel("p1".into(), db, occupancy);
+        let tx = registry.sensor_sender("p1").unwrap();
+        tx.send(sensor_event("after")).unwrap();
+
+        let (provider, ev) = rx.recv().await.unwrap();
+        assert_eq!((provider.as_str(), ev.device_id.as_str()), ("p1", "after"));
+    }
+
+    /// The same guarantee forwards in time: a provider added long after a
+    /// consumer subscribed reaches it too (no resubscribe, no restart).
+    #[tokio::test]
+    async fn a_subscriber_receives_from_providers_added_later() {
+        let db = test_db().await;
+        let occupancy: crate::api::rooms::OccupancySeen = Default::default();
+        let mut registry = ConnectionRegistry::new();
+        let mut rx = registry.subscribe_sensors();
+
+        registry.ensure_sensor_push_channel("late".into(), db, occupancy);
+        registry
+            .sensor_sender("late")
+            .unwrap()
+            .send(sensor_event("d1"))
+            .unwrap();
+
+        let (provider, ev) = rx.recv().await.unwrap();
+        assert_eq!((provider.as_str(), ev.device_id.as_str()), ("late", "d1"));
+    }
 
     // ── Polling manager ──────────────────────────────────────────────────────
 

@@ -14,10 +14,11 @@
 //    only fix.
 //
 // This hook collapses every consumer onto one ref-counted EventSource and
-// actively reconnects: on a detected error (backoff), and — the case that
-// actually matters for a wall tablet — whenever the page becomes visible or
-// the network comes back online, since a WebView-suspended zombie connection
-// gives no other signal that it's dead.
+// actively reconnects: on a detected error (backoff), whenever the page becomes
+// visible or the network comes back online, and — the backstop that needs no
+// guess about *why* a stream died — whenever the server's heartbeat stops
+// arriving. A wall tablet holds one connection open for days, so "it looks
+// open" is never enough; silence is the only reliable liveness signal.
 
 import { useEffect, useRef } from "react";
 
@@ -27,6 +28,13 @@ type Handler = (raw: MessageEvent) => void;
 
 const EVENT_NAMES: BifrostEventName[] = ["light_state", "media_state", "power_state", "sensor_state", "inventory"];
 
+/** The server's liveness beat (`api::events::HEARTBEAT`, every 20s). Not a
+ * subscribable event — nothing but the watchdog below cares — but it is a real
+ * named event on purpose: `EventSource` never surfaces the SSE keep-alive
+ * comment, so without it a silently-dead stream is indistinguishable from a
+ * quiet house. */
+const HEARTBEAT_EVENT = "hb";
+
 const listeners = new Map<BifrostEventName, Set<Handler>>(EVENT_NAMES.map((name) => [name, new Set()]));
 
 let es: EventSource | null = null;
@@ -34,6 +42,16 @@ let refCount = 0;
 let backoffMs = 1000;
 const MAX_BACKOFF_MS = 30_000;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+// ── Liveness watchdog ───────────────────────────────────────────────────────
+// A connection can be OPEN and dead: a suspended WebView's socket, a stream the
+// server stopped feeding. The server beats every 20s, so silence well past that
+// means the stream is gone whether or not the browser noticed — reconnect on
+// our own authority instead of waiting for an `onerror` that may never come.
+const SILENCE_LIMIT_MS = 70_000;
+const WATCHDOG_INTERVAL_MS = 15_000;
+let lastSeenAt = 0;
+let watchdog: ReturnType<typeof setInterval> | null = null;
 
 function dispatch(name: BifrostEventName, raw: MessageEvent) {
   listeners.get(name)?.forEach((fn) => fn(raw));
@@ -49,12 +67,21 @@ function clearReconnectTimer() {
 function connect() {
   if (es) return;
   const conn = new EventSource("/api/events");
+  lastSeenAt = Date.now();
   EVENT_NAMES.forEach((name) => {
     conn.addEventListener(name, (raw) => {
       backoffMs = 1000;
+      lastSeenAt = Date.now();
       dispatch(name, raw as MessageEvent);
     });
   });
+  conn.addEventListener(HEARTBEAT_EVENT, () => {
+    backoffMs = 1000;
+    lastSeenAt = Date.now();
+  });
+  conn.onopen = () => {
+    lastSeenAt = Date.now();
+  };
   conn.onerror = () => {
     conn.close();
     if (es === conn) es = null;
@@ -86,8 +113,26 @@ function reconnectNow() {
 
 function teardown() {
   clearReconnectTimer();
+  stopWatchdog();
   es?.close();
   es = null;
+}
+
+function startWatchdog() {
+  if (watchdog !== null) return;
+  watchdog = setInterval(() => {
+    // Only meaningful while we believe we're connected: a stream waiting on its
+    // backoff has no beat to miss.
+    if (refCount <= 0 || !es) return;
+    if (Date.now() - lastSeenAt > SILENCE_LIMIT_MS) reconnectNow();
+  }, WATCHDOG_INTERVAL_MS);
+}
+
+function stopWatchdog() {
+  if (watchdog !== null) {
+    clearInterval(watchdog);
+    watchdog = null;
+  }
 }
 
 // Only force a reconnect on a visibility flip if the page was actually hidden
@@ -134,6 +179,7 @@ export function useEvents(handlers: Partial<Record<BifrostEventName, Handler>>, 
     if (!enabled) return;
     refCount++;
     connect();
+    startWatchdog();
 
     // Subscribe to every event name, not just the ones present in `handlers`
     // right now — the wrapper checks handlersRef.current at DISPATCH time, so

@@ -131,6 +131,58 @@ async fn events_with_session_returns_sse_content_type() {
     );
 }
 
+/// End to end over the wire: a device event reaches an ALREADY-OPEN stream even
+/// though its provider's push channel was created afterwards. A wall tablet
+/// holds this connection for days, so anything that restarts a manager (a
+/// credential edit, a pairing, a relocate rebind) must not leave the board
+/// silently deaf until someone reloads it.
+#[tokio::test]
+async fn events_stream_carries_a_channel_created_after_the_client_connected() {
+    use futures_util::StreamExt;
+
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .oneshot(helpers::authed_get("/api/events", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut body = resp.into_body().into_data_stream();
+
+    // Mint the pseudo-provider's sensor channel now that the client is already
+    // listening, then push a reading through it.
+    bifrost::api::kiosks::ensure_kiosk_sensor_channel(&state).await;
+    let tx = {
+        let connections = state.connections.lock().await;
+        connections
+            .sensor_sender(bifrost::api::kiosks::KIOSK_SENSOR_PROVIDER)
+            .expect("sensor channel")
+    };
+    tx.send(bifrost::connection::SensorEvent {
+        device_id: "sensor-1".into(),
+        state: bifrost::models::sensor::SensorState::boolean(true),
+    })
+    .unwrap();
+
+    let mut seen = String::new();
+    let found = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(Ok(chunk)) = body.next().await {
+            seen.push_str(&String::from_utf8_lossy(&chunk));
+            if seen.contains("event: sensor_state") {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+    assert!(found, "no sensor_state frame on the stream; saw: {seen:?}");
+    assert!(
+        seen.contains("sensor-1"),
+        "frame lost its device id: {seen:?}"
+    );
+}
+
 // ── Health ──────────────────────────────────────────────────────────────────
 
 #[tokio::test]

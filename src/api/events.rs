@@ -12,7 +12,7 @@ use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::{BroadcastStream, IntervalStream};
 
 type SseStream = Pin<Box<dyn stream::Stream<Item = Result<Event, Infallible>> + Send>>;
 
@@ -20,97 +20,86 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new().route("/", get(sse_events))
 }
 
+/// How often the stream emits an `hb` event. This is a **named event**, not the
+/// SSE keep-alive comment: a browser's `EventSource` never surfaces comments, so
+/// a comment-only heartbeat gives the client no way to tell a healthy-but-quiet
+/// stream from a connection that died silently (the WebView-suspended zombie a
+/// wall tablet produces every screen-off cycle). With a real event the client
+/// can watchdog the stream and reconnect on silence — see `frontend/src/useEvents.ts`.
+const HEARTBEAT: Duration = Duration::from_secs(20);
+
 async fn sse_events(
     State(state): State<Arc<AppState>>,
     _: Session,
 ) -> Result<axum::response::Response, StatusCode> {
-    let (receivers, media_receivers, power_receivers, sensor_receivers) = {
+    // ONE subscription per domain, on the registry's app-wide fan-in channels —
+    // never per provider. A per-provider snapshot would go permanently deaf for
+    // any provider whose manager restarts after this connection opened (a
+    // relocate rebind, a credential edit, a pairing), with no error to notice:
+    // exactly the "board went stale, only a reload fixes it" failure.
+    let (lights, media, power, sensors) = {
         let connections = state.connections.lock().await;
         (
-            connections.subscribe_all(),
-            connections.subscribe_all_media(),
-            connections.subscribe_all_power(),
-            connections.subscribe_all_sensor(),
+            connections.subscribe_lights(),
+            connections.subscribe_media(),
+            connections.subscribe_power(),
+            connections.subscribe_sensors(),
         )
     };
 
-    let mut streams: Vec<SseStream> = receivers
-        .into_iter()
-        .map(|rx| {
-            BroadcastStream::new(rx)
-                .filter_map(|r| std::future::ready(r.ok()))
-                .map(|event| {
-                    let data = serde_json::to_string(&serde_json::json!({
-                        "device_id": event.device_id,
-                        "patch": event.patch,
-                    }))
-                    .unwrap_or_default();
-                    Ok::<Event, Infallible>(Event::default().event("light_state").data(data))
-                })
-                .boxed()
-        })
-        .collect();
-
-    // Media push events: full-state snapshots tagged with the provider row id
-    // so the frontend can match its media_devices rows.
-    for (provider_id, rx) in media_receivers {
-        streams.push(
-            BroadcastStream::new(rx)
-                .filter_map(|r| std::future::ready(r.ok()))
-                .map(move |event| {
-                    let data = serde_json::to_string(&serde_json::json!({
-                        "provider_id": provider_id,
-                        "device_id": event.device_id,
-                        "state": event.state,
-                    }))
-                    .unwrap_or_default();
-                    Ok::<Event, Infallible>(Event::default().event("media_state").data(data))
-                })
-                .boxed(),
-        );
-    }
-
-    // Power push events: full snapshots tagged with the provider row id so the
-    // frontend can match its power_devices rows.
-    for (provider_id, rx) in power_receivers {
-        streams.push(
-            BroadcastStream::new(rx)
-                .filter_map(|r| std::future::ready(r.ok()))
-                .map(move |event| {
-                    let data = serde_json::to_string(&serde_json::json!({
-                        "provider_id": provider_id,
-                        "device_id": event.device_id,
-                        "state": event.state,
-                    }))
-                    .unwrap_or_default();
-                    Ok::<Event, Infallible>(Event::default().event("power_state").data(data))
-                })
-                .boxed(),
-        );
-    }
-
-    // Sensor push events: full snapshots tagged with the provider row id so the
-    // frontend can match its sensor_devices rows (motion/lux/temp updates).
-    for (provider_id, rx) in sensor_receivers {
-        streams.push(
-            BroadcastStream::new(rx)
-                .filter_map(|r| std::future::ready(r.ok()))
-                .map(move |event| {
-                    let data = serde_json::to_string(&serde_json::json!({
-                        "provider_id": provider_id,
-                        "device_id": event.device_id,
-                        "state": event.state,
-                    }))
-                    .unwrap_or_default();
-                    Ok::<Event, Infallible>(Event::default().event("sensor_state").data(data))
-                })
-                .boxed(),
-        );
-    }
-
-    // Inventory changes (rename/glyph/enable/room/shadow): one app-wide channel,
-    // so device lists refresh live on every surface and every client.
-    streams.push(
+    let mut streams: Vec<SseStream> = vec![
+        BroadcastStream::new(lights)
+            .filter_map(|r| std::future::ready(r.ok()))
+            .map(|event| {
+                let data = serde_json::to_string(&serde_json::json!({
+                    "device_id": event.device_id,
+                    "patch": event.patch,
+                }))
+                .unwrap_or_default();
+                Ok::<Event, Infallible>(Event::default().event("light_state").data(data))
+            })
+            .boxed(),
+        // Media/power/sensor pushes are full-state snapshots tagged with the
+        // provider row id, so the frontend can match its device rows.
+        BroadcastStream::new(media)
+            .filter_map(|r| std::future::ready(r.ok()))
+            .map(|(provider_id, event)| {
+                let data = serde_json::to_string(&serde_json::json!({
+                    "provider_id": provider_id,
+                    "device_id": event.device_id,
+                    "state": event.state,
+                }))
+                .unwrap_or_default();
+                Ok::<Event, Infallible>(Event::default().event("media_state").data(data))
+            })
+            .boxed(),
+        BroadcastStream::new(power)
+            .filter_map(|r| std::future::ready(r.ok()))
+            .map(|(provider_id, event)| {
+                let data = serde_json::to_string(&serde_json::json!({
+                    "provider_id": provider_id,
+                    "device_id": event.device_id,
+                    "state": event.state,
+                }))
+                .unwrap_or_default();
+                Ok::<Event, Infallible>(Event::default().event("power_state").data(data))
+            })
+            .boxed(),
+        BroadcastStream::new(sensors)
+            .filter_map(|r| std::future::ready(r.ok()))
+            .map(|(provider_id, event)| {
+                let data = serde_json::to_string(&serde_json::json!({
+                    "provider_id": provider_id,
+                    "device_id": event.device_id,
+                    "state": event.state,
+                }))
+                .unwrap_or_default();
+                Ok::<Event, Infallible>(Event::default().event("sensor_state").data(data))
+            })
+            .boxed(),
+        // Inventory changes (rename/glyph/enable/room/shadow, board edits): one
+        // app-wide channel, so device lists refresh live on every surface and
+        // every client.
         BroadcastStream::new(state.inventory_events.subscribe())
             .filter_map(|r| std::future::ready(r.ok()))
             .map(|table: String| {
@@ -119,9 +108,13 @@ async fn sse_events(
                 Ok::<Event, Infallible>(Event::default().event("inventory").data(data))
             })
             .boxed(),
-    );
+        // The observable liveness beat (see HEARTBEAT).
+        IntervalStream::new(tokio::time::interval(HEARTBEAT))
+            .map(|_| Ok::<Event, Infallible>(Event::default().event("hb").data("1")))
+            .boxed(),
+    ];
 
-    // A pending stream prevents select_all from terminating when there are no providers.
+    // A pending stream keeps select_all from ever terminating.
     streams.push(stream::pending().boxed());
 
     let merged = stream::select_all(streams);
