@@ -14,6 +14,7 @@ import {
   getAutomations,
   getDashboards,
   getGenericDevices,
+  DEFAULT_TIMEOUT_MS,
   getKioskSelf,
   getLights,
   runAutomation,
@@ -217,6 +218,16 @@ const GAP = 8;
 // Fixed row height only for the phone fallback's stacked, view-only list.
 const ROW_H = 42;
 
+/** How often the generic (HA passthrough) readouts are re-read. */
+const GENERIC_POLL_MS = 20_000;
+/** When an unsettled generic read is treated as abandoned and may be replaced.
+ * Derived from the real fetch deadline rather than restated: a read still
+ * pending past it has outlived the abort that was supposed to kill it, which is
+ * the only anomaly this guard exists for. It must stay ABOVE the deadline — a
+ * shorter window would abort every healthy read and replace it with another
+ * doomed to the same fate, silently freezing the readouts for good. */
+const GENERIC_POLL_STALE_MS = DEFAULT_TIMEOUT_MS + 10_000;
+
 type WidgetType = "room" | "device" | "button" | "group" | "now_playing" | "scene" | "macro" | "control" | "sensor" | "device_status" | "weather" | "clock" | "label" | "feed" | "exit";
 
 // The kiosk-exit control is a special built-in widget: present on every board,
@@ -269,21 +280,46 @@ export function BoardsPage() {
     setActiveId((cur) => cur ?? bs[0]?.id ?? null);
   }, []);
 
+  // Deliberately does NOT read the generic devices: the poll below is their one
+  // writer. They are discovered live per request and are absent from every
+  // table an inventory event announces, so refetching them here only bought a
+  // sixth parallel request per event and a second, unordered writer that could
+  // land a stale snapshot on top of a newer poll result.
+  //
+  // Reads coalesce rather than stack. A burst of inventory events (a discovery
+  // run, an editing session) would otherwise put five parallel requests in
+  // flight per event, against a browser budget of six per origin — the pressure
+  // that leaves a kiosk's buttons unresponsive. A call arriving mid-read is
+  // remembered and replayed once at the end, so the lists still settle on the
+  // newest state without a request pile-up.
+  const devicesBusy = useRef(false);
+  const devicesQueued = useRef(false);
   const reloadDevices = useCallback(async () => {
-    const [l, m, p, s, g, r] = await Promise.all([
-      getLights(),
-      getMediaDevices(),
-      getPowerDevices(),
-      getScenes(),
-      getGenericDevices(),
-      getRooms(),
-    ]);
-    if (l !== "unauthorized") setLights(l);
-    setMedia(m);
-    setPower(p);
-    setScenes(s);
-    setGeneric(g);
-    setRooms(r);
+    if (devicesBusy.current) {
+      devicesQueued.current = true;
+      return;
+    }
+    devicesBusy.current = true;
+    try {
+      do {
+        devicesQueued.current = false;
+        const [l, m, p, s, r] = await Promise.all([
+          getLights(),
+          getMediaDevices(),
+          getPowerDevices(),
+          getScenes(),
+          getRooms(),
+        ]);
+        if (l !== "unauthorized") setLights(l);
+        setMedia(m);
+        setPower(p);
+        setScenes(s);
+        setRooms(r);
+      } while (devicesQueued.current);
+    } finally {
+      devicesBusy.current = false;
+      devicesQueued.current = false;
+    }
   }, []);
 
   useEffect(() => {
@@ -321,9 +357,15 @@ export function BoardsPage() {
     // showing a board picks up layout changes made from any other client live,
     // instead of holding the stale board until someone exits and re-enters.
     inventory: (raw) => {
-      reloadDevices();
       const { table } = JSON.parse(raw.data) as { table: string };
-      if (table === "dashboards" && !editRef.current) reloadBoards();
+      // A board-layout save announces itself on this same stream and says
+      // nothing about devices, so it must not drag a device refetch behind it:
+      // every open board would re-read five endpoints on every save.
+      if (table === "dashboards") {
+        if (!editRef.current) reloadBoards();
+        return;
+      }
+      reloadDevices();
     },
     light_state: (raw) => {
       const { device_id, patch } = JSON.parse(raw.data) as {
@@ -363,20 +405,51 @@ export function BoardsPage() {
   // browser's 6-connection budget), and refresh the moment the screen comes
   // back rather than waiting out the interval on a just-woken board.
   useEffect(() => {
-    let inFlight = false;
-    const poll = () => {
-      if (inFlight || document.visibilityState === "hidden") return;
-      inFlight = true;
-      getGenericDevices()
-        .then(setGeneric)
+    // The in-flight guard records when the read STARTED rather than a bare
+    // boolean, because it has to be self-clearing: a promise that never settled
+    // would latch a boolean forever and silently retire this poll for the life
+    // of the mount — "the readouts froze and only leaving the board and coming
+    // back fixes them". Elapsed time is measured on the monotonic clock, so an
+    // NTP correction on a tablet that has been up for weeks can't push the
+    // comparison negative and suspend the poll until wall-clock catches up.
+    // Each read carries an incrementing token so a superseded reply is dropped
+    // instead of overwriting newer data.
+    let seq = 0;
+    let current = 0;
+    let startedAt = 0;
+    let ctrl: AbortController | null = null;
+    // `force` replaces an in-flight read instead of deferring to it. A wake is
+    // the one moment we have positive reason to distrust the read in progress:
+    // it was almost certainly issued before the WebView's networking was
+    // suspended. Aborting it first means the replacement can never be a second
+    // concurrent request — at most one of these is ever outstanding, so this
+    // can't leak the connection-pool slots the whole poll guard exists to
+    // protect.
+    const poll = (force = false) => {
+      if (document.visibilityState === "hidden") return;
+      const pending = current !== 0;
+      if (pending && !force && performance.now() - startedAt < GENERIC_POLL_STALE_MS) return;
+      if (pending) ctrl?.abort();
+      const mine = ++seq;
+      const mineCtrl = new AbortController();
+      current = mine;
+      startedAt = performance.now();
+      ctrl = mineCtrl;
+      getGenericDevices(mineCtrl.signal)
+        .then((devices) => { if (current === mine) setGeneric(devices); })
         .catch(() => {})
-        .finally(() => { inFlight = false; });
+        .finally(() => { if (current === mine) { current = 0; ctrl = null; } });
     };
-    const t = setInterval(poll, 20000);
-    document.addEventListener("visibilitychange", poll);
+    const onVisible = () => poll(true);
+    // Immediately, not a tick from now: this poll is the only writer of the
+    // generic readouts, so the first paint depends on it.
+    poll();
+    const t = setInterval(() => poll(), GENERIC_POLL_MS);
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       clearInterval(t);
-      document.removeEventListener("visibilitychange", poll);
+      ctrl?.abort();
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, []);
 

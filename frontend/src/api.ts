@@ -7,15 +7,57 @@
 // connection, to exhaust the 6-connections-per-origin budget and leave every
 // subsequent button press queued indefinitely. Aborting on a timeout frees
 // the slot immediately instead.
+//
+// The deadline has to cover the BODY, not just the headers. `fetch` resolves as
+// soon as the response headers land, so releasing the timer there would hand
+// the caller a live stream guarded by a spent AbortController: if the body then
+// stalls mid-transfer — what a WebView whose networking was suspended across a
+// screen-off cycle does — the caller's `res.json()` waits forever with nothing
+// left that can abort it. That is a permanently stuck promise rather than a
+// slow one, and it is worse than the original hang: a poll guarded by an
+// in-flight flag never clears the flag, so it stops for the life of the mount
+// (only a remount revives it), and the wedged body still holds its pool slot.
+// So the body is read to completion under the same timer and handed back as a
+// fully-materialized Response. Callers are unaffected — `res.ok`, `.json()`
+// and `.text()` behave identically, and nothing here streams (the largest
+// response is a device list).
+// Because the response is rebuilt, it carries status, statusText and headers but
+// NOT `url`, `redirected` or `type` (and its `content-length` / `content-encoding`
+// describe the original transfer, not the buffer). Nothing here reads those; a
+// caller that needs one has to reach past this wrapper rather than trust them.
 const rawFetch = fetch;
-const DEFAULT_TIMEOUT_MS = 20_000;
+/** The deadline every call below runs under unless it passes its own. Exported
+ * so a caller that wraps this in its own staleness guard can derive its
+ * threshold from the real timeout instead of restating it as a literal — a
+ * guard shorter than the deadline would abort healthy reads forever. */
+export const DEFAULT_TIMEOUT_MS = 20_000;
+/** Statuses the `Response` constructor forbids a body on, empty or not. */
+const NULL_BODY_STATUS = new Set([204, 205, 304]);
 async function timedFetch(input: string, init?: RequestInit, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Response> {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  // A caller's own signal has to be chained onto the internal one rather than
+  // passed through, since the internal controller owns the deadline and would
+  // otherwise overwrite it. (Composed by hand: `AbortSignal.any` is too new for
+  // the WebView on an older wall tablet.)
+  // The caller's own reason is carried across, so a cancelled read still reads
+  // as cancelled rather than being indistinguishable from a 20s timeout.
+  const caller = init?.signal ?? null;
+  const relay = () => ctrl.abort(caller?.reason);
+  if (caller?.aborted) ctrl.abort(caller.reason);
+  else caller?.addEventListener("abort", relay);
   try {
-    return await rawFetch(input, { ...init, signal: ctrl.signal });
+    const res = await rawFetch(input, { ...init, signal: ctrl.signal });
+    const body = await res.arrayBuffer();
+    const empty = NULL_BODY_STATUS.has(res.status) || body.byteLength === 0;
+    return new Response(empty ? null : body, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: res.headers,
+    });
   } finally {
     clearTimeout(t);
+    caller?.removeEventListener("abort", relay);
   }
 }
 
@@ -377,8 +419,8 @@ export interface GenericDevice {
 }
 
 /** Live list of generic devices across every provider that serves them (HA). */
-export async function getGenericDevices(): Promise<GenericDevice[]> {
-  const res = await timedFetch("/api/generic/devices");
+export async function getGenericDevices(signal?: AbortSignal): Promise<GenericDevice[]> {
+  const res = await timedFetch("/api/generic/devices", { signal });
   if (!res.ok) return [];
   return res.json();
 }
