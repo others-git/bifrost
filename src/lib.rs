@@ -55,6 +55,11 @@ pub struct AppState {
     /// DB-writer tasks recompute (and log) on every presence event without
     /// holding `AppState`. Std mutex: never held across an await.
     pub occupancy_seen: api::rooms::OccupancySeen,
+    /// Live `/api/events` subscribers — who is listening, and what they have
+    /// actually been sent. Read by `GET /api/dev/streams`; the hub otherwise
+    /// has no visibility at all into its own push fan-out, which is what makes
+    /// "a surface went stale" undiagnosable from the server side.
+    pub streams: std::sync::Arc<api::events::StreamRegistry>,
     cipher: Aes256Gcm,
     /// Non-reversible fingerprint of the derived credential key — for the startup
     /// diagnostic that catches a silently-changed `BIFROST_SECRET`.
@@ -76,6 +81,7 @@ impl AppState {
             hold_watch: api::automations::HoldWatch::default(),
             inventory_events: tokio::sync::broadcast::channel(64).0,
             occupancy_seen: api::rooms::OccupancySeen::default(),
+            streams: std::sync::Arc::new(api::events::StreamRegistry::default()),
         }
     }
 

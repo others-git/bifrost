@@ -37,6 +37,7 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route("/media/{id}/routing", get(media_routing_handler))
         .route("/events", get(events_handler))
+        .route("/streams", get(streams_handler))
         .route("/events/clear", axum::routing::post(events_clear_handler))
 }
 
@@ -122,6 +123,29 @@ async fn events_handler(
         "areas": crate::journal::Journal::global().areas(),
     }))
     .into_response()
+}
+
+/// The live `/api/events` subscriber list: who is connected, for how long, and
+/// how much has actually gone out to each.
+///
+/// This is the server-side half of diagnosing "a surface went stale and only a
+/// reload fixes it". The three shapes it distinguishes, none of which were
+/// observable before:
+/// - the client **isn't here** — its stream died and it never re-established;
+/// - it's here, `beats_sent` climbing, `events_sent` flat — the hub isn't
+///   emitting, so look at the fan-in, not the browser;
+/// - it's here and being sent events it evidently isn't rendering — the bug is
+///   in the client, and no amount of server-side reconnect logic will fix it.
+///
+/// `lagged` above zero means that subscriber has *missed* events outright.
+async fn streams_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(code) = guard(&state, &headers).await {
+        return code.into_response();
+    }
+    Json(json!({ "streams": state.streams.snapshot() })).into_response()
 }
 
 async fn events_clear_handler(

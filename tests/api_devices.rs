@@ -2533,6 +2533,7 @@ async fn dev_routes_404_when_dev_mode_off() {
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
     for uri in [
         "/api/dev/info",
+        "/api/dev/streams",
         "/api/dev/media/whatever/routing",
         "/api/dev/devices/some-provider/climate.bedroom/raw",
     ] {
@@ -2589,6 +2590,45 @@ async fn dev_info_ok_with_bearer_when_on() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// The SSE subscriber list. Empty here because `oneshot` never holds a stream
+/// open — what matters is that the surface exists, is gated like the rest of
+/// the dev routes, and reports the shape the diagnosis relies on.
+#[tokio::test]
+async fn dev_streams_lists_live_sse_subscribers() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    enable_dev_mode(&app, &cookie).await;
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/dev/streams", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert!(
+        body["streams"].is_array(),
+        "expected a streams array, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn dev_streams_401_without_auth() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    enable_dev_mode(&app, &cookie).await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/dev/streams")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

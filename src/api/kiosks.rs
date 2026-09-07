@@ -364,6 +364,22 @@ struct SelfResponse {
     default_board_id: Option<String>,
 }
 
+/// Name the kiosk a request came from, when its `bfr_key` cookie says which one
+/// it is. `None` for an ordinary browser (no cookie, or a key that isn't a
+/// kiosk's). Used to label diagnostics by the tablet they belong to — a wall
+/// fixture is the client hardest to inspect from the outside, so it is the one
+/// worth naming.
+pub async fn kiosk_name_for_headers(state: &Arc<AppState>, headers: &HeaderMap) -> Option<String> {
+    let key = crate::api::auth::kiosk_cookie_key(headers)?;
+    let key_id = crate::api::apikeys::validate_key(state, &key).await?;
+    sqlx::query_scalar::<_, String>("SELECT name FROM kiosks WHERE api_key_id = ?")
+        .bind(&key_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+}
+
 /// `GET /api/kiosks/self` — the kiosk asks *which kiosk am I and what should I
 /// show*. Resolved from the `bfr_key` cookie the WebView carries (not a session,
 /// which isn't tied to a kiosk), so the web client can auto-launch its assigned

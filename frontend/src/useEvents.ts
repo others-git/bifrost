@@ -48,10 +48,49 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 // server stopped feeding. The server beats every 20s, so silence well past that
 // means the stream is gone whether or not the browser noticed — reconnect on
 // our own authority instead of waiting for an `onerror` that may never come.
-const SILENCE_LIMIT_MS = 70_000;
+export const SILENCE_LIMIT_MS = 70_000;
 const WATCHDOG_INTERVAL_MS = 15_000;
 let lastSeenAt = 0;
 let watchdog: ReturnType<typeof setInterval> | null = null;
+
+// ── Health, for the dev-mode readout ────────────────────────────────────────
+// A wall tablet has no devtools, so "is this board stale because the stream
+// died, or because the hub stopped sending?" is otherwise unanswerable while
+// standing in front of it. These counters are what `StreamBadge` renders and
+// what makes the two cases tell themselves apart on sight: a beat still
+// arriving while device events have gone quiet points at the hub, and both
+// gone quiet points at this connection.
+let lastEventAt = 0; // any DEVICE/inventory event (not the beat)
+let lastBeatAt = 0; // `hb` only
+let openedAt = 0; // when the current connection opened
+let reconnects = 0; // (re)connections since page load, first excluded
+
+export type StreamHealth = {
+  /** `EventSource.readyState`, or -1 when there is no connection object. */
+  readyState: number;
+  /** ms since the last device/inventory event, or null if none yet. */
+  sinceEvent: number | null;
+  /** ms since the last server heartbeat, or null if none yet. */
+  sinceBeat: number | null;
+  /** ms the current connection has been open, or null if not connected. */
+  openFor: number | null;
+  reconnects: number;
+  /** True once the beat is overdue — the stream is dead or the hub is gone. */
+  silent: boolean;
+};
+
+/** Snapshot of the shared connection's health. Cheap; safe to poll per second. */
+export function streamHealth(): StreamHealth {
+  const now = Date.now();
+  return {
+    readyState: es ? es.readyState : -1,
+    sinceEvent: lastEventAt ? now - lastEventAt : null,
+    sinceBeat: lastBeatAt ? now - lastBeatAt : null,
+    openFor: openedAt ? now - openedAt : null,
+    reconnects,
+    silent: lastSeenAt > 0 && now - lastSeenAt > SILENCE_LIMIT_MS,
+  };
+}
 
 function dispatch(name: BifrostEventName, raw: MessageEvent) {
   listeners.get(name)?.forEach((fn) => fn(raw));
@@ -68,23 +107,30 @@ function connect() {
   if (es) return;
   const conn = new EventSource("/api/events");
   lastSeenAt = Date.now();
+  if (openedAt) reconnects++; // the first connection isn't a reconnect
   EVENT_NAMES.forEach((name) => {
     conn.addEventListener(name, (raw) => {
       backoffMs = 1000;
       lastSeenAt = Date.now();
+      lastEventAt = lastSeenAt;
       dispatch(name, raw as MessageEvent);
     });
   });
   conn.addEventListener(HEARTBEAT_EVENT, () => {
     backoffMs = 1000;
     lastSeenAt = Date.now();
+    lastBeatAt = lastSeenAt;
   });
   conn.onopen = () => {
     lastSeenAt = Date.now();
+    openedAt = lastSeenAt;
   };
   conn.onerror = () => {
     conn.close();
-    if (es === conn) es = null;
+    if (es === conn) {
+      es = null;
+      openedAt = 0;
+    }
     scheduleReconnect();
   };
   es = conn;
@@ -111,11 +157,21 @@ function reconnectNow() {
   connect();
 }
 
+/** Reset the health counters — the connection is deliberately gone, so
+ * "silent for 4 hours" would be a lie the badge shouldn't tell. */
+function clearHealth() {
+  openedAt = 0;
+  lastSeenAt = 0;
+  lastEventAt = 0;
+  lastBeatAt = 0;
+}
+
 function teardown() {
   clearReconnectTimer();
   stopWatchdog();
   es?.close();
   es = null;
+  clearHealth();
 }
 
 function startWatchdog() {
