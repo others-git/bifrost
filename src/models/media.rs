@@ -122,6 +122,26 @@ pub struct NowPlaying {
     pub artwork_url: Option<String>,
 }
 
+impl NowPlaying {
+    /// True when every field is absent — metadata that says nothing.
+    ///
+    /// Providers that fold *incremental* metadata messages into a snapshot must
+    /// not let an all-empty answer materialise `Some(NowPlaying::default())`: an
+    /// idle receiver replies `N/A` to every track query, and `Some(empty)` is a
+    /// **different** `MediaState` than `None`, so each empty answer reads as a
+    /// state change. That defeats changed-only dedup all the way down the
+    /// pipeline — the push is broadcast to every client, written to
+    /// `media_devices.last_state`, and journalled — for a device whose state
+    /// never actually moved.
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none()
+            && self.artist.is_none()
+            && self.album.is_none()
+            && self.play_state.is_none()
+            && self.artwork_url.is_none()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PlayState {
@@ -217,6 +237,35 @@ pub enum TransportCmd {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn now_playing_is_empty_only_when_every_field_absent() {
+        assert!(NowPlaying::default().is_empty());
+        for np in [
+            NowPlaying {
+                title: Some("Paranoid Android".into()),
+                ..Default::default()
+            },
+            NowPlaying {
+                artist: Some("Radiohead".into()),
+                ..Default::default()
+            },
+            NowPlaying {
+                album: Some("OK Computer".into()),
+                ..Default::default()
+            },
+            NowPlaying {
+                play_state: Some(PlayState::Playing),
+                ..Default::default()
+            },
+            NowPlaying {
+                artwork_url: Some("http://art".into()),
+                ..Default::default()
+            },
+        ] {
+            assert!(!np.is_empty(), "{np:?} says something and is not empty");
+        }
+    }
 
     #[test]
     fn media_command_is_empty_only_when_all_fields_absent() {

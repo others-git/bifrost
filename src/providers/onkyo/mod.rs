@@ -282,18 +282,24 @@ fn apply_message(state: &mut MediaState, code: &str, data: &str) -> bool {
             state.source = Some(name);
             true
         }
-        "NTI" | "NAT" | "NAL" => {
-            let np = state.now_playing.get_or_insert_with(Default::default);
+        // Track metadata. A receiver answers these even when it is off or on a
+        // non-NET input — with `N/A` in every field — so folding the reply in
+        // unconditionally would materialise an EMPTY `now_playing`, which the
+        // very next `PWR`/`SLI` message clears again. `Some(empty)` and `None`
+        // are different states, so that flip-flop is a state *change* on every
+        // reconnect's query battery, and it is what defeated the changed-only
+        // dedup below: an idle receiver pushed its unchanged state to every
+        // client several times a minute. Keep the accumulated fields, but only
+        // carry a `now_playing` that actually says something.
+        "NTI" | "NAT" | "NAL" | "NST" => {
+            let mut np = state.now_playing.take().unwrap_or_default();
             match code {
                 "NTI" => np.title = clean(data),
                 "NAT" => np.artist = clean(data),
-                _ => np.album = clean(data),
+                "NAL" => np.album = clean(data),
+                _ => np.play_state = parse_play_state(data),
             }
-            true
-        }
-        "NST" => {
-            let np = state.now_playing.get_or_insert_with(Default::default);
-            np.play_state = parse_play_state(data);
+            state.now_playing = (!np.is_empty()).then_some(np);
             true
         }
         _ => false,
@@ -451,10 +457,18 @@ fn link_for(host: &str, port: u16) -> Arc<OnkyoLink> {
 /// (rotating flakes across the audio-mock test family, ~1 full-suite run in 3
 /// on shared runners). 400ms×2 tolerates ~1.2s of scheduler starvation while
 /// keeping the reconnect tests well inside their wait budgets.
+///
+/// In production this also has to stay **under the receiver's own idle
+/// timeout**, which is what makes it a keep-alive and not just a probe. A live
+/// hub measured its receiver closing a quiet session after 29.74s (a dead-flat
+/// 30.00s connect→close→reconnect cycle, ±0.01s over 20 cycles): at a 30s
+/// heartbeat the probe never got to run, so the receiver hung up first and the
+/// link reconnected 2,880 times a day. 20s keeps ~10s of margin, and the probe
+/// itself is the traffic that resets the receiver's idle timer.
 const HEARTBEAT: Duration = if cfg!(test) {
     Duration::from_millis(400)
 } else {
-    Duration::from_secs(30)
+    Duration::from_secs(20)
 };
 /// Reconnect after this many consecutive heartbeats go unanswered (a live but
 /// quiet receiver answers the very first probe, resetting the count).
@@ -469,8 +483,33 @@ const MAX_SILENT_HEARTBEATS: u32 = 2;
 /// surface degrades to "unreachable, last known …" instead.
 const LINK_STATE: &str = "_LK";
 
+/// Pause between a healthy session ending and the quiet reconnect that replaces
+/// it. Long enough that a receiver which accepts and instantly hangs up can't
+/// spin this loop, short enough to be invisible.
+const SESSION_GRACE: Duration = Duration::from_millis(250);
+
+/// A session that lasted at least this long counts as *healthy*: the receiver
+/// accepted us and stayed. Its ending is then an ordinary idle close, not an
+/// outage — see the quiet-reconnect note in [`onkyo_link_actor`]. Sessions that
+/// collapse faster than this are a real fault (the receiver's single control
+/// slot is held by another controller, it drops us right after accept), so they
+/// take the DOWN-and-back-off path instead.
+const HEALTHY_SESSION: Duration = if cfg!(test) {
+    Duration::from_millis(200)
+} else {
+    Duration::from_secs(5)
+};
+
 /// Owns the single socket: connects (refreshing full state each time), then
 /// loops writing queued batches and broadcasting decoded replies/echoes.
+///
+/// **A session ending is not the same as the link being down.** Receivers hang
+/// up on a quiet control session as a matter of course, and announcing DOWN for
+/// that flips every surface to "unreachable" and back for a receiver that is
+/// sitting there working. So a session that was healthy while it lasted
+/// reconnects *quietly* — DOWN is announced only once we have actually failed
+/// to re-establish, which costs at most a connect timeout on the honest-outage
+/// path and nothing at all on the common one.
 async fn onkyo_link_actor(
     host: String,
     port: u16,
@@ -480,10 +519,13 @@ async fn onkyo_link_actor(
     let addr = format!("{host}:{port}");
     let mut attempt: u32 = 0;
     loop {
+        // Whether this iteration got a session that lived long enough to call
+        // the link healthy; drives the quiet-reconnect path below.
+        let mut healthy = false;
         if let Ok(Ok(mut stream)) =
             tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&addr)).await
         {
-            attempt = 0;
+            let opened = tokio::time::Instant::now();
             // Re-query full state on (re)connect so subscribers and the cache resync.
             let mut init = Vec::new();
             for q in STATE_QUERIES {
@@ -539,11 +581,22 @@ async fn onkyo_link_actor(
                         },
                     }
                 }
+                healthy = opened.elapsed() >= HEALTHY_SESSION;
             }
         }
-        // Reached on a dead session (socket closed/errored, heartbeats
-        // exhausted, init write failed) or a failed connect — either way the
-        // receiver is unreachable right now; say so instead of going quiet.
+        if healthy {
+            // An ordinary idle close on a link that was working. Reconnect
+            // without announcing anything: subscribers keep the state they
+            // have, and the re-query on the next connect corrects anything
+            // that moved while we were away. If that reconnect fails, the next
+            // pass through this loop is the one that reports DOWN.
+            attempt = 0;
+            tokio::time::sleep(SESSION_GRACE).await;
+            continue;
+        }
+        // Reached on a failed connect, an init write that failed, or a session
+        // that collapsed almost immediately — the receiver is genuinely not
+        // usable right now, so say so instead of going quiet.
         let _ = events.send((LINK_STATE.to_string(), "DOWN".to_string()));
         // Backoff before reconnecting (capped); writes queued meanwhile flush on
         // reconnect. Tests cap much lower: the short test heartbeat can still
@@ -1499,6 +1552,122 @@ mod tests {
             recovered,
             "a reconnect must restore reachable:true + real state"
         );
+    }
+
+    #[tokio::test]
+    async fn idle_close_reconnects_quietly_without_announcing_unreachable() {
+        // Receivers hang up on a quiet control session as a matter of course: a
+        // live hub measured a dead-flat 30.00s connect→close→reconnect cycle
+        // against real hardware. Treating that as an outage flickered
+        // "unreachable" across every surface twice a minute for a receiver that
+        // was sitting there working, and re-broadcast its unchanged state to
+        // every client on each cycle.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let conns = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&conns);
+        // Answers normally, then drops the socket once the session has outlived
+        // HEALTHY_SESSION — the hardware's idle close, without a FIN-less hang.
+        let hold = HEALTHY_SESSION + HEALTHY_SESSION / 2;
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                counter.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let scripted = baseline_scripted();
+                    let mut buf: Vec<u8> = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    let hangup = tokio::time::sleep(hold);
+                    tokio::pin!(hangup);
+                    loop {
+                        tokio::select! {
+                            _ = &mut hangup => return,
+                            r = sock.read(&mut chunk) => {
+                                let Ok(n) = r else { return };
+                                if n == 0 {
+                                    return;
+                                }
+                                buf.extend_from_slice(&chunk[..n]);
+                                while let Some((msg, consumed)) = decode_packet(&buf) {
+                                    buf.drain(..consumed);
+                                    if msg.len() < 3 {
+                                        continue;
+                                    }
+                                    let (code, data) = msg.split_at(3);
+                                    let reply = if data == "QSTN" {
+                                        format!(
+                                            "{code}{}",
+                                            scripted.get(code).cloned().unwrap_or("N/A".into())
+                                        )
+                                    } else {
+                                        msg.clone()
+                                    };
+                                    let _ = sock.write_all(&encode_packet(&reply)).await;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        });
+
+        let p = OnkyoProvider::new_for_test("127.0.0.1", port);
+        let mut rx = p.event_stream().await.unwrap();
+
+        // Ride out several hangup cycles: not one of them may report the
+        // receiver unreachable.
+        let deadline = tokio::time::Instant::now() + hold * 8;
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(50), rx.recv()).await {
+                Ok(Some(ev)) => assert_ne!(
+                    ev.state.reachable,
+                    Some(false),
+                    "an idle close is not an outage — it must not push reachable:false"
+                ),
+                Ok(None) => panic!("stream closed"),
+                Err(_) => {}
+            }
+        }
+        assert!(
+            conns.load(Ordering::SeqCst) >= 2,
+            "the link must keep reconnecting through idle closes (sessions served: {})",
+            conns.load(Ordering::SeqCst)
+        );
+    }
+
+    #[test]
+    fn empty_track_metadata_does_not_materialise_now_playing() {
+        // A receiver answers the NET metadata queries even when it is off or on
+        // another input — with `N/A` everywhere. Folding that in used to build
+        // an empty `now_playing`, which the next PWR/SLI message cleared again:
+        // a Some(empty)⇄None flip-flop that reads as a state CHANGE and so
+        // defeats changed-only dedup on every reconnect's query battery.
+        let mut s = MediaState::default();
+        assert!(apply_message(&mut s, "NTI", "N/A"));
+        assert!(apply_message(&mut s, "NAT", "N/A"));
+        assert!(apply_message(&mut s, "NAL", ""));
+        assert!(apply_message(&mut s, "NST", "N/A"));
+        assert!(
+            s.now_playing.is_none(),
+            "all-empty metadata must stay None, got {:?}",
+            s.now_playing
+        );
+
+        // Real metadata still lands, and partial fields accumulate.
+        assert!(apply_message(&mut s, "NTI", "Paranoid Android"));
+        assert!(apply_message(&mut s, "NAT", "Radiohead"));
+        let np = s.now_playing.as_ref().expect("real metadata must be kept");
+        assert_eq!(np.title.as_deref(), Some("Paranoid Android"));
+        assert_eq!(np.artist.as_deref(), Some("Radiohead"));
+
+        // …and emptying every field again drops back to None rather than
+        // leaving a hollow object behind.
+        assert!(apply_message(&mut s, "NTI", "N/A"));
+        assert!(apply_message(&mut s, "NAT", "N/A"));
+        assert!(s.now_playing.is_none());
     }
 
     #[tokio::test]
