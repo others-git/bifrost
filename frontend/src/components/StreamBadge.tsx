@@ -76,7 +76,7 @@ export function StreamBadge() {
       style={{
         position: "fixed",
         right: space.sm,
-        bottom: space.sm,
+        top: space.sm,
         zIndex: 9999,
         pointerEvents: "none",
         display: "flex",
