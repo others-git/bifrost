@@ -75,7 +75,7 @@ export function StreamBadge() {
       // Not interactive: a diagnostic must never be able to eat a control tap.
       style={{
         position: "fixed",
-        right: space.sm,
+        left: space.sm,
         top: space.sm,
         zIndex: 9999,
         pointerEvents: "none",
