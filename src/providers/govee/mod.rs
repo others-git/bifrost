@@ -14,6 +14,8 @@ use reqwest::{Client, header};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const BASE_URL: &str = "https://openapi.api.govee.com/router/api/v1";
@@ -26,6 +28,9 @@ pub struct GoveeCloud {
     client: Client,
     /// Base URL for the API; overridden in tests to point at a wiremock server.
     base_url: String,
+    /// The request pacer this endpoint's traffic draws from. Process-wide, so
+    /// every rebuilt provider shares one budget (see [`limiter_for`]).
+    limiter: Arc<RateLimiter>,
 }
 
 /// Process-wide `base_url → (device id → SKU)` cache. Control and state
@@ -77,6 +82,48 @@ fn scene_cache() -> &'static tokio::sync::RwLock<
     CACHE.get_or_init(|| tokio::sync::RwLock::new(std::collections::HashMap::new()))
 }
 
+/// Per-device cloud write gate: one device's command batch at a time, and the
+/// newest desired state wins.
+///
+/// Two problems this solves, both of which read to the user as "the command
+/// didn't take". **Serialisation:** Govee needs one request per capability, and
+/// firing power/brightness/colour at a device simultaneously is how a burst
+/// arrives out of order (or partly rejected) — a batch now holds the gate for
+/// the device it targets. **Coalescing:** a brightness drag emits a write every
+/// ~200ms, and each one costs several cloud requests, so a two-second drag
+/// enqueues far more traffic than the account is allowed. Every writer drops
+/// its desired state in `pending` before queueing; whoever gets the gate sends
+/// whatever is latest at that moment, and writers that find the slot already
+/// taken return without sending. The drag then costs a couple of round-trips
+/// ending on the value the finger stopped at, instead of replaying every
+/// intermediate frame into a 429.
+///
+/// Coalescing is only safe because the service layer merges a patch onto the
+/// light's cached state before calling the provider (`apply_light_state`), so
+/// the newest write is a strict superset of the ones it supersedes — never a
+/// partial that would lose the dimension an earlier write moved.
+#[derive(Default)]
+struct DeviceGate {
+    /// Held for one device's whole command batch.
+    batch: tokio::sync::Mutex<()>,
+    /// The latest desired full state / segment list, or `None` once sent.
+    pending_state: tokio::sync::Mutex<Option<LightState>>,
+    pending_segments: tokio::sync::Mutex<Option<Vec<SegmentColor>>>,
+}
+
+/// The process-wide gate for one `(base_url, device)`. Process-lived because the
+/// provider is rebuilt per request, so a per-instance gate would serialise
+/// nothing.
+fn device_gate(base_url: &str, device_id: &str) -> Arc<DeviceGate> {
+    static MAP: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Arc<DeviceGate>>>> =
+        std::sync::OnceLock::new();
+    let map = MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut map = map.lock().expect("Govee device-gate map poisoned");
+    map.entry(format!("{base_url}|{device_id}"))
+        .or_default()
+        .clone()
+}
+
 /// Clear the process-wide SKU + scene caches. Tests only — the caches are keyed by
 /// `base_url`, and wiremock reuses ephemeral ports across tests, so a stale entry
 /// from a prior (dropped) mock server could otherwise satisfy a fresh lookup.
@@ -106,21 +153,23 @@ impl GoveeCloud {
                 .timeout(std::time::Duration::from_secs(30))
                 .build()?)
         })?;
+        let base_url = base_url.into();
         Ok(Self {
+            limiter: limiter_for(&format!("{base_url}|{api_key}")),
             client,
-            base_url: base_url.into(),
+            base_url,
         })
     }
 
     /// Fetch the account's device list (shared by discovery and SKU lookup).
     async fn fetch_devices(&self) -> Result<Vec<GoveeDevice>> {
-        let resp: GoveeResponse<GoveeDeviceList> =
-            send_retrying(self.client.get(format!("{}/user/devices", self.base_url)))
-                .await
-                .context("Govee devices request failed")?
-                .error_for_status()?
-                .json()
-                .await?;
+        let resp: GoveeResponse<GoveeDeviceList> = self
+            .send(self.client.get(format!("{}/user/devices", self.base_url)))
+            .await
+            .context("Govee devices request failed")?
+            .error_for_status()?
+            .json()
+            .await?;
 
         if resp.code != 200 {
             bail!("Govee API error {}: {}", resp.code, resp.message);
@@ -217,15 +266,16 @@ impl GoveeCloud {
             "requestId": Uuid::new_v4().to_string(),
             "payload": { "sku": sku, "device": device_id }
         });
-        let resp: GoveeResponse<GoveeSceneData> = send_retrying(
-            self.client
-                .post(format!("{}/{endpoint}", self.base_url))
-                .json(&body),
-        )
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+        let resp: GoveeResponse<GoveeSceneData> = self
+            .send(
+                self.client
+                    .post(format!("{}/{endpoint}", self.base_url))
+                    .json(&body),
+            )
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
         if resp.code != 200 {
             bail!("Govee scenes error {}: {}", resp.code, resp.message);
         }
@@ -268,23 +318,76 @@ impl GoveeCloud {
         Ok(scenes)
     }
 
+    /// Send a request under the shared [`RateLimiter`], retrying on rate-limit
+    /// (429) and transient/server errors.
+    ///
+    /// The limiter is the primary defence — it keeps the burst from being sent
+    /// at all — and the retry is what covers the residue: another Bifrost
+    /// instance, the Govee phone app, or a per-device limit we can't see from
+    /// here. A 429 parks the whole bucket rather than only this call, so the
+    /// other capability commands of the same gesture slow down with it instead
+    /// of piling straight into the same wall.
+    async fn send(&self, req: reqwest::RequestBuilder) -> reqwest::Result<reqwest::Response> {
+        const MAX_RETRIES: u32 = 4;
+        let mut attempt = 0u32;
+        loop {
+            // JSON / empty bodies are always cloneable; unwrap is safe here.
+            let this = req
+                .try_clone()
+                .expect("Govee request body must be cloneable");
+            self.limiter.acquire().await;
+            match this.send().await {
+                Ok(resp) => {
+                    let limited = resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS;
+                    let retryable = limited || resp.status().is_server_error();
+                    if limited {
+                        let wait = retry_wait(&resp).unwrap_or_else(|| backoff(attempt));
+                        tracing::debug!(
+                            target: "bifrost::govee",
+                            attempt,
+                            wait_ms = wait.as_millis() as u64,
+                            "cloud rate-limited (429) — parking every caller",
+                        );
+                        // Parking makes the next `acquire` wait, so no extra sleep here.
+                        self.limiter.park(wait).await;
+                    }
+                    if retryable && attempt < MAX_RETRIES {
+                        if !limited {
+                            tokio::time::sleep(backoff(attempt)).await;
+                        }
+                        attempt += 1;
+                        continue;
+                    }
+                    return Ok(resp);
+                }
+                // Transient transport errors (timeout / connect) also get a retry.
+                Err(e) if attempt < MAX_RETRIES && (e.is_timeout() || e.is_connect()) => {
+                    attempt += 1;
+                    tokio::time::sleep(backoff(attempt)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     /// Send one capability command to a device (`/device/control`). The unit of
-    /// Govee control — `set_state` and `set_segments` fan several of these out
-    /// concurrently. `send_retrying` handles per-request 429s.
+    /// Govee control — `set_state` and `set_segments` issue several of these in
+    /// sequence. [`GoveeCloud::send`] handles pacing and 429s.
     async fn send_control(&self, sku: &str, device: &str, capability: Value) -> Result<()> {
         let body = json!({
             "requestId": Uuid::new_v4().to_string(),
             "payload": { "sku": sku, "device": device, "capability": capability }
         });
-        let resp: GoveeResponse<Value> = send_retrying(
-            self.client
-                .post(format!("{}/device/control", self.base_url))
-                .json(&body),
-        )
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+        let resp: GoveeResponse<Value> = self
+            .send(
+                self.client
+                    .post(format!("{}/device/control", self.base_url))
+                    .json(&body),
+            )
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
         if resp.code != 200 {
             bail!("Govee control error {}: {}", resp.code, resp.message);
         }
@@ -298,57 +401,138 @@ impl GoveeCloud {
     }
 }
 
-/// Send a request, retrying on rate-limit (429) and transient/server errors.
+// ── Cloud request pacing ────────────────────────────────────────────────────
+
+/// Sustained cloud request rate, and the burst allowed above it.
 ///
-/// Govee's cloud is aggressively rate-limited (~10 req/s; per-device limits too),
-/// so a burst on app launch or a sync/prune sweep would otherwise fail outright
-/// with 429 — the reported "flaky on launch / laggy controls". Back off and
-/// retry a few times, honouring `Retry-After` when the server sends it.
-async fn send_retrying(req: reqwest::RequestBuilder) -> reqwest::Result<reqwest::Response> {
-    const MAX_RETRIES: u32 = 3;
-    let mut attempt = 0u32;
-    loop {
-        // JSON / empty bodies are always cloneable; unwrap is safe here.
-        let this = req
-            .try_clone()
-            .expect("Govee request body must be cloneable");
-        match this.send().await {
-            Ok(resp) => {
-                let retryable = resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
-                    || resp.status().is_server_error();
-                if retryable && attempt < MAX_RETRIES {
-                    let wait = retry_after(&resp).unwrap_or_else(|| backoff(attempt));
-                    attempt += 1;
-                    tokio::time::sleep(wait).await;
+/// Govee's cloud publishes ~10 req/s per account (plus a daily cap and tighter
+/// per-device limits). Every capability is a separate request — "turn on, dim to
+/// 40%, go blue" is three — so one room command, or one brightness drag, clears
+/// 10/s without trying. Discovering that per-request and retrying doesn't help:
+/// the retry re-sends into the same burst. Instead every cloud request draws
+/// from ONE process-wide budget, which turns a burst into a *paced* sequence.
+const RATE_PER_SEC: f64 = 5.0;
+const RATE_BURST: f64 = 10.0;
+
+/// A token bucket shared by every [`GoveeCloud`] talking to the same endpoint.
+///
+/// Two jobs. It paces the steady stream (a drag, a room fan-out, a poll sweep)
+/// below the account limit, and — via [`RateLimiter::park`] — it lets a single
+/// 429 slow down *every* in-flight caller instead of only the unlucky one that
+/// received it. Callers queue on the mutex in arrival order (tokio's mutex is
+/// FIFO), so pacing never reorders commands for a device.
+struct RateLimiter {
+    state: tokio::sync::Mutex<BucketState>,
+}
+
+struct BucketState {
+    tokens: f64,
+    last: Instant,
+    /// Set when the server said "too many": nothing leaves until it passes.
+    hold_until: Option<Instant>,
+}
+
+impl RateLimiter {
+    fn new() -> Self {
+        Self {
+            state: tokio::sync::Mutex::new(BucketState {
+                tokens: RATE_BURST,
+                last: Instant::now(),
+                hold_until: None,
+            }),
+        }
+    }
+
+    /// Wait until one request may be sent, then spend its token.
+    async fn acquire(&self) {
+        // The guard is deliberately held across the sleeps: it's what queues
+        // waiting callers in order and keeps the refill arithmetic atomic.
+        let mut s = self.state.lock().await;
+        loop {
+            let now = Instant::now();
+            let elapsed = now.saturating_duration_since(s.last).as_secs_f64();
+            s.tokens = (s.tokens + elapsed * RATE_PER_SEC).min(RATE_BURST);
+            s.last = now;
+
+            if let Some(until) = s.hold_until {
+                if until > now {
+                    tokio::time::sleep(until - now).await;
                     continue;
                 }
-                return Ok(resp);
+                s.hold_until = None;
             }
-            // Transient transport errors (timeout / connect) also get a retry.
-            Err(e) if attempt < MAX_RETRIES && (e.is_timeout() || e.is_connect()) => {
-                attempt += 1;
-                tokio::time::sleep(backoff(attempt)).await;
+            if s.tokens >= 1.0 {
+                s.tokens -= 1.0;
+                return;
             }
-            Err(e) => return Err(e),
+            let deficit = 1.0 - s.tokens;
+            tokio::time::sleep(Duration::from_secs_f64(deficit / RATE_PER_SEC)).await;
         }
+    }
+
+    /// A 429 (or an explicit `Retry-After`) parks the whole bucket: the account
+    /// is over its limit, so every other caller must back off too, not just this
+    /// request's retry loop.
+    async fn park(&self, wait: Duration) {
+        let mut s = self.state.lock().await;
+        let until = Instant::now() + wait;
+        if s.hold_until.is_none_or(|t| t < until) {
+            s.hold_until = Some(until);
+        }
+        s.tokens = 0.0;
+        s.last = Instant::now();
     }
 }
 
-/// Exponential backoff: ~250ms, 500ms, 1s.
-fn backoff(attempt: u32) -> std::time::Duration {
-    std::time::Duration::from_millis(250u64 << attempt.min(3))
+/// The process-wide limiter for one endpoint+key. Production uses the constant
+/// [`BASE_URL`], so every rebuilt provider for an account shares one budget;
+/// tests each get their own (their mock URI is unique).
+fn limiter_for(key: &str) -> Arc<RateLimiter> {
+    static MAP: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Arc<RateLimiter>>>> =
+        std::sync::OnceLock::new();
+    let map = MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut map = map.lock().expect("Govee limiter map poisoned");
+    map.entry(key.to_string())
+        .or_insert_with(|| Arc::new(RateLimiter::new()))
+        .clone()
 }
 
-/// The server's `Retry-After` (whole seconds), if present and parseable.
-fn retry_after(resp: &reqwest::Response) -> Option<std::time::Duration> {
-    resp.headers()
-        .get(reqwest::header::RETRY_AFTER)?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse::<u64>()
-        .ok()
-        .map(std::time::Duration::from_secs)
+/// Exponential backoff: ~250ms, 500ms, 1s, 2s.
+fn backoff(attempt: u32) -> Duration {
+    Duration::from_millis(250u64 << attempt.min(3))
+}
+
+/// How long the server asked us to wait, if it said so.
+///
+/// `Retry-After` is the standard answer; Govee also stamps rate-limit state on
+/// its responses, and the reset value has been seen both as a delta and as an
+/// absolute unix timestamp — a value bigger than a year of seconds can only be
+/// an epoch, so treat it as one. Clamped, so a bogus header can't wedge control.
+fn retry_wait(resp: &reqwest::Response) -> Option<Duration> {
+    retry_wait_from(resp.headers())
+}
+
+/// [`retry_wait`] over a bare header map, so it's testable without a live response.
+fn retry_wait_from(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    const MAX_WAIT: i64 = 10;
+    let read = |name: &str| -> Option<i64> {
+        headers.get(name)?.to_str().ok()?.trim().parse::<i64>().ok()
+    };
+    let secs = read("retry-after")
+        .or_else(|| reset_delta(read("x-ratelimit-reset")))
+        .or_else(|| reset_delta(read("api-ratelimit-reset")))?;
+    Some(Duration::from_secs(secs.clamp(0, MAX_WAIT) as u64))
+}
+
+/// A rate-limit `*-Reset` value as seconds-from-now, whichever form it arrived in.
+fn reset_delta(value: Option<i64>) -> Option<i64> {
+    const ONE_YEAR_SECS: i64 = 31_536_000;
+    let v = value?;
+    Some(if v > ONE_YEAR_SECS {
+        v - Utc::now().timestamp()
+    } else {
+        v
+    })
 }
 
 // ── Wire types ─────────────────────────────────────────────────────────────
@@ -631,6 +815,17 @@ impl LightProvider for GoveeCloud {
     }
 
     async fn set_state(&self, provider_id: &str, state: &LightState) -> Result<()> {
+        // Queue behind (and supersede) any other write for this device.
+        let gate = device_gate(&self.base_url, provider_id);
+        *gate.pending_state.lock().await = Some(state.clone());
+        let _batch = gate.batch.lock().await;
+        let Some(state) = gate.pending_state.lock().await.take() else {
+            // A batch that started after we enqueued already sent our state (or
+            // a newer one). Nothing left to do — reporting success is honest.
+            tracing::debug!(target: "bifrost::govee", device = %provider_id, "set_state superseded by a newer write");
+            return Ok(());
+        };
+
         // Govee requires one command per capability.
         let mut commands: Vec<Value> = vec![json!({
             "type": "devices.capabilities.on_off",
@@ -638,61 +833,69 @@ impl LightProvider for GoveeCloud {
             "value": if state.on { 1 } else { 0 }
         })];
 
-        if let Some(brightness) = state.brightness {
-            commands.push(json!({
-                "type": "devices.capabilities.range",
-                "instance": "brightness",
-                "value": brightness.round() as u32
-            }));
-        }
+        // Attributes only matter while the light is on, and each one is a
+        // separate metered request — sending colour/brightness alongside an
+        // "off" spends three times the quota to say one thing, and hands the
+        // device a reason to light back up.
+        if state.on {
+            if let Some(brightness) = state.brightness {
+                commands.push(json!({
+                    "type": "devices.capabilities.range",
+                    "instance": "brightness",
+                    "value": brightness.round() as u32
+                }));
+            }
 
-        if let Some(color) = &state.color {
-            let (r, g, b) = color.to_rgb();
-            let rgb_int = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
-            commands.push(json!({
-                "type": "devices.capabilities.color_setting",
-                "instance": "colorRgb",
-                "value": rgb_int
-            }));
-        }
+            if let Some(color) = &state.color {
+                let (r, g, b) = color.to_rgb();
+                let rgb_int = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+                commands.push(json!({
+                    "type": "devices.capabilities.color_setting",
+                    "instance": "colorRgb",
+                    "value": rgb_int
+                }));
+            }
 
-        if let Some(mirek) = state.color_temp_mirek {
-            let kelvin = crate::models::mirek_to_kelvin(mirek);
-            commands.push(json!({
-                "type": "devices.capabilities.color_setting",
-                "instance": "colorTemperatureK",
-                "value": kelvin
-            }));
-        }
+            if let Some(mirek) = state.color_temp_mirek {
+                let kelvin = crate::models::mirek_to_kelvin(mirek);
+                commands.push(json!({
+                    "type": "devices.capabilities.color_setting",
+                    "instance": "colorTemperatureK",
+                    "value": kelvin
+                }));
+            }
 
-        // A dynamic scene ("effect") is applied by echoing back its opaque value
-        // under the dynamic_scene capability. The frontend sends `effect` only on
-        // an actual scene pick, so this doesn't ride along with colour tweaks.
-        if let Some(effect) = state.effect.as_deref().filter(|e| !e.is_empty()) {
-            let scene = self
-                .scenes_for(provider_id)
-                .await?
-                .into_iter()
-                .find(|s| s.name == effect)
-                .ok_or_else(|| anyhow::anyhow!("unknown Govee scene '{effect}'"))?;
-            commands.push(json!({
-                "type": "devices.capabilities.dynamic_scene",
-                "instance": scene.instance,
-                "value": scene.value
-            }));
+            // A dynamic scene ("effect") is applied by echoing back its opaque
+            // value under the dynamic_scene capability. The frontend sends
+            // `effect` only on an actual scene pick, so this doesn't ride along
+            // with colour tweaks.
+            if let Some(effect) = state.effect.as_deref().filter(|e| !e.is_empty()) {
+                let scene = self
+                    .scenes_for(provider_id)
+                    .await?
+                    .into_iter()
+                    .find(|s| s.name == effect)
+                    .ok_or_else(|| anyhow::anyhow!("unknown Govee scene '{effect}'"))?;
+                commands.push(json!({
+                    "type": "devices.capabilities.dynamic_scene",
+                    "instance": scene.instance,
+                    "value": scene.value
+                }));
+            }
         }
 
         let sku = self.sku_for(provider_id).await?;
 
-        // Govee needs one HTTP call per capability. They target independent
-        // capabilities with no ordering dependency, so fire them **concurrently**:
-        // a multi-capability change (power + brightness + colour) then costs ~one
-        // cloud round-trip instead of three sequential ones — the bulk of the
-        // cloud-path lag.
-        let sends = commands
-            .into_iter()
-            .map(|cmd| self.send_control(&sku, provider_id, cmd));
-        futures_util::future::try_join_all(sends).await?;
+        // **Sequentially**, power first. Firing them concurrently was faster on
+        // a quiet account but is what makes a busy one flaky: the device gets
+        // simultaneous capability writes, and `try_join_all` cancels the
+        // siblings the moment one fails — so a rate-limited colour command also
+        // dropped the brightness command that was already on the wire, leaving
+        // the light half-applied. In order, a failure stops the batch with the
+        // most important command (power) already delivered.
+        for cmd in commands {
+            self.send_control(&sku, provider_id, cmd).await?;
+        }
 
         Ok(())
     }
@@ -701,6 +904,17 @@ impl LightProvider for GoveeCloud {
         if segments.is_empty() {
             return Ok(());
         }
+        // Same gate as `set_state`: one batch per device, newest wins. A strip
+        // editor drag emits a segment write every 150ms, each of which is
+        // several requests.
+        let gate = device_gate(&self.base_url, provider_id);
+        *gate.pending_segments.lock().await = Some(segments.to_vec());
+        let _batch = gate.batch.lock().await;
+        let Some(segments) = gate.pending_segments.lock().await.take() else {
+            tracing::debug!(target: "bifrost::govee", device = %provider_id, "set_segments superseded by a newer write");
+            return Ok(());
+        };
+        let segments = &segments[..];
         let sku = self.sku_for(provider_id).await?;
         // `segmentedColorRgb` / `segmentedBrightness` each set one value across a
         // *list* of segments, so group by value: each distinct colour and each
@@ -730,11 +944,11 @@ impl LightProvider for GoveeCloud {
                 "value": { "segment": segs, "brightness": brightness }
             }));
         }
-        // Fan the (independent) segment commands out concurrently.
-        let sends = capabilities
-            .into_iter()
-            .map(|c| self.send_control(&sku, provider_id, c));
-        futures_util::future::try_join_all(sends).await?;
+        // Sequential, for the same reason `set_state` is: a cancelled sibling
+        // leaves the strip half-painted.
+        for c in capabilities {
+            self.send_control(&sku, provider_id, c).await?;
+        }
         Ok(())
     }
 
@@ -745,15 +959,16 @@ impl LightProvider for GoveeCloud {
             "payload": { "sku": sku, "device": provider_id }
         });
 
-        let resp: GoveeResponse<GoveeStateData> = send_retrying(
-            self.client
-                .post(format!("{}/device/state", self.base_url))
-                .json(&body),
-        )
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+        let resp: GoveeResponse<GoveeStateData> = self
+            .send(
+                self.client
+                    .post(format!("{}/device/state", self.base_url))
+                    .json(&body),
+            )
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
 
         if resp.code != 200 {
             bail!("Govee state error {}: {}", resp.code, resp.message);
@@ -772,22 +987,99 @@ use crate::providers::govee_lan::{GoveeLanProvider, LanScan};
 use crate::providers::mac_hw_id;
 use std::net::IpAddr;
 
-/// Process-wide `normalized-MAC → LAN IP` map. Populated by [`GoveeProvider`]'s
-/// discovery/scan; read by control + state to address a device over the LAN.
-/// Global (MACs are unique) and process-lived because `build_provider` rebuilds
-/// the provider per request, so a per-instance map would never survive to the
-/// next control call. Only devices that answered a LAN scan appear here — that
-/// membership IS the per-device LAN-eligibility gate (not every Govee supports LAN).
-fn lan_ip_cache() -> &'static tokio::sync::RwLock<std::collections::HashMap<String, String>> {
+/// How long a LAN address stays trusted after the device last proved it's there
+/// (a scan reply or a successful `devStatus` read). Comfortably longer than the
+/// poll interval that refreshes it, short enough that a device which moved or
+/// went away stops swallowing commands within one cycle.
+const LAN_TTL: Duration = Duration::from_secs(300);
+
+/// Floor between LAN scans triggered by a cache miss. A scan is a ~1.5s
+/// multicast window; without this floor a cloud-only device (LAN Control off)
+/// paid one on **every** command and every poll, which is most of what "the
+/// controls are laggy" was.
+const LAN_RESCAN_INTERVAL: Duration = Duration::from_secs(30);
+
+/// A device's last known LAN address and when it last proved it was there.
+#[derive(Clone)]
+struct LanEntry {
+    ip: String,
+    seen: Instant,
+}
+
+/// Process-wide `normalized-MAC → LAN address` map. Populated by
+/// [`GoveeProvider`]'s discovery/scan; read by control + state to address a
+/// device over the LAN. Global (MACs are unique) and process-lived because
+/// `build_provider` rebuilds the provider per request, so a per-instance map
+/// would never survive to the next control call.
+///
+/// Membership IS the per-device LAN-eligibility gate — but membership **expires**
+/// ([`LAN_TTL`]). LAN control is fire-and-forget UDP: a `send_to` at a device
+/// that has moved to a new DHCP lease, or been unplugged, succeeds at the
+/// syscall and returns `Ok`, so a never-expiring entry meant every command for
+/// that light vanished silently and the cloud fallback never ran. An entry is
+/// only trusted while something recent proved the device answers there.
+fn lan_ip_cache() -> &'static tokio::sync::RwLock<std::collections::HashMap<String, LanEntry>> {
     static CACHE: std::sync::OnceLock<
-        tokio::sync::RwLock<std::collections::HashMap<String, String>>,
+        tokio::sync::RwLock<std::collections::HashMap<String, LanEntry>>,
     > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| tokio::sync::RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Serialises miss-driven rescans and remembers when the last one ran, so a
+/// burst of misses (a room command over several cloud-only lights) costs one
+/// scan window shared by all of them rather than one each.
+fn lan_scan_gate() -> &'static tokio::sync::Mutex<Option<Instant>> {
+    static GATE: std::sync::OnceLock<tokio::sync::Mutex<Option<Instant>>> =
+        std::sync::OnceLock::new();
+    GATE.get_or_init(|| tokio::sync::Mutex::new(None))
+}
+
+/// The device's LAN address, if one is cached and still within [`LAN_TTL`].
+async fn fresh_lan_ip(key: &str) -> Option<String> {
+    lan_ip_cache()
+        .read()
+        .await
+        .get(key)
+        .filter(|e| e.seen.elapsed() < LAN_TTL)
+        .map(|e| e.ip.clone())
+}
+
+/// The device just answered on the LAN — extend its lease.
+async fn mark_lan_seen(key: &str) {
+    if let Some(e) = lan_ip_cache().write().await.get_mut(key) {
+        e.seen = Instant::now();
+    }
+}
+
+/// The device didn't answer at its cached address — drop it so control goes
+/// cloud immediately instead of shouting into a dead socket until the TTL lapses.
+async fn forget_lan(key: &str) {
+    lan_ip_cache().write().await.remove(key);
+}
+
+/// Test helper: backdate a cached LAN lease so expiry can be exercised without
+/// waiting out [`LAN_TTL`].
+#[cfg(test)]
+async fn seed_lan_entry(key: &str, ip: &str, age: Duration) {
+    lan_ip_cache().write().await.insert(
+        key.to_string(),
+        LanEntry {
+            ip: ip.to_string(),
+            seen: Instant::now() - age,
+        },
+    );
+}
+
+/// Test helper: when the last LAN scan ran, for asserting the rescan floor.
+#[cfg(test)]
+async fn lan_scan_stamp() -> Option<Instant> {
+    *lan_scan_gate().lock().await
 }
 
 #[cfg(test)]
 async fn clear_lan_ip_cache() {
     lan_ip_cache().write().await.clear();
+    *lan_scan_gate().lock().await = None;
 }
 
 /// Govee with **both transports**: a per-device LAN-preferred, cloud-fallback
@@ -798,12 +1090,17 @@ async fn clear_lan_ip_cache() {
 /// interface configured) and LAN-only (no API key) both work.
 pub struct GoveeProvider {
     cloud: Option<GoveeCloud>,
-    lan: Option<GoveeLanProvider>,
+    /// `Arc` so a background refresh can outlive the request that started it —
+    /// the provider itself is rebuilt and dropped per request.
+    lan: Option<Arc<GoveeLanProvider>>,
 }
 
 impl GoveeProvider {
     pub fn new(cloud: Option<GoveeCloud>, lan: Option<GoveeLanProvider>) -> Self {
-        Self { cloud, lan }
+        Self {
+            cloud,
+            lan: lan.map(Arc::new),
+        }
     }
 
     /// Fold a batch of LAN scan results into the process-wide MAC→IP cache.
@@ -811,38 +1108,63 @@ impl GoveeProvider {
         if scans.is_empty() {
             return;
         }
+        let now = Instant::now();
         let mut cache = lan_ip_cache().write().await;
         for s in scans {
             if let Some(k) = mac_hw_id(&s.mac) {
-                cache.insert(k, s.ip.clone());
+                cache.insert(
+                    k,
+                    LanEntry {
+                        ip: s.ip.clone(),
+                        seen: now,
+                    },
+                );
             }
         }
     }
 
-    /// Resolve a device's current LAN IP from its MAC, refreshing the cache with a
-    /// live scan on a miss (a control may arrive before the first poll populated
-    /// it). `None` means the device isn't LAN-eligible right now → use the cloud.
+    /// Resolve a device's current LAN address from its MAC. `None` means the
+    /// device isn't LAN-eligible right now → use the cloud.
+    ///
+    /// A miss (or an expired lease) kicks off a refresh, since a control can
+    /// arrive before the first poll populated the cache — but **in the
+    /// background**. A scan is a 1.5s multicast window and this sits directly on
+    /// the control path: a device that will never answer one (LAN Control off)
+    /// would otherwise put that 1.5s in front of every command it receives, to
+    /// learn nothing. The command in hand goes over the cloud; the next one gets
+    /// the LAN. The refresh is also floored at [`LAN_RESCAN_INTERVAL`] and
+    /// coalesced, because one scan refreshes every device at once.
     async fn lan_ip_for(&self, mac: &str) -> Option<String> {
-        let lan = self.lan.as_ref()?;
+        let lan = self.lan.clone()?;
         let key = mac_hw_id(mac)?;
-        if let Some(ip) = lan_ip_cache().read().await.get(&key).cloned() {
+        if let Some(ip) = fresh_lan_ip(&key).await {
             return Some(ip);
         }
-        // Miss: re-scan, refill, look again.
-        let scans = lan.scan().await.ok()?;
-        let ip = {
+        Self::refresh_lan_addresses(lan);
+        None
+    }
+
+    /// Spawn one LAN scan to refill the address cache, unless a scan already ran
+    /// inside [`LAN_RESCAN_INTERVAL`] or is running right now (`try_lock` — a
+    /// held gate IS a scan in flight, and a second one would learn the same thing).
+    fn refresh_lan_addresses(lan: Arc<GoveeLanProvider>) {
+        tokio::spawn(async move {
+            let Ok(mut gate) = lan_scan_gate().try_lock() else {
+                return;
+            };
+            if gate.is_some_and(|t| t.elapsed() < LAN_RESCAN_INTERVAL) {
+                return;
+            }
+            let scans = lan.scan().await.unwrap_or_default();
+            *gate = Some(Instant::now());
             Self::cache_scans(&scans).await;
-            lan_ip_cache().read().await.get(&key).cloned()
-        };
-        tracing::debug!(
-            target: "bifrost::govee",
-            %mac,
-            scanned = scans.len(),
-            resolved = ip.is_some(),
-            "LAN address cache miss — re-scanned ({} device(s) replied)",
-            scans.len(),
-        );
-        ip
+            tracing::debug!(
+                target: "bifrost::govee",
+                scanned = scans.len(),
+                "LAN address cache miss — re-scanned in the background ({} device(s) replied)",
+                scans.len(),
+            );
+        });
     }
 
     /// Cloud control, or a clear "unreachable" error when there's no cloud key.
@@ -869,6 +1191,12 @@ impl LightProvider for GoveeProvider {
             Some(lan) => lan.scan().await.unwrap_or_default(),
             None => Vec::new(),
         };
+        if self.lan.is_some() {
+            // This scan refreshed every device's lease, so it counts against the
+            // miss-driven rescan floor — a control arriving right after a poll
+            // shouldn't open a second scan window for what this one just answered.
+            *lan_scan_gate().lock().await = Some(Instant::now());
+        }
         Self::cache_scans(&scans).await;
 
         // Cloud devices carry the richer metadata (name, capabilities, effects).
@@ -940,7 +1268,8 @@ impl LightProvider for GoveeProvider {
             tracing::debug!(target: "bifrost::govee", %mac, "set_state: effect → cloud (LAN has no scene catalogue)");
             return self.cloud_set(mac, state).await;
         }
-        // LAN-preferred: only when this device actually answered a scan.
+        // LAN-preferred: only when this device answered a scan recently enough
+        // for the address to still be trusted (see [`LAN_TTL`]).
         if let Some(lan) = &self.lan
             && let Some(ip) = self.lan_ip_for(mac).await
         {
@@ -948,6 +1277,11 @@ impl LightProvider for GoveeProvider {
             match lan.set_state(&ip, state).await {
                 Ok(()) => return Ok(()),
                 Err(e) => {
+                    // The address is suspect now — drop it so the *next* command
+                    // goes straight to the cloud instead of repeating this.
+                    if let Some(k) = mac_hw_id(mac) {
+                        forget_lan(&k).await;
+                    }
                     tracing::warn!("Govee LAN control failed for {mac}, trying cloud: {e:#}")
                 }
             }
@@ -973,14 +1307,29 @@ impl LightProvider for GoveeProvider {
     }
 
     async fn get_state(&self, mac: &str) -> Result<LightState> {
+        // The LAN read is also the liveness probe that keeps (or revokes) this
+        // device's LAN lease — control is fire-and-forget UDP and can't prove
+        // anything itself, so this is where "is it still there?" gets answered.
         if let Some(lan) = &self.lan
             && let Some(ip) = self.lan_ip_for(mac).await
-            && let Ok(mut state) = lan.get_state(&ip).await
-            && state.reachable != Some(false)
         {
-            state.transport = Some("lan".to_string());
-            tracing::debug!(target: "bifrost::govee", %mac, %ip, "get_state: via LAN");
-            return Ok(state);
+            let key = mac_hw_id(mac);
+            match lan.get_state(&ip).await {
+                Ok(mut state) if state.reachable != Some(false) => {
+                    if let Some(k) = &key {
+                        mark_lan_seen(k).await;
+                    }
+                    state.transport = Some("lan".to_string());
+                    tracing::debug!(target: "bifrost::govee", %mac, %ip, "get_state: via LAN");
+                    return Ok(state);
+                }
+                _ => {
+                    if let Some(k) = &key {
+                        forget_lan(k).await;
+                    }
+                    tracing::debug!(target: "bifrost::govee", %mac, %ip, "get_state: LAN silent — dropping the address, falling back to cloud");
+                }
+            }
         }
         // LAN unavailable/unreachable → cloud if we have it.
         if let Some(c) = &self.cloud {
@@ -999,7 +1348,12 @@ impl LightProvider for GoveeProvider {
     async fn debug_info(&self) -> Option<Value> {
         let mut out = json!({
             "transport": { "cloud": self.cloud.is_some(), "lan": self.lan.is_some() },
-            "lan_cached_devices": lan_ip_cache().read().await.len(),
+            "lan_cached_devices": lan_ip_cache()
+                .read()
+                .await
+                .values()
+                .filter(|e| e.seen.elapsed() < LAN_TTL)
+                .count(),
         });
         if let Some(cloud) = &self.cloud {
             match cloud.debug_devices().await {
@@ -1885,6 +2239,9 @@ mod tests {
             Some(mock_provider(&server).await),
             Some(test_provider(&mock)),
         );
+        // Prime the address cache the way production does — the polling
+        // manager's discover scan, not the control path.
+        provider.discover().await.unwrap();
         provider
             .set_state(
                 MAC,
@@ -1988,6 +2345,353 @@ mod tests {
         // The device answered the LAN scan, so it's surfaced as LAN-connected even
         // though its metadata came from the cloud.
         assert_eq!(lights[0].state.transport.as_deref(), Some("lan"));
+    }
+
+    // ── Cloud pacing ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn rate_limiter_spaces_a_burst_past_the_allowed_burst() {
+        // The burst is free; everything past it is paced at RATE_PER_SEC. This is
+        // what keeps a room command (one request per capability per light) from
+        // arriving as a single spike the account answers with 429s.
+        let limiter = RateLimiter::new();
+        for _ in 0..RATE_BURST as usize {
+            limiter.acquire().await;
+        }
+        let start = Instant::now();
+        limiter.acquire().await;
+        limiter.acquire().await;
+        let elapsed = start.elapsed();
+        let expected = Duration::from_secs_f64(2.0 / RATE_PER_SEC);
+        assert!(
+            elapsed >= expected.mul_f64(0.8),
+            "two requests past the burst should be paced, took {elapsed:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_park_holds_every_caller_not_just_the_rate_limited_one() {
+        // A 429 means the ACCOUNT is over its limit, so the sibling capability
+        // commands of the same gesture must slow down too — parking only the
+        // caller that saw the 429 just walks the rest into the same wall.
+        let limiter = RateLimiter::new();
+        limiter.park(Duration::from_millis(250)).await;
+        let start = Instant::now();
+        limiter.acquire().await;
+        assert!(
+            start.elapsed() >= Duration::from_millis(200),
+            "a parked bucket must delay a fresh caller",
+        );
+    }
+
+    #[test]
+    fn retry_wait_reads_retry_after_seconds() {
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert("retry-after", "3".parse().unwrap());
+        assert_eq!(retry_wait_from(&h), Some(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn retry_wait_falls_back_to_a_rate_limit_reset_header() {
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert("x-ratelimit-reset", "2".parse().unwrap());
+        assert_eq!(retry_wait_from(&h), Some(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn retry_wait_clamps_an_absurd_header() {
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert("retry-after", "86400".parse().unwrap());
+        assert_eq!(retry_wait_from(&h), Some(Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn retry_wait_is_none_without_a_hint() {
+        assert_eq!(retry_wait_from(&reqwest::header::HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn reset_delta_reads_an_absolute_epoch_as_a_delta() {
+        // Govee has been seen sending the reset as a unix timestamp rather than
+        // a delta; taking it literally would park control for 55 years.
+        let epoch = Utc::now().timestamp() + 4;
+        let delta = reset_delta(Some(epoch)).unwrap();
+        assert!((3..=5).contains(&delta), "expected ~4s, got {delta}");
+        // A plausible delta is left alone.
+        assert_eq!(reset_delta(Some(5)), Some(5));
+    }
+
+    // ── Cloud command shaping ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn set_state_off_sends_only_the_power_command() {
+        // Every capability is a separate metered request. An "off" that also
+        // ships the cached brightness and colour spends three times the quota to
+        // say one thing — and hands the device a reason to light back up.
+        let server = MockServer::start().await;
+        mount_control_mocks(&server).await;
+
+        mock_provider(&server)
+            .await
+            .set_state(
+                "AA:BB:CC:DD:EE:FF",
+                &LightState {
+                    on: false,
+                    brightness: Some(70.0),
+                    color: Some(Color::from_rgb(255, 0, 0)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let bodies = control_bodies(&server).await;
+        assert_eq!(bodies.len(), 1, "off must be one command: {bodies:?}");
+        assert_eq!(
+            bodies[0]["payload"]["capability"]["instance"],
+            "powerSwitch"
+        );
+        assert_eq!(bodies[0]["payload"]["capability"]["value"], 0);
+    }
+
+    #[tokio::test]
+    async fn a_devices_commands_are_sent_in_order_power_first() {
+        // Concurrency here was the flakiness: simultaneous capability writes to
+        // one device, and a cancelled sibling on the first failure. Ordered means
+        // a batch that dies partway still delivered the power intent.
+        let server = MockServer::start().await;
+        mount_control_mocks(&server).await;
+
+        mock_provider(&server)
+            .await
+            .set_state(
+                "AA:BB:CC:DD:EE:FF",
+                &LightState {
+                    on: true,
+                    brightness: Some(40.0),
+                    color: Some(Color::from_rgb(0, 0, 255)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let instances: Vec<String> = control_bodies(&server)
+            .await
+            .iter()
+            .map(|b| {
+                b["payload"]["capability"]["instance"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(instances, vec!["powerSwitch", "brightness", "colorRgb"]);
+    }
+
+    #[tokio::test]
+    async fn concurrent_writes_to_one_device_coalesce_to_the_newest() {
+        // A brightness drag emits a write every ~200ms and each costs several
+        // cloud requests, so the queue outruns the account's budget and the tail
+        // 429s. Superseded writes are dropped: the drag costs a couple of
+        // round-trips and lands on the value the finger stopped at.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/devices"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(device_list_response()))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/device/control"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(
+                        serde_json::json!({"code": 200, "message": "success", "data": {}}),
+                    )
+                    // Slow enough that the later writes queue behind the first.
+                    .set_delay(Duration::from_millis(400)),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = Arc::new(mock_provider(&server).await);
+        let write = |b: f32| {
+            let p = provider.clone();
+            tokio::spawn(async move {
+                p.set_state(
+                    "AA:BB:CC:DD:EE:FF",
+                    &LightState {
+                        on: true,
+                        brightness: Some(b),
+                        ..Default::default()
+                    },
+                )
+                .await
+            })
+        };
+
+        let first = write(10.0);
+        // Let the first write take the device gate before the others queue.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let superseded = write(20.0);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let newest = write(30.0);
+
+        for t in [first, superseded, newest] {
+            t.await.unwrap().unwrap();
+        }
+
+        let sent: Vec<i64> = control_bodies(&server)
+            .await
+            .iter()
+            .filter(|b| b["payload"]["capability"]["instance"] == "brightness")
+            .map(|b| b["payload"]["capability"]["value"].as_i64().unwrap())
+            .collect();
+        assert!(
+            sent.contains(&10) && sent.contains(&30),
+            "the in-flight and the final value must both land: {sent:?}",
+        );
+        assert!(
+            !sent.contains(&20),
+            "the superseded mid-drag value must be dropped: {sent:?}",
+        );
+    }
+
+    // ── LAN lease lifecycle ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn an_expired_lan_lease_falls_back_to_cloud() {
+        // LAN control is fire-and-forget UDP: a send at a device that moved to a
+        // new DHCP lease or was unplugged still returns Ok, so a never-expiring
+        // address meant every command for that light vanished silently.
+        let _serial = lan_cache_lock().await;
+        clear_lan_ip_cache().await;
+        let server = MockServer::start().await;
+        mount_control_mocks(&server).await;
+        // A live LAN device exists, but the cached lease for it is stale...
+        let mock = spawn_mock_device().await;
+        seed_lan_entry(
+            &mac_hw_id(MAC).unwrap(),
+            "127.0.0.1",
+            LAN_TTL + Duration::from_secs(1),
+        )
+        .await;
+
+        // ...and an expired lease is not used, so control must reach the light
+        // over the cloud rather than shouting at the stale address. (The refresh
+        // it kicks off is in the background and can't rescue this command.)
+        let provider = GoveeProvider::new(Some(mock_provider(&server).await), Some(dead_lan()));
+        provider
+            .set_state(
+                MAC,
+                &LightState {
+                    on: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            control_bodies(&server).await.len(),
+            1,
+            "an expired LAN lease must not swallow the command",
+        );
+        assert!(
+            mock.received.lock().await.is_empty(),
+            "nothing should have been sent to the stale address",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lan_miss_never_blocks_the_command_on_a_scan() {
+        // A scan is a 1.5s multicast window and this sits on the control path.
+        // A device with LAN Control off answers none of them, so blocking would
+        // put 1.5s in front of every command it receives to learn nothing. The
+        // command in hand goes cloud; the scan catches up behind it.
+        let _serial = lan_cache_lock().await;
+        clear_lan_ip_cache().await;
+        let mock = spawn_mock_device().await;
+        let provider = GoveeProvider::new(None, Some(test_provider(&mock)));
+
+        let start = Instant::now();
+        assert!(provider.lan_ip_for(MAC).await.is_none());
+        assert!(
+            start.elapsed() < Duration::from_millis(50),
+            "resolving must not wait on a scan, took {:?}",
+            start.elapsed(),
+        );
+
+        // The background refresh lands, so the NEXT command gets the LAN.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(
+            provider.lan_ip_for(MAC).await.as_deref(),
+            Some("127.0.0.1"),
+            "the background scan should have filled the address cache",
+        );
+    }
+
+    #[tokio::test]
+    async fn lan_rescans_are_floored_to_one_per_interval() {
+        // One scan refreshes every device, so a burst of misses — a room command
+        // over several cloud-only lights — must share one window rather than
+        // each opening its own.
+        let _serial = lan_cache_lock().await;
+        clear_lan_ip_cache().await;
+        let provider = GoveeProvider::new(None, Some(dead_lan()));
+
+        assert!(provider.lan_ip_for(MAC).await.is_none());
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let first = lan_scan_stamp().await.expect("the first miss should scan");
+
+        for _ in 0..5 {
+            assert!(provider.lan_ip_for(MAC).await.is_none());
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        assert_eq!(
+            lan_scan_stamp().await,
+            Some(first),
+            "further misses inside the interval must not open another scan",
+        );
+    }
+
+    #[tokio::test]
+    async fn get_state_drops_a_lan_address_that_stops_answering() {
+        // The LAN read is the only thing that can prove a device is still at its
+        // address — control can't. When it goes silent the lease is revoked so
+        // the next command goes straight to the cloud.
+        let _serial = lan_cache_lock().await;
+        clear_lan_ip_cache().await;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/devices"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(device_list_response()))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/device/state"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 200, "message": "success",
+                "payload": { "capabilities": [
+                    {"type": "devices.capabilities.online", "instance": "online", "state": {"value": true}},
+                    {"type": "devices.capabilities.on_off", "instance": "powerSwitch", "state": {"value": 1}}
+                ]}
+            })))
+            .mount(&server)
+            .await;
+
+        let key = mac_hw_id(MAC).unwrap();
+        seed_lan_entry(&key, "127.0.0.1", Duration::ZERO).await;
+
+        let provider = GoveeProvider::new(Some(mock_provider(&server).await), Some(dead_lan()));
+        let state = provider.get_state(MAC).await.unwrap();
+
+        assert_eq!(state.transport.as_deref(), Some("cloud"));
+        assert!(
+            !lan_ip_cache().read().await.contains_key(&key),
+            "a silent device's LAN address must be dropped",
+        );
     }
 
     #[tokio::test]

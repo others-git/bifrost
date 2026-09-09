@@ -25,6 +25,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, OnceCell};
@@ -35,6 +36,21 @@ const SCAN_PORT: u16 = 4001;
 const RECV_PORT: u16 = 4002;
 const CONTROL_PORT: u16 = 4003;
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(1500);
+/// Gap between the datagrams of one control batch. Govee firmware drops
+/// back-to-back packets — with control being fire-and-forget UDP, a dropped
+/// `brightness` behind a `turn` is simply lost, which is what "it turned on but
+/// stayed dim" looks like. Small enough to stay imperceptible.
+const COMMAND_GAP: Duration = Duration::from_millis(30);
+
+/// Longer settle after a power-**on** before any attribute packet.
+///
+/// Observed on the live hub: a strip that had been off for 16s was told
+/// `on + 1% + pink`; the next poll read it back amber at 1%, i.e. the `turn` and
+/// the `brightness` landed and the `colorwc` did not — the controller is still
+/// coming up and drops what arrives in the same breath as its power-on. Nothing
+/// acks a lost datagram, so the hub logged the write as `ok`. This is the gap
+/// that costs a command, and it is worth 150ms to close.
+const POWER_ON_SETTLE: Duration = Duration::from_millis(150);
 
 pub struct GoveeLanProvider {
     /// Local interface address the UDP socket binds to (0.0.0.0 = all).
@@ -47,11 +63,40 @@ pub struct GoveeLanProvider {
     control_port: u16,
     /// How long discovery collects replies / a state query waits.
     timeout: Duration,
-    socket: OnceCell<UdpSocket>,
-    /// Serialises request/response exchanges so concurrent polls don't steal
-    /// each other's replies off the shared socket.
+    socket: OnceCell<Arc<LanSocket>>,
+}
+
+/// The bound receive socket, plus the lock that serialises request/response
+/// exchanges on it so concurrent readers can't steal each other's replies.
+struct LanSocket {
+    sock: UdpSocket,
     exchange: Mutex<()>,
 }
+
+/// Process-wide registry of bound receive sockets, keyed by what identifies one:
+/// `(bind address, port, joined the multicast group)`.
+///
+/// Govee devices answer a scan or a `devStatus` on the **well-known port 4002**,
+/// which one process can bind exactly once — but a light provider is rebuilt per
+/// request. So every read outside the polling manager's long-lived instance
+/// bound 4002, got `EADDRINUSE`, and failed silently: the address-cache refresh
+/// learned nothing, and `POST /api/providers/{id}/discover` (the Sync button)
+/// saw an empty scan, so it stamped every LAN device `transport: "cloud"` and
+/// dropped its IP until the next poll put them back. Sharing the bound socket
+/// (and its exchange lock) makes the LAN transport work from every caller, not
+/// just whichever one bound the port first.
+///
+/// Only well-known ports are shared. A test provider asks for port 0 (an
+/// OS-assigned ephemeral port), which is private by construction.
+fn shared_sockets() -> &'static Mutex<SocketRegistry> {
+    static SOCKETS: std::sync::OnceLock<Mutex<SocketRegistry>> = std::sync::OnceLock::new();
+    SOCKETS.get_or_init(|| Mutex::new(SocketRegistry::new()))
+}
+
+/// `(bind address, port, joined the multicast group)` — what makes one bound
+/// receive socket distinct from another.
+type SocketKey = (IpAddr, u16, bool);
+type SocketRegistry = HashMap<SocketKey, Arc<LanSocket>>;
 
 impl GoveeLanProvider {
     /// Production provider bound to `bind_addr`, using the standard Govee ports.
@@ -63,7 +108,6 @@ impl GoveeLanProvider {
             control_port: CONTROL_PORT,
             timeout: DEFAULT_TIMEOUT,
             socket: OnceCell::new(),
-            exchange: Mutex::new(()),
         }
     }
 
@@ -79,7 +123,6 @@ impl GoveeLanProvider {
             control_port: mock_addr.port(),
             timeout,
             socket: OnceCell::new(),
-            exchange: Mutex::new(()),
         }
     }
 
@@ -92,40 +135,64 @@ impl GoveeLanProvider {
         self
     }
 
-    async fn socket(&self) -> Result<&UdpSocket> {
+    /// Does this instance need to receive on the multicast group?
+    fn is_multicast(&self) -> bool {
+        matches!(self.discovery_target.ip(), IpAddr::V4(ip) if ip.is_multicast())
+    }
+
+    /// Bind the receive socket for this instance's address/port.
+    async fn bind_socket(&self) -> Result<LanSocket> {
+        // Govee devices send scan/devStatus replies to the **multicast group**
+        // 239.255.255.250:4002, so the socket must *join* that group to receive
+        // them — binding the port alone isn't enough (the bug that left LAN
+        // discovery finding nothing). To receive multicast we bind the wildcard
+        // address; `bind_addr` selects the joining NIC.
+        let multicast = self.is_multicast();
+        let bind_ip = if multicast {
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        } else {
+            self.bind_addr
+        };
+        let sock = UdpSocket::bind((bind_ip, self.listen_port))
+            .await
+            .with_context(|| {
+                format!(
+                    "binding Govee LAN socket to {bind_ip}:{} (port 4002 must be free)",
+                    self.listen_port
+                )
+            })?;
+        if multicast {
+            let iface = match self.bind_addr {
+                IpAddr::V4(v4) => v4,
+                _ => Ipv4Addr::UNSPECIFIED,
+            };
+            sock.join_multicast_v4(MULTICAST_ADDR, iface)
+                .with_context(|| {
+                    format!("joining Govee multicast group {MULTICAST_ADDR} on {iface}")
+                })?;
+        }
+        Ok(LanSocket {
+            sock,
+            exchange: Mutex::new(()),
+        })
+    }
+
+    /// The receive socket — process-shared for a well-known port (see
+    /// [`shared_sockets`]), instance-private for an OS-assigned one.
+    async fn socket(&self) -> Result<&Arc<LanSocket>> {
         self.socket
             .get_or_try_init(|| async {
-                // Govee devices send scan/devStatus replies to the **multicast
-                // group** 239.255.255.250:4002, so the socket must *join* that group
-                // to receive them — binding the port alone isn't enough (the bug
-                // that left LAN discovery finding nothing). To receive multicast we
-                // bind the wildcard address; `bind_addr` selects the joining NIC.
-                let multicast =
-                    matches!(self.discovery_target.ip(), IpAddr::V4(ip) if ip.is_multicast());
-                let bind_ip = if multicast {
-                    IpAddr::V4(Ipv4Addr::UNSPECIFIED)
-                } else {
-                    self.bind_addr
-                };
-                let sock = UdpSocket::bind((bind_ip, self.listen_port))
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "binding Govee LAN socket to {bind_ip}:{} (port 4002 must be free)",
-                            self.listen_port
-                        )
-                    })?;
-                if multicast {
-                    let iface = match self.bind_addr {
-                        IpAddr::V4(v4) => v4,
-                        _ => Ipv4Addr::UNSPECIFIED,
-                    };
-                    sock.join_multicast_v4(MULTICAST_ADDR, iface)
-                        .with_context(|| {
-                            format!("joining Govee multicast group {MULTICAST_ADDR} on {iface}")
-                        })?;
+                if self.listen_port == 0 {
+                    return Ok(Arc::new(self.bind_socket().await?));
                 }
-                Ok::<_, anyhow::Error>(sock)
+                let key = (self.bind_addr, self.listen_port, self.is_multicast());
+                let mut sockets = shared_sockets().lock().await;
+                if let Some(existing) = sockets.get(&key) {
+                    return Ok(existing.clone());
+                }
+                let shared = Arc::new(self.bind_socket().await?);
+                sockets.insert(key, shared.clone());
+                Ok::<_, anyhow::Error>(shared)
             })
             .await
     }
@@ -135,8 +202,9 @@ impl GoveeLanProvider {
     /// This is the unified provider's LAN-capability probe: only devices that
     /// answer (LAN Control supported + enabled) are LAN-eligible.
     pub async fn scan(&self) -> Result<Vec<LanScan>> {
-        let sock = self.socket().await?;
-        let _guard = self.exchange.lock().await;
+        let shared = self.socket().await?;
+        let _guard = shared.exchange.lock().await;
+        let sock = &shared.sock;
 
         sock.send_to(
             &command("scan", json!({ "account_topic": "reserve" })),
@@ -194,25 +262,30 @@ impl GoveeLanProvider {
         let mut packets: Vec<Vec<u8>> =
             vec![command("turn", json!({ "value": u8::from(state.on) }))];
 
-        if let Some(b) = state.brightness {
-            packets.push(command(
-                "brightness",
-                json!({ "value": (b.round() as i64).clamp(1, 100) }),
-            ));
-        }
-        if let Some(color) = &state.color {
-            let (r, g, b) = color.to_rgb();
-            packets.push(command(
-                "colorwc",
-                json!({ "color": { "r": r, "g": g, "b": b }, "colorTemInKelvin": 0 }),
-            ));
-        }
-        if let Some(mirek) = state.color_temp_mirek {
-            let kelvin = crate::models::mirek_to_kelvin(mirek);
-            packets.push(command(
-                "colorwc",
-                json!({ "color": { "r": 0, "g": 0, "b": 0 }, "colorTemInKelvin": kelvin }),
-            ));
+        // Attributes only mean anything while the light is on; trailing a
+        // brightness/colour packet behind an "off" just gives the device a
+        // reason to light back up.
+        if state.on {
+            if let Some(b) = state.brightness {
+                packets.push(command(
+                    "brightness",
+                    json!({ "value": (b.round() as i64).clamp(1, 100) }),
+                ));
+            }
+            if let Some(color) = &state.color {
+                let (r, g, b) = color.to_rgb();
+                packets.push(command(
+                    "colorwc",
+                    json!({ "color": { "r": r, "g": g, "b": b }, "colorTemInKelvin": 0 }),
+                ));
+            }
+            if let Some(mirek) = state.color_temp_mirek {
+                let kelvin = crate::models::mirek_to_kelvin(mirek);
+                packets.push(command(
+                    "colorwc",
+                    json!({ "color": { "r": 0, "g": 0, "b": 0 }, "colorTemInKelvin": kelvin }),
+                ));
+            }
         }
 
         // Control is **fire-and-forget** — we don't read the device's ack — so
@@ -228,10 +301,21 @@ impl GoveeLanProvider {
         let sock = UdpSocket::bind((self.bind_addr, 0))
             .await
             .context("binding Govee LAN send socket")?;
-        for pkt in packets {
-            sock.send_to(&pkt, target)
+        let last = packets.len().saturating_sub(1);
+        for (i, pkt) in packets.iter().enumerate() {
+            sock.send_to(pkt, target)
                 .await
                 .context("sending Govee LAN command")?;
+            if i < last {
+                // Packet 0 is always `turn`; a light coming on needs longer to be
+                // ready for the attributes than the attributes need from each other.
+                let gap = if i == 0 && state.on {
+                    POWER_ON_SETTLE
+                } else {
+                    COMMAND_GAP
+                };
+                tokio::time::sleep(gap).await;
+            }
         }
         Ok(())
     }
@@ -369,8 +453,9 @@ impl LightProvider for GoveeLanProvider {
                 .with_context(|| format!("invalid Govee LAN device address '{device_id}'"))?,
             self.control_port,
         );
-        let sock = self.socket().await?;
-        let _guard = self.exchange.lock().await;
+        let shared = self.socket().await?;
+        let _guard = shared.exchange.lock().await;
+        let sock = &shared.sock;
 
         sock.send_to(&command("devStatus", json!({})), target)
             .await
@@ -567,6 +652,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_second_provider_can_read_while_the_first_holds_the_well_known_port() {
+        // Regression: the light provider is rebuilt per request, but Govee
+        // devices only answer on port 4002 — which one process can bind once. A
+        // per-instance socket meant every read from a control request failed
+        // EADDRINUSE behind the polling manager's long-lived instance, so the
+        // device looked LAN-ineligible and the command took the slow cloud path.
+        let mock = spawn_mock_device().await;
+        // A well-known (non-zero) port both instances ask for, the way both ask
+        // for 4002 in production.
+        let port = {
+            let probe = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            probe.local_addr().unwrap().port()
+        };
+        let build = || {
+            GoveeLanProvider::new_for_test(mock.addr, Duration::from_millis(400))
+                .with_listen_port(port)
+        };
+
+        let poller = build();
+        assert_eq!(poller.scan().await.unwrap().len(), 1);
+
+        // A freshly built provider — the per-request case — must read too.
+        let per_request = build();
+        let found = per_request
+            .scan()
+            .await
+            .expect("a rebuilt provider must share the bound receive port");
+        assert_eq!(found.len(), 1, "the second instance saw no replies");
+        assert_eq!(
+            per_request.get_state("127.0.0.1").await.unwrap().reachable,
+            Some(true),
+        );
+    }
+
+    #[tokio::test]
     async fn get_state_times_out_to_unreachable() {
         // Point at a closed loopback port: no device answers.
         let dead = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4); // unused
@@ -640,6 +760,110 @@ mod tests {
         assert!(
             cmds.contains(&"turn"),
             "command never reached the device: {cmds:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_state_off_sends_only_turn() {
+        // Control is fire-and-forget UDP, so a brightness/colour packet trailing
+        // an "off" is both wasted and a reason for the device to light back up.
+        let mock = spawn_mock_device().await;
+        let provider = test_provider(&mock);
+
+        provider
+            .set_state(
+                "127.0.0.1",
+                &LightState {
+                    on: false,
+                    brightness: Some(70.0),
+                    color: Some(Color::from_rgb(255, 0, 0)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let got = mock.received.lock().await;
+        let cmds: Vec<&str> = got.iter().map(|c| c["cmd"].as_str().unwrap()).collect();
+        assert_eq!(cmds, vec!["turn"], "off must be one packet: {cmds:?}");
+        assert_eq!(got[0]["data"]["value"], 0);
+    }
+
+    #[tokio::test]
+    async fn a_power_on_settles_before_its_attribute_packets() {
+        // The observed live failure: `on + brightness + colour` at a strip that
+        // had been off landed the power and the brightness but not the colour —
+        // the controller drops what arrives while it is still coming up, and
+        // fire-and-forget UDP reports success anyway.
+        let mock = spawn_mock_device().await;
+        let provider = test_provider(&mock);
+
+        let start = Instant::now();
+        provider
+            .set_state(
+                "127.0.0.1",
+                &LightState {
+                    on: true,
+                    color: Some(Color::from_rgb(255, 0, 255)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            start.elapsed() >= POWER_ON_SETTLE,
+            "the colour must not chase the power-on immediately, took {:?}",
+            start.elapsed(),
+        );
+
+        // An "off" carries no attributes, so it pays no settle at all.
+        let start = Instant::now();
+        provider
+            .set_state(
+                "127.0.0.1",
+                &LightState {
+                    on: false,
+                    color: Some(Color::from_rgb(255, 0, 255)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            start.elapsed() < POWER_ON_SETTLE,
+            "an off is one packet and should be immediate, took {:?}",
+            start.elapsed(),
+        );
+    }
+
+    #[tokio::test]
+    async fn control_packets_are_spaced_apart() {
+        // Govee firmware drops back-to-back datagrams, and nothing acks a lost
+        // one — "it turned on but stayed dim" is a `brightness` that landed in
+        // the same breath as its `turn`.
+        let mock = spawn_mock_device().await;
+        let provider = test_provider(&mock);
+
+        let start = Instant::now();
+        provider
+            .set_state(
+                "127.0.0.1",
+                &LightState {
+                    on: true,
+                    brightness: Some(60.0),
+                    color: Some(Color::from_rgb(0, 255, 0)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let elapsed = start.elapsed();
+
+        // Three packets ⇒ a power-on settle plus one inter-attribute gap.
+        assert!(
+            elapsed >= POWER_ON_SETTLE + COMMAND_GAP,
+            "three packets should be spaced, took {elapsed:?}",
         );
     }
 
