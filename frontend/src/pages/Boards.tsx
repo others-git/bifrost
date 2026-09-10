@@ -1762,32 +1762,9 @@ function DeviceTile({
         : media.find((d) => d.id === cfg.id);
   const themed = useMatchTheme();
   const { queue: queueSlide, cancel: cancelSlide } = useCoalescedWrite(ATTR_DELAY);
-  if (!dev) return <div style={{ ...CENTER, color: T.faint, fontSize: "0.75rem" }}>Device removed</div>;
-
-  const name = (cfg.name as string) || (dev as { name: string }).name;
-  // Hidden header: no title/power row — the control body fills the tile.
-  const hideHeader = cfg.hide_header === true;
-  const light = domain === "light" ? (dev as Light) : undefined;
-  const mediaDev = domain === "media" ? (dev as MediaDevice) : undefined;
-  const powerDev = domain === "power" ? (dev as PowerDevice) : undefined;
-  const on = !!(light?.last_state?.on ?? mediaDev?.state.power ?? powerDev?.state.on);
-  const reachable =
-    (light?.last_state?.reachable ?? mediaDev?.state.reachable ?? powerDev?.state.reachable) !== false;
-  const fx = !!light && !!activeEffect(light);
-  const accent = light
-    ? themed
-      ? T.accent
-      : fx
-        ? EFFECT_ACCENT
-        : lightChromaHex(light)
-    : domain === "power"
-      ? color.gold
-      : color.violet;
-  // The plate smoulders or blazes with the actual dimmer level (lights only —
-  // media/power have no meaningful "how lit" dimension).
-  const charge = light && on ? ((light.last_state?.brightness ?? 100) as number) / 100 : 1;
-  const np = isNowPlaying ? mediaDev?.state.now_playing : undefined;
-  const glyph = (dev as { glyph?: string | null }).glyph ?? (light ? "bulb" : powerDev ? "power" : "speaker");
+  const light = dev && domain === "light" ? (dev as Light) : undefined;
+  const mediaDev = dev && domain === "media" ? (dev as MediaDevice) : undefined;
+  const powerDev = dev && domain === "power" ? (dev as PowerDevice) : undefined;
 
   const setTilePower = useToggleWrite<boolean>({
     write: (next) => {
@@ -1807,6 +1784,31 @@ function DeviceTile({
       else if (mediaDev) onMediaPatch(mediaDev.id, { power: !next });
     },
   });
+
+  if (!dev) return <div style={{ ...CENTER, color: T.faint, fontSize: "0.75rem" }}>Device removed</div>;
+
+  const name = (cfg.name as string) || (dev as { name: string }).name;
+  // Hidden header: no title/power row — the control body fills the tile.
+  const hideHeader = cfg.hide_header === true;
+  const on = !!(light?.last_state?.on ?? mediaDev?.state.power ?? powerDev?.state.on);
+  const reachable =
+    (light?.last_state?.reachable ?? mediaDev?.state.reachable ?? powerDev?.state.reachable) !== false;
+  const fx = !!light && !!activeEffect(light);
+  const accent = light
+    ? themed
+      ? T.accent
+      : fx
+        ? EFFECT_ACCENT
+        : lightChromaHex(light)
+    : domain === "power"
+      ? color.gold
+      : color.violet;
+  // The plate smoulders or blazes with the actual dimmer level (lights only —
+  // media/power have no meaningful "how lit" dimension).
+  const charge = light && on ? ((light.last_state?.brightness ?? 100) as number) / 100 : 1;
+  const np = isNowPlaying ? mediaDev?.state.now_playing : undefined;
+  const glyph = (dev as { glyph?: string | null }).glyph ?? (light ? "bulb" : powerDev ? "power" : "speaker");
+
   function togglePower() {
     setTilePower(!on);
   }

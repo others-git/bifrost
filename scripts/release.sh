@@ -97,6 +97,18 @@ else
         cargo fmt --check                          || gate_fail "cargo fmt --check (run 'cargo fmt')"
         cargo clippy --all-targets -- -D warnings  || gate_fail "cargo clippy (-D warnings)"
         cargo test                                 || gate_fail "cargo test"
+        # The frontend ships INSIDE this binary, so it is part of the release and
+        # belongs in the release gate. It was not, and a Rules-of-Hooks violation
+        # (a hook after an early return) reached the wall tablets: it type-checks
+        # and builds, then crashes the React tree at runtime. `npm test` is
+        # eslint's rules-of-hooks + vitest — the two things that DO see it.
+        if [ -f frontend/package.json ]; then
+            echo "release: gate — frontend lint · test · build…"
+            [ -d frontend/node_modules ] || npm --prefix frontend ci \
+                || gate_fail "npm ci (frontend deps)"
+            npm --prefix frontend test  || gate_fail "frontend lint/tests (npm test)"
+            npm --prefix frontend run build || gate_fail "frontend build (tsc && vite build)"
+        fi
         ;;
     kiosk)
         echo "release: gate — ./gradlew testDebugUnitTest…"

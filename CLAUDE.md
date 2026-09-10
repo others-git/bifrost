@@ -73,7 +73,9 @@ Every public function, method, and non-trivial private helper must have test cov
   cargo fmt --check
   cargo clippy --all-targets -- -D warnings
   cargo test
+  cd frontend && npm test && npm run build   # eslint rules-of-hooks + vitest, then tsc + vite
   ```
+  The **frontend is part of the gate** (it ships inside the same binary), and `npm test` runs **`eslint`'s `react-hooks/rules-of-hooks`** before vitest for a specific reason: a hook called after an early `return` type-checks and builds cleanly, then crashes the whole React tree at runtime with "Rendered fewer hooks than expected". `tsc` and `vite build` cannot see it; that class of bug reached the wall tablets once. `eslint.config.js` is deliberately narrow — that one correctness rule, no style opinions.
 - Don't silence warnings with `#[allow(dead_code)]` to pass — fix the code.
 - Prefer real behaviour over mocks (wiremock for external HTTP, real in-memory SQLite for DB). Test public contracts, not internals. One clear assertion purpose per test, named after the behaviour. Large shared fixtures go in `tests/helpers.rs`.
 

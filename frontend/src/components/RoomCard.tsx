@@ -424,22 +424,6 @@ export function RoomControlButton({
   const tPower = power.filter((d) => has("power", d.id));
   const tAudio = audio.filter((d) => has("media", d.id));
 
-  // A non-scene control whose targets have all been removed/disabled has nothing
-  // to act on — drop it rather than render a dead button.
-  if (control.kind !== "scene" && tLights.length + tPower.length + tAudio.length === 0) {
-    return null;
-  }
-
-  const anyOn =
-    control.kind === "scene"
-      ? false
-      : tLights.some((l) => l.last_state?.on) ||
-        tPower.some((d) => d.state.on) ||
-        tAudio.some((d) => d.state.power);
-
-  const accent =
-    control.kind === "volume" ? T.media : control.kind === "brightness" ? "#ffb84d" : T.accent;
-
   // Fans to every target. Optimistic paint and burst coalescing come from the
   // shared toggle plane; the revert stays per-device, since one unreachable lamp
   // must not un-paint the members that did take the command.
@@ -465,6 +449,23 @@ export function RoomControlButton({
       for (const d of tAudio) onMediaPatch(d.id, { power: next });
     },
   });
+
+  // A non-scene control whose targets have all been removed/disabled has nothing
+  // to act on — drop it rather than render a dead button.
+  if (control.kind !== "scene" && tLights.length + tPower.length + tAudio.length === 0) {
+    return null;
+  }
+
+  const anyOn =
+    control.kind === "scene"
+      ? false
+      : tLights.some((l) => l.last_state?.on) ||
+        tPower.some((d) => d.state.on) ||
+        tAudio.some((d) => d.state.power);
+
+  const accent =
+    control.kind === "volume" ? T.media : control.kind === "brightness" ? "#ffb84d" : T.accent;
+
 
   async function applyScene() {
     if (!control.scene_id) return;
