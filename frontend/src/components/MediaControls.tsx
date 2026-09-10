@@ -19,6 +19,7 @@ import { useRemote, KeysPad, ScryPad, RemoteApps, ExpandedRemote, RemoteTextEntr
 import { PowerToggle, Segmented } from "./controls";
 import { useSwipeTabs } from "./useSwipeTabs";
 import { Flyout, FlyoutHeader } from "./Flyout";
+import { VOLUME_DELAY, useCoalescedWrite, useToggleWrite } from "./useWrite";
 import { Select } from "./Select";
 import { Glyph } from "./glyphs";
 import { useViewport } from "../useViewport";
@@ -73,7 +74,7 @@ export function MediaControls({
    * Remote tab instead). */
   hideTransport?: boolean;
 }) {
-  const volumeTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const { queue: queueVolume } = useCoalescedWrite(VOLUME_DELAY);
   const s = device.state;
   const offline = s.reachable === false;
   const np = s.now_playing;
@@ -92,12 +93,15 @@ export function MediaControls({
   }
   function setVolume(v: number) {
     onLocalPatch(device.id, { volume: v });
-    clearTimeout(volumeTimer.current);
-    volumeTimer.current = setTimeout(() => send({ volume: v }), 250);
+    queueVolume(() => void send({ volume: v }));
   }
+  const setMute = useToggleWrite<boolean>({
+    write: (next) => setMediaState(device.id, { mute: next }),
+    onOptimistic: (next) => onLocalPatch(device.id, { mute: next }),
+    onRevert: (next) => onLocalPatch(device.id, { mute: !next }),
+  });
   function toggleMute() {
-    onLocalPatch(device.id, { mute: !s.mute });
-    send({ mute: !s.mute });
+    setMute(!s.mute);
   }
   async function toggleFavorites() {
     const next = !favOpen;
@@ -343,13 +347,15 @@ export function MediaEditor({
     localStorage.setItem(TV_TAB_KEY, t);
   }
 
-  function togglePower() {
-    const next = !device.state.power;
+  const setPower = useToggleWrite<boolean>({
+    write: (next) => setMediaState(device.id, { power: next }),
     // Optimistic: powering a standby TV on also marks it reachable, so the UI
     // reflects the wake immediately (the composite read confirms it shortly).
-    onLocalPatch(device.id, next ? { power: next, reachable: true } : { power: next });
-    setMediaState(device.id, { power: next });
-  }
+    onOptimistic: (next) =>
+      onLocalPatch(device.id, next ? { power: next, reachable: true } : { power: next }),
+    onRevert: (next) => onLocalPatch(device.id, { power: !next }),
+  });
+  const togglePower = () => setPower(!device.state.power);
 
   // Power for a TV-with-remote shows regardless of media reachability; for other
   // media it needs source switching and a reachable device.
@@ -563,7 +569,7 @@ function FancyVolume({
   const volume = st.volume ?? 0;
   const muted = st.mute ?? false;
   const trackRef = useRef<HTMLDivElement>(null);
-  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const { queue: queueVolume } = useCoalescedWrite(VOLUME_DELAY);
 
   // In receiver-paired mode the receiver itself is hidden, so surface a small
   // power toggle for it beside the "Volume → receiver" line. Its power isn't on
@@ -580,19 +586,22 @@ function FancyVolume({
       alive = false;
     };
   }, [device.receiver_id]);
+  const setReceiver = useToggleWrite<boolean>({
+    write: (next) => setMediaState(device.receiver_id!, { power: next }),
+    onOptimistic: setReceiverPower,
+    onRevert: (next) => setReceiverPower(!next),
+  });
   function toggleReceiver() {
-    const rid = device.receiver_id;
-    if (!rid || receiverPower === null) return;
-    const next = !receiverPower;
-    setReceiverPower(next);
-    setMediaState(rid, { power: next });
+    if (!device.receiver_id || receiverPower === null) return;
+    setReceiver(!receiverPower);
   }
 
   function commit(v: number) {
     const clamped = Math.max(0, Math.min(100, Math.round(v)));
     onLocalPatch(device.id, { volume: clamped });
-    clearTimeout(timer.current);
-    timer.current = setTimeout(() => setMediaState(device.id, { volume: clamped }), 200);
+    // Was 200ms here and 250ms on the main bar — the same capability, two
+    // cadences. One number now.
+    queueVolume(() => void setMediaState(device.id, { volume: clamped }));
   }
   function fromPointer(clientX: number) {
     const el = trackRef.current;

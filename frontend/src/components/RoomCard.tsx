@@ -41,6 +41,7 @@ import { type Dialogs } from "./dialogs";
 import { T, font, nicheStyle, radius } from "../theme";
 import { EFFECT_ACCENT, activeEffect, roomLightWrite } from "./lightControl";
 import { useMatchTheme } from "./appearance";
+import { ATTR_DELAY, useCoalescedWrite, useToggleWrite } from "./useWrite";
 import { useViewport } from "../useViewport";
 
 /** The engraved room-card title — the Control page's header type. */
@@ -244,18 +245,21 @@ export function LightButton({
   const fx = !!activeEffect(light);
   const hex = themed ? T.accent : fx ? EFFECT_ACCENT : lightHex(light);
 
-  // Quick power toggle (long-press) — refreshes after, unlike the editor's
-  // debounced live commits, so a power flip reconciles against the server.
-  async function toggle() {
-    const next = !isOn;
-    // Power is independent: send only `{ on }` so a flip never re-asserts a
-    // colour/effect (the backend preserves the running mode). UI keeps the look.
-    onLightUpdate(light.id, { ...(light.last_state ?? { on: false }), on: next });
-    const err = await setLightState(light.id, { on: next });
-    // Revert the optimistic flip if the write failed (e.g. light unreachable).
-    if (err) onLightUpdate(light.id, { ...(light.last_state ?? { on: false }), on: isOn });
-    onChanged();
-  }
+  // Quick power toggle (long-press). Power is independent: send only `{ on }` so
+  // a flip never re-asserts a colour/effect (the backend preserves the running
+  // mode). The shared toggle plane owns the optimistic paint, the burst
+  // coalescing and the revert-on-failure.
+  const toggle = useToggleWrite<boolean>({
+    write: async (next) => {
+      const err = await setLightState(light.id, { on: next });
+      onChanged();
+      return err;
+    },
+    onOptimistic: (next) =>
+      onLightUpdate(light.id, { ...(light.last_state ?? { on: false }), on: next }),
+    onRevert: (next) =>
+      onLightUpdate(light.id, { ...(light.last_state ?? { on: false }), on: !next }),
+  });
 
   return (
     <>
@@ -268,7 +272,7 @@ export function LightButton({
         effect={fx && !themed}
         buttonRef={ref}
         onClick={() => setEditing((v) => !v)}
-        onLongPress={toggle}
+        onLongPress={() => toggle(!isOn)}
       >
         <Glyph name={light.glyph ?? "bulb"} />
       </GlyphButton>
@@ -352,14 +356,11 @@ export function MediaButton({
   const offline = device.state.reachable === false;
   const grouped = !!groupMembers && groupMembers.length >= 2;
   const title = grouped ? groupMembers!.map((m) => m.name).join(" + ") : device.name;
-  function togglePower() {
-    const next = !device.state.power;
-    onMediaPatch(device.id, { power: next });
-    // Revert the optimistic flip if the device didn't accept it (e.g. offline).
-    setMediaState(device.id, { power: next }).then((err) => {
-      if (err) onMediaPatch(device.id, { power: !next });
-    });
-  }
+  const togglePower = useToggleWrite<boolean>({
+    write: (next) => setMediaState(device.id, { power: next }),
+    onOptimistic: (next) => onMediaPatch(device.id, { power: next }),
+    onRevert: (next) => onMediaPatch(device.id, { power: !next }),
+  });
   return (
     <>
       <GlyphButton
@@ -370,7 +371,7 @@ export function MediaButton({
         active={open}
         buttonRef={ref}
         onClick={() => setOpen((v) => !v)}
-        onLongPress={togglePower}
+        onLongPress={() => togglePower(!device.state.power)}
       >
         <Glyph name={grouped ? "speaker_group" : (device.glyph ?? mediaKindGlyph(device.kind))} />
       </GlyphButton>
@@ -415,7 +416,7 @@ export function RoomControlButton({
 }) {
   const ref = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
-  const commitTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const { queue: queueWrite, cancel: cancelWrite } = useCoalescedWrite(ATTR_DELAY);
 
   const has = (domain: ControlTarget["domain"], id: string) =>
     control.targets.some((t) => t.domain === domain && t.id === id);
@@ -439,23 +440,31 @@ export function RoomControlButton({
   const accent =
     control.kind === "volume" ? T.media : control.kind === "brightness" ? "#ffb84d" : T.accent;
 
-  function togglePower() {
-    const next = !anyOn;
-    // Each optimistic flip reverts if its device rejects the write (offline).
-    for (const l of tLights) {
-      onLightUpdate(l.id, { ...(l.last_state ?? { on: false }), on: next }); // power only — preserves each light's mode
-      setLightState(l.id, { on: next }).then((err) => {
-        if (err) onLightUpdate(l.id, { ...(l.last_state ?? { on: false }), on: !next });
-      });
-    }
-    for (const d of tPower) onPowerToggle(d.id, next);
-    for (const d of tAudio) {
-      onMediaPatch(d.id, { power: next });
-      setMediaState(d.id, { power: next }).then((err) => {
-        if (err) onMediaPatch(d.id, { power: !next });
-      });
-    }
-  }
+  // Fans to every target. Optimistic paint and burst coalescing come from the
+  // shared toggle plane; the revert stays per-device, since one unreachable lamp
+  // must not un-paint the members that did take the command.
+  const togglePower = useToggleWrite<boolean>({
+    write: (next) => {
+      for (const l of tLights) {
+        setLightState(l.id, { on: next }).then((err) => {
+          if (err) onLightUpdate(l.id, { ...(l.last_state ?? { on: false }), on: !next });
+        });
+      }
+      for (const d of tPower) onPowerToggle(d.id, next);
+      for (const d of tAudio) {
+        setMediaState(d.id, { power: next }).then((err) => {
+          if (err) onMediaPatch(d.id, { power: !next });
+        });
+      }
+      return null;
+    },
+    onOptimistic: (next) => {
+      cancelWrite(); // a queued attribute write carries on:true — it would re-light
+      // power only — preserves each light's mode
+      for (const l of tLights) onLightUpdate(l.id, { ...(l.last_state ?? { on: false }), on: next });
+      for (const d of tAudio) onMediaPatch(d.id, { power: next });
+    },
+  });
 
   async function applyScene() {
     if (!control.scene_id) return;
@@ -476,10 +485,9 @@ export function RoomControlButton({
         : { ...(l.last_state ?? { on: true }), on: true };
       onLightUpdate(l.id, opt);
     }
-    clearTimeout(commitTimer.current);
-    commitTimer.current = setTimeout(() => {
+    queueWrite(() => {
       for (const id of ids) setLightState(id, lightWrite(change));
-    }, 200);
+    });
   }
 
   // Volume control fans changes to every target audio device. The MediaEditor
@@ -489,7 +497,7 @@ export function RoomControlButton({
   }
 
   function onClick() {
-    if (control.kind === "power") togglePower();
+    if (control.kind === "power") togglePower(!anyOn);
     else if (control.kind === "scene") applyScene();
     else setOpen((v) => !v);
   }
@@ -526,7 +534,7 @@ export function RoomControlButton({
           showWhite={tLights.some((l) => l.capabilities.color_temperature)}
           showBrightness={tLights.some((l) => l.capabilities.dimmable)}
           on={anyOn}
-          onToggle={togglePower}
+          onToggle={() => togglePower(!anyOn)}
           onChange={cascade}
           onClose={() => setOpen(false)}
         />
@@ -608,7 +616,10 @@ export function RoomCard({
   const [editing, setEditing] = useState(false);
   const [scenesOpen, setScenesOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const commitTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // ONE slot for the whole cascade: colour/temp/effect are mutually exclusive
+  // light modes, so a later pick must supersede an unsent earlier one rather
+  // than both reaching the server (which would resolve one and drop the other).
+  const { queue: queueCascade, cancel: cancelCascade } = useCoalescedWrite(ATTR_DELAY);
 
   const page = variant === "page";
   // Density: the Control card breathes; the board form packs the same parts
@@ -690,10 +701,9 @@ export function RoomCard({
       for (const l of lights) {
         if (ids.includes(l.id)) onLightUpdate(l.id, lightOptimistic(l.last_state, change));
       }
-      clearTimeout(commitTimer.current);
-      commitTimer.current = setTimeout(() => {
+      queueCascade(() => {
         for (const id of ids) setLightState(id, lightWrite(change));
-      }, 200);
+      });
       return;
     }
     // Adjust only the dimension the user moved. Optimistically resolve each LIT
@@ -706,27 +716,42 @@ export function RoomCard({
         : l.last_state;
       onLightUpdate(l.id, opt);
     }
+    // `roomLightWrite` strips the implicit power bit: an attribute cascade must
+    // carry NO `on`, or the server treats it as a room power intent and wakes
+    // every off lamp (and the room's speakers and switches) with it.
     const patch = roomLightWrite(change);
-    clearTimeout(commitTimer.current);
-    commitTimer.current = setTimeout(() => { setRoomState(roomId, patch); }, 200);
+    queueCascade(() => void setRoomState(roomId, patch));
   }
 
   // Room power is the ONE shared control plane: optimistic flips locally, then a
   // single room-state PUT — the server fans out to every member domain (with the
   // pure-power rule and per-room audio offsets).
-  async function toggleAll() {
-    if (!roomId) return;
-    const next = !roomAnyOn;
-    setBusy(true);
-    for (const l of lights) onLightUpdate(l.id, { ...(l.last_state ?? { on: false }), on: next });
-    for (const d of audio) onMediaPatch(d.id, { power: next });
-    try {
-      await setRoomState(roomId, { on: next });
-      onChanged();
-    } finally {
-      setBusy(false);
-    }
-  }
+  // Room power is the ONE shared control plane: an explicit `{ on }` PUT that the
+  // server fans out to every member domain. A whole-request failure reverts the
+  // paint; a PARTIAL (one unreachable lamp) does not, since the members that did
+  // take it are painted correctly and SSE reconciles the rest.
+  const toggleAll = useToggleWrite<boolean>({
+    write: async (next) => {
+      setBusy(true);
+      try {
+        const { error } = await setRoomState(roomId!, { on: next });
+        onChanged();
+        return error;
+      } finally {
+        setBusy(false);
+      }
+    },
+    onOptimistic: (next) => {
+      cancelCascade(); // the effect branch's queued write carries on:true
+      for (const l of lights) onLightUpdate(l.id, { ...(l.last_state ?? { on: false }), on: next });
+      for (const d of audio) onMediaPatch(d.id, { power: next });
+    },
+    onRevert: (next) => {
+      for (const l of lights) onLightUpdate(l.id, { ...(l.last_state ?? { on: false }), on: !next });
+      for (const d of audio) onMediaPatch(d.id, { power: !next });
+    },
+  });
+  const toggleRoom = () => { if (roomId) toggleAll(!roomAnyOn); };
 
   async function applyScene(sceneId: string) {
     if (!sceneId) return;
@@ -829,7 +854,7 @@ export function RoomCard({
                 title={roomAnyOn ? "Turn room off" : "Turn room on"}
                 active={false}
                 buttonRef={null}
-                onClick={toggleAll}
+                onClick={toggleRoom}
                 size={sz.btn}
               >
                 <Glyph name="power" size={sz.btnGlyph} />
@@ -900,7 +925,7 @@ export function RoomCard({
           effects={agg.effects.length > 0 ? agg.effects : undefined}
           initialEffect={agg.commonEffect}
           on={anyOn}
-          onToggle={toggleAll}
+          onToggle={toggleRoom}
           onChange={cascade}
           onClose={() => setEditing(false)}
         >

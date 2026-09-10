@@ -51,6 +51,7 @@ import { alpha, color, font, glassCard, glow, labelType, radius } from "../theme
 import { Glyph } from "../components/glyphs";
 import { Button, Switch as SharedSwitch } from "../components/controls";
 import { useEvents } from "../useEvents";
+import { ATTR_DELAY, useCoalescedWrite, useToggleWrite } from "../components/useWrite";
 
 type Tool = "view" | "floor" | "wall" | "erase" | "place" | "room" | "paint";
 
@@ -189,7 +190,9 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
   const [popover, setPopover] = useState<Popover | null>(null);
   const [editor, setEditor] = useState<EditorTarget | null>(null);
   const [showNewPlan, setShowNewPlan] = useState(false);
-  const editTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // The room cascade's one slot — colour/temp/effect supersede each other, and a
+  // power toggle cancels a queued attribute write (which carries on:true).
+  const { queue: queueEdit, cancel: cancelEdit } = useCoalescedWrite(ATTR_DELAY);
   const [toast, setToast] = useState("");
 
   const [allRooms, setAllRooms] = useState<Room[]>([]);
@@ -364,7 +367,7 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
     }
   }
 
-  async function setRoom(room: Room, on: boolean) {
+  const paintRoom = (room: Room, on: boolean) =>
     setStatesById((prev) => {
       const next = new Map(prev);
       for (const id of room.light_ids) {
@@ -372,7 +375,17 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
       }
       return next;
     });
-    await setRoomState(room.id, { on });
+  const writeRoom = useToggleWrite<{ room: Room; on: boolean }>({
+    write: async ({ room, on }) => (await setRoomState(room.id, { on })).error,
+    onOptimistic: ({ room, on }) => {
+      cancelEdit();
+      paintRoom(room, on);
+    },
+    onRevert: ({ room, on }) => paintRoom(room, !on),
+    same: (a, b) => a.room.id === b.room.id && a.on === b.on,
+  });
+  function setRoom(room: Room, on: boolean) {
+    writeRoom({ room, on });
   }
 
   async function applyScene(_room: Room, sceneId: string) {
@@ -434,14 +447,15 @@ export function FloorPlanPage({ lights }: { lights: Light[] }) {
       for (const id of targetIds) next.set(id, lightOptimistic(prev.get(id), change));
       return next;
     });
-    clearTimeout(editTimer.current);
-    editTimer.current = setTimeout(() => {
+    queueEdit(() => {
       if (change.field === "effect") {
         for (const id of targetIds) setLightState(id, lightWrite(change));
       } else {
-        setRoomState(room.id, roomLightWrite(change));
+        // `roomLightWrite` carries NO power bit: the server casts an attribute
+        // change onto lit lights only, so a room dim never wakes an off lamp.
+        void setRoomState(room.id, roomLightWrite(change));
       }
-    }, 250);
+    });
   }
 
   async function paintLight(lightId: string) {
@@ -1035,10 +1049,9 @@ function RoomController({
   plan: PlanDetail;
   rooms: Room[];
   statesById: Map<string, LightState>;
-  onSetRoom: (room: Room, on: boolean) => Promise<void>;
+  onSetRoom: (room: Room, on: boolean) => void;
   onEditRoom: (room: Room, anchor: HTMLElement) => void;
 }) {
-  const [busy, setBusy] = useState("");
   const [mediaDevices, setMediaDevices] = useState<MediaDevice[]>([]);
 
   useEffect(() => {
@@ -1115,14 +1128,9 @@ function RoomController({
               <span style={{ color: "var(--bf-faint)", fontSize: "0.72rem", whiteSpace: "nowrap" }}>
                 {count} light{count !== 1 ? "s" : ""}
               </span>
-              <Switch
-                on={anyOn}
-                disabled={busy === room.id || count === 0}
-                onToggle={async () => {
-                  setBusy(room.id);
-                  try { await onSetRoom(room, !anyOn); } finally { setBusy(""); }
-                }}
-              />
+              {/* No in-flight disable: the shared toggle plane absorbs a burst
+                  and always converges on the last state asked for. */}
+              <Switch on={anyOn} disabled={count === 0} onToggle={() => onSetRoom(room, !anyOn)} />
             </div>
 
             {room.media_devices.length > 0 && (

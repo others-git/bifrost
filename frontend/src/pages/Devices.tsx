@@ -68,6 +68,7 @@ import { AnchoredPanel } from "../components/AnchoredPanel";
 import { useViewport } from "../useViewport";
 import { useSwipeTabs } from "../components/useSwipeTabs";
 import { T, ACCENT, alpha } from "../theme";
+import { useToggleWrite } from "../components/useWrite";
 
 type Domain = "light" | "media" | "power" | "sensor";
 
@@ -1404,14 +1405,17 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
     refresh();
   }, [refresh]);
 
-  async function toggle(item: Item, next: boolean) {
+  const paint = (id: string, on: boolean) =>
+    setItems((prev) => prev.map((d) => (d.id === id ? { ...d, on } : d)));
+  const writePower = useToggleWrite<{ id: string; on: boolean }>({
+    write: ({ id, on }) => setPowerState(id, on),
+    onOptimistic: ({ id, on }) => paint(id, on),
+    onRevert: ({ id, on }) => paint(id, !on),
+    same: (a, b) => a.id === b.id && a.on === b.on,
+  });
+  function toggle(item: Item, next: boolean) {
     if (item.domain !== "power") return;
-    // Optimistic — reflect immediately, reconcile on error.
-    setItems((prev) => prev.map((d) => (d.id === item.id ? { ...d, on: next } : d)));
-    const err = await setPowerState(item.id, next);
-    if (err) {
-      setItems((prev) => prev.map((d) => (d.id === item.id ? { ...d, on: !next } : d)));
-    }
+    writePower({ id: item.id, on: next });
   }
 
   async function setEnabled(item: Item, enabled: boolean) {

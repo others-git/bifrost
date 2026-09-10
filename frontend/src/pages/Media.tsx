@@ -20,6 +20,7 @@ import { useViewport } from "../useViewport";
 import { useEvents } from "../useEvents";
 import { T, domain, color, alpha } from "../theme";
 import { pageShell } from "../styles";
+import { useToggleWrite } from "../components/useWrite";
 
 const ACCENT = domain.media; // violet — audio's counterpart to the lamps' glow
 
@@ -244,9 +245,13 @@ function MediaDeviceCard({
   const [groupOpen, setGroupOpen] = useState(false);
   const [groupBusy, setGroupBusy] = useState(false);
 
+  const setPower = useToggleWrite<boolean>({
+    write: (next) => setMediaState(device.id, { power: next }),
+    onOptimistic: (next) => onLocalPatch(device.id, { power: next }),
+    onRevert: (next) => onLocalPatch(device.id, { power: !next }),
+  });
   function togglePower() {
-    onLocalPatch(device.id, { power: !s.power });
-    setMediaState(device.id, { power: !s.power });
+    setPower(!s.power);
   }
 
   // This card's speaker coordinates the group; each selected peer joins it.

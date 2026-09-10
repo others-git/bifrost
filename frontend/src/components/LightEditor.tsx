@@ -9,6 +9,7 @@ import { color, glow, alpha } from "../theme";
 import { useSwipeTabs } from "./useSwipeTabs";
 import { Segmented, PowerToggle } from "./controls";
 import { Flyout, FlyoutHeader } from "./Flyout";
+import { SEGMENT_DELAY, useCoalescedWrite } from "./useWrite";
 
 // ── HSV color math (h in degrees, s/v in 0..1) ──────────────────────────────
 
@@ -823,12 +824,11 @@ function SegmentEditor({
 
   // Debounce network writes so a wheel/slider drag doesn't spam the strip; a
   // discrete pick (swatch/clear) sends immediately.
-  const sendTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const { queue: queueSegments } = useCoalescedWrite(SEGMENT_DELAY);
   function send(segs: SegmentColorChange[], immediate = false) {
     if (segs.length === 0) return;
-    clearTimeout(sendTimer.current);
     if (immediate) onApply(segs);
-    else sendTimer.current = setTimeout(() => onApply(segs), 150);
+    else queueSegments(() => onApply(segs));
   }
 
   function toggle(i: number) {

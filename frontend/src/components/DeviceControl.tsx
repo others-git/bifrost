@@ -22,6 +22,7 @@ import { LightEditor, type LightControlChange } from "./LightEditor";
 import { lightOptimistic, lightSupports, lightWrite, isClearEffect } from "./lightControl";
 import { MediaEditor } from "./MediaControls";
 import { PowerFlyout } from "./PowerFlyout";
+import { ATTR_DELAY, useCoalescedWrite, useToggleWrite } from "./useWrite";
 
 type Anchor = HTMLElement | { x: number; y: number };
 
@@ -48,7 +49,7 @@ export function LightFlyout({
   /** Extra controls (a DisableRow, a SceneButton) rendered at the editor's foot. */
   children?: ReactNode;
 }) {
-  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const { queue: queueWrite, cancel: cancelWrite } = useCoalescedWrite(ATTR_DELAY);
   const st = light.last_state;
   const isOn = st?.on ?? false;
   const hex = st?.color
@@ -64,12 +65,17 @@ export function LightFlyout({
   // Power is its own independent dimension: send just `{ on }` so toggling never
   // re-asserts a colour/effect (the server preserves the running mode on an
   // on/off-only write). The optimistic patch keeps the full look for the UI.
-  function togglePower() {
-    const next = !isOn;
-    onLocalPatch(light.id, { ...(st ?? { on: false }), on: next });
-    clearTimeout(timer.current);
-    timer.current = setTimeout(() => setLightState(light.id, { on: next }), 200);
-  }
+  const setPower = useToggleWrite<boolean>({
+    write: (next) => setLightState(light.id, { on: next }),
+    onOptimistic: (next) => {
+      // A queued attribute write carries `on: true`; letting it land after an
+      // off would switch the light straight back on.
+      cancelWrite();
+      onLocalPatch(light.id, { ...(st ?? { on: false }), on: next });
+    },
+    onRevert: (next) => onLocalPatch(light.id, { ...(st ?? { on: false }), on: !next }),
+  });
+  const togglePower = () => setPower(!isOn);
 
   function onChange(change: LightControlChange) {
     // The shared light-control rule (see `lightControl.ts`): update the UI
@@ -78,8 +84,7 @@ export function LightFlyout({
     // tweak. The server merges the minimal patch and preserves the rest.
     if (!lightSupports(change, light.capabilities)) return;
     onLocalPatch(light.id, lightOptimistic(light.last_state, change));
-    clearTimeout(timer.current);
-    timer.current = setTimeout(() => setLightState(light.id, lightWrite(change)), 200);
+    queueWrite(() => void setLightState(light.id, lightWrite(change)));
   }
 
   return (

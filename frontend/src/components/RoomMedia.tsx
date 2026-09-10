@@ -3,7 +3,7 @@
 // page). Volume/mute fans out to every audio device in the room; each device's
 // per-room offset is applied server-side.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   setMediaState,
   setRoomMediaDevices,
@@ -17,6 +17,7 @@ import { Button } from "./controls";
 import { Glyph } from "./glyphs";
 import { alpha } from "../theme";
 import { pickableMedia } from "../deviceSelectors";
+import { VOLUME_DELAY, useCoalescedWrite } from "./useWrite";
 
 const ACCENT = "#a78bfa";
 
@@ -44,7 +45,7 @@ export function RoomVolumeStrip({ room, devices }: { room: Room; devices: MediaD
   const seedMute = mem.length > 0 && mem.every((x) => x.dev.state.mute);
   const [volume, setVolume] = useState(seedVol);
   const [mute, setMute] = useState(seedMute);
-  const volumeTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const { queue: queueRoomVolume } = useCoalescedWrite(VOLUME_DELAY);
 
   useEffect(() => {
     setVolume(seedVol);
@@ -55,8 +56,7 @@ export function RoomVolumeStrip({ room, devices }: { room: Room; devices: MediaD
 
   function commitVolume(v: number) {
     setVolume(v);
-    clearTimeout(volumeTimer.current);
-    volumeTimer.current = setTimeout(() => setRoomMediaState(room.id, { volume: v }), 250);
+    queueRoomVolume(() => void setRoomMediaState(room.id, { volume: v }));
   }
   function toggleMute() {
     setMute(!mute);
@@ -94,14 +94,13 @@ export function RoomVolumeStrip({ room, devices }: { room: Room; devices: MediaD
  * trim offsets until the room balances. */
 function MemberLevel({ device }: { device: MediaDevice }) {
   const [level, setLevel] = useState(device.state.volume);
-  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const { queue: queueVolume } = useCoalescedWrite(VOLUME_DELAY);
 
   useEffect(() => setLevel(device.state.volume), [device.id, device.state.volume]);
 
   function commit(v: number) {
     setLevel(v);
-    clearTimeout(timer.current);
-    timer.current = setTimeout(() => setMediaState(device.id, { volume: v }), 250);
+    queueVolume(() => void setMediaState(device.id, { volume: v }));
   }
 
   return (

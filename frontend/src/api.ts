@@ -1651,17 +1651,41 @@ export async function assistantSay(deviceId: string, text: string): Promise<stri
   return (await res.text()) || `HTTP ${res.status}`;
 }
 
+/** The outcome of a room write. `error` is non-null when the request itself
+ *  failed — the room was not touched, so an optimistic paint must be reverted.
+ *  `failed > 0` with no `error` is a PARTIAL: some members took the command and
+ *  some (an unreachable lamp) didn't, and reverting the whole room's paint would
+ *  be wrong — SSE reconciles the stragglers. */
+export interface RoomWriteResult {
+  applied: number;
+  failed: number;
+  error: string | null;
+}
+
+/** Drive a room's members. An explicit `on` is a POWER intent for the whole room
+ *  (the server fans it out to switches and speakers); a patch with NO `on` is an
+ *  attribute cascade the server casts onto lit lights only. Never add a stray
+ *  `on: true` to an attribute change — see `roomLightWrite`.
+ *
+ *  Reports failure rather than throwing: this used to reject, and since no caller
+ *  caught it, a provider error skipped the caller's refresh entirely and left the
+ *  optimistic paint stuck showing a state the room had never reached. */
 export async function setRoomState(
   id: string,
   state: LightStatePatch,
-): Promise<{ applied: number; failed: number }> {
-  const res = await timedFetch(`/api/rooms/${id}/state`, {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(state),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+): Promise<RoomWriteResult> {
+  try {
+    const res = await timedFetch(`/api/rooms/${id}/state`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(state),
+    });
+    if (!res.ok) return { applied: 0, failed: 0, error: `HTTP ${res.status}` };
+    const body = (await res.json()) as { applied?: number; failed?: number };
+    return { applied: body.applied ?? 0, failed: body.failed ?? 0, error: null };
+  } catch (e) {
+    return { applied: 0, failed: 0, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 // ── Client API keys (public /api/v1 access) ──────────────────────────────────

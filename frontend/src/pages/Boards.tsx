@@ -85,6 +85,7 @@ import { PageHeader } from "../components/PageHeader";
 import { useViewport } from "../useViewport";
 import { S } from "../styles";
 import { alpha, color, font, glow, labelType, radius, T } from "../theme";
+import { ATTR_DELAY, VOLUME_DELAY, useCoalescedWrite, useToggleWrite } from "../components/useWrite";
 
 /** The full-cell "lit niche" plate every Boards widget wears — the same recessed,
  * device-lit surface as the Control room cards' `GlyphButton`s — but retuned for
@@ -661,10 +662,18 @@ export function BoardsPage() {
     setLights((ls) => ls.map((l) => (l.id === id ? { ...l, last_state: st } : l)));
   const onMediaPatch = (id: string, patch: Partial<MediaDevice["state"]>) =>
     setMedia((ms) => ms.map((m) => (m.id === id ? { ...m, state: { ...m.state, ...patch } } : m)));
-  const onPowerToggle = (id: string, next: boolean) => {
-    setPower((ps) => ps.map((d) => (d.id === id ? { ...d, state: { ...d.state, on: next } } : d)));
-    setPowerState(id, next);
-  };
+  const paintPower = (id: string, on: boolean) =>
+    setPower((ps) => ps.map((d) => (d.id === id ? { ...d, state: { ...d.state, on } } : d)));
+  // Reverts on failure now — this used to keep claiming a device was on after
+  // the write to it failed, while the identically-named Dashboard handler
+  // reverted. Same capability, two behaviours; one plane now.
+  const writePower = useToggleWrite<{ id: string; on: boolean }>({
+    write: ({ id, on }) => setPowerState(id, on),
+    onOptimistic: ({ id, on }) => paintPower(id, on),
+    onRevert: ({ id, on }) => paintPower(id, !on),
+    same: (a, b) => a.id === b.id && a.on === b.on,
+  });
+  const onPowerToggle = (id: string, next: boolean) => writePower({ id, on: next });
 
   const renderWidget = (w: Widget) =>
     w.type === "exit" ? (
@@ -1752,7 +1761,7 @@ function DeviceTile({
         ? power.find((d) => d.id === cfg.id)
         : media.find((d) => d.id === cfg.id);
   const themed = useMatchTheme();
-  const commitTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const { queue: queueSlide, cancel: cancelSlide } = useCoalescedWrite(ATTR_DELAY);
   if (!dev) return <div style={{ ...CENTER, color: T.faint, fontSize: "0.75rem" }}>Device removed</div>;
 
   const name = (cfg.name as string) || (dev as { name: string }).name;
@@ -1780,21 +1789,26 @@ function DeviceTile({
   const np = isNowPlaying ? mediaDev?.state.now_playing : undefined;
   const glyph = (dev as { glyph?: string | null }).glyph ?? (light ? "bulb" : powerDev ? "power" : "speaker");
 
+  const setTilePower = useToggleWrite<boolean>({
+    write: (next) => {
+      if (light) return setLightState(light.id, { on: next });
+      if (mediaDev) return setMediaState(mediaDev.id, { power: next });
+      if (powerDev) onPowerToggle(powerDev.id, next); // its own plane, incl. revert
+      return null;
+    },
+    onOptimistic: (next) => {
+      cancelSlide(); // a queued brightness write carries on:true
+      // power only — preserves the light's mode
+      if (light) onLightUpdate(light.id, { ...(light.last_state ?? { on: false }), on: next });
+      else if (mediaDev) onMediaPatch(mediaDev.id, { power: next });
+    },
+    onRevert: (next) => {
+      if (light) onLightUpdate(light.id, { ...(light.last_state ?? { on: false }), on: !next });
+      else if (mediaDev) onMediaPatch(mediaDev.id, { power: !next });
+    },
+  });
   function togglePower() {
-    // Each optimistic flip reverts if the device rejects the write (offline).
-    if (light) {
-      onLightUpdate(light.id, { ...(light.last_state ?? { on: false }), on: !on }); // power only — preserves the light's mode
-      setLightState(light.id, { on: !on }).then((err) => {
-        if (err) onLightUpdate(light.id, { ...(light.last_state ?? { on: false }), on });
-      });
-    } else if (mediaDev) {
-      onMediaPatch(mediaDev.id, { power: !on });
-      setMediaState(mediaDev.id, { power: !on }).then((err) => {
-        if (err) onMediaPatch(mediaDev.id, { power: on });
-      });
-    } else if (powerDev) {
-      onPowerToggle(powerDev.id, !on);
-    }
+    setTilePower(!on);
   }
 
   const dimmable = !!light?.capabilities.dimmable;
@@ -1808,13 +1822,12 @@ function DeviceTile({
     if (light) onLightUpdate(light.id, lightOptimistic(light.last_state, { field: "brightness", brightness: v }));
     else if (mediaDev) onMediaPatch(mediaDev.id, { volume: v });
   };
-  // Write only ~300ms after the drag stops (on release) — never spam mid-drag.
+  // Write only after the drag stops (on release) — never spam mid-drag.
   const onCommit = (v: number) => {
-    clearTimeout(commitTimer.current);
-    commitTimer.current = setTimeout(() => {
+    queueSlide(() => {
       if (light) setLightState(light.id, { on: true, brightness: v });
       else if (mediaDev) setMediaState(mediaDev.id, { volume: v });
-    }, 300);
+    });
   };
 
   // A power device is strictly on/off — its tile is just a big centered power
@@ -2016,7 +2029,8 @@ function GroupWidget({
   const themed = useMatchTheme();
   const ref = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
-  const commitTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const { queue: queueCascade, cancel: cancelCascade } = useCoalescedWrite(ATTR_DELAY);
+  const { queue: queueVolume } = useCoalescedWrite(VOLUME_DELAY);
 
   // `all` is a mixed power group: every selected device of any type, controlled by
   // the one action shared across all domains — power on/off. The typed domains keep
@@ -2036,22 +2050,32 @@ function GroupWidget({
   // ("all") groups are on/off only.
   const hasEditor = domain === "light" || domain === "media";
 
+  // Fans to every target; the revert stays per-device so one unreachable member
+  // can't un-paint the ones that did take the command.
+  const setGroupPower = useToggleWrite<boolean>({
+    write: (next) => {
+      for (const l of tLights) {
+        setLightState(l.id, { on: next }).then((err) => {
+          if (err) onLightUpdate(l.id, { ...(l.last_state ?? { on: false }), on: !next });
+        });
+      }
+      for (const m of tMedia) {
+        setMediaState(m.id, { power: next }).then((err) => {
+          if (err) onMediaPatch(m.id, { power: !next });
+        });
+      }
+      for (const p of tPower) onPowerToggle(p.id, next);
+      return null;
+    },
+    onOptimistic: (next) => {
+      cancelCascade(); // a queued attribute write carries on:true
+      // power only — preserves each light's mode
+      for (const l of tLights) onLightUpdate(l.id, { ...(l.last_state ?? { on: false }), on: next });
+      for (const m of tMedia) onMediaPatch(m.id, { power: next });
+    },
+  });
   function togglePower() {
-    const next = !anyOn;
-    // Each optimistic flip reverts if its device rejects the write (offline).
-    for (const l of tLights) {
-      onLightUpdate(l.id, { ...(l.last_state ?? { on: false }), on: next }); // power only — preserves each light's mode
-      setLightState(l.id, { on: next }).then((err) => {
-        if (err) onLightUpdate(l.id, { ...(l.last_state ?? { on: false }), on: !next });
-      });
-    }
-    for (const m of tMedia) {
-      onMediaPatch(m.id, { power: next });
-      setMediaState(m.id, { power: next }).then((err) => {
-        if (err) onMediaPatch(m.id, { power: !next });
-      });
-    }
-    for (const p of tPower) onPowerToggle(p.id, next);
+    setGroupPower(!anyOn);
   }
 
   // Per-light cascade (mirrors the room-header cascade, fanned per device) via the
@@ -2066,10 +2090,9 @@ function GroupWidget({
       else if (change.field !== "effect")
         onLightUpdate(l.id, { ...(l.last_state ?? { on: true }), on: true });
     }
-    clearTimeout(commitTimer.current);
-    commitTimer.current = setTimeout(() => {
+    queueCascade(() => {
       for (const id of ids) setLightState(id, lightWrite(change));
-    }, 200);
+    });
   }
 
   // Media cascade: the editor commits its own `device`; fan the rest.
@@ -2105,22 +2128,20 @@ function GroupWidget({
     }
   };
   const slideBrightnessCommit = (v: number) => {
-    clearTimeout(commitTimer.current);
-    commitTimer.current = setTimeout(() => {
+    queueCascade(() => {
       // Brightness only — never re-send a member's colour/effect (shared rule).
       for (const l of tLights) {
         if (l.capabilities.dimmable) setLightState(l.id, { on: true, brightness: v });
       }
-    }, 300);
+    });
   };
   const slideVolumeChange = (v: number) => {
     for (const m of tMedia) onMediaPatch(m.id, { volume: v, power: true });
   };
   const slideVolumeCommit = (v: number) => {
-    clearTimeout(commitTimer.current);
-    commitTimer.current = setTimeout(() => {
+    queueVolume(() => {
       for (const m of tMedia) setMediaState(m.id, { volume: v });
-    }, 300);
+    });
   };
 
   // A running effect owns the group's accent — same rule as a single light

@@ -10,6 +10,7 @@ import { DevicesPage } from "./pages/Devices";
 import { ScenesPage } from "./pages/Scenes";
 import { RoomsPage } from "./pages/Rooms";
 import { FloorPlanPage } from "./pages/FloorPlan";
+import { FEATURES } from "./features";
 import { AutomationsPage } from "./pages/Automations";
 import { SettingsPage, type AddPrefill } from "./pages/Settings";
 import { S } from "./styles";
@@ -81,7 +82,8 @@ export function App() {
   const [pendingAdd, setPendingAdd] = useState<AddPrefill | null>(null);
   const [lights, setLights] = useState<Light[]>([]);
   const [version, setVersion] = useState("");
-  // Dev mode gates dev-only surfaces (today: the tabled Floor Plan nav entry).
+  // Dev mode gates dev-only surfaces (the StreamBadge; the Floor Plan nav entry
+  // too, but that is switched off outright — see FEATURES.floorPlan).
   // Fetched post-auth; the Settings toggle updates it live via onDevModeChange.
   const [devMode, setDevMode] = useState(false);
   const { isMobile, isCompact } = useViewport();
@@ -149,6 +151,7 @@ export function App() {
   if (page === "login") return <LoginPage onSuccess={() => init()} version={version} />;
 
   const navigate = (p: NavPage) => {
+    if (p === "plan" && !FEATURES.floorPlan) return;
     if (p === "dashboard" || p === "scenes" || p === "plan")
       refreshLights().then(() => setPage(p));
     else setPage(p);
@@ -171,7 +174,7 @@ export function App() {
       {isCompact ? (
         <MobileTopBar version={version} page={page} onLogout={onLogout} />
       ) : (
-        <NavTray version={version} page={page} showPlan={devMode} onNavigate={navigate} onLogout={onLogout} />
+        <NavTray version={version} page={page} showPlan={FEATURES.floorPlan && devMode} onNavigate={navigate} onLogout={onLogout} />
       )}
 
       <main
@@ -203,6 +206,7 @@ export function App() {
         {page === "scenes" && <ScenesPage />}
         {page === "rooms" && <RoomsPage />}
         {page === "plan" &&
+          FEATURES.floorPlan &&
           (isMobile ? (
             <div style={{ padding: "3rem 1.2rem", textAlign: "center", color: color.dim }}>
               The Floor Plan is available on a larger screen.
@@ -221,7 +225,7 @@ export function App() {
         )}
       </main>
 
-      {isCompact && <BottomNav page={page} onNavigate={navigate} showPlan={!isMobile && devMode} />}
+      {isCompact && <BottomNav page={page} onNavigate={navigate} showPlan={FEATURES.floorPlan && !isMobile && devMode} />}
       {/* Dev-mode only, but rendered on EVERY client including the kiosks —
           turning dev mode on at the hub is what lights it up on a wall tablet
           that has no other way to report its own stream health. */}
@@ -324,7 +328,8 @@ function BottomNav({
         paddingBottom: "env(safe-area-inset-bottom)",
       }}
     >
-      {/* Floor Plan needs room to draw — shown on tablet fixtures, hidden on phones. */}
+      {/* Floor Plan needs room to draw — tablet fixtures yes, phones no. Off
+          entirely at FEATURES.floorPlan today. */}
       {NAV_ITEMS.filter((item) => item.id !== "plan" || showPlan).map((item) => {
         const active = page === item.id;
         return (
@@ -366,7 +371,8 @@ function NavTray({
 }: {
   version: string;
   page: Page;
-  /** Floor Plan is tabled — its nav entry is dev-mode only. */
+  /** Floor Plan is off at the feature flag (`FEATURES.floorPlan`); when on, its
+   *  nav entry is additionally dev-mode only. */
   showPlan: boolean;
   onNavigate: (p: NavPage) => void;
   onLogout: () => void;

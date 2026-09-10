@@ -30,6 +30,7 @@ import { PageHeader } from "../components/PageHeader";
 import { useDialogs, type Dialogs } from "../components/dialogs";
 import { useMediaQuery, useViewport } from "../useViewport";
 import { useEvents } from "../useEvents";
+import { useToggleWrite } from "../components/useWrite";
 
 interface Props {
   lights: Light[];
@@ -115,16 +116,17 @@ export function DashboardPage({ lights, onRefresh, onNavigate }: Props) {
       prev.map((d) => (d.id === id ? { ...d, state: { ...d.state, ...patch } } : d)),
     );
   }
-  function onPowerToggle(id: string, next: boolean) {
+  const paintPower = (id: string, on: boolean) =>
     setPowerDevices((prev) =>
-      prev.map((d) => (d.id === id ? { ...d, state: { ...d.state, on: next } } : d)),
+      prev.map((d) => (d.id === id ? { ...d, state: { ...d.state, on } } : d)),
     );
-    setPowerState(id, next).then((err) => {
-      if (err) setPowerDevices((prev) =>
-        prev.map((d) => (d.id === id ? { ...d, state: { ...d.state, on: !next } } : d)),
-      );
-    });
-  }
+  const writePower = useToggleWrite<{ id: string; on: boolean }>({
+    write: ({ id, on }) => setPowerState(id, on),
+    onOptimistic: ({ id, on }) => paintPower(id, on),
+    onRevert: ({ id, on }) => paintPower(id, !on),
+    same: (a, b) => a.id === b.id && a.on === b.on,
+  });
+  const onPowerToggle = (id: string, next: boolean) => writePower({ id, on: next });
   function onLightSetEnabled(id: string, enabled: boolean) {
     setLocalLights((prev) => prev.map((l) => (l.id === id ? { ...l, enabled } : l)));
     setLightEnabled(id, enabled);
