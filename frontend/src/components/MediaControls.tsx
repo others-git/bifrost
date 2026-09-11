@@ -19,11 +19,11 @@ import { useRemote, KeysPad, ScryPad, RemoteApps, ExpandedRemote, RemoteTextEntr
 import { PowerToggle, Segmented } from "./controls";
 import { useSwipeTabs } from "./useSwipeTabs";
 import { Flyout, FlyoutHeader } from "./Flyout";
-import { VOLUME_DELAY, useCoalescedWrite, useToggleWrite } from "./useWrite";
+import { VOLUME_DELAY, useCoalescedWrite, useNudge, useToggleWrite } from "./useWrite";
 import { Select } from "./Select";
 import { Glyph } from "./glyphs";
 import { useViewport } from "../useViewport";
-import { T, domain, color, alpha, hitHalo, labelType } from "../theme";
+import { T, TOUCH, domain, color, alpha, hitHalo, labelType } from "../theme";
 import type { RemoteKey } from "../api";
 
 const ACCENT = domain.media; // violet — audio's accent
@@ -52,6 +52,75 @@ export function fanMediaCommand(
   }
 }
 
+/**
+ * The one volume control plane for a media device: the optimistic paint, the
+ * shared coalesced write, and a ±step that accumulates across rapid taps.
+ *
+ * Every volume gesture on every surface goes through this — the slider, the −/+
+ * nudge buttons, and the remote pad's volume keys — because the routing behind
+ * it isn't uniform: a source bound to a receiver has its volume resolved onto
+ * that receiver server-side, so a control that reached the device by any other
+ * path would move the wrong box. One hook instance is one coalescing slot, so a
+ * surface that shows a slider *and* nudge buttons (the AIO TV control) calls it
+ * once and shares the result rather than racing two slots against each other.
+ */
+export function useVolumeControl(
+  device: MediaDevice,
+  onLocalPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void,
+): { volume: number; set: (v: number) => void; nudge: (delta: number) => void } {
+  const { queue } = useCoalescedWrite(VOLUME_DELAY);
+  const volume = device.state.volume ?? 0;
+  const set = (v: number) => {
+    const clamped = Math.max(0, Math.min(100, Math.round(v)));
+    onLocalPatch(device.id, { volume: clamped });
+    queue(() => void setMediaState(device.id, { volume: clamped }));
+  };
+  return { volume, set, nudge: useNudge(volume, set) };
+}
+
+/** One ±1 volume step — the discrete twin of the slider it sits beside, for the
+ * level a fingertip dragging a bar can't land on (and for a wall tablet, where
+ * a small nudge beats a re-grab). Bare glyph in the same weight as the mute
+ * button next to it, sized to a full touch target on compact. */
+export function VolumeStep({
+  dir,
+  onNudge,
+  size = 16,
+}: {
+  dir: "up" | "down";
+  onNudge: (delta: number) => void;
+  size?: number;
+}) {
+  const { isCompact } = useViewport();
+  const label = dir === "up" ? "Volume up" : "Volume down";
+  // A real box rather than the usual `hitHalo`: three haloed controls in one
+  // row would overlap each other's invisible padding, and the later one in the
+  // DOM would quietly eat taps aimed at its neighbour's glyph.
+  const box = isCompact ? TOUCH : 28;
+  return (
+    <button
+      onClick={() => onNudge(dir === "up" ? 1 : -1)}
+      title={label}
+      aria-label={label}
+      style={{
+        width: box,
+        height: box,
+        padding: 0,
+        background: "none",
+        border: "none",
+        cursor: "pointer",
+        color: T.text,
+        opacity: 0.6,
+        flexShrink: 0,
+        display: "grid",
+        placeItems: "center",
+      }}
+    >
+      <Glyph name={dir === "up" ? "volume_up" : "volume_down"} size={size} />
+    </button>
+  );
+}
+
 export const KIND_LABEL: Record<string, string> = {
   receiver: "Receiver",
   speaker: "Speaker",
@@ -74,7 +143,7 @@ export function MediaControls({
    * Remote tab instead). */
   hideTransport?: boolean;
 }) {
-  const { queue: queueVolume } = useCoalescedWrite(VOLUME_DELAY);
+  const vol = useVolumeControl(device, onLocalPatch);
   const s = device.state;
   const offline = s.reachable === false;
   const np = s.now_playing;
@@ -90,10 +159,6 @@ export function MediaControls({
   async function send(cmd: MediaCommand) {
     const err = await setMediaState(device.id, cmd);
     if (err) console.warn("audio command failed:", err);
-  }
-  function setVolume(v: number) {
-    onLocalPatch(device.id, { volume: v });
-    queueVolume(() => void send({ volume: v }));
   }
   const setMute = useToggleWrite<boolean>({
     write: (next) => setMediaState(device.id, { mute: next }),
@@ -173,14 +238,16 @@ export function MediaControls({
           >
             <Glyph name={s.mute ? "mute" : "volume"} size={18} />
           </button>
+          <VolumeStep dir="down" onNudge={vol.nudge} />
           <input
             type="range"
             min={0}
             max={100}
             value={s.volume}
-            onChange={(e) => setVolume(Number(e.target.value))}
+            onChange={(e) => vol.set(Number(e.target.value))}
             style={{ flex: 1, accentColor: ACCENT, height: compact ? 40 : undefined, margin: compact ? "-8px 0" : undefined }}
           />
+          <VolumeStep dir="up" onNudge={vol.nudge} />
           <span style={{ fontSize: "0.78rem", color: T.dim, width: 30, textAlign: "right" }}>{s.volume}</span>
         </div>
       )}
@@ -429,6 +496,10 @@ function TvAio({
 }) {
   const remote = useRemote(remoteId);
   const { isDesktop } = useViewport();
+  // One instance, shared by the slider and the keypad's volume keys: two would
+  // be two coalescing slots for one capability, and the keys would be routed
+  // differently from the bar sitting right above them.
+  const vol = useVolumeControl(device, onLocalPatch);
   // A horizontal swipe anywhere on the panel body flips Keys ⇄ Scry ⇄ Apps.
   const swipe = useSwipeTabs(tab, ["keys", "scry", "apps"] as const, onTabChange);
 
@@ -483,14 +554,14 @@ function TvAio({
         <div style={{ display: "flex", flexDirection: "column", gap: "0.9rem" }}>
           {/* What's on + volume sit above the keypad — the old "Watch" tab, folded in. */}
           <TvNowPlaying device={device} />
-          <FancyVolume device={device} onLocalPatch={onLocalPatch} />
-          <KeysPad press={remote.press} />
+          <FancyVolume device={device} onLocalPatch={onLocalPatch} vol={vol} />
+          <KeysPad press={remote.press} onVolume={vol.nudge} />
           <RemoteTextEntry send={remote.send} />
           <AssistantSay deviceId={device.id} />
           <ExpandedRemote remoteId={remoteId} send={remote.send} />
         </div>
       ) : tab === "scry" ? (
-        <ScryPad press={remote.press} />
+        <ScryPad press={remote.press} onVolume={vol.nudge} />
       ) : (
         <RemoteApps
           apps={remote.apps}
@@ -560,16 +631,19 @@ function TvNowPlaying({ device }: { device: MediaDevice }) {
 function FancyVolume({
   device,
   onLocalPatch,
+  vol,
 }: {
   device: MediaDevice;
   onLocalPatch: (id: string, patch: Partial<MediaDevice["state"]>) => void;
+  /** The shared volume plane, owned by the caller so the keypad's volume keys
+   * and this bar move the same level through the same slot. */
+  vol: { volume: number; set: (v: number) => void; nudge: (delta: number) => void };
 }) {
   const st = device.state;
   const receiverName = device.receiver_name ?? undefined;
-  const volume = st.volume ?? 0;
+  const volume = vol.volume;
   const muted = st.mute ?? false;
   const trackRef = useRef<HTMLDivElement>(null);
-  const { queue: queueVolume } = useCoalescedWrite(VOLUME_DELAY);
 
   // In receiver-paired mode the receiver itself is hidden, so surface a small
   // power toggle for it beside the "Volume → receiver" line. Its power isn't on
@@ -596,18 +670,11 @@ function FancyVolume({
     setReceiver(!receiverPower);
   }
 
-  function commit(v: number) {
-    const clamped = Math.max(0, Math.min(100, Math.round(v)));
-    onLocalPatch(device.id, { volume: clamped });
-    // Was 200ms here and 250ms on the main bar — the same capability, two
-    // cadences. One number now.
-    queueVolume(() => void setMediaState(device.id, { volume: clamped }));
-  }
   function fromPointer(clientX: number) {
     const el = trackRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
-    commit(((clientX - r.left) / r.width) * 100);
+    vol.set(((clientX - r.left) / r.width) * 100);
   }
   function toggleMute() {
     onLocalPatch(device.id, { mute: !muted });
@@ -625,6 +692,7 @@ function FancyVolume({
         >
           <Glyph name={muted ? "mute" : "volume"} size={18} />
         </button>
+        <VolumeStep dir="down" onNudge={vol.nudge} />
         {/* The slim track keeps its look; the halo wrapper is the grab target,
             and it owns the drag (stopPropagation) so a volume swipe never reads
             as a tab swipe. */}
@@ -686,6 +754,7 @@ function FancyVolume({
           />
         </div>
         </div>
+        <VolumeStep dir="up" onNudge={vol.nudge} />
         <span style={{ fontSize: "0.8rem", color: T.dim, width: 28, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
           {volume}
         </span>

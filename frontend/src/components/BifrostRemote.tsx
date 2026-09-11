@@ -64,23 +64,94 @@ export function useRemote(remoteId: string) {
   return { currentApp, apps, send, press, togglePin };
 }
 
-/** Back / Home / Menu — the three discrete keys every navigation surface keeps
- * outside itself (a gesture flick or a D-pad tap can't express them). */
-function NavRow({ onKey }: { onKey: (k: RemoteKey) => void }) {
+/** A row of remote keys.
+ *
+ * Centred at the shared key size by default; `full` instead splits the panel's
+ * whole width between them. The two modes must not be mixed within one stack:
+ * a centred row stops at `KeyNiche`'s max width and centres the slack, so it
+ * sits a few px inside a full-width row above it — which is exactly what the
+ * rows under the Scrying Glass looked like before they all went `full`. */
+function KeyRow({ keys, full = false }: { keys: KeySpec[]; full?: boolean }) {
   return (
     <Row>
-      <KeyNiche glyph="back" label="Back" onClick={() => onKey("back")} />
-      <KeyNiche glyph="home" label="Home" onClick={() => onKey("home")} />
-      <KeyNiche glyph="menu" label="Menu" onClick={() => onKey("menu")} />
+      {keys.map((k) =>
+        full ? (
+          // `square` is KeyNiche's "fill the cell you're given" mode — here, the
+          // equal share of the row this wrapper claims.
+          <div key={k.label} style={{ flex: 1, display: "grid" }}>
+            <KeyNiche glyph={k.glyph} label={k.label} square onClick={k.onClick} />
+          </div>
+        ) : (
+          <KeyNiche key={k.label} glyph={k.glyph} label={k.label} onClick={k.onClick} />
+        ),
+      )}
     </Row>
   );
 }
 
-/** The Keys plate: cross-keys D-pad, nav row, and transport — an engraved
+type KeySpec = { glyph: string; label: string; onClick: () => void };
+
+/** Back / Home / Menu — the three discrete keys every navigation surface keeps
+ * outside itself (a gesture flick or a D-pad tap can't express them). */
+function NavRow({ onKey, full = false }: { onKey: (k: RemoteKey) => void; full?: boolean }) {
+  return (
+    <KeyRow
+      full={full}
+      keys={[
+        { glyph: "back", label: "Back", onClick: () => onKey("back") },
+        { glyph: "home", label: "Home", onClick: () => onKey("home") },
+        { glyph: "menu", label: "Menu", onClick: () => onKey("menu") },
+      ]}
+    />
+  );
+}
+
+/** Volume −/+ — a one-step nudge, sitting directly above the nav row on every
+ * navigation surface (so the Scrying Glass has volume too, without putting a
+ * slider on a slab whose whole point is that you aren't looking at it).
+ *
+ * `onVolume` is the media plane: when the caller owns the TV's media device —
+ * the AIO TV control always does — the step goes through it, so a TV whose
+ * volume is bound to a receiver nudges the RECEIVER, exactly like the slider
+ * above. A bare remote with no media device behind it falls back to the TV's
+ * own volume keys, which is all such a device has.
+ *
+ * `full` (see `KeyRow`) splits the panel's whole width between the two keys —
+ * what the Scrying Glass wants, so the row under the slab reads as a slim base
+ * flush with it rather than a stray pair of buttons floating underneath. */
+function VolumeRow({
+  onKey,
+  onVolume,
+  full = false,
+}: {
+  onKey: (k: RemoteKey) => void;
+  onVolume?: (delta: number) => void;
+  full?: boolean;
+}) {
+  const step = (delta: number) => (onVolume ? onVolume(delta) : onKey(delta > 0 ? "volume_up" : "volume_down"));
+  return (
+    <KeyRow
+      full={full}
+      keys={[
+        { glyph: "volume_down", label: "Volume down", onClick: () => step(-1) },
+        { glyph: "volume_up", label: "Volume up", onClick: () => step(1) },
+      ]}
+    />
+  );
+}
+
+/** The Keys plate: cross-keys D-pad, volume, nav row, and transport — an engraved
  * panel for anyone who wants discrete tap targets (a mouse, or fingers that
  * prefer buttons to gestures). One of the two peer navigation tabs; see
  * `ScryPad` for the gesture alternative. */
-export function KeysPad({ press }: { press: (k: RemoteKey) => () => void }) {
+export function KeysPad({
+  press,
+  onVolume,
+}: {
+  press: (k: RemoteKey) => () => void;
+  /** Route the volume keys through the media plane (see `VolumeRow`). */
+  onVolume?: (delta: number) => void;
+}) {
   const onKey = (k: RemoteKey) => press(k)();
   return (
     <div
@@ -98,6 +169,7 @@ export function KeysPad({ press }: { press: (k: RemoteKey) => () => void }) {
       <CornerFiligree />
       <CrossKeys onKey={onKey} />
       <div aria-hidden style={{ height: 1, background: gildedRule, opacity: 0.5 }} />
+      <VolumeRow onKey={onKey} onVolume={onVolume} />
       <NavRow onKey={onKey} />
       <Row>
         <KeyNiche glyph="prev" label="Previous" onClick={() => onKey("previous")} />
@@ -109,10 +181,17 @@ export function KeysPad({ press }: { press: (k: RemoteKey) => () => void }) {
 }
 
 /** The Scrying Glass plate: the gesture slab filling all the height its parent
- * gives it, with just the nav row beneath — "eyes on the TV, not on the
+ * gives it, with just the volume + nav rows beneath — "eyes on the TV, not on the
  * phone" means nothing else competes for the surface. The caller (`TvAio`)
  * is what actually maximizes that parent height when this tab is open. */
-export function ScryPad({ press }: { press: (k: RemoteKey) => () => void }) {
+export function ScryPad({
+  press,
+  onVolume,
+}: {
+  press: (k: RemoteKey) => () => void;
+  /** Route the volume keys through the media plane (see `VolumeRow`). */
+  onVolume?: (delta: number) => void;
+}) {
   const onKey = (k: RemoteKey) => press(k)();
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "0.7rem", flex: 1, minHeight: 0 }}>
@@ -123,7 +202,8 @@ export function ScryPad({ press }: { press: (k: RemoteKey) => () => void }) {
       <div style={{ flex: 1, minHeight: "min(56vh, 480px)", display: "grid" }}>
         <ScryingGlass onKey={onKey} height="100%" />
       </div>
-      <NavRow onKey={onKey} />
+      <VolumeRow onKey={onKey} onVolume={onVolume} full />
+      <NavRow onKey={onKey} full />
     </div>
   );
 }

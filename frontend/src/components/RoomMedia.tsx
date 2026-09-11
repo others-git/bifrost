@@ -14,10 +14,11 @@ import {
   type RoomMediaMember,
 } from "../api";
 import { Button } from "./controls";
+import { VolumeStep } from "./MediaControls";
 import { Glyph } from "./glyphs";
 import { alpha } from "../theme";
 import { pickableMedia } from "../deviceSelectors";
-import { VOLUME_DELAY, useCoalescedWrite } from "./useWrite";
+import { VOLUME_DELAY, useCoalescedWrite, useNudge } from "./useWrite";
 
 const ACCENT = "#a78bfa";
 
@@ -46,6 +47,10 @@ export function RoomVolumeStrip({ room, devices }: { room: Room; devices: MediaD
   const [volume, setVolume] = useState(seedVol);
   const [mute, setMute] = useState(seedMute);
   const { queue: queueRoomVolume } = useCoalescedWrite(VOLUME_DELAY);
+  // Above the `mem.length === 0` early return below: a hook after a conditional
+  // return renders a different number of hooks per branch and takes down the
+  // whole tree.
+  const nudge = useNudge(volume, (v) => commitVolume(v));
 
   useEffect(() => {
     setVolume(seedVol);
@@ -75,6 +80,7 @@ export function RoomVolumeStrip({ room, devices }: { room: Room; devices: MediaD
       >
         <Glyph name={mute ? "mute" : "volume"} size={15} />
       </button>
+      <VolumeStep dir="down" onNudge={nudge} size={15} />
       <input
         type="range"
         min={0}
@@ -83,6 +89,7 @@ export function RoomVolumeStrip({ room, devices }: { room: Room; devices: MediaD
         onChange={(e) => commitVolume(Number(e.target.value))}
         style={{ flex: 1, accentColor: ACCENT }}
       />
+      <VolumeStep dir="up" onNudge={nudge} size={15} />
       <span style={{ fontSize: "0.68rem", color: "var(--bf-faint)", width: 22, textAlign: "right" }}>{volume}</span>
     </div>
   );
@@ -95,6 +102,7 @@ export function RoomVolumeStrip({ room, devices }: { room: Room; devices: MediaD
 function MemberLevel({ device }: { device: MediaDevice }) {
   const [level, setLevel] = useState(device.state.volume);
   const { queue: queueVolume } = useCoalescedWrite(VOLUME_DELAY);
+  const nudge = useNudge(level, (v) => commit(v));
 
   useEffect(() => setLevel(device.state.volume), [device.id, device.state.volume]);
 
@@ -106,6 +114,7 @@ function MemberLevel({ device }: { device: MediaDevice }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
       <span style={{ fontSize: "0.72rem", color: "var(--bf-dim)", width: 40 }}>level</span>
+      <VolumeStep dir="down" onNudge={nudge} size={15} />
       <input
         type="range"
         min={0}
@@ -114,6 +123,7 @@ function MemberLevel({ device }: { device: MediaDevice }) {
         onChange={(e) => commit(Number(e.target.value))}
         style={{ flex: 1, accentColor: ACCENT }}
       />
+      <VolumeStep dir="up" onNudge={nudge} size={15} />
       <span style={{ fontSize: "0.72rem", color: "var(--bf-dim)", width: 34, textAlign: "right" }}>
         {level}
       </span>

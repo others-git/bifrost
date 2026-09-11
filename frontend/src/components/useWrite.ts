@@ -4,15 +4,20 @@
 // which is how the app ended up with five different N for the same capability
 // (light attributes at 200/250/300ms depending on whether you were on the room
 // card, the floor plan or a board) and with power writes that coalesced in the
-// device fly-out and nowhere else. These two hooks are that pattern, named and
+// device fly-out and nowhere else. These hooks are that pattern, named and
 // shared, so a cadence is a property of the *capability* rather than of whichever
 // page you happen to be standing on.
 //
-// Two modes, because continuous and discrete controls want opposite edges:
+// Two write modes, because continuous and discrete controls want opposite edges,
+// plus the stepper's accumulator that feeds either:
 //
 //   useCoalescedWrite — sliders (brightness, colour, volume, segments). Trailing
 //     only: nothing is sent until the gesture settles, so dragging a slider
 //     across its track costs one write instead of thirty.
+//
+//   useNudge — stepper buttons (volume ±1). Not a write slot of its own: it is
+//     the accumulator in front of one, so a burst of taps steps from the last
+//     value asked for instead of from a prop React has not re-rendered yet.
 //
 //   useToggleWrite — buttons (power, mute, enable). Leading *and* trailing: the
 //     first press goes out immediately (a light must not wait 200ms to come on),
@@ -23,7 +28,7 @@
 //     window's end, so power-cycling works), while `off → on → off` drops the
 //     middle `on`, because the device is already where it needs to be.
 //
-// Neither hook cancels a pending write on unmount, deliberately: dragging a
+// Neither write hook cancels a pending write on unmount, deliberately: dragging a
 // brightness slider and immediately closing the fly-out must still reach the
 // light. The pending work holds its own closure and no React state, so it is
 // safe to land after the component is gone.
@@ -131,5 +136,39 @@ export function useToggleWrite<T>({
     }
     void send(value);
     openWindow();
+  };
+}
+
+/**
+ * The accumulator for a stepping control (volume ±1), sitting in front of a
+ * write slot rather than owning one.
+ *
+ * `nudge(delta)` steps from the value the **last tap asked for**, not from
+ * `current`: taps arrive faster than a round-trip and can outrun a re-render, so
+ * reading the prop each time would make three taps on +1 move the level by one.
+ * Any change to `current` that isn't ours — a slider drag, another surface, a
+ * push from the device — drops the accumulator, so the next tap steps from where
+ * the device actually is rather than from a level the user has since abandoned.
+ *
+ * The step is clamped and rounded here so no call site has to, and `commit` gets
+ * a value that is already a legal level.
+ */
+export function useNudge(
+  current: number,
+  commit: (value: number) => void,
+  { min = 0, max = 100 }: { min?: number; max?: number } = {},
+): (delta: number) => void {
+  const pending = useRef<number | undefined>(undefined);
+  const seen = useRef(current);
+  // Derived-from-props state: cheaper and more correct than an effect, which
+  // would clear the accumulator a render too late (after the next tap read it).
+  if (seen.current !== current) {
+    seen.current = current;
+    pending.current = undefined;
+  }
+  return (delta: number) => {
+    const next = Math.max(min, Math.min(max, Math.round((pending.current ?? current) + delta)));
+    pending.current = next;
+    commit(next);
   };
 }

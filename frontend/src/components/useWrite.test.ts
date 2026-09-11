@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
-import { useCoalescedWrite, useToggleWrite } from "./useWrite";
+import { useCoalescedWrite, useNudge, useToggleWrite } from "./useWrite";
 
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
@@ -193,5 +193,65 @@ describe("useToggleWrite", () => {
     await settle();
 
     expect(onRevert).not.toHaveBeenCalled();
+  });
+});
+
+describe("useNudge", () => {
+  it("steps from the last value asked for, not from a prop that hasn't re-rendered", () => {
+    const commit = vi.fn();
+    // `current` deliberately never changes: this is the burst case, where taps
+    // outrun the re-render that would carry the new level back down.
+    const { result } = renderHook(() => useNudge(50, commit));
+
+    act(() => result.current(1));
+    act(() => result.current(1));
+    act(() => result.current(1));
+
+    expect(commit.mock.calls.map((c) => c[0])).toEqual([51, 52, 53]);
+  });
+
+  it("drops the accumulator when the value changes under it", () => {
+    const commit = vi.fn();
+    const { result, rerender } = renderHook(({ v }) => useNudge(v, commit), {
+      initialProps: { v: 50 },
+    });
+
+    act(() => result.current(1)); // 51
+    rerender({ v: 20 }); // someone dragged the slider (or the device pushed)
+    act(() => result.current(1));
+
+    expect(commit).toHaveBeenLastCalledWith(21);
+  });
+
+  it("clamps to the range instead of walking past it", () => {
+    const commit = vi.fn();
+    const { result } = renderHook(() => useNudge(99, commit));
+
+    act(() => result.current(1));
+    act(() => result.current(1));
+    act(() => result.current(1));
+
+    expect(commit.mock.calls.map((c) => c[0])).toEqual([100, 100, 100]);
+  });
+
+  it("honours a non-default range", () => {
+    const commit = vi.fn();
+    const { result } = renderHook(() => useNudge(0, commit, { min: -10, max: 10 }));
+
+    act(() => result.current(-5));
+    act(() => result.current(-5));
+    act(() => result.current(-5));
+
+    expect(commit.mock.calls.map((c) => c[0])).toEqual([-5, -10, -10]);
+  });
+
+  it("rounds a fractional level to a whole step", () => {
+    const commit = vi.fn();
+    const { result } = renderHook(() => useNudge(41.6, commit));
+
+    act(() => result.current(1));
+    act(() => result.current(1));
+
+    expect(commit.mock.calls.map((c) => c[0])).toEqual([43, 44]);
   });
 });

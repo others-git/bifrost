@@ -256,10 +256,19 @@ const BODIES: Record<string, JSX.Element> = {
     </>
   ),
   volume_down: (
-    // Speaker with one wave — quieter.
+    // Speaker with a minus — one step quieter. Drawn as a sign rather than as
+    // "fewer waves" so it reads as a nudge button next to `volume_up`, not as a
+    // quieter-volume state.
     <>
       <path d="M4 9.5v5h3.5L13 19V5L7.5 9.5H4Z" />
-      <path d="M16.5 9.2a4 4 0 0 1 0 5.6" />
+      <path d="M16.4 12h5" />
+    </>
+  ),
+  volume_up: (
+    // Speaker with a plus — one step louder.
+    <>
+      <path d="M4 9.5v5h3.5L13 19V5L7.5 9.5H4Z" />
+      <path d="M16.4 12h5M18.9 9.5v5" />
     </>
   ),
   play_pause: (
@@ -522,6 +531,7 @@ export const ALL_GLYPH_OPTIONS: { name: string; label: string }[] = [
   { name: "brightness", label: "Brightness" },
   { name: "volume", label: "Volume" },
   { name: "volume_down", label: "Volume down" },
+  { name: "volume_up", label: "Volume up" },
   { name: "mute", label: "Mute" },
   { name: "scene", label: "Scene" },
   { name: "restore", label: "Restore" },
