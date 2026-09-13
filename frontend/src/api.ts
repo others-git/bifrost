@@ -33,7 +33,53 @@ const rawFetch = fetch;
 export const DEFAULT_TIMEOUT_MS = 20_000;
 /** Statuses the `Response` constructor forbids a body on, empty or not. */
 const NULL_BODY_STATUS = new Set([204, 205, 304]);
+
+/** A kiosk WebView, identified the only way it can be before any auth has
+ * happened: its user-agent. */
+export const IS_KIOSK = /\bBifrostKiosk\//.test(navigator.userAgent);
+
+const KIOSK_LOGIN_PATH = "/api/auth/kiosk";
+let kioskReauth: Promise<boolean> | null = null;
+
+/**
+ * Trade the kiosk's `bfr_key` cookie for a fresh dashboard session.
+ *
+ * At most one exchange is in flight however many calls 401 at once — a board
+ * wakes several requests together, and each one minting its own session would
+ * leave a pile of rows behind for a single lapse.
+ */
+function reauthKiosk(): Promise<boolean> {
+  kioskReauth ??= fetchOnce(KIOSK_LOGIN_PATH, { method: "POST" })
+    .then((r) => r.ok)
+    .catch(() => false)
+    .finally(() => {
+      kioskReauth = null;
+    });
+  return kioskReauth;
+}
+
+/**
+ * Every call, with one retry after re-authenticating a kiosk.
+ *
+ * A dashboard session is a 7-DAY ABSOLUTE expiry that nothing renews, and a
+ * wall tablet's WebView stays loaded for weeks — so its session lapses
+ * underneath a running page as a matter of course, and every session-gated
+ * call starts returning 401 with no one to notice. The exchange used to happen
+ * only inside the app's boot path, which is why a reload was the sole cure:
+ * the page had no way to re-authenticate without being born again. Doing it
+ * here means any call can recover, which is what keeps the buttons working.
+ *
+ * `init` is replayed as-is; nothing here sends a stream body, so re-issuing it
+ * is safe.
+ */
 async function timedFetch(input: string, init?: RequestInit, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Response> {
+  const res = await fetchOnce(input, init, timeoutMs);
+  if (res.status !== 401 || !IS_KIOSK || input === KIOSK_LOGIN_PATH) return res;
+  if (!(await reauthKiosk())) return res;
+  return fetchOnce(input, init, timeoutMs);
+}
+
+async function fetchOnce(input: string, init?: RequestInit, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Response> {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   // A caller's own signal has to be chained onto the internal one rather than
@@ -569,9 +615,11 @@ export async function logout(): Promise<void> {
 
 /** Trade a paired kiosk's `bfr_key` cookie (set by the kiosk app) for a dashboard
  * session, so an authorized wall fixture skips the password login. */
+/** Explicit kiosk session exchange, for a caller that wants to establish one
+ * up front rather than on the first 401. Shares the in-flight exchange with
+ * the automatic one in `timedFetch`. */
 export async function kioskLogin(): Promise<boolean> {
-  const res = await timedFetch("/api/auth/kiosk", { method: "POST" });
-  return res.ok;
+  return reauthKiosk();
 }
 
 export async function getLights(): Promise<Light[] | "unauthorized"> {
@@ -1841,6 +1889,20 @@ export interface Kiosk {
    * Clients view polls this after sending the `screenshot` command; the image
    * itself is `GET /api/kiosks/{id}/screenshot`. */
   screenshot_at: string | null;
+  /** What the kiosk's own PAGE last said about its `/api/events` connection
+   * (see `reportKioskHealth`). All-null until it reports — an older kiosk
+   * build never will. The ages are as of `seen_at`, not as of now: pair them
+   * with it, because a stale report is itself the finding (the page froze). */
+  web: KioskWebHealth;
+}
+
+export interface KioskWebHealth {
+  seen_at: string | null;
+  since_event_ms: number | null;
+  since_beat_ms: number | null;
+  reconnects: number | null;
+  ready_state: number | null;
+  page_age_ms: number | null;
 }
 
 export type AwareOverrideMode = "keep_on" | "keep_off";
@@ -1852,6 +1914,24 @@ export async function reportKioskViewport(w: number, h: number): Promise<void> {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ w: Math.round(w), h: Math.round(h) }),
+  }).catch(() => {});
+}
+
+/** Report this page's view of the shared event stream to the hub (kiosk
+ * WebView only — auth'd by the `bfr_key` cookie, deliberately NOT the session,
+ * so the report still lands when a lapsed session is the very thing that broke
+ * the stream). Fire-and-forget. */
+export async function reportKioskHealth(h: {
+  since_event_ms: number | null;
+  since_beat_ms: number | null;
+  reconnects: number;
+  ready_state: number;
+  page_age_ms: number;
+}): Promise<void> {
+  await timedFetch("/api/kiosks/self/health", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(h),
   }).catch(() => {});
 }
 

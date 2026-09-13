@@ -42,6 +42,10 @@ const TINT: Record<Level, string> = {
   silent: color.rose,
 };
 
+/** `EventSource.readyState`, in one letter: **c**onnecting, **o**pen,
+ * **x** closed, **–** no connection object at all. */
+const READY_STATE: Record<number, string> = { [-1]: "–", 0: "c", 1: "o", 2: "x" };
+
 /** "4s" / "12m" / "3h" — compact enough for a corner, exact enough to act on. */
 function ago(ms: number | null): string {
   if (ms === null) return "—";
@@ -64,11 +68,15 @@ export function StreamBadge() {
   const tint = TINT[lvl];
 
   // The numbers that actually discriminate, in the order you'd read them:
-  // last event, last beat, and how many times this page has had to reconnect
-  // (a climbing count is its own finding — the stream keeps dying).
+  // last event, last beat, how many times this page has had to reconnect (a
+  // climbing count is its own finding — the stream keeps dying), and the raw
+  // connection state. That last one earns its two characters: a stream stuck
+  // CONNECTING forever, one the browser has CLOSED, and one that looks OPEN
+  // while delivering nothing are three different faults, and without it they
+  // all read as the same rose pill.
   const detail = `evt ${ago(health.sinceEvent)} · hb ${ago(health.sinceBeat)}${
     health.reconnects > 0 ? ` · rc ${health.reconnects}` : ""
-  }`;
+  } · ${READY_STATE[health.readyState] ?? "?"}`;
 
   return (
     <div

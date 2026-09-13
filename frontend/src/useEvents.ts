@@ -63,7 +63,8 @@ let watchdog: ReturnType<typeof setInterval> | null = null;
 let lastEventAt = 0; // any DEVICE/inventory event (not the beat)
 let lastBeatAt = 0; // `hb` only
 let openedAt = 0; // when the current connection opened
-let reconnects = 0; // (re)connections since page load, first excluded
+let attempts = 0; // connections ATTEMPTED since page load
+let reconnects = 0; // attempts after the first
 
 export type StreamHealth = {
   /** `EventSource.readyState`, or -1 when there is no connection object. */
@@ -74,6 +75,7 @@ export type StreamHealth = {
   sinceBeat: number | null;
   /** ms the current connection has been open, or null if not connected. */
   openFor: number | null;
+  /** Reconnect ATTEMPTS, not successes — see `connect()`. */
   reconnects: number;
   /** True once the beat is overdue — the stream is dead or the hub is gone. */
   silent: boolean;
@@ -107,7 +109,14 @@ function connect() {
   if (es) return;
   const conn = new EventSource("/api/events");
   lastSeenAt = Date.now();
-  if (openedAt) reconnects++; // the first connection isn't a reconnect
+  // Count the ATTEMPT, not a successful open. This was `if (openedAt)
+  // reconnects++`, and `onerror` zeroes `openedAt` — so the counter froze the
+  // moment connecting started failing, i.e. in the one situation the badge
+  // exists to report. A wall tablet sat at "rc 13" for sixteen hours while it
+  // was in fact reopening the stream every thirty seconds, and the frozen
+  // number read as "the watchdog is dead" rather than "every attempt is being
+  // refused". A climbing rc with no events is the signal worth having.
+  if (attempts++ > 0) reconnects++; // the first connection isn't a reconnect
   EVENT_NAMES.forEach((name) => {
     conn.addEventListener(name, (raw) => {
       backoffMs = 1000;

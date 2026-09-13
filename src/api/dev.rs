@@ -38,6 +38,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/media/{id}/routing", get(media_routing_handler))
         .route("/events", get(events_handler))
         .route("/streams", get(streams_handler))
+        .route("/kiosks", get(kiosks_handler))
         .route("/events/clear", axum::routing::post(events_clear_handler))
 }
 
@@ -146,6 +147,84 @@ async fn streams_handler(
         return code.into_response();
     }
     Json(json!({ "streams": state.streams.snapshot() })).into_response()
+}
+
+/// `GET /api/dev/kiosks` — every wall tablet's three layers on one line.
+///
+/// A kiosk fails in three places and, read separately, they are easy to confuse
+/// for one another. This puts them side by side, per kiosk:
+///
+/// - **device** — `last_seen` / `online`, from the native app's 10s check-in.
+///   Aging means the tablet is off the network (or the app died); nothing above
+///   it can be believed.
+/// - **page** — `web`, self-reported by the WebView. A stale `web.seen_at` with
+///   a live check-in means the page itself is frozen or crashed while the device
+///   is fine. A fresh report whose `since_beat_ms` keeps growing means the page
+///   is running and its stream is being refused or dropped.
+/// - **stream** — `stream`, this kiosk's live `/api/events` subscriber, matched
+///   by kiosk **id** rather than name (two tablets of one model share a default
+///   name). Absent while the page reports itself alive is the signature of a
+///   stream the hub is turning away rather than one the client abandoned.
+///
+/// Read-only, and Bearer-reachable like the rest of `/api/dev`, because the
+/// question this answers — *which* of my tablets is the dead one — is one you
+/// ask from a shell, often while standing nowhere near either of them.
+async fn kiosks_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(code) = guard(&state, &headers).await {
+        return code.into_response();
+    }
+    let streams = state.streams.snapshot();
+    let rows = sqlx::query(
+        "SELECT id, name, app_version, last_seen, screen_on, viewport_w, viewport_h,
+                web_seen_at, web_since_event_ms, web_since_beat_ms, web_reconnects,
+                web_ready_state, web_page_age_ms,
+                CAST((julianday('now') - julianday(last_seen)) * 86400 AS INTEGER) AS last_seen_secs,
+                CAST((julianday('now') - julianday(web_seen_at)) * 86400 AS INTEGER) AS web_seen_secs
+         FROM kiosks ORDER BY name",
+    )
+    .fetch_all(&state.db)
+    .await;
+    let Ok(rows) = rows else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+
+    let kiosks: Vec<Value> = rows
+        .into_iter()
+        .map(|r| {
+            let id: String = r.get("id");
+            let stream = streams
+                .iter()
+                .find(|s| s.kiosk_id.as_deref() == Some(id.as_str()));
+            json!({
+                "id": id,
+                "name": r.get::<String, _>("name"),
+                "app_version": r.get::<Option<String>, _>("app_version"),
+                "screen_on": r.get::<Option<i64>, _>("screen_on").map(|v| v != 0),
+                "viewport": match (r.get::<Option<i64>, _>("viewport_w"), r.get::<Option<i64>, _>("viewport_h")) {
+                    (Some(w), Some(h)) => json!(format!("{w}x{h}")),
+                    _ => Value::Null,
+                },
+                "device": {
+                    "last_seen": r.get::<Option<String>, _>("last_seen"),
+                    "last_seen_secs": r.get::<Option<i64>, _>("last_seen_secs"),
+                },
+                "web": {
+                    "seen_at": r.get::<Option<String>, _>("web_seen_at"),
+                    "seen_secs": r.get::<Option<i64>, _>("web_seen_secs"),
+                    "since_event_ms": r.get::<Option<i64>, _>("web_since_event_ms"),
+                    "since_beat_ms": r.get::<Option<i64>, _>("web_since_beat_ms"),
+                    "reconnects": r.get::<Option<i64>, _>("web_reconnects"),
+                    "ready_state": r.get::<Option<i64>, _>("web_ready_state"),
+                    "page_age_ms": r.get::<Option<i64>, _>("web_page_age_ms"),
+                },
+                "stream": stream,
+            })
+        })
+        .collect();
+    Json(json!({ "kiosks": kiosks })).into_response()
 }
 
 async fn events_clear_handler(

@@ -131,6 +131,60 @@ async fn events_with_session_returns_sse_content_type() {
     );
 }
 
+/// A kiosk's stream must not expire on the session clock. Sessions are a 7-day
+/// ABSOLUTE expiry that nothing renews, and a wall tablet's WebView stays
+/// loaded for weeks — session-only gating here killed the board's live updates
+/// on a timer. The failure is silent in both directions: `EventSource` cannot
+/// read a status code, so a 401 arrives as an ordinary `error` and the client
+/// reconnects to the same refused endpoint forever, while the hub never
+/// registers a subscriber and so has nothing to show for it either.
+#[tokio::test]
+async fn events_accept_a_kiosk_key_cookie_without_a_session() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/api-keys",
+            &cookie,
+            r#"{"name":"wall tablet"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let key = helpers::response_json(resp).await["key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let with_key_cookie = |k: &str| {
+        Request::builder()
+            .uri("/api/events")
+            .header(header::COOKIE, format!("bfr_key={k}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    // The key cookie alone (the state a kiosk is in once its session lapses).
+    let resp = app.clone().oneshot(with_key_cookie(&key)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.contains("text/event-stream")),
+    );
+
+    // A key that isn't real buys nothing — this widens the gate to paired
+    // kiosks, not to anyone who can set a cookie.
+    let resp = app
+        .clone()
+        .oneshot(with_key_cookie("bfr_not_a_real_key"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 /// End to end over the wire: a device event reaches an ALREADY-OPEN stream even
 /// though its provider's push channel was created afterwards. A wall tablet
 /// holds this connection for days, so anything that restarts a manager (a

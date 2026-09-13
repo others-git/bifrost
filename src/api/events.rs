@@ -1,5 +1,5 @@
 use crate::AppState;
-use crate::api::auth::Session;
+use crate::api::auth::SessionOrKiosk;
 use axum::{
     Router,
     extract::State,
@@ -43,6 +43,10 @@ pub struct StreamStats {
     /// Which client this is, as far as we can tell: a paired kiosk by name, or
     /// a plain browser session.
     label: String,
+    /// The kiosk row this stream belongs to, when the request carried a kiosk
+    /// key. Names collide (two tablets of one model default to the same one),
+    /// so the id is what lets a diagnostics view say WHICH tablet is missing.
+    kiosk_id: Option<String>,
     user_agent: String,
     connected_at: std::time::SystemTime,
     /// Device-state + inventory events written to this client.
@@ -88,6 +92,8 @@ fn unix_ms() -> u64 {
 pub struct StreamSnapshot {
     pub id: u64,
     pub label: String,
+    /// Set when this subscriber is a paired kiosk — joins it to its kiosk row.
+    pub kiosk_id: Option<String>,
     pub user_agent: String,
     pub connected_secs: u64,
     pub events_sent: u64,
@@ -108,10 +114,16 @@ impl StreamRegistry {
     /// Register a subscriber. The returned guard removes it again when the
     /// response stream is dropped — which, for SSE, is the only disconnect
     /// signal there is.
-    fn register(self: &Arc<Self>, label: String, user_agent: String) -> StreamGuard {
+    fn register(
+        self: &Arc<Self>,
+        label: String,
+        kiosk_id: Option<String>,
+        user_agent: String,
+    ) -> StreamGuard {
         let stats = Arc::new(StreamStats {
             id: self.next_id.fetch_add(1, Ordering::Relaxed),
             label,
+            kiosk_id,
             user_agent,
             connected_at: std::time::SystemTime::now(),
             events_sent: AtomicU64::new(0),
@@ -148,6 +160,7 @@ impl StreamRegistry {
                 StreamSnapshot {
                     id: s.id,
                     label: s.label.clone(),
+                    kiosk_id: s.kiosk_id.clone(),
                     user_agent: s.user_agent.clone(),
                     connected_secs: now
                         .duration_since(s.connected_at)
@@ -241,10 +254,22 @@ impl<S: stream::Stream + Unpin> stream::Stream for Registered<S> {
 /// can watchdog the stream and reconnect on silence — see `frontend/src/useEvents.ts`.
 const HEARTBEAT: Duration = Duration::from_secs(20);
 
+/// The live stream, gated by a session **or** a paired kiosk's `bfr_key`
+/// cookie — deliberately NOT session-only.
+///
+/// A dashboard session is a 7-day absolute expiry that nothing renews, and a
+/// wall tablet's WebView stays loaded for weeks. Session-only gating therefore
+/// killed a kiosk's event stream on a timer: `EventSource` cannot see a status
+/// code, so a 401 arrives as an indistinguishable `error`, and the client
+/// reconnects to the same refused endpoint forever while the hub never
+/// registers a subscriber at all. The board keeps rendering whatever it last
+/// heard, and only a reload — which re-mints the session — brings it back.
+/// The kiosk's *key* is its durable identity (it already authorizes every
+/// `/api/v1` write), so the stream rides that instead.
 async fn sse_events(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    _: Session,
+    _: SessionOrKiosk,
 ) -> Result<axum::response::Response, StatusCode> {
     let user_agent = headers
         .get(axum::http::header::USER_AGENT)
@@ -256,11 +281,14 @@ async fn sse_events(
     // A wall tablet is the client that matters most here and the one we can
     // least easily inspect, so name it by its kiosk row when its key cookie
     // says which one it is.
-    let label = match crate::api::kiosks::kiosk_name_for_headers(&state, &headers).await {
-        Some(name) => format!("kiosk:{name}"),
+    let identity = crate::api::kiosks::kiosk_identity_for_headers(&state, &headers).await;
+    let label = match &identity {
+        Some((_, name)) => format!("kiosk:{name}"),
         None => "session".to_string(),
     };
-    let guard = state.streams.register(label, user_agent);
+    let guard = state
+        .streams
+        .register(label, identity.map(|(id, _)| id), user_agent);
     let stats = Arc::clone(&guard.stats);
     // ONE subscription per domain, on the registry's app-wide fan-in channels —
     // never per provider. A per-provider snapshot would go permanently deaf for
@@ -413,11 +441,18 @@ mod tests {
         let reg = Arc::new(StreamRegistry::default());
         assert!(reg.snapshot().is_empty());
 
-        let guard = reg.register("kiosk:Kitchen".into(), "BifrostKiosk/1".into());
+        let guard = reg.register(
+            "kiosk:Kitchen".into(),
+            Some("kiosk-1".into()),
+            "BifrostKiosk/1".into(),
+        );
         let live = reg.snapshot();
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].label, "kiosk:Kitchen");
         assert_eq!(live[0].user_agent, "BifrostKiosk/1");
+        // The id, not the label, is what joins this to a kiosk row: two tablets
+        // of one model default to the same name.
+        assert_eq!(live[0].kiosk_id.as_deref(), Some("kiosk-1"));
         // Nothing written yet — "connected but never sent anything" has to be
         // distinguishable from "sent something a while ago".
         assert_eq!(live[0].idle_secs, None);
@@ -434,7 +469,7 @@ mod tests {
     #[test]
     fn counters_separate_events_beats_and_dropped_backlog() {
         let reg = Arc::new(StreamRegistry::default());
-        let guard = reg.register("session".into(), "curl".into());
+        let guard = reg.register("session".into(), None, "curl".into());
         guard.stats.event();
         guard.stats.event();
         guard.stats.beat();
@@ -452,8 +487,8 @@ mod tests {
     #[test]
     fn subscribers_get_distinct_ids_and_a_stable_order() {
         let reg = Arc::new(StreamRegistry::default());
-        let a = reg.register("session".into(), "one".into());
-        let b = reg.register("session".into(), "two".into());
+        let a = reg.register("session".into(), None, "one".into());
+        let b = reg.register("session".into(), None, "two".into());
         let snap = reg.snapshot();
         assert_eq!(snap.len(), 2);
         assert!(snap[0].id < snap[1].id, "listed oldest-first by id");
@@ -469,7 +504,7 @@ mod tests {
     #[tokio::test]
     async fn lagged_events_are_counted_and_dropped_not_silently_swallowed() {
         let reg = Arc::new(StreamRegistry::default());
-        let guard = reg.register("session".into(), "curl".into());
+        let guard = reg.register("session".into(), None, "curl".into());
         let stats = Arc::clone(&guard.stats);
 
         use tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged;

@@ -1,5 +1,5 @@
 import { useEffect, useState, type MouseEvent } from "react";
-import { getHealth, getLights, logout, getSetupStatus, kioskLogin, getKioskSelf, reportKioskViewport, type Light, getSettings } from "./api";
+import { getHealth, getLights, logout, getSetupStatus, getKioskSelf, reportKioskViewport, IS_KIOSK, type Light, getSettings } from "./api";
 import { Glyph } from "./components/glyphs";
 import { SetupPage } from "./pages/Setup";
 import { LoginPage } from "./pages/Login";
@@ -17,6 +17,7 @@ import { S } from "./styles";
 import { color, font, navAurora as NAV_AURORA, alpha } from "./theme";
 import { useViewport } from "./useViewport";
 import { useAutoReloadOnNewBuild } from "./useAutoReload";
+import { useKioskHealthReport } from "./kioskHealth";
 import { useEvents } from "./useEvents";
 import { StreamBadge } from "./components/StreamBadge";
 import { VoiceFeedback } from "./components/VoiceFeedback";
@@ -30,7 +31,6 @@ type Page = "loading" | "setup" | "login" | NavPage;
  * `BifrostKiosk/<version>` to its User-Agent). A wall fixture is paired by QR
  * and deauthed remotely by the controller, so we hide the Sign-out button there
  * — otherwise any passerby could tap it and knock the tablet offline. */
-const IS_KIOSK = /\bBifrostKiosk\//.test(navigator.userAgent);
 
 /** "BIFROST" in Elder Futhark — ᛒ(B) ᛁ(I) ᚠ(F) ᚱ(R) ᛟ(O) ᛋ(S) ᛏ(T). */
 const BRAND_RUNES = "ᛒᛁᚠᚱᛟᛋᛏ";
@@ -90,26 +90,22 @@ export function App() {
 
   // Kiosk self-update: reload when a new frontend build is deployed.
   useAutoReloadOnNewBuild();
+  // A kiosk tells the hub how its own event stream is doing, so "which tablet
+  // is the dead one" is answerable without standing in front of one.
+  useKioskHealthReport();
 
   useEffect(() => {
     getHealth().then((h) => setVersion(h.version));
   }, []);
 
-  // A paired kiosk trades its `bfr_key` cookie for a session instead of showing
-  // login — both on first load and when a session later expires. Returns the
-  // lights result after the (single) re-auth attempt.
-  async function lightsWithKioskAuth() {
-    let result = await getLights();
-    if (result === "unauthorized" && IS_KIOSK && (await kioskLogin())) {
-      result = await getLights();
-    }
-    return result;
-  }
-
   async function init() {
     const status = await getSetupStatus();
     if (!status.setup_complete) { setPage("setup"); return; }
-    const result = await lightsWithKioskAuth();
+    // A paired kiosk never sees the login screen: any 401 is exchanged for a
+    // session against its `bfr_key` cookie inside the api layer, on first load
+    // and equally on the day its session expires under a page that has been
+    // open for a week.
+    const result = await getLights();
     if (result === "unauthorized") { setPage("login"); return; }
     setLights(result);
     getSettings().then((st) => setDevMode(!!st.dev_mode));
@@ -137,7 +133,7 @@ export function App() {
   );
 
   async function refreshLights() {
-    const result = await lightsWithKioskAuth();
+    const result = await getLights();
     if (result === "unauthorized") { setPage("login"); return; }
     setLights(result);
   }

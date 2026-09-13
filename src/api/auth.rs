@@ -152,11 +152,48 @@ impl FromRequestParts<Arc<AppState>> for Session {
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
         if require_session(state, &parts.headers).await.is_some() {
-            Ok(Session)
-        } else {
-            Err(StatusCode::UNAUTHORIZED)
+            return Ok(Session);
         }
+        // An extractor's 401 never reaches a handler, so without this line a
+        // rejected request leaves NO trace anywhere: the hub looks like it was
+        // never asked. That is exactly how a wall tablet whose session had
+        // quietly expired went unexplained for hours — it was hammering
+        // `/api/events` the whole time and every attempt was refused in
+        // silence. A kiosk being turned away is a real fault (its key should
+        // have bought it a fresh session), so that case is a warning; an
+        // ordinary browser 401 is just the pre-login state.
+        let level_is_kiosk = is_kiosk_request(parts);
+        let path = parts.uri.path();
+        let has_cookie = extract_session(&parts.headers).is_some();
+        if level_is_kiosk {
+            tracing::warn!(
+                target: "bifrost::auth",
+                %path,
+                has_session_cookie = has_cookie,
+                has_key_cookie = kiosk_cookie_key(&parts.headers).is_some(),
+                "kiosk request rejected: no valid session"
+            );
+        } else {
+            tracing::debug!(
+                target: "bifrost::auth",
+                %path,
+                has_session_cookie = has_cookie,
+                "request rejected: no valid session"
+            );
+        }
+        Err(StatusCode::UNAUTHORIZED)
     }
+}
+
+/// Is this request from a kiosk WebView? Its user-agent is the only marker
+/// available before any auth has been resolved, which is what makes a rejected
+/// request attributable at all.
+fn is_kiosk_request(parts: &Parts) -> bool {
+    parts
+        .headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ua| ua.contains("BifrostKiosk"))
 }
 
 /// Request extractor admitting an authenticated session **or** a paired
@@ -177,17 +214,15 @@ impl FromRequestParts<Arc<AppState>> for SessionOrKiosk {
     ) -> Result<Self, Self::Rejection> {
         // Journal-visible request trace (debug — the RUST_LOG console stays
         // quiet). A kiosk's requests are attributable by its distinctive UA,
-        // which is what makes "are the wall tablet's poster fetches arriving
-        // at all, and how do they auth?" answerable from Settings → Developer
-        // instead of guesswork — the exact question a poster-less kiosk poses.
-        let is_kiosk_ua = parts
-            .headers
-            .get(axum::http::header::USER_AGENT)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|ua| ua.contains("BifrostKiosk"));
+        // which is what makes "are the wall tablet's requests arriving at all,
+        // and how do they auth?" answerable from Settings → Developer instead
+        // of guesswork. `auth` is the load-bearing field: a kiosk falling
+        // through to `kiosk_key` is how you SEE that its session has lapsed,
+        // while the surfaces gated this way keep working.
+        let is_kiosk_ua = is_kiosk_request(parts);
         let path = parts.uri.path().to_string();
         if require_session(state, &parts.headers).await.is_some() {
-            tracing::debug!(target: "bifrost::feeds", kiosk_ua = is_kiosk_ua, %path, auth = "session", "feed request");
+            tracing::debug!(target: "bifrost::auth", kiosk_ua = is_kiosk_ua, %path, auth = "session", "gated request");
             return Ok(SessionOrKiosk);
         }
         if let Some(key) = kiosk_cookie_key(&parts.headers)
@@ -195,19 +230,19 @@ impl FromRequestParts<Arc<AppState>> for SessionOrKiosk {
                 .await
                 .is_some()
         {
-            tracing::debug!(target: "bifrost::feeds", kiosk_ua = is_kiosk_ua, %path, auth = "kiosk_key", "feed request");
+            tracing::debug!(target: "bifrost::auth", kiosk_ua = is_kiosk_ua, %path, auth = "kiosk_key", "gated request");
             return Ok(SessionOrKiosk);
         }
         // The rejection would otherwise be invisible: extractor 401s never
         // reach a handler, so a kiosk whose cookies stopped flowing looked
         // identical to a kiosk that never asked.
         tracing::warn!(
-            target: "bifrost::feeds",
+            target: "bifrost::auth",
             kiosk_ua = is_kiosk_ua,
             %path,
             has_session_cookie = extract_session(&parts.headers).is_some(),
             has_key_cookie = kiosk_cookie_key(&parts.headers).is_some(),
-            "feed request rejected (no valid session or kiosk key)"
+            "gated request rejected (no valid session or kiosk key)"
         );
         Err(StatusCode::UNAUTHORIZED)
     }

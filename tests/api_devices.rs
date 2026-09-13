@@ -2534,6 +2534,7 @@ async fn dev_routes_404_when_dev_mode_off() {
     for uri in [
         "/api/dev/info",
         "/api/dev/streams",
+        "/api/dev/kiosks",
         "/api/dev/media/whatever/routing",
         "/api/dev/devices/some-provider/climate.bedroom/raw",
     ] {
@@ -2612,6 +2613,113 @@ async fn dev_streams_lists_live_sse_subscribers() {
         body["streams"].is_array(),
         "expected a streams array, got {body}"
     );
+}
+
+/// The three-layer kiosk view. A tablet fails at the device, the page, or the
+/// stream, and reading those separately is what made four rounds of "the board
+/// is stale" ambiguous — so they belong on one row, joined by kiosk **id**
+/// (two tablets of one model share a default name).
+#[tokio::test]
+async fn dev_kiosks_reports_device_page_and_stream_layers() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    enable_dev_mode(&app, &cookie).await;
+
+    // Pair a kiosk (an API key + a check-in registers the row).
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/api-keys",
+            &cookie,
+            r#"{"name":"hall tablet"}"#,
+        ))
+        .await
+        .unwrap();
+    let key = helpers::response_json(resp).await["key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/kiosks/checkin")
+                .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"screen_on":true,"app_version":"1.4"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The page reports on itself, with only its key cookie — the auth that
+    // survives the lapsed session this exists to make visible.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/kiosks/self/health")
+                .header(header::COOKIE, format!("bfr_key={key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"since_event_ms":900000,"since_beat_ms":900000,"reconnects":13,"ready_state":0,"page_age_ms":864000000}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/dev/kiosks", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    let k = &body["kiosks"][0];
+    assert_eq!(k["name"], "hall tablet");
+    // Device layer: it just checked in.
+    assert!(k["device"]["last_seen"].is_string());
+    assert!(k["device"]["last_seen_secs"].as_i64().unwrap() < 60);
+    // Page layer: exactly what it said, plus how old the report is.
+    assert_eq!(k["web"]["reconnects"], 13);
+    assert_eq!(k["web"]["ready_state"], 0);
+    assert_eq!(k["web"]["since_beat_ms"], 900_000);
+    assert!(k["web"]["seen_secs"].as_i64().unwrap() < 60);
+    // Stream layer: no live subscriber for it, which is the whole point of
+    // showing the three together — the page says it is alive and connecting,
+    // and the hub has nothing.
+    assert!(k["stream"].is_null(), "expected no live stream, got {k}");
+
+    // The same report reaches the Clients view.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/kiosks", &cookie))
+        .await
+        .unwrap();
+    let rows = helpers::response_json(resp).await;
+    assert_eq!(rows[0]["web"]["reconnects"], 13);
+}
+
+#[tokio::test]
+async fn kiosk_self_health_401s_without_a_key_cookie() {
+    let app = helpers::test_app_with_password().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/kiosks/self/health")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"reconnects":1}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

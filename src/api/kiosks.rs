@@ -73,6 +73,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/checkin", post(checkin))
         .route("/self", get(self_info))
         .route("/self/viewport", axum::routing::put(set_self_viewport))
+        .route("/self/health", post(report_self_health))
         .route("/self/noise", post(report_noise))
         .route(
             "/self/screenshot",
@@ -370,14 +371,30 @@ struct SelfResponse {
 /// fixture is the client hardest to inspect from the outside, so it is the one
 /// worth naming.
 pub async fn kiosk_name_for_headers(state: &Arc<AppState>, headers: &HeaderMap) -> Option<String> {
+    kiosk_identity_for_headers(state, headers)
+        .await
+        .map(|(_, name)| name)
+}
+
+/// The kiosk `(id, name)` a request's `bfr_key` cookie identifies.
+///
+/// The **id** is what makes a live subscriber joinable to its kiosk row: a name
+/// is a label a human typed and two tablets of the same model default to the
+/// same one, which is exactly the ambiguity that makes "which of these two is
+/// the dead one?" unanswerable from a diagnostics dump.
+pub async fn kiosk_identity_for_headers(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+) -> Option<(String, String)> {
     let key = crate::api::auth::kiosk_cookie_key(headers)?;
     let key_id = crate::api::apikeys::validate_key(state, &key).await?;
-    sqlx::query_scalar::<_, String>("SELECT name FROM kiosks WHERE api_key_id = ?")
+    let row = sqlx::query("SELECT id, name FROM kiosks WHERE api_key_id = ?")
         .bind(&key_id)
         .fetch_optional(&state.db)
         .await
         .ok()
-        .flatten()
+        .flatten()?;
+    Some((row.get("id"), row.get("name")))
 }
 
 /// `GET /api/kiosks/self` — the kiosk asks *which kiosk am I and what should I
@@ -451,6 +468,98 @@ async fn set_self_viewport(
     }
 }
 
+#[derive(Deserialize)]
+struct WebHealthRequest {
+    /// ms since the page last received a device/inventory event.
+    #[serde(default)]
+    since_event_ms: Option<i64>,
+    /// ms since the page last received a heartbeat.
+    #[serde(default)]
+    since_beat_ms: Option<i64>,
+    /// EventSource (re)connection attempts since load.
+    #[serde(default)]
+    reconnects: Option<i64>,
+    /// `EventSource.readyState` (0 connecting, 1 open, 2 closed, -1 none).
+    #[serde(default)]
+    ready_state: Option<i64>,
+    /// How long this page has been loaded.
+    #[serde(default)]
+    page_age_ms: Option<i64>,
+}
+
+/// `POST /api/kiosks/self/health` — the kiosk-served page reports its own view
+/// of the shared `/api/events` connection. Same `bfr_key`-cookie auth as
+/// `GET /self`, which is the point: a lapsed session is exactly when the page
+/// most needs to be able to say something, and a session-gated report would go
+/// silent in the same breath as the stream it is reporting on.
+///
+/// This is the middle of the three layers a wall tablet fails in — the app's
+/// check-in proves the device is alive, the subscriber registry proves the
+/// stream is, and only this says whether the PAGE is running and what it thinks
+/// it is receiving. Before it existed the answer lived solely on the tablet's
+/// screen, which meant walking over to read a badge that a reload erases.
+async fn report_self_health(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<WebHealthRequest>,
+) -> impl IntoResponse {
+    let Some(key) = crate::api::auth::kiosk_cookie_key(&headers) else {
+        return StatusCode::UNAUTHORIZED;
+    };
+    let Some(key_id) = crate::api::apikeys::validate_key(&state, &key).await else {
+        return StatusCode::UNAUTHORIZED;
+    };
+    match sqlx::query(
+        "UPDATE kiosks SET web_seen_at = datetime('now'), web_since_event_ms = ?,
+                           web_since_beat_ms = ?, web_reconnects = ?,
+                           web_ready_state = ?, web_page_age_ms = ?
+         WHERE api_key_id = ?",
+    )
+    .bind(req.since_event_ms)
+    .bind(req.since_beat_ms)
+    .bind(req.reconnects)
+    .bind(req.ready_state)
+    .bind(req.page_age_ms)
+    .bind(&key_id)
+    .execute(&state.db)
+    .await
+    {
+        Ok(r) if r.rows_affected() > 0 => StatusCode::NO_CONTENT,
+        Ok(_) => StatusCode::NOT_FOUND, // valid key, not a registered kiosk
+        Err(e) => {
+            tracing::error!("db error storing kiosk web health: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
+/// One kiosk's self-reported web-layer health, as stored by
+/// [`report_self_health`]. Ages are as of the report, not as of now — pair them
+/// with `seen_at` to know how stale the report itself is.
+#[derive(Serialize, Default)]
+pub struct WebHealth {
+    pub seen_at: Option<String>,
+    pub since_event_ms: Option<i64>,
+    pub since_beat_ms: Option<i64>,
+    pub reconnects: Option<i64>,
+    pub ready_state: Option<i64>,
+    pub page_age_ms: Option<i64>,
+}
+
+impl WebHealth {
+    /// Read the web-health columns off a kiosks row.
+    fn from_row(r: &sqlx::sqlite::SqliteRow) -> Self {
+        Self {
+            seen_at: r.get("web_seen_at"),
+            since_event_ms: r.get("web_since_event_ms"),
+            since_beat_ms: r.get("web_since_beat_ms"),
+            reconnects: r.get("web_reconnects"),
+            ready_state: r.get("web_ready_state"),
+            page_age_ms: r.get("web_page_age_ms"),
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct KioskRow {
     id: String,
@@ -508,6 +617,9 @@ struct KioskRow {
     /// When the latest debug screenshot was captured (mig 0064) — the Clients
     /// view polls this to know a requested capture has landed. Null = none yet.
     screenshot_at: Option<String>,
+    /// What the kiosk's own PAGE last said about its event stream (mig 0065).
+    /// All-null until it first reports (an older kiosk build never will).
+    web: WebHealth,
 }
 
 /// `GET /api/kiosks` (session) — the clients view: every registered kiosk with
@@ -520,7 +632,8 @@ async fn list(State(state): State<Arc<AppState>>, _: Session) -> impl IntoRespon
                 battery_level, battery_charging, battery_voltage_mv, battery_current_ua,
                 battery_temp_dc, power_source, viewport_w, viewport_h, hour_modes,
                 mic_presence, mic_sensitivity, mic_level, aware_override_targets,
-                screenshot_at,
+                screenshot_at, web_seen_at, web_since_event_ms, web_since_beat_ms,
+                web_reconnects, web_ready_state, web_page_age_ms,
                 api_key_id IS NOT NULL AS authorized,
                 (last_seen > datetime('now', '-{ONLINE_WINDOW_SECS} seconds')) AS online
          FROM kiosks ORDER BY name"
@@ -567,6 +680,7 @@ async fn list(State(state): State<Arc<AppState>>, _: Session) -> impl IntoRespon
                         aware_override_targets,
                         aware_override_mode,
                         screenshot_at: r.get("screenshot_at"),
+                        web: WebHealth::from_row(&r),
                     }
                 })
                 .collect::<Vec<_>>(),

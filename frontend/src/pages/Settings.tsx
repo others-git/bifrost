@@ -2682,6 +2682,52 @@ function ClientsTab({ dialogs }: { dialogs: Dialogs }) {
   );
 }
 
+/** "3s" / "12m" / "3h" / "9d" — an age, short enough for a meta line. */
+function shortAge(ms: number): string {
+  const s = Math.round(ms / 1000);
+  if (s < 90) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 90) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
+const WEB_READY_STATE: Record<number, string> = {
+  [-1]: "no connection",
+  0: "connecting",
+  1: "open",
+  2: "closed",
+};
+
+/** One-line summary of what the kiosk's PAGE last said about its event stream.
+ *
+ * This is the layer between "the device checks in" and "the hub has a
+ * subscriber for it", and the one that used to be visible only as a badge on
+ * the tablet's own screen. Read `page` first: it is the age of the report
+ * itself, so a large one means the WebView is frozen and everything after it
+ * is history, not news. */
+function webHealthMeta(k: Kiosk, now: number): string | null {
+  const w = k.web;
+  if (!w?.seen_at) return null;
+  const reportAge = now - Date.parse(`${w.seen_at.replace(" ", "T")}Z`);
+  const parts = [`page ${shortAge(Math.max(0, reportAge))} ago`];
+  if (w.ready_state != null) parts.push(WEB_READY_STATE[w.ready_state] ?? `state ${w.ready_state}`);
+  if (w.since_event_ms != null) parts.push(`evt ${shortAge(w.since_event_ms)}`);
+  if (w.since_beat_ms != null) parts.push(`hb ${shortAge(w.since_beat_ms)}`);
+  if (w.reconnects) parts.push(`rc ${w.reconnects}`);
+  if (w.page_age_ms != null) parts.push(`loaded ${shortAge(w.page_age_ms)} ago`);
+  return parts.join(" · ");
+}
+
+/** Is the page's own report bad enough to say so in colour? Either its stream
+ * is not open, or nothing has beaten for well past the hub's 20s heartbeat. */
+function webHealthAlarming(k: Kiosk): boolean {
+  const w = k.web;
+  if (!w?.seen_at) return false;
+  return (w.ready_state != null && w.ready_state !== 1) || (w.since_beat_ms ?? 0) > 120_000;
+}
+
 /** One-line battery/power summary for a kiosk: level, charging draw (V×I), and
  * temperature. Watts are computed from the reported voltage + current. */
 function batteryMeta(k: Kiosk): string {
@@ -3025,6 +3071,18 @@ function KiosksSection({
               {k.battery_level != null && (
                 <div style={{ color: "var(--bf-faint)", fontSize: "0.74rem", marginTop: "0.1rem" }}>
                   {batteryMeta(k)}
+                </div>
+              )}
+              {webHealthMeta(k, Date.now()) && (
+                <div
+                  title="What the kiosk's own page last reported about its live event stream"
+                  style={{
+                    color: webHealthAlarming(k) ? "var(--bf-gold)" : "var(--bf-faint)",
+                    fontSize: "0.74rem",
+                    marginTop: "0.1rem",
+                  }}
+                >
+                  {webHealthMeta(k, Date.now())}
                 </div>
               )}
             </div>
