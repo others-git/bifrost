@@ -184,7 +184,43 @@ effective device. **The overlay order is load-bearing — do not reorder it:**
 
 Companions are skipped as surfaces in steps 3–4 (`if companion_of.is_some()
 { continue }`). `get_device_live` does the same for a single device, loading its
-companions and one paired-remote state on demand.
+companions and one paired-remote state on demand — steps 2–4 are the shared
+`compose_device`, so no caller can assemble a *partly* effective device.
+
+## The effective device (push path)
+
+`/api/events` composes too, through `compose_media_push` — **a client must be
+handed the same device a read of it returns, whichever way the state arrives.**
+A raw provider push describes only the row that pushed, which broke the receiver
+binding in both directions:
+
+- A bound source pushed its **own** volume (a TV whose audio goes to a receiver
+  reports a near-zero internal level), overwriting the receiver's on every
+  surface. The volume stepper steps from what is painted, so the next ±1 press
+  moved the *receiver* to that level ±1 — observed live as a receiver at 52
+  dropping to 7.
+- A receiver's push matched **no** bound source (different provider row and
+  device id), so a knob turn on the receiver left every bound source's slider
+  stale until the next full read.
+- A composite **member**'s push reached only that member's row — which every
+  control surface hides (`companion_of` is filtered out of the rendered list) —
+  so the surface's now-playing, volume and power froze until the next full read,
+  even though a read merges exactly that member into it.
+
+So one push can emit several events: the pushing device composed around the state
+it just reported; its composite's **surface**, when the pusher is a hidden member
+(the member's own event still goes out — the Devices page lists members with their
+own state); and the composed surface of each source bound to it as their receiver,
+carrying the volume/mute just pushed. A just-arrived push is threaded into the
+composition as `(row id, state)` so it composes against **itself** wherever it
+lands — the device or one of its members — rather than against the cached row the
+DB writer is concurrently catching up to. A device with no binding, no composite and nothing bound to it
+costs one indexed lookup and passes through untouched.
+
+The composition runs per subscriber, in the SSE stream itself, deliberately: the
+broadcast channels carry **raw provider truth** (a TV's own volume *is* the TV's
+volume), which is what the automation engine and the `last_state` writer must
+see. Only the surfaces want the effective device.
 
 ### Power & reachability resolution
 

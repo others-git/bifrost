@@ -326,18 +326,37 @@ async fn sse_events(
             .boxed(),
         // Media/power/sensor pushes are full-state snapshots tagged with the
         // provider row id, so the frontend can match its device rows.
+        //
+        // Media pushes are *composed* first (`media::compose_media_push`): a
+        // client must be handed the same effective device a read of it returns,
+        // so a receiver-bound source shows its receiver's volume/mute and a
+        // receiver's own push also reaches the sources bound to it. One push can
+        // therefore become several — hence `then` + `flat_map`.
         BroadcastStream::new(media)
             .filter_map({
                 let stats = Arc::clone(&stats);
                 move |r| drop_lagged(&stats, "media", r)
             })
+            .then({
+                let state = Arc::clone(&state);
+                move |(provider_id, event)| {
+                    let state = Arc::clone(&state);
+                    async move {
+                        stream::iter(
+                            crate::api::media::compose_media_push(&state, &provider_id, &event)
+                                .await,
+                        )
+                    }
+                }
+            })
+            .flatten()
             .map({
                 let stats = Arc::clone(&stats);
-                move |(provider_id, event)| {
+                move |push| {
                     let data = serde_json::to_string(&serde_json::json!({
-                        "provider_id": provider_id,
-                        "device_id": event.device_id,
-                        "state": event.state,
+                        "provider_id": push.provider_id,
+                        "device_id": push.device_id,
+                        "state": push.state,
                     }))
                     .unwrap_or_default();
                     stats.event();

@@ -636,28 +636,32 @@ pub(crate) async fn list_all_devices(state: &AppState) -> Result<Vec<MediaDevice
     Ok(devices)
 }
 
+/// One device row with everything read assembly needs: its cached state, both
+/// room resolutions, and its provider's type + credentials (for a live read).
+/// Shared by the live read and the cached composition so the two can never
+/// disagree about what a device row *is*.
+const DEVICE_READ_SQL: &str = "SELECT a.id, a.provider_id, a.device_id, a.name, a.kind, a.capabilities,
+            a.last_state, a.last_seen, a.enabled, a.glyph, a.hw_id, a.shadowed_by, a.shadow_auto,
+            a.receiver_id, a.receiver_source, a.group_id,
+            (SELECT room_id FROM room_media_devices WHERE media_device_id = a.id LIMIT 1) AS room_id,
+            (SELECT rl.room_id FROM room_links rl
+               JOIN provider_group_media_devices pga ON pga.provider_group_id = rl.provider_group_id
+               WHERE pga.media_device_id = a.id LIMIT 1) AS inherited_room_id,
+            p.provider_type, p.credentials
+     FROM media_devices a JOIN providers p ON a.provider_id = p.id
+     WHERE a.id = ? AND p.enabled = 1";
+
 /// Fetch one device with a live state read. Falls back to the cached state
 /// (marked unreachable) when the device doesn't answer; `Ok(None)` = unknown id.
 pub(crate) async fn get_device_live(
     state: &AppState,
     id: &str,
 ) -> Result<Option<MediaDeviceRow>, ()> {
-    let row = sqlx::query(
-        "SELECT a.id, a.provider_id, a.device_id, a.name, a.kind, a.capabilities,
-                a.last_state, a.last_seen, a.enabled, a.glyph, a.hw_id, a.shadowed_by, a.shadow_auto,
-                a.receiver_id, a.receiver_source, a.group_id,
-                (SELECT room_id FROM room_media_devices WHERE media_device_id = a.id LIMIT 1) AS room_id,
-                (SELECT rl.room_id FROM room_links rl
-                   JOIN provider_group_media_devices pga ON pga.provider_group_id = rl.provider_group_id
-                   WHERE pga.media_device_id = a.id LIMIT 1) AS inherited_room_id,
-                p.provider_type, p.credentials
-         FROM media_devices a JOIN providers p ON a.provider_id = p.id
-         WHERE a.id = ? AND p.enabled = 1",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| tracing::error!("db error fetching media device: {e}"))?;
+    let row = sqlx::query(DEVICE_READ_SQL)
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| tracing::error!("db error fetching media device: {e}"))?;
 
     let Some(row) = row else { return Ok(None) };
     let device_id: String = row.get("device_id");
@@ -689,14 +693,38 @@ pub(crate) async fn get_device_live(
         }
     }
 
+    compose_device(state, &mut device, None).await;
+    Ok(Some(device))
+}
+
+/// Compose one loaded row into the **effective device**: merge its composite's
+/// companions, resolve composite power from every member's signal, surface the
+/// richest paired remote, and overlay a bound receiver's volume/mute.
+///
+/// Shared by every read path *and* by the push composition
+/// ([`compose_media_push`]), so what a surface is handed for a device is the same
+/// device whichever way it arrives — a raw provider push must not describe a
+/// device differently from a read of it.
+async fn compose_device(
+    state: &AppState,
+    device: &mut MediaDeviceRow,
+    fresh_member: Option<(&str, &MediaState)>,
+) {
     // M26: overlay companions' complementary state (now-playing, sources, and
     // their receiver binding) onto this primary — before the receiver overlay,
     // so a companion's binding shows the receiver's volume here too. Each member
     // also contributes a power signal for the composite resolution below.
     let mut media_members: Vec<PowerSignal> = Vec::new();
-    for companion in load_companions(state, &device.id).await {
+    for mut companion in load_companions(state, &device.id).await {
+        // A member whose push is the reason we're composing: its just-reported
+        // state, not the cached row the DB writer is still catching up to.
+        if let Some((id, fresh)) = fresh_member
+            && id == companion.id
+        {
+            companion.state = fresh.clone();
+        }
         media_members.push(PowerSignal::media(&companion));
-        merge_companion_into(&mut device, &companion);
+        merge_companion_into(device, &companion);
     }
     // Surface the richest paired remote for control, and fold *every* paired
     // remote's signal into the composite power resolution (see `list_all_devices`).
@@ -711,7 +739,7 @@ pub(crate) async fn get_device_live(
         .collect();
     // Composite power/reachability: a fresher companion media_player (or, in
     // standby, the paired remote) corrects a stale/off primary.
-    apply_composite_power(&mut device, &media_members, &remotes);
+    apply_composite_power(device, &media_members, &remotes);
 
     // For a bound source the receiver owns volume/mute, so show the receiver's
     // values — what the source's own volume slider actually controls. Use the
@@ -736,7 +764,169 @@ pub(crate) async fn get_device_live(
             device.state.mute = rstate.mute;
         }
     }
-    Ok(Some(device))
+}
+
+/// The effective device for row `id` without a provider round-trip, composed
+/// from cached state. `fresh` is a just-arrived push as `(row id, state)` — it
+/// replaces that row's cached state wherever it lands in the composition (this
+/// device, or one of its composite's members), so a push composes against itself
+/// rather than against the row the DB writer is concurrently catching up to.
+/// Used by the push composition, which must never put a live read on a push path.
+async fn compose_row(
+    state: &AppState,
+    id: &str,
+    fresh: Option<(&str, &MediaState)>,
+) -> Option<MediaDeviceRow> {
+    let row = sqlx::query(DEVICE_READ_SQL)
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| tracing::error!("db error composing media device {id}: {e}"))
+        .ok()??;
+    let mut device = row_to_device(row);
+    if let Some((fresh_id, fresh)) = fresh
+        && fresh_id == device.id
+    {
+        device.state = fresh.clone();
+    }
+    compose_device(state, &mut device, fresh).await;
+    Some(device)
+}
+
+/// One media-state push as a client should receive it, keyed the way clients
+/// match their device rows (provider row id + provider-native device id).
+pub(crate) struct MediaPushOut {
+    pub provider_id: String,
+    pub device_id: String,
+    pub state: MediaState,
+}
+
+/// Turn one raw provider media push into the pushes a client should actually
+/// see — the push-stream half of the effective-device composition.
+///
+/// Reads compose a device (companion merge, composite power, and the receiver
+/// overlay that shows a bound source its *receiver's* volume/mute, because the
+/// receiver owns them). The push stream carried raw provider state instead, so
+/// the two surfaces disagreed about the same device, three ways:
+///
+/// - A bound TV's own volume — near-zero on a TV whose audio goes to a receiver
+///   — overwrote the receiver's volume on every surface the moment the TV
+///   pushed. The slider jumped to the TV's level, and the ±1 stepper, which
+///   steps from what is painted, then moved the *receiver* to that level ±1
+///   (observed live: a receiver at 52 dropped to 7).
+/// - A receiver's own push reaches no bound source (different provider and
+///   device id), so turning the knob on the receiver left every bound source's
+///   slider stale until the next full read.
+/// - A composite **member**'s push reached only that member's row, which every
+///   control surface hides (a row with `companion_of` set is filtered out), so
+///   the surface's now-playing/volume/power froze until the next full read —
+///   even though a read merges exactly that member into it.
+///
+/// All three are composed here, at the one seam every client reads.
+pub(crate) async fn compose_media_push(
+    state: &AppState,
+    provider_id: &str,
+    event: &crate::models::media::MediaEvent,
+) -> Vec<MediaPushOut> {
+    let raw = || {
+        vec![MediaPushOut {
+            provider_id: provider_id.to_string(),
+            device_id: event.device_id.clone(),
+            state: event.state.clone(),
+        }]
+    };
+
+    // One indexed lookup decides whether this push needs composing at all: a
+    // plain speaker — no receiver binding, no composite, nothing bound to it —
+    // is the common case by far and stays a pure pass-through.
+    let row = sqlx::query(
+        "SELECT id, group_id, receiver_id,
+                EXISTS(SELECT 1 FROM media_devices s WHERE s.receiver_id = media_devices.id) AS is_receiver
+         FROM media_devices WHERE provider_id = ? AND device_id = ?",
+    )
+    .bind(provider_id)
+    .bind(&event.device_id)
+    .fetch_optional(&state.db)
+    .await;
+    let Ok(Some(row)) = row else { return raw() };
+    let id: String = row.get("id");
+    let group: Option<String> = row.get("group_id");
+    let is_receiver = row.get::<i64, _>("is_receiver") != 0;
+    if group.is_none() && row.get::<Option<String>, _>("receiver_id").is_none() && !is_receiver {
+        return raw();
+    }
+
+    // The pushing device itself, composed around the state it just reported.
+    let mut out = match compose_row(state, &id, Some((&id, &event.state))).await {
+        Some(device) => vec![MediaPushOut {
+            provider_id: provider_id.to_string(),
+            device_id: event.device_id.clone(),
+            state: device.state,
+        }],
+        None => raw(),
+    };
+
+    // Both fan-outs need to know which row of a composite clients render.
+    let surfaces = if group.is_some() || is_receiver {
+        group_surfaces(state).await
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    // A member's push belongs to its composite's **surface**. The member's own
+    // event above still goes out — the Devices page lists members with their own
+    // state — but this is the one that moves the tile.
+    if let Some(surface) = group
+        .as_deref()
+        .and_then(|g| surfaces.get(g))
+        .filter(|surface| surface.as_str() != id)
+        && let Some(device) = compose_row(state, surface, Some((&id, &event.state))).await
+    {
+        out.push(MediaPushOut {
+            provider_id: device.provider_id,
+            device_id: device.device_id,
+            state: device.state,
+        });
+    }
+
+    if is_receiver {
+        let sources = sqlx::query(
+            "SELECT a.id, a.group_id FROM media_devices a JOIN providers p ON a.provider_id = p.id
+             WHERE a.receiver_id = ? AND a.enabled = 1 AND a.shadowed_by IS NULL AND p.enabled = 1",
+        )
+        .bind(&id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| tracing::error!("db error loading bound sources: {e}"))
+        .unwrap_or_default();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for r in sources {
+            // A bound *companion* merges its binding up to its composite's
+            // surface, so the surface is the row a client actually renders.
+            let source_id: String = r.get("id");
+            let target = r
+                .get::<Option<String>, _>("group_id")
+                .and_then(|g| surfaces.get(&g).cloned())
+                .unwrap_or(source_id);
+            if !seen.insert(target.clone()) {
+                continue;
+            }
+            if let Some(mut device) = compose_row(state, &target, None).await
+                && device.receiver_id.as_deref() == Some(id.as_str())
+            {
+                // The push in hand is fresher than the receiver row the overlay
+                // just read: the db writer that persists it races this stream.
+                device.state.volume = event.state.volume;
+                device.state.mute = event.state.mute;
+                out.push(MediaPushOut {
+                    provider_id: device.provider_id,
+                    device_id: device.device_id,
+                    state: device.state,
+                });
+            }
+        }
+    }
+    out
 }
 
 pub(crate) enum SetMediaOutcome {
@@ -2510,5 +2700,339 @@ mod tests {
         assert_eq!(routed["native_tv"].source.as_deref(), Some("hdmi2"));
         assert_eq!(routed["native_tv"].transport, Some(TransportCmd::Play));
         assert!(!routed.contains_key("ha"));
+    }
+
+    // ── Push composition (`compose_media_push`) ──────────────────────────────
+
+    async fn push_test_state() -> Arc<AppState> {
+        use sqlx::SqlitePool;
+        use sqlx::sqlite::SqliteConnectOptions;
+        use std::str::FromStr;
+        let opts = SqliteConnectOptions::from_str(":memory:")
+            .unwrap()
+            .foreign_keys(true);
+        let db = SqlitePool::connect_with(opts).await.unwrap();
+        sqlx::migrate!("./migrations").run(&db).await.unwrap();
+        let state = Arc::new(AppState::new(
+            db,
+            "test-secret-key-32-bytes-exactly",
+            crate::providers::default_registry(),
+        ));
+        for (id, ptype) in [("onk", "onkyo"), ("tv", "smarttv"), ("ha", "ha")] {
+            sqlx::query("INSERT INTO providers (id, provider_type, name, credentials) VALUES (?, ?, ?, 'x')")
+                .bind(id)
+                .bind(ptype)
+                .bind(ptype)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        state
+    }
+
+    /// One media row with a cached state, optionally bound to a receiver and/or
+    /// part of a composite group.
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_media(
+        state: &AppState,
+        id: &str,
+        provider: &str,
+        device_id: &str,
+        kind: &str,
+        cached: &str,
+        receiver: Option<&str>,
+        group: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO media_devices (id, provider_id, device_id, name, kind, capabilities, last_state, receiver_id, group_id)
+             VALUES (?, ?, ?, ?, ?, '{}', ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(provider)
+        .bind(device_id)
+        .bind(id)
+        .bind(kind)
+        .bind(cached)
+        .bind(receiver)
+        .bind(group)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    fn push(device_id: &str, volume: u8, mute: bool) -> crate::models::media::MediaEvent {
+        crate::models::media::MediaEvent {
+            device_id: device_id.into(),
+            state: MediaState {
+                power: true,
+                volume,
+                mute,
+                reachable: Some(true),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn a_bound_sources_push_carries_its_receivers_volume_not_its_own() {
+        // The live failure: a TV bound to an Onkyo pushes its OWN volume (8 — the
+        // TV's muted internal output), which replaced the receiver's 52 on every
+        // surface. The ±1 stepper steps from what is painted, so the next press
+        // moved the *receiver* to 7.
+        let state = push_test_state().await;
+        seed_media(
+            &state,
+            "recv",
+            "onk",
+            "main",
+            "receiver",
+            r#"{"power":true,"volume":52,"mute":false}"#,
+            None,
+            None,
+        )
+        .await;
+        seed_media(
+            &state,
+            "tv",
+            "tv",
+            "192.168.1.250",
+            "tv",
+            r#"{"power":true,"volume":8,"mute":false}"#,
+            Some("recv"),
+            None,
+        )
+        .await;
+
+        let out = compose_media_push(&state, "tv", &push("192.168.1.250", 8, true)).await;
+        assert_eq!(out.len(), 1, "one device pushed, one event out");
+        assert_eq!(out[0].device_id, "192.168.1.250");
+        assert_eq!(
+            out[0].state.volume, 52,
+            "a bound source's push must carry the receiver's volume, not the TV's own"
+        );
+        assert!(
+            !out[0].state.mute,
+            "mute comes from the receiver too — the TV's own mute is not the one the slider shows"
+        );
+        assert!(out[0].state.power, "the pushed state is otherwise intact");
+    }
+
+    #[tokio::test]
+    async fn a_receivers_push_also_reaches_the_sources_bound_to_it() {
+        // The mirror direction: a receiver push matches no bound source (different
+        // provider and device id), so turning the knob on the receiver left every
+        // bound source's slider stale until the next full read.
+        let state = push_test_state().await;
+        seed_media(
+            &state,
+            "recv",
+            "onk",
+            "main",
+            "receiver",
+            r#"{"power":true,"volume":30,"mute":false}"#,
+            None,
+            None,
+        )
+        .await;
+        seed_media(
+            &state,
+            "tv",
+            "tv",
+            "192.168.1.250",
+            "tv",
+            r#"{"power":true,"volume":8,"mute":false}"#,
+            Some("recv"),
+            None,
+        )
+        .await;
+
+        let out = compose_media_push(&state, "onk", &push("main", 44, false)).await;
+        assert_eq!(
+            out.len(),
+            2,
+            "the receiver's own push plus the bound source"
+        );
+        let recv = out.iter().find(|p| p.device_id == "main").unwrap();
+        assert_eq!(recv.state.volume, 44);
+        let tv = out.iter().find(|p| p.device_id == "192.168.1.250").unwrap();
+        assert_eq!(tv.provider_id, "tv", "keyed as the client knows the source");
+        assert_eq!(
+            tv.state.volume, 44,
+            "the bound source's slider must follow the receiver's new volume"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unbound_devices_push_passes_through_untouched() {
+        // The common case (a plain speaker) must stay a pass-through — one indexed
+        // lookup, no composition.
+        let state = push_test_state().await;
+        seed_media(
+            &state,
+            "sonos",
+            "ha",
+            "media_player.kitchen",
+            "speaker",
+            r#"{"power":true,"volume":20,"mute":false}"#,
+            None,
+            None,
+        )
+        .await;
+        let out = compose_media_push(&state, "ha", &push("media_player.kitchen", 35, true)).await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].state.volume, 35);
+        assert!(out[0].state.mute);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_device_id_still_pushes_raw() {
+        // A device the hub hasn't discovered yet must not lose its push.
+        let state = push_test_state().await;
+        let out = compose_media_push(&state, "ha", &push("media_player.ghost", 12, false)).await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].state.volume, 12);
+    }
+
+    #[tokio::test]
+    async fn a_composite_members_push_also_moves_its_surface() {
+        // A member's push reaches only the member's row, and every control
+        // surface hides those (`companion_of`) — so the tile froze until a
+        // refetch, even though a read merges the member into the surface. The
+        // surface must be composed against the state just *pushed*, not the
+        // cached member row the DB writer is still catching up to.
+        let state = push_test_state().await;
+        seed_media(
+            &state,
+            "surface",
+            "tv",
+            "192.168.1.44",
+            "tv",
+            r#"{"power":true,"volume":0,"mute":false}"#,
+            None,
+            Some("g1"),
+        )
+        .await;
+        seed_media(
+            &state,
+            "hacopy",
+            "ha",
+            "media_player.bedroom_tv",
+            "speaker",
+            r#"{"power":false,"volume":8,"mute":false}"#,
+            None,
+            Some("g1"),
+        )
+        .await;
+
+        let event = crate::models::media::MediaEvent {
+            device_id: "media_player.bedroom_tv".into(),
+            state: MediaState {
+                power: true,
+                volume: 25,
+                mute: false,
+                now_playing: Some(crate::models::media::NowPlaying {
+                    title: Some("Arrival".into()),
+                    play_state: Some(crate::models::media::PlayState::Playing),
+                    ..Default::default()
+                }),
+                reachable: Some(true),
+                ..Default::default()
+            },
+        };
+        let out = compose_media_push(&state, "ha", &event).await;
+        assert_eq!(out.len(), 2, "the member's own event plus its surface");
+        let surface = out
+            .iter()
+            .find(|p| p.device_id == "192.168.1.44")
+            .expect("the surface must be pushed");
+        assert_eq!(
+            surface.state.now_playing.as_ref().unwrap().title.as_deref(),
+            Some("Arrival"),
+            "the surface must carry the member's just-pushed now-playing"
+        );
+        assert_eq!(
+            surface.state.volume, 25,
+            "and the volume the member just reported, not its cached 8"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_surfaces_own_push_is_not_duplicated() {
+        // The surface pushing its own state must emit exactly one event: it is
+        // already the row clients render.
+        let state = push_test_state().await;
+        seed_media(
+            &state,
+            "surface",
+            "tv",
+            "192.168.1.44",
+            "tv",
+            r#"{"power":true,"volume":0,"mute":false}"#,
+            None,
+            Some("g1"),
+        )
+        .await;
+        seed_media(
+            &state,
+            "hacopy",
+            "ha",
+            "media_player.bedroom_tv",
+            "speaker",
+            r#"{"power":false,"volume":0,"mute":false}"#,
+            None,
+            Some("g1"),
+        )
+        .await;
+        let out = compose_media_push(&state, "tv", &push("192.168.1.44", 30, false)).await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].device_id, "192.168.1.44");
+    }
+
+    #[tokio::test]
+    async fn a_receivers_push_reaches_the_surface_of_a_bound_companions_composite() {
+        // The binding lives on the HA copy, which is a hidden companion; the row a
+        // client renders is the composite's surface (the native TV), and that is
+        // where the merged binding — and so the receiver's volume — shows up.
+        let state = push_test_state().await;
+        seed_media(
+            &state,
+            "recv",
+            "onk",
+            "main",
+            "receiver",
+            r#"{"power":true,"volume":30,"mute":false}"#,
+            None,
+            None,
+        )
+        .await;
+        seed_media(
+            &state,
+            "native",
+            "tv",
+            "192.168.1.250",
+            "tv",
+            r#"{"power":true,"volume":8,"mute":false}"#,
+            None,
+            Some("g1"),
+        )
+        .await;
+        seed_media(
+            &state,
+            "hacopy",
+            "ha",
+            "media_player.tv",
+            "speaker",
+            r#"{"power":true,"volume":8,"mute":false}"#,
+            Some("recv"),
+            Some("g1"),
+        )
+        .await;
+
+        let out = compose_media_push(&state, "onk", &push("main", 41, false)).await;
+        let surface = out
+            .iter()
+            .find(|p| p.device_id == "192.168.1.250")
+            .expect("the composite's surface must be pushed, not the hidden companion");
+        assert_eq!(surface.state.volume, 41);
     }
 }
