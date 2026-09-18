@@ -227,6 +227,16 @@ struct CheckinRequest {
     battery_temp_dc: Option<i64>, // deci-celsius
     #[serde(default)]
     power_source: Option<String>, // ac | usb | wireless | none
+    // Display policy (mig 0066) — whether the app still holds the device-owner
+    // powers that keep a lock screen off the panel. Absent on older apps.
+    #[serde(default)]
+    device_owner: Option<bool>,
+    #[serde(default)]
+    lock_task: Option<bool>,
+    #[serde(default)]
+    keyguard_disabled: Option<bool>,
+    #[serde(default)]
+    keyguard_locked: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -278,8 +288,10 @@ async fn checkin(
     let row = sqlx::query(
         "INSERT INTO kiosks (id, api_key_id, name, app_version, screen_on,
                              battery_level, battery_charging, battery_voltage_mv,
-                             battery_current_ua, battery_temp_dc, power_source, last_seen)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                             battery_current_ua, battery_temp_dc, power_source,
+                             device_owner, lock_task, keyguard_disabled, keyguard_locked,
+                             last_seen)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
          ON CONFLICT(api_key_id) DO UPDATE SET
              name               = excluded.name,
              app_version        = excluded.app_version,
@@ -290,6 +302,10 @@ async fn checkin(
              battery_current_ua = excluded.battery_current_ua,
              battery_temp_dc    = excluded.battery_temp_dc,
              power_source       = excluded.power_source,
+             device_owner       = excluded.device_owner,
+             lock_task          = excluded.lock_task,
+             keyguard_disabled  = excluded.keyguard_disabled,
+             keyguard_locked    = excluded.keyguard_locked,
              last_seen          = datetime('now')
          RETURNING id, pending_command",
     )
@@ -304,6 +320,10 @@ async fn checkin(
     .bind(req.battery_current_ua)
     .bind(req.battery_temp_dc)
     .bind(&req.power_source)
+    .bind(req.device_owner.map(i64::from))
+    .bind(req.lock_task.map(i64::from))
+    .bind(req.keyguard_disabled.map(i64::from))
+    .bind(req.keyguard_locked.map(i64::from))
     .fetch_one(&state.db)
     .await;
 
@@ -620,6 +640,39 @@ struct KioskRow {
     /// What the kiosk's own PAGE last said about its event stream (mig 0065).
     /// All-null until it first reports (an older kiosk build never will).
     web: WebHealth,
+    /// Whether the app still holds the device-owner powers that keep a lock
+    /// screen off the panel (mig 0066). All-null on an older app build.
+    policy: DisplayPolicy,
+}
+
+/// The kiosk app's own report of its display policy — the layer *below* the
+/// page and the stream, and the one that decides whether a woken panel shows
+/// the dashboard or a lock screen.
+#[derive(Serialize)]
+pub struct DisplayPolicy {
+    /// The app is this device's owner; every policy below depends on it.
+    pub device_owner: Option<bool>,
+    /// Lock task (screen pinning) is active.
+    pub lock_task: Option<bool>,
+    /// `setKeyguardDisabled(true)` was accepted — false means the tablet has a
+    /// secure lock credential, which no app policy can override.
+    pub keyguard_disabled: Option<bool>,
+    /// A keyguard was showing at check-in time. True on a lit panel is the
+    /// "swipe to unlock" fault itself.
+    pub keyguard_locked: Option<bool>,
+}
+
+impl DisplayPolicy {
+    /// Read the display-policy columns off a kiosks row.
+    fn from_row(r: &sqlx::sqlite::SqliteRow) -> Self {
+        let flag = |c: &str| r.get::<Option<i64>, _>(c).map(|v| v != 0);
+        Self {
+            device_owner: flag("device_owner"),
+            lock_task: flag("lock_task"),
+            keyguard_disabled: flag("keyguard_disabled"),
+            keyguard_locked: flag("keyguard_locked"),
+        }
+    }
 }
 
 /// `GET /api/kiosks` (session) — the clients view: every registered kiosk with
@@ -634,6 +687,7 @@ async fn list(State(state): State<Arc<AppState>>, _: Session) -> impl IntoRespon
                 mic_presence, mic_sensitivity, mic_level, aware_override_targets,
                 screenshot_at, web_seen_at, web_since_event_ms, web_since_beat_ms,
                 web_reconnects, web_ready_state, web_page_age_ms,
+                device_owner, lock_task, keyguard_disabled, keyguard_locked,
                 api_key_id IS NOT NULL AS authorized,
                 (last_seen > datetime('now', '-{ONLINE_WINDOW_SECS} seconds')) AS online
          FROM kiosks ORDER BY name"
@@ -681,6 +735,7 @@ async fn list(State(state): State<Arc<AppState>>, _: Session) -> impl IntoRespon
                         aware_override_mode,
                         screenshot_at: r.get("screenshot_at"),
                         web: WebHealth::from_row(&r),
+                        policy: DisplayPolicy::from_row(&r),
                     }
                 })
                 .collect::<Vec<_>>(),

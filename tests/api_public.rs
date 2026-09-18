@@ -1082,6 +1082,72 @@ async fn kiosk_checkin_stores_battery_telemetry() {
 }
 
 #[tokio::test]
+async fn kiosk_checkin_stores_display_policy() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "Bedroom tablet").await;
+
+    let r = app
+        .clone()
+        .oneshot(bearer_json(
+            "POST",
+            "/api/kiosks/checkin",
+            &key,
+            r#"{"app_version":"0.3.7","screen_on":true,"device_owner":true,
+                "lock_task":true,"keyguard_disabled":false,"keyguard_locked":true}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    let list = helpers::response_json(
+        app.oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let policy = &list.as_array().unwrap()[0]["policy"];
+    assert_eq!(policy["device_owner"], true);
+    assert_eq!(policy["lock_task"], true);
+    // A tablet whose keyguard could not be disabled and is showing one right
+    // now: a lit panel no one can get past, invisible from every other layer.
+    assert_eq!(policy["keyguard_disabled"], false);
+    assert_eq!(policy["keyguard_locked"], true);
+}
+
+#[tokio::test]
+async fn kiosk_display_policy_is_null_for_an_older_app() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let key = create_api_key(&app, &cookie, "Hall tablet").await;
+
+    let r = app
+        .clone()
+        .oneshot(bearer_json(
+            "POST",
+            "/api/kiosks/checkin",
+            &key,
+            r#"{"app_version":"0.3.6","screen_on":true}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    let list = helpers::response_json(
+        app.oneshot(helpers::authed_get("/api/kiosks", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let policy = &list.as_array().unwrap()[0]["policy"];
+    // Unknown must not read as "off": an app that never reports this would
+    // otherwise look like a kiosk that just lost its device-owner powers.
+    assert!(policy["device_owner"].is_null());
+    assert!(policy["keyguard_disabled"].is_null());
+    assert!(policy["keyguard_locked"].is_null());
+}
+
+#[tokio::test]
 async fn kiosk_schedule_set_reflected_and_validated() {
     let app = helpers::test_app_with_password().await;
     let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;

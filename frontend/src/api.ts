@@ -1894,6 +1894,23 @@ export interface Kiosk {
    * build never will. The ages are as of `seen_at`, not as of now: pair them
    * with it, because a stale report is itself the finding (the page froze). */
   web: KioskWebHealth;
+  /** What the kiosk APP last said about the device-owner powers that keep a
+   * lock screen off the panel. All-null until it reports — an older kiosk build
+   * never will. This is the layer under `web`: every other layer can read
+   * healthy while the tablet sits on "swipe to unlock". */
+  policy: KioskDisplayPolicy;
+}
+
+export interface KioskDisplayPolicy {
+  /** The app is this device's owner; every policy below depends on it. */
+  device_owner: boolean | null;
+  /** Lock task (screen pinning) is active. */
+  lock_task: boolean | null;
+  /** `setKeyguardDisabled(true)` was accepted. False = the tablet has a secure
+   * lock credential (PIN/pattern), which no app policy can override. */
+  keyguard_disabled: boolean | null;
+  /** A keyguard was showing at check-in. True is the "swipe to unlock" fault. */
+  keyguard_locked: boolean | null;
 }
 
 export interface KioskWebHealth {

@@ -166,9 +166,25 @@ async fn streams_handler(
 ///   name). Absent while the page reports itself alive is the signature of a
 ///   stream the hub is turning away rather than one the client abandoned.
 ///
+/// Beneath all three sits **policy** — what the app says about the device-owner
+/// powers that keep a lock screen off the panel. Every layer above can read
+/// perfectly healthy while the tablet shows "swipe to unlock", because a kiosk
+/// behind the keyguard is still checking in, still rendering, still streaming;
+/// it just isn't reachable by a hand. `keyguard_locked` true, or
+/// `keyguard_disabled` false, is that fault. All-null = an app build older than
+/// the one that reports this.
+///
 /// Read-only, and Bearer-reachable like the rest of `/api/dev`, because the
 /// question this answers — *which* of my tablets is the dead one — is one you
 /// ask from a shell, often while standing nowhere near either of them.
+/// Read an optional boolean column as JSON (null when the app never reported it).
+fn flag(r: &sqlx::sqlite::SqliteRow, col: &str) -> Value {
+    match r.get::<Option<i64>, _>(col) {
+        Some(v) => json!(v != 0),
+        None => Value::Null,
+    }
+}
+
 async fn kiosks_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -181,6 +197,7 @@ async fn kiosks_handler(
         "SELECT id, name, app_version, last_seen, screen_on, viewport_w, viewport_h,
                 web_seen_at, web_since_event_ms, web_since_beat_ms, web_reconnects,
                 web_ready_state, web_page_age_ms,
+                device_owner, lock_task, keyguard_disabled, keyguard_locked,
                 CAST((julianday('now') - julianday(last_seen)) * 86400 AS INTEGER) AS last_seen_secs,
                 CAST((julianday('now') - julianday(web_seen_at)) * 86400 AS INTEGER) AS web_seen_secs
          FROM kiosks ORDER BY name",
@@ -219,6 +236,12 @@ async fn kiosks_handler(
                     "reconnects": r.get::<Option<i64>, _>("web_reconnects"),
                     "ready_state": r.get::<Option<i64>, _>("web_ready_state"),
                     "page_age_ms": r.get::<Option<i64>, _>("web_page_age_ms"),
+                },
+                "policy": {
+                    "device_owner": flag(&r, "device_owner"),
+                    "lock_task": flag(&r, "lock_task"),
+                    "keyguard_disabled": flag(&r, "keyguard_disabled"),
+                    "keyguard_locked": flag(&r, "keyguard_locked"),
                 },
                 "stream": stream,
             })

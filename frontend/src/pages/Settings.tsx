@@ -88,6 +88,7 @@ import { color } from "../theme";
 import { Glyph } from "../components/glyphs";
 import { speak } from "../tts";
 import { copyText } from "../clipboard";
+import { policyAlarming, policySummary } from "../kioskPolicy";
 
 interface Props {
   onNavigate: (page: "dashboard") => void;
@@ -3083,6 +3084,18 @@ function KiosksSection({
                   }}
                 >
                   {webHealthMeta(k, Date.now())}
+                </div>
+              )}
+              {policySummary(k.policy) && (
+                <div
+                  title="What the kiosk app last reported about the device-owner powers that keep a lock screen off the panel"
+                  style={{
+                    color: policyAlarming(k.policy) ? "var(--bf-rose, #e57)" : "var(--bf-faint)",
+                    fontSize: "0.74rem",
+                    marginTop: "0.1rem",
+                  }}
+                >
+                  {policySummary(k.policy)}
                 </div>
               )}
             </div>
