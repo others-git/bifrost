@@ -60,6 +60,7 @@ import { Glyph } from "./glyphs";
 import { Select } from "./Select";
 import { S } from "../styles";
 import { T, alpha, color } from "../theme";
+import { hubNow } from "../hubClock";
 
 // ── Subjects & phrasing ───────────────────────────────────────────────────────
 
@@ -250,7 +251,7 @@ function conditionText(
 function firedAgo(utc: string): string {
   const then = Date.parse(`${utc.replace(" ", "T")}Z`);
   if (Number.isNaN(then)) return "";
-  const mins = Math.max(0, Math.round((Date.now() - then) / 60000));
+  const mins = Math.max(0, Math.round((hubNow() - then) / 60000));
   if (mins < 1) return "just now";
   if (mins < 60) return `${mins}m ago`;
   const h = Math.round(mins / 60);

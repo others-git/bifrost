@@ -586,10 +586,11 @@ async fn media_db_writer_task(
                     state_json.clone(),
                 );
                 let _ = sqlx::query(
-                    "UPDATE media_devices SET last_state = ?, last_seen = datetime('now')
+                    "UPDATE media_devices SET last_state = ?, last_seen = ?
                      WHERE provider_id = ? AND device_id = ?",
                 )
                 .bind(&state_json)
+                .bind(crate::clock::sql_now())
                 .bind(&provider_row_id)
                 .bind(&event.device_id)
                 .execute(&db)
@@ -719,10 +720,11 @@ async fn sensor_db_writer_task(
                     state_json.clone(),
                 );
                 let written = sqlx::query(
-                    "UPDATE sensor_devices SET last_state = ?, last_seen = datetime('now')
+                    "UPDATE sensor_devices SET last_state = ?, last_seen = ?
                      WHERE provider_id = ? AND device_id = ?",
                 )
                 .bind(&state_json)
+                .bind(crate::clock::sql_now())
                 .bind(&provider_row_id)
                 .bind(&event.device_id)
                 .execute(&db)
@@ -764,10 +766,11 @@ async fn power_db_writer_task(
                     state_json.clone(),
                 );
                 let _ = sqlx::query(
-                    "UPDATE power_devices SET last_state = ?, last_seen = datetime('now')
+                    "UPDATE power_devices SET last_state = ?, last_seen = ?
                      WHERE provider_id = ? AND device_id = ?",
                 )
                 .bind(&state_json)
+                .bind(crate::clock::sql_now())
                 .bind(&provider_row_id)
                 .bind(&event.device_id)
                 .execute(&db)
@@ -1413,22 +1416,22 @@ async fn apply_event_to_db(event: &LightEvent, db: &SqlitePool) -> bool {
         let stored_caps: Option<String> = row.get("capabilities");
         let changed = stored_caps.as_deref() != Some(caps_json.as_str());
         let _ = sqlx::query(
-            "UPDATE lights SET last_state = ?, capabilities = ?, last_seen = datetime('now') WHERE device_id = ?",
+            "UPDATE lights SET last_state = ?, capabilities = ?, last_seen = ? WHERE device_id = ?",
         )
         .bind(&state_json)
         .bind(&caps_json)
+        .bind(crate::clock::sql_now())
         .bind(&event.device_id)
         .execute(db)
         .await;
         changed
     } else {
-        let _ = sqlx::query(
-            "UPDATE lights SET last_state = ?, last_seen = datetime('now') WHERE device_id = ?",
-        )
-        .bind(&state_json)
-        .bind(&event.device_id)
-        .execute(db)
-        .await;
+        let _ = sqlx::query("UPDATE lights SET last_state = ?, last_seen = ? WHERE device_id = ?")
+            .bind(&state_json)
+            .bind(crate::clock::sql_now())
+            .bind(&event.device_id)
+            .execute(db)
+            .await;
         false
     }
 }
@@ -1448,7 +1451,6 @@ fn backoff_delay(attempt: u32) -> Duration {
 mod tests {
     use super::*;
     use crate::models::{Light, LightCapabilities};
-    use chrono::Utc;
     use std::sync::atomic::{AtomicU32, Ordering};
     use uuid::Uuid;
 
@@ -1567,7 +1569,7 @@ mod tests {
                     // Discovery snapshot is default (Govee's device list has no state).
                     state: LightState::default(),
                     capabilities: LightCapabilities::default(),
-                    last_seen: Utc::now(),
+                    last_seen: crate::clock::now_utc(),
                     hw_id: None,
                 })
                 .collect())

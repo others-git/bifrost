@@ -420,7 +420,7 @@ fn scan_to_light(ip: &str, sku: &str) -> Light {
             effects: Vec::new(),
             segments: None,
         },
-        last_seen: chrono::Utc::now(),
+        last_seen: crate::clock::now_utc(),
         hw_id: None, // LAN scan exposes only IP; no MAC yet.
     }
 }

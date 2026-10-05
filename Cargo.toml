@@ -1,6 +1,6 @@
 [package]
 name = "bifrost"
-version = "0.33.20"
+version = "0.33.21"
 edition = "2024"
 
 [lib]
@@ -82,6 +82,7 @@ signature = "2"
 rmcp = { version = "1.7.0", features = ["server", "transport-streamable-http-server", "schemars"] }
 schemars = "1" # JSON Schema for MCP tool argument structs
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+chrono-tz = "0.10"
 
 [dev-dependencies]
 wiremock = "0.6"

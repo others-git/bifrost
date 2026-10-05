@@ -29,7 +29,6 @@ use crate::providers::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
-use chrono::Utc;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -322,7 +321,7 @@ fn info_to_light(info: NanoInfo) -> Light {
         name: info.name,
         state,
         capabilities,
-        last_seen: Utc::now(),
+        last_seen: crate::clock::now_utc(),
     }
 }
 

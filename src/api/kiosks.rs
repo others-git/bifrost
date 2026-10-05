@@ -147,11 +147,12 @@ async fn upload_screenshot(
         return StatusCode::UNPROCESSABLE_ENTITY;
     }
     match sqlx::query(
-        "UPDATE kiosks SET screenshot = ?, screenshot_mime = ?, screenshot_at = datetime('now')
+        "UPDATE kiosks SET screenshot = ?, screenshot_mime = ?, screenshot_at = ?
          WHERE api_key_id = ?",
     )
     .bind(body.as_ref())
     .bind(&mime)
+    .bind(crate::clock::sql_now())
     .bind(&key_id)
     .execute(&state.db)
     .await
@@ -291,7 +292,7 @@ async fn checkin(
                              battery_current_ua, battery_temp_dc, power_source,
                              device_owner, lock_task, keyguard_disabled, keyguard_locked,
                              last_seen)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(api_key_id) DO UPDATE SET
              name               = excluded.name,
              app_version        = excluded.app_version,
@@ -306,7 +307,7 @@ async fn checkin(
              lock_task          = excluded.lock_task,
              keyguard_disabled  = excluded.keyguard_disabled,
              keyguard_locked    = excluded.keyguard_locked,
-             last_seen          = datetime('now')
+             last_seen          = excluded.last_seen
          RETURNING id, pending_command",
     )
     .bind(Uuid::new_v4().to_string())
@@ -324,6 +325,7 @@ async fn checkin(
     .bind(req.lock_task.map(i64::from))
     .bind(req.keyguard_disabled.map(i64::from))
     .bind(req.keyguard_locked.map(i64::from))
+    .bind(crate::clock::sql_now())
     .fetch_one(&state.db)
     .await;
 
@@ -530,11 +532,12 @@ async fn report_self_health(
         return StatusCode::UNAUTHORIZED;
     };
     match sqlx::query(
-        "UPDATE kiosks SET web_seen_at = datetime('now'), web_since_event_ms = ?,
+        "UPDATE kiosks SET web_seen_at = ?, web_since_event_ms = ?,
                            web_since_beat_ms = ?, web_reconnects = ?,
                            web_ready_state = ?, web_page_age_ms = ?
          WHERE api_key_id = ?",
     )
+    .bind(crate::clock::sql_now())
     .bind(req.since_event_ms)
     .bind(req.since_beat_ms)
     .bind(req.reconnects)
@@ -689,9 +692,10 @@ async fn list(State(state): State<Arc<AppState>>, _: Session) -> impl IntoRespon
                 web_reconnects, web_ready_state, web_page_age_ms,
                 device_owner, lock_task, keyguard_disabled, keyguard_locked,
                 api_key_id IS NOT NULL AS authorized,
-                (last_seen > datetime('now', '-{ONLINE_WINDOW_SECS} seconds')) AS online
+                (last_seen > datetime(?, '-{ONLINE_WINDOW_SECS} seconds')) AS online
          FROM kiosks ORDER BY name"
     ))
+    .bind(crate::clock::sql_now())
     .fetch_all(&state.db)
     .await;
 
@@ -1196,7 +1200,7 @@ pub async fn run_scheduler(state: Arc<AppState>) {
             _ = ticker.tick() => {}
             _ = state.occupancy_seen.poked() => {}
         }
-        let now = chrono::Local::now();
+        let now = crate::clock::now_local();
         scheduler_tick(
             &state,
             &mut sched,
@@ -1549,7 +1553,7 @@ async fn set_mic(
                         .unwrap_or_default();
                 let _ = sqlx::query(
                     "INSERT INTO sensor_devices (id, provider_id, device_id, name, provider_name, kind, last_state, last_seen)
-                     VALUES (?, ?, ?, ?, ?, 'occupancy', ?, datetime('now'))",
+                     VALUES (?, ?, ?, ?, ?, 'occupancy', ?, ?)",
                 )
                 .bind(&sid)
                 .bind(KIOSK_SENSOR_PROVIDER)
@@ -1557,6 +1561,7 @@ async fn set_mic(
                 .bind(&name)
                 .bind(&name)
                 .bind(&initial)
+                .bind(crate::clock::sql_now())
                 .execute(&state.db)
                 .await;
                 sid

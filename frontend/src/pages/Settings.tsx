@@ -24,6 +24,8 @@ import {
   revokeApiKey,
   createEnrollmentToken,
   getSettings,
+  getTimezones,
+  type AppSettings,
   updateSettings,
   getDevInfo,
   getDevProviders,
@@ -89,6 +91,7 @@ import { Glyph } from "../components/glyphs";
 import { speak } from "../tts";
 import { copyText } from "../clipboard";
 import { policyAlarming, policySummary } from "../kioskPolicy";
+import { formatHubDate, formatHubTime, hubNow, syncHubClock, useHubNow } from "../hubClock";
 
 interface Props {
   onNavigate: (page: "dashboard") => void;
@@ -101,9 +104,10 @@ interface Props {
   onDevModeChange?: (on: boolean) => void;
 }
 
-type SettingsTab = "providers" | "voice" | "clients" | "appearance" | "developer";
+type SettingsTab = "providers" | "time" | "voice" | "clients" | "appearance" | "developer";
 const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: "providers", label: "Providers" },
+  { id: "time", label: "Time" },
   { id: "voice", label: "Voice & AI" },
   { id: "clients", label: "Clients" },
   { id: "appearance", label: "Appearance" },
@@ -459,6 +463,12 @@ export function SettingsPage({ onNavigate: _onNavigate, initialAdd, onConsumeAdd
 
       {/* Form-shaped tabs keep a readable column (left-aligned, not centered);
           full-bleed is for card collections, not input stacks. */}
+      {tab === "time" && (
+        <div style={{ maxWidth: 760 }}>
+          <TimeTab />
+        </div>
+      )}
+
       {tab === "voice" && (
         <div style={{ maxWidth: 760 }}>
           <AiEndpointsSection dialogs={dialogs} />
@@ -662,6 +672,167 @@ function ExpandedLanSection() {
         </div>
       )}
     </div>
+  );
+}
+
+// ── Time (hub clock) ────────────────────────────────────────────────────────
+
+/** "+1.2 s" / "−340 ms" for an NTP correction. */
+function fmtOffset(ms: number): string {
+  const sign = ms < 0 ? "−" : "+";
+  const a = Math.abs(ms);
+  return a >= 1000 ? `${sign}${(a / 1000).toFixed(a >= 10_000 ? 0 : 1)} s` : `${sign}${a} ms`;
+}
+
+/**
+ * The hub's clock: the time zone every time-of-day feature runs in (kiosk hour
+ * plans, automation timers + time gates, board clocks) and the NTP servers the
+ * hub corrects its clock against. The zone is saved on pick; servers on Save.
+ */
+function TimeTab() {
+  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [zones, setZones] = useState<string[]>([]);
+  const [servers, setServers] = useState("");
+  const [msg, setMsg] = useState("");
+  const [saving, setSaving] = useState(false);
+  const now = useHubNow(1000);
+  const deviceZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  function adopt(s: AppSettings) {
+    setSettings(s);
+    setServers((s.ntp_servers ?? []).join(", "));
+  }
+
+  useEffect(() => {
+    getSettings().then(adopt);
+    getTimezones().then(setZones);
+    // The report carries live sync status — refresh it while the tab is open.
+    const t = setInterval(() => getSettings().then(setSettings), 15_000);
+    return () => clearInterval(t);
+  }, []);
+
+  async function save(patch: Partial<AppSettings>) {
+    setSaving(true);
+    setMsg("");
+    const res = await updateSettings(patch);
+    setSaving(false);
+    if ("error" in res) {
+      setMsg(res.error);
+      return;
+    }
+    adopt(res);
+    setMsg("✓ Saved.");
+    // Re-measure hub time now so every readout on this client follows at once.
+    void syncHubClock();
+    // The sync runs in the background on the hub; pick up its result shortly.
+    setTimeout(() => getSettings().then(setSettings), 2500);
+  }
+
+  if (!settings) return null;
+  const clock = settings.clock;
+  const envLabel =
+    clock && clock.zone_source !== "setting"
+      ? clock.timezone ?? `system, UTC${clock.utc_offset_min >= 0 ? "+" : "−"}${Math.abs(clock.utc_offset_min / 60)}`
+      : "the hub's environment";
+  const zoneOptions = [
+    { value: "", label: `Automatic (${envLabel})` },
+    ...zones.map((z) => ({ value: z, label: z.replace(/_/g, " ") })),
+  ];
+  const ntp = clock?.ntp;
+
+  return (
+    <section style={{ marginTop: "0.25rem", display: "flex", flexDirection: "column", gap: "1.75rem" }}>
+      <div>
+        <SectionLabel style={{ marginBottom: "0.4rem" }}>Hub time</SectionLabel>
+        <div style={{ fontSize: "1.6rem", fontWeight: 600, fontVariantNumeric: "tabular-nums", color: "var(--bf-text)" }}>
+          {formatHubTime(now, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+        </div>
+        <div style={{ color: "var(--bf-dim)", fontSize: "0.85rem" }}>
+          {formatHubDate(now, { weekday: "long", year: "numeric", month: "long", day: "numeric" })}
+          {clock?.timezone ? ` · ${clock.timezone}` : ""}
+        </div>
+      </div>
+
+      <div>
+        <SectionLabel style={{ marginBottom: "0.4rem" }}>Time zone</SectionLabel>
+        <p style={{ color: "var(--bf-dim)", fontSize: "0.85rem", margin: "0 0 0.75rem", maxWidth: 560 }}>
+          Kiosk display plans, automation timers and time windows, and board clocks all run in this
+          zone. Automatic uses the hub's environment (<code>TZ</code>), which in a stock Docker
+          deploy is UTC.
+        </p>
+        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+          <Select
+            value={settings.timezone ?? ""}
+            options={zoneOptions}
+            onChange={(tz) => save({ timezone: tz })}
+            disabled={saving}
+            searchable
+            width={320}
+          />
+          {deviceZone && deviceZone !== clock?.timezone && zones.includes(deviceZone) && (
+            <Button variant="ghost" onClick={() => save({ timezone: deviceZone })} disabled={saving}>
+              Use {deviceZone.replace(/_/g, " ")}
+            </Button>
+          )}
+        </div>
+      </div>
+
+      <div>
+        <SectionLabel style={{ marginBottom: "0.4rem" }}>Clock sync (NTP)</SectionLabel>
+        <p style={{ color: "var(--bf-dim)", fontSize: "0.85rem", margin: "0 0 0.75rem", maxWidth: 560 }}>
+          The hub measures its clock against these servers hourly and corrects its own time — the
+          host's clock is never changed. Leave the list empty for <code>pool.ntp.org</code>, or point
+          it at your router. Up to 4.
+        </p>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "0.75rem" }}>
+          <Switch on={!!settings.ntp_enabled} onChange={(on) => save({ ntp_enabled: on })} disabled={saving} accent={ACCENT} />
+          <span style={{ fontSize: "0.9rem" }}>{settings.ntp_enabled ? "Enabled" : "Off — using the host clock"}</span>
+        </div>
+        {settings.ntp_enabled && (
+          <>
+            <div style={{ display: "flex", gap: "0.5rem", alignItems: "flex-start", maxWidth: 560 }}>
+              <input
+                value={servers}
+                onChange={(e) => setServers(e.target.value)}
+                placeholder="pool.ntp.org"
+                style={{ ...S.input, flex: 1 }}
+                spellCheck={false}
+              />
+              <Button
+                onClick={() => save({ ntp_servers: servers.split(/[,\s]+/).map((x) => x.trim()).filter(Boolean) })}
+                disabled={saving}
+              >
+                {saving ? "Saving…" : "Save"}
+              </Button>
+            </div>
+            {ntp && (
+              <div
+                style={{
+                  marginTop: "0.6rem",
+                  fontSize: "0.8rem",
+                  color: ntp.last_error && !ntp.synced ? "var(--bf-rose)" : "var(--bf-dim)",
+                }}
+              >
+                {ntp.synced
+                  ? `Synced with ${ntp.server} · correction ${fmtOffset(clock?.offset_ms ?? 0)}${
+                      ntp.delay_ms != null ? ` · round trip ${ntp.delay_ms} ms` : ""
+                    }${ntp.last_sync ? ` · ${formatHubTime(Date.parse(ntp.last_sync), { hour: "2-digit", minute: "2-digit" })}` : ""}`
+                  : ntp.last_error
+                    ? "Not synced — running on the host clock."
+                    : "Syncing…"}
+                {ntp.last_error && (
+                  <div style={{ color: "var(--bf-rose)", marginTop: "0.2rem" }}>Last attempt failed: {ntp.last_error}</div>
+                )}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {msg && (
+        <span style={{ fontSize: "0.8rem", color: msg.startsWith("✓") ? "var(--bf-good)" : "#fa0" }}>{msg}</span>
+      )}
+    </section>
   );
 }
 
@@ -3074,7 +3245,7 @@ function KiosksSection({
                   {batteryMeta(k)}
                 </div>
               )}
-              {webHealthMeta(k, Date.now()) && (
+              {webHealthMeta(k, hubNow()) && (
                 <div
                   title="What the kiosk's own page last reported about its live event stream"
                   style={{
@@ -3083,7 +3254,7 @@ function KiosksSection({
                     marginTop: "0.1rem",
                   }}
                 >
-                  {webHealthMeta(k, Date.now())}
+                  {webHealthMeta(k, hubNow())}
                 </div>
               )}
               {policySummary(k.policy) && (

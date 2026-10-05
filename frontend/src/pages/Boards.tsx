@@ -86,6 +86,7 @@ import { useViewport } from "../useViewport";
 import { S } from "../styles";
 import { alpha, color, font, glow, labelType, radius, T } from "../theme";
 import { ATTR_DELAY, VOLUME_DELAY, useCoalescedWrite, useToggleWrite } from "../components/useWrite";
+import { formatHubDate, formatHubTime, hubNow, useHubNow } from "../hubClock";
 
 /** The full-cell "lit niche" plate every Boards widget wears — the same recessed,
  * device-lit surface as the Control room cards' `GlyphButton`s — but retuned for
@@ -1951,16 +1952,12 @@ function ExitWidget({ onExit }: { onExit: () => void }) {
 
 /** A live clock tile. `cfg.format` = "24h" | "12h". */
 function ClockWidget({ cfg }: { cfg: Record<string, unknown> }) {
-  const [now, setNow] = useState(() => new Date());
-  useEffect(() => {
-    const t = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(t);
-  }, []);
+  const now = useHubNow(1000);
   const h24 = cfg.format !== "12h";
   // A size multiplier on the auto-scaling type (1 = default); still box-relative.
   const scale = typeof cfg.scale === "number" && cfg.scale > 0 ? cfg.scale : 1;
-  const time = now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: !h24 });
-  const date = now.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+  const time = formatHubTime(now, { hour: "2-digit", minute: "2-digit", hour12: !h24 });
+  const date = formatHubDate(now, { weekday: "long", month: "short", day: "numeric" });
   return (
     <Plate accents={[color.gold]} style={{ alignItems: "center", justifyContent: "center", gap: "0.15rem" }}>
       <div style={{ fontFamily: font.display, fontSize: `clamp(1rem, ${26 * scale}cqmin, ${5 * scale}rem)`, fontWeight: 700, color: T.text, fontVariantNumeric: "tabular-nums", letterSpacing: "0.04em", lineHeight: 1.05 }}>{time}</div>
@@ -2849,7 +2846,7 @@ const FEED_POLL_MS = 60_000;
 
 /** Coarse relative age for a feed tile ("2h ago"). Refreshed by the poll. */
 function timeAgo(unixSecs: number): string {
-  const s = Math.max(0, Math.floor(Date.now() / 1000 - unixSecs));
+  const s = Math.max(0, Math.floor(hubNow() / 1000 - unixSecs));
   if (s < 3600) return `${Math.max(1, Math.floor(s / 60))}m ago`;
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
   const d = Math.floor(s / 86400);

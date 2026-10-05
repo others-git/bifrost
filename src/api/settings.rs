@@ -1,6 +1,7 @@
 //! App-wide settings (the singleton `config` row), beyond first-run auth.
 //!
-//! Currently just the **Expanded-LAN scan list**: extra private /24 subnets that
+//! The hub clock (time zone + NTP servers, see [`crate::clock`]) and the
+//! **Expanded-LAN scan list**: extra private /24 subnets that
 //! network auto-detect should sweep in addition to the container's own subnet.
 //! This is how auto-detect reaches devices on a different LAN when Bifrost runs
 //! bridged (without host networking) — unicast TCP routes across subnets even
@@ -20,7 +21,9 @@ use std::sync::Arc;
 const MAX_SUBNETS: usize = 8;
 
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new().route("/", get(get_settings).put(put_settings))
+    Router::new()
+        .route("/", get(get_settings).put(put_settings))
+        .route("/timezones", get(get_timezones))
 }
 
 // Both fields are `Option` so a PUT is a **partial update** — sending only one
@@ -35,6 +38,19 @@ struct Settings {
     /// the `/api/dev` API). Off in a normal deploy.
     #[serde(default)]
     dev_mode: Option<bool>,
+    /// IANA zone every time-of-day feature runs in; `""` defers to the
+    /// process environment (`TZ` / the system zone).
+    #[serde(default)]
+    timezone: Option<String>,
+    /// NTP correction of the hub's clock.
+    #[serde(default)]
+    ntp_enabled: Option<bool>,
+    /// NTP servers; empty = the built-in default pool.
+    #[serde(default)]
+    ntp_servers: Option<Vec<String>>,
+    /// Read-only: the live clock (effective zone, correction, sync status).
+    #[serde(default, skip_deserializing)]
+    clock: Option<crate::clock::ClockReport>,
 }
 
 /// Read the current settings (shared by GET and the PUT response).
@@ -51,6 +67,7 @@ async fn read_settings(state: &AppState) -> Settings {
     let dev_mode = row
         .map(|r| r.get::<i64, _>("dev_mode") != 0)
         .unwrap_or(false);
+    let clock_cfg = crate::clock::read_config(&state.db).await;
     Settings {
         expanded_lan_scan: Some(
             raw.split(',')
@@ -60,6 +77,10 @@ async fn read_settings(state: &AppState) -> Settings {
                 .collect(),
         ),
         dev_mode: Some(dev_mode),
+        timezone: Some(clock_cfg.timezone),
+        ntp_enabled: Some(clock_cfg.ntp_enabled),
+        ntp_servers: Some(clock_cfg.ntp_servers),
+        clock: Some(crate::clock::clock().report()),
     }
 }
 
@@ -115,6 +136,40 @@ async fn get_settings(State(state): State<Arc<AppState>>, _: Session) -> impl In
     Json(read_settings(&state).await).into_response()
 }
 
+/// `GET /api/settings/timezones` — every IANA zone the hub accepts, sorted.
+async fn get_timezones(_: Session) -> impl IntoResponse {
+    Json(crate::clock::zone_names()).into_response()
+}
+
+/// Validate + normalise the clock fields of a PUT. `None` = field omitted.
+fn clock_fields(req: &Settings) -> Result<(Option<String>, Option<String>), String> {
+    let timezone = match req.timezone.as_deref().map(str::trim) {
+        Some("") => Some(String::new()),
+        Some(tz) => Some(crate::clock::parse_zone(tz)?.name().to_string()),
+        None => None,
+    };
+    let servers = match &req.ntp_servers {
+        Some(list) => {
+            if list.len() > crate::clock::MAX_NTP_SERVERS {
+                return Err(format!(
+                    "at most {} NTP servers allowed",
+                    crate::clock::MAX_NTP_SERVERS
+                ));
+            }
+            let mut out: Vec<String> = Vec::new();
+            for entry in list.iter().filter(|e| !e.trim().is_empty()) {
+                let s = crate::clock::normalize_server(entry)?;
+                if !out.contains(&s) {
+                    out.push(s);
+                }
+            }
+            Some(out.join(","))
+        }
+        None => None,
+    };
+    Ok((timezone, servers))
+}
+
 async fn put_settings(
     State(state): State<Arc<AppState>>,
     _: Session,
@@ -143,25 +198,51 @@ async fn put_settings(
         }
         None => None,
     };
+    let (timezone, ntp_servers) = match clock_fields(&req) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, e).into_response(),
+    };
+    let clock_changed = timezone.is_some() || ntp_servers.is_some() || req.ntp_enabled.is_some();
 
     // COALESCE: an omitted field keeps its stored value (partial update).
     let res = sqlx::query(
         "UPDATE config
             SET scan_subnets = COALESCE(?, scan_subnets),
-                dev_mode     = COALESCE(?, dev_mode)
+                dev_mode     = COALESCE(?, dev_mode),
+                timezone     = COALESCE(?, timezone),
+                ntp_enabled  = COALESCE(?, ntp_enabled),
+                ntp_servers  = COALESCE(?, ntp_servers)
           WHERE id = 1",
     )
     .bind(stored)
     .bind(req.dev_mode.map(i64::from))
+    .bind(timezone)
+    .bind(req.ntp_enabled.map(i64::from))
+    .bind(ntp_servers)
     .execute(&state.db)
     .await;
     match res {
-        Ok(_) => Json(read_settings(&state).await).into_response(),
+        Ok(_) => {
+            if clock_changed {
+                apply_clock_change(&state).await;
+            }
+            Json(read_settings(&state).await).into_response()
+        }
         Err(e) => {
             tracing::error!("db error saving settings: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
+}
+
+/// A clock setting changed: adopt the zone now, re-sync NTP, and poke both
+/// schedulers so a plan hour that moved under the new zone is acted on
+/// immediately rather than at the next tick.
+async fn apply_clock_change(state: &AppState) {
+    crate::clock::load_zone(&state.db).await;
+    crate::clock::clock().resync();
+    state.automations_changed.notify_one();
+    state.occupancy_seen.poke();
 }
 
 #[cfg(test)]
@@ -196,5 +277,36 @@ mod tests {
         assert!(parse_private_subnet("not.an.ip").is_err());
         assert!(parse_private_subnet("").is_err());
         assert!(parse_private_subnet("999.1.1.1").is_err());
+    }
+
+    fn req(tz: Option<&str>, servers: Option<Vec<&str>>) -> Settings {
+        Settings {
+            expanded_lan_scan: None,
+            dev_mode: None,
+            timezone: tz.map(String::from),
+            ntp_enabled: None,
+            ntp_servers: servers.map(|v| v.into_iter().map(String::from).collect()),
+            clock: None,
+        }
+    }
+
+    #[test]
+    fn clock_fields_normalise_and_validate() {
+        assert_eq!(
+            clock_fields(&req(
+                Some(" Europe/Paris "),
+                Some(vec![" time.lan ", "time.lan", ""])
+            )),
+            Ok((Some("Europe/Paris".into()), Some("time.lan".into())))
+        );
+        assert_eq!(
+            clock_fields(&req(Some(""), None)),
+            Ok((Some(String::new()), None)),
+            "empty zone clears the setting"
+        );
+        assert_eq!(clock_fields(&req(None, None)), Ok((None, None)));
+        assert!(clock_fields(&req(Some("Nowhere/Land"), None)).is_err());
+        assert!(clock_fields(&req(None, Some(vec!["bad host"]))).is_err());
+        assert!(clock_fields(&req(None, Some(vec!["a", "b", "c", "d", "e"]))).is_err());
     }
 }

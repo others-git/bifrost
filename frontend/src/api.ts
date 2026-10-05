@@ -421,6 +421,56 @@ export interface AppSettings {
   /** Developer mode — exposes contributor/dev-only surfaces (provider debug, the
    * `/api/dev` API). Omit on a partial PUT to leave it unchanged. */
   dev_mode?: boolean;
+  /** IANA zone every time-of-day feature runs in; `""` = the hub's environment. */
+  timezone?: string;
+  /** NTP correction of the hub clock. */
+  ntp_enabled?: boolean;
+  /** NTP servers; empty = the built-in default pool. */
+  ntp_servers?: string[];
+  /** Read-only live clock report (GET only). */
+  clock?: HubClockReport;
+}
+
+/** The hub's live clock (read-only, on `GET /api/settings`). */
+export interface HubClockReport {
+  /** Corrected hub-local time, RFC 3339 with offset. */
+  now: string;
+  now_ms: number;
+  /** IANA name of the effective zone, when it has one. */
+  timezone: string | null;
+  /** Where the zone came from: the hub setting, the `TZ` env, or the system. */
+  zone_source: "setting" | "env" | "system";
+  utc_offset_min: number;
+  /** NTP correction applied to the host clock. */
+  offset_ms: number;
+  ntp: {
+    enabled: boolean;
+    synced: boolean;
+    server: string | null;
+    last_sync: string | null;
+    delay_ms: number | null;
+    last_error: string | null;
+  };
+}
+
+/** `GET /api/time` — unauthenticated; what a client derives hub time from. */
+export interface HubTime {
+  now_ms: number;
+  timezone: string | null;
+  utc_offset_min: number;
+}
+
+export async function getHubTime(): Promise<HubTime | null> {
+  const res = await timedFetch("/api/time", { cache: "no-store" });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+/** Every IANA zone the hub accepts (sorted). */
+export async function getTimezones(): Promise<string[]> {
+  const res = await timedFetch("/api/settings/timezones");
+  if (!res.ok) return [];
+  return res.json();
 }
 
 export async function getSettings(): Promise<AppSettings> {

@@ -659,7 +659,7 @@ fn in_cooldown(rule: &Automation, now_utc: chrono::DateTime<chrono::Utc>) -> boo
 /// Shared by the rule-level gate and each step's own gate.
 async fn conditions_hold(state: &AppState, conditions: &[RuleCondition]) -> bool {
     use chrono::{Datelike, Timelike};
-    let now = chrono::Local::now();
+    let now = crate::clock::now_local();
     let now_min = (now.hour() * 60 + now.minute()) as u16;
     let now_day = now.weekday().num_days_from_monday() as u8;
     for cond in conditions {
@@ -1130,8 +1130,9 @@ async fn schedule_restore(state: &AppState, rule: &Automation, secs: u32) {
             .flatten();
     if existing.is_some() {
         let _ = sqlx::query(
-            "UPDATE automation_restores SET restore_at = datetime('now', ?) WHERE automation_id = ?",
+            "UPDATE automation_restores SET restore_at = datetime(?, ?) WHERE automation_id = ?",
         )
+        .bind(crate::clock::sql_now())
         .bind(&modifier)
         .bind(&rule.id)
         .execute(&state.db)
@@ -1158,9 +1159,10 @@ async fn schedule_restore(state: &AppState, rule: &Automation, secs: u32) {
     }
     let _ = sqlx::query(
         "INSERT INTO automation_restores (automation_id, restore_at, snapshot_json)
-         VALUES (?, datetime('now', ?), ?)",
+         VALUES (?, datetime(?, ?), ?)",
     )
     .bind(&rule.id)
+    .bind(crate::clock::sql_now())
     .bind(&modifier)
     .bind(serde_json::to_string(&snapshot).unwrap_or_else(|_| "[]".into()))
     .execute(&state.db)
@@ -1173,8 +1175,9 @@ async fn schedule_restore(state: &AppState, rule: &Automation, secs: u32) {
 pub(crate) async fn apply_due_restores(state: &AppState) {
     let rows = sqlx::query(
         "SELECT automation_id, snapshot_json FROM automation_restores
-         WHERE restore_at <= datetime('now')",
+         WHERE restore_at <= ?",
     )
+    .bind(crate::clock::sql_now())
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
@@ -1344,7 +1347,8 @@ pub(crate) async fn execute_rule(state: &AppState, rule: &Automation) {
             watch_hold_devices(state, &entries).await;
         }
     }
-    let _ = sqlx::query("UPDATE automations SET last_fired_at = datetime('now') WHERE id = ?")
+    let _ = sqlx::query("UPDATE automations SET last_fired_at = ? WHERE id = ?")
+        .bind(crate::clock::sql_now())
         .bind(&rule.id)
         .execute(&state.db)
         .await;
@@ -1352,7 +1356,7 @@ pub(crate) async fn execute_rule(state: &AppState, rule: &Automation) {
 
 /// Fire a rule if its gates (cooldown + conditions) pass.
 async fn try_fire(state: &AppState, rule: &Automation) {
-    if in_cooldown(rule, chrono::Utc::now()) {
+    if in_cooldown(rule, crate::clock::now_utc()) {
         tracing::debug!(target: "bifrost::automation", rule = %rule.id, "rule skipped: in cooldown");
         return;
     }
@@ -1535,7 +1539,13 @@ async fn execute_schedule_off(state: &AppState, rule: &Automation) {
 /// plan set itself may have changed.
 pub(crate) async fn evaluate_schedules(state: &AppState, engine: &mut EngineState, force: bool) {
     use chrono::Timelike;
-    evaluate_schedules_at(state, engine, chrono::Local::now().hour() as usize, force).await;
+    evaluate_schedules_at(
+        state,
+        engine,
+        crate::clock::now_local().hour() as usize,
+        force,
+    )
+    .await;
 }
 
 /// Evaluate schedule rules at `hour` and act on the plan's **edges**: going
@@ -2829,7 +2839,7 @@ mod tests {
             restore_secs: None,
             last_fired_at: last.map(str::to_string),
         };
-        let now = chrono::Utc::now();
+        let now = crate::clock::now_utc();
         let recent = (now - chrono::Duration::seconds(10))
             .format("%Y-%m-%d %H:%M:%S")
             .to_string();

@@ -1,5 +1,6 @@
 pub mod api;
 pub mod audio;
+pub mod clock;
 pub mod config;
 pub mod connection;
 pub mod crypto;
@@ -235,6 +236,21 @@ pub async fn run() -> Result<()> {
             target: "bifrost::crypto", stored_fp = %stored, current_fp = %state.key_fp,
             "BIFROST_SECRET CHANGED since the last boot — credentials encrypted under the previous secret will NOT decrypt. Restore the previous BIFROST_SECRET, or re-enter every provider credential."
         ),
+    }
+
+    // The hub clock: apply the configured zone, start NTP correction, and give
+    // the first sync a moment to land before anything schedules off the clock
+    // (a boot-time plan pass on an uncorrected clock would fire the wrong hour).
+    clock::load_zone(&state.db).await;
+    tokio::spawn(clock::run(state.db.clone()));
+    if tokio::time::timeout(
+        std::time::Duration::from_secs(4),
+        clock::clock().first_attempt(),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!(target: "bifrost::clock", "first ntp sync still pending — starting on the host clock");
     }
 
     start_managers(&state).await;

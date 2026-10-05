@@ -203,19 +203,20 @@ async fn put_endpoint(
 
     let res = sqlx::query(
         "INSERT INTO ai_endpoints (role, base_url, model, api_key, enabled, updated_at)
-         VALUES (?, ?, ?, ?, ?, datetime('now'))
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(role) DO UPDATE SET
              base_url = excluded.base_url,
              model = excluded.model,
              api_key = excluded.api_key,
              enabled = excluded.enabled,
-             updated_at = datetime('now')",
+             updated_at = excluded.updated_at",
     )
     .bind(&role)
     .bind(&base_url)
     .bind(&model)
     .bind(&stored_key)
     .bind(req.enabled as i64)
+    .bind(crate::clock::sql_now())
     .execute(&state.db)
     .await;
 

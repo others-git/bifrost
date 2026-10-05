@@ -638,13 +638,12 @@ async fn update_credentials(
         }
     };
 
-    if let Err(e) = sqlx::query(
-        "UPDATE providers SET credentials = ?, updated_at = datetime('now') WHERE id = ?",
-    )
-    .bind(&encrypted)
-    .bind(&id)
-    .execute(&state.db)
-    .await
+    if let Err(e) = sqlx::query("UPDATE providers SET credentials = ?, updated_at = ? WHERE id = ?")
+        .bind(&encrypted)
+        .bind(crate::clock::sql_now())
+        .bind(&id)
+        .execute(&state.db)
+        .await
     {
         tracing::error!("db error: {e}");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -1303,13 +1302,13 @@ async fn smarttv_pair_remote(
                         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                     }
                 };
-                if let Err(e) = sqlx::query(
-                    "UPDATE providers SET credentials = ?, updated_at = datetime('now') WHERE id = ?",
-                )
-                .bind(&encrypted)
-                .bind(&id)
-                .execute(&state.db)
-                .await
+                if let Err(e) =
+                    sqlx::query("UPDATE providers SET credentials = ?, updated_at = ? WHERE id = ?")
+                        .bind(&encrypted)
+                        .bind(crate::clock::sql_now())
+                        .bind(&id)
+                        .execute(&state.db)
+                        .await
                 {
                     tracing::error!("db error: {e}");
                     return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -1431,10 +1430,7 @@ async fn discover(
     // is set. `prune_before` is captured now; rediscovered devices get a newer
     // `last_seen`, so anything older is no longer reported and gets removed.
     let prune = q.prune.unwrap_or(row.get::<i64, _>("prune") != 0);
-    let prune_before: String = sqlx::query_scalar("SELECT datetime('now')")
-        .fetch_one(&state.db)
-        .await
-        .unwrap_or_default();
+    let prune_before: String = crate::clock::sql_now();
 
     // A provider type can serve several device domains (Home Assistant does
     // lights + power from one row); discover each domain it's registered for and
@@ -1475,7 +1471,7 @@ async fn discover(
                 let state_json = serde_json::to_string(&light.state).unwrap_or_default();
                 let _ = sqlx::query(
                     "INSERT INTO lights (id, provider_id, device_id, name, provider_name, capabilities, last_state, last_seen, hw_id)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                      ON CONFLICT (provider_id, device_id)
                      DO UPDATE SET name        = CASE WHEN name = provider_name THEN excluded.name ELSE name END,
                                    provider_name = excluded.provider_name,
@@ -1491,6 +1487,7 @@ async fn discover(
                 .bind(&light.name)
                 .bind(&caps)
                 .bind(&state_json)
+                .bind(crate::clock::sql_now())
                 .bind(&light.hw_id)
                 .execute(&mut *tx)
                 .await;

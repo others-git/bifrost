@@ -9,6 +9,7 @@
 import { useEffect, useRef, useState } from "react";
 import { alpha, hitHalo, TOUCH } from "../theme";
 import { useViewport } from "../useViewport";
+import { hubHourMinute, useHubNow } from "../hubClock";
 
 export interface HourPlanMode {
   /** The stored plan character ('W' | 'S' | 'A'). */
@@ -69,7 +70,8 @@ export function HourPlanEditor({
 
   const modeColor = (m: string) => modes.find((x) => x.mode === m)?.color ?? "var(--bf-faint)";
   const modeFill = (m: string) => modes.find((x) => x.mode === m)?.fill ?? 0.5;
-  const nowHour = new Date().getHours();
+  // The plan runs on the hub's clock, so "now" is the hub's hour.
+  const nowHour = hubHourMinute(useHubNow(60_000)).hour;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem" }}>

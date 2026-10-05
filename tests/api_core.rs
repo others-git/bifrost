@@ -522,6 +522,7 @@ async fn session_gated_routes_return_401() {
         ("POST", "/api/api-keys", r#"{"name":"x"}"#),
         ("GET", "/api/settings", ""),
         ("PUT", "/api/settings", r#"{"expanded_lan_scan":[]}"#),
+        ("GET", "/api/settings/timezones", ""),
         ("GET", "/api/ai-endpoints", ""),
         ("GET", "/api/voice/vocabulary", ""),
         (
@@ -1839,6 +1840,114 @@ async fn settings_roundtrip_normalises_private_subnets() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+// ── Settings: hub clock (time zone + NTP) ────────────────────────────────────
+
+#[tokio::test]
+async fn settings_clock_roundtrip_and_validation() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    // Defaults: no zone set (defers to the environment), NTP on, default pool.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get("/api/settings", &cookie))
+        .await
+        .unwrap();
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["timezone"], "");
+    assert_eq!(body["ntp_enabled"], true);
+    assert_eq!(body["ntp_servers"], serde_json::json!([]));
+    assert!(
+        body["clock"]["now"].is_string(),
+        "live clock report: {body}"
+    );
+
+    // A zone + servers persist normalised, and the live clock adopts the zone.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/settings",
+            &cookie,
+            r#"{"timezone":" Pacific/Auckland ","ntp_servers":["time.lan"," time.lan "]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["timezone"], "Pacific/Auckland");
+    assert_eq!(body["ntp_servers"], serde_json::json!(["time.lan"]));
+    assert_eq!(body["clock"]["timezone"], "Pacific/Auckland");
+    assert_eq!(body["clock"]["zone_source"], "setting");
+
+    // Unknown zone / bad server → 422, nothing written.
+    for bad in [
+        r#"{"timezone":"Atlantis/Capital"}"#,
+        r#"{"ntp_servers":["not a host"]}"#,
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(helpers::authed_json("PUT", "/api/settings", &cookie, bad))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
+    }
+
+    // Clearing the zone hands it back to the environment.
+    let resp = app
+        .oneshot(helpers::authed_json(
+            "PUT",
+            "/api/settings",
+            &cookie,
+            r#"{"timezone":""}"#,
+        ))
+        .await
+        .unwrap();
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["timezone"], "");
+    assert_ne!(body["clock"]["zone_source"], "setting");
+}
+
+#[tokio::test]
+async fn timezones_list_is_sorted_iana_names() {
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let resp = app
+        .oneshot(helpers::authed_get("/api/settings/timezones", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let zones = helpers::response_json(resp).await;
+    let zones: Vec<&str> = zones
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|z| z.as_str().unwrap())
+        .collect();
+    assert!(zones.contains(&"America/Chicago"));
+    assert!(zones.windows(2).all(|w| w[0] <= w[1]));
+}
+
+#[tokio::test]
+async fn time_endpoint_is_unauthenticated_and_reports_the_hub_clock() {
+    let app = helpers::test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/time")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = helpers::response_json(resp).await;
+    let now_ms = body["now_ms"].as_i64().unwrap();
+    let host_ms = chrono::Utc::now().timestamp_millis();
+    assert!((now_ms - host_ms).abs() < 60_000, "{body}");
+    assert!(body["utc_offset_min"].is_i64());
 }
 
 // ── Provider display names + audio domain in listings ─────────────────────────

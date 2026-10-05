@@ -185,12 +185,12 @@ pub(crate) async fn write_light_state(db: &sqlx::SqlitePool, light_id: &str, sta
     let Ok(json) = serde_json::to_string(state) else {
         return;
     };
-    let _ =
-        sqlx::query("UPDATE lights SET last_state = ?, last_seen = datetime('now') WHERE id = ?")
-            .bind(json)
-            .bind(light_id)
-            .execute(db)
-            .await;
+    let _ = sqlx::query("UPDATE lights SET last_state = ?, last_seen = ? WHERE id = ?")
+        .bind(json)
+        .bind(crate::clock::sql_now())
+        .bind(light_id)
+        .execute(db)
+        .await;
 }
 
 pub(crate) async fn persist_light_state(db: &sqlx::SqlitePool, light_id: &str, new: &LightState) {

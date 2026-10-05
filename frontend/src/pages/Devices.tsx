@@ -69,6 +69,7 @@ import { useViewport } from "../useViewport";
 import { useSwipeTabs } from "../components/useSwipeTabs";
 import { T, ACCENT, alpha } from "../theme";
 import { useToggleWrite } from "../components/useWrite";
+import { formatHubDateTime } from "../hubClock";
 
 type Domain = "light" | "media" | "power" | "sensor";
 
@@ -955,7 +956,7 @@ function DeviceCard({
           <DetailRow label="Status">{statusText}</DetailRow>
           {item.domain === "sensor" && item.changedAt && (
             <DetailRow label="Last changed">
-              <span title={item.changedAt}>{new Date(item.changedAt).toLocaleString()}</span>
+              <span title={item.changedAt}>{formatHubDateTime(Date.parse(item.changedAt))}</span>
             </DetailRow>
           )}
           {item.domain === "sensor" && (

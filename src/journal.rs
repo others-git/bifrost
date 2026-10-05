@@ -64,7 +64,7 @@ impl Journal {
     ) {
         let entry = JournalEntry {
             seq: self.seq.fetch_add(1, Ordering::Relaxed) + 1,
-            ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            ts: crate::clock::now_utc().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             level,
             target: target.to_string(),
             message,

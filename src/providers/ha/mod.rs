@@ -60,7 +60,6 @@ use crate::providers::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
-use chrono::Utc;
 use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::Deserialize;
@@ -677,7 +676,7 @@ fn entity_to_light(e: HaEntity, hw_id: Option<String>) -> Light {
         name: friendly_name(&e.entity_id, &e.attributes),
         state,
         capabilities,
-        last_seen: Utc::now(),
+        last_seen: crate::clock::now_utc(),
         hw_id,
     }
 }

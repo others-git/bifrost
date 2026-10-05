@@ -302,7 +302,7 @@ fn lan_light(mac: &str, label: &str) -> Light {
             transport: Some("lan".to_string()),
             ..Default::default()
         },
-        last_seen: chrono::Utc::now(),
+        last_seen: crate::clock::now_utc(),
     }
 }
 

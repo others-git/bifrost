@@ -91,13 +91,12 @@ fn extract_bearer(headers: &HeaderMap) -> Option<String> {
 /// or `None` if unknown. Used by the Bearer guard and the kiosk session exchange.
 pub async fn validate_key(state: &Arc<AppState>, key: &str) -> Option<String> {
     let hash = hash_key(key);
-    let row = sqlx::query(
-        "UPDATE api_keys SET last_used = datetime('now') WHERE key_hash = ? RETURNING id",
-    )
-    .bind(&hash)
-    .fetch_optional(&state.db)
-    .await
-    .ok()??;
+    let row = sqlx::query("UPDATE api_keys SET last_used = ? WHERE key_hash = ? RETURNING id")
+        .bind(crate::clock::sql_now())
+        .bind(&hash)
+        .fetch_optional(&state.db)
+        .await
+        .ok()??;
     Some(row.get("id"))
 }
 

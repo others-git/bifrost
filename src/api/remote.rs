@@ -115,7 +115,7 @@ pub(crate) async fn discover_remote_devices(
         let state_json = serde_json::to_string(&device.state).unwrap_or_default();
         let _ = sqlx::query(
             "INSERT INTO remote_devices (id, provider_id, device_id, name, last_state, last_seen, hw_id)
-             VALUES (?, ?, ?, ?, ?, datetime('now'), ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (provider_id, device_id)
              DO UPDATE SET name       = excluded.name,
                            last_state = excluded.last_state,
@@ -127,6 +127,7 @@ pub(crate) async fn discover_remote_devices(
         .bind(&device.provider_id)
         .bind(&device.name)
         .bind(&state_json)
+        .bind(crate::clock::sql_now())
         .bind(&device.hw_id)
         .execute(&state.db)
         .await;
@@ -206,13 +207,14 @@ pub(crate) async fn record_app_seen(state: &AppState, remote_id: &str, package: 
     // catalog's real title, which the package-derived guess must not clobber.
     let _ = sqlx::query(
         "INSERT INTO remote_apps (remote_id, package, name, pinned, last_seen)
-         VALUES (?, ?, ?, 0, datetime('now'))
+         VALUES (?, ?, ?, 0, ?)
          ON CONFLICT (remote_id, package)
-         DO UPDATE SET last_seen = datetime('now')",
+         DO UPDATE SET last_seen = excluded.last_seen",
     )
     .bind(remote_id)
     .bind(package)
     .bind(app_display_name(package))
+    .bind(crate::clock::sql_now())
     .execute(&state.db)
     .await;
 }
@@ -478,13 +480,13 @@ pub(crate) async fn read_remote_state(state: &AppState, id: &str) -> Option<Remo
                 live.reachable = Some(true);
             }
             let json = serde_json::to_string(&live).unwrap_or_default();
-            let _ = sqlx::query(
-                "UPDATE remote_devices SET last_state = ?, last_seen = datetime('now') WHERE id = ?",
-            )
-            .bind(&json)
-            .bind(id)
-            .execute(&state.db)
-            .await;
+            let _ =
+                sqlx::query("UPDATE remote_devices SET last_state = ?, last_seen = ? WHERE id = ?")
+                    .bind(&json)
+                    .bind(crate::clock::sql_now())
+                    .bind(id)
+                    .execute(&state.db)
+                    .await;
             // Record the foreground app as a "recent" (HA gives no app list).
             if let Some(app) = live.current_app.as_deref() {
                 record_app_seen(state, id, app).await;

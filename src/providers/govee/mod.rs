@@ -9,7 +9,6 @@ use crate::models::{Color, Light, LightCapabilities, LightState, Provider, Segme
 use crate::providers::LightProvider;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
-use chrono::Utc;
 use reqwest::{Client, header};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -529,7 +528,7 @@ fn reset_delta(value: Option<i64>) -> Option<i64> {
     const ONE_YEAR_SECS: i64 = 31_536_000;
     let v = value?;
     Some(if v > ONE_YEAR_SECS {
-        v - Utc::now().timestamp()
+        v - crate::clock::now_utc().timestamp()
     } else {
         v
     })
@@ -733,7 +732,7 @@ fn govee_device_to_light(d: GoveeDevice, state: Option<LightState>) -> Light {
             effects: Vec::new(),
             segments,
         },
-        last_seen: Utc::now(),
+        last_seen: crate::clock::now_utc(),
     }
 }
 
@@ -1401,7 +1400,7 @@ fn lan_only_light(s: &LanScan) -> Light {
             // can't know its segment count — segment control needs the cloud anyway.
             segments: None,
         },
-        last_seen: Utc::now(),
+        last_seen: crate::clock::now_utc(),
     }
 }
 
@@ -2414,7 +2413,7 @@ mod tests {
     fn reset_delta_reads_an_absolute_epoch_as_a_delta() {
         // Govee has been seen sending the reset as a unix timestamp rather than
         // a delta; taking it literally would park control for 55 years.
-        let epoch = Utc::now().timestamp() + 4;
+        let epoch = crate::clock::now_utc().timestamp() + 4;
         let delta = reset_delta(Some(epoch)).unwrap();
         assert!((3..=5).contains(&delta), "expected ~4s, got {delta}");
         // A plausible delta is left alone.

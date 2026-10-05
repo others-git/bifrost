@@ -14,7 +14,8 @@
 // deliberate carve-out as the Effects tiles' literal gradients.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef } from "react";
+import { hubHourMinute, useHubNow } from "../hubClock";
 
 /** Per-board appearance spec, stored verbatim in `dashboards.background`.
  * `kind` may be absent when the board has no background but other appearance
@@ -767,13 +768,10 @@ const SKY_STOPS: [number, string, string][] = [
 ];
 
 function SkyLayer() {
-  const [now, setNow] = useState(() => new Date());
-  useEffect(() => {
-    const iv = setInterval(() => setNow(new Date()), 60_000);
-    return () => clearInterval(iv);
-  }, []);
+  const now = useHubNow(60_000);
   const p = useMemo(livePalette, []);
-  const hr = now.getHours() + now.getMinutes() / 60;
+  const { hour, minute } = hubHourMinute(now);
+  const hr = hour + minute / 60;
   let i = 0;
   while (i < SKY_STOPS.length - 2 && SKY_STOPS[i + 1][0] <= hr) i++;
   const [h0, t0, b0] = SKY_STOPS[i];

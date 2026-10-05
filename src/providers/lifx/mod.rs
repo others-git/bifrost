@@ -13,7 +13,6 @@ use crate::models::{Color, Light, LightCapabilities, LightState, Provider, Segme
 use crate::providers::{LightProvider, ProviderGroup};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
-use chrono::Utc;
 use reqwest::{Client, header};
 use serde::Deserialize;
 use serde_json::json;
@@ -315,7 +314,7 @@ fn lifx_to_light(l: LifxLight) -> Light {
             // the LAN (the cloud HTTP API has no multizone endpoint).
             segments: l.zones.as_ref().map(|z| z.count).filter(|&n| n > 1),
         },
-        last_seen: Utc::now(),
+        last_seen: crate::clock::now_utc(),
     }
 }
 

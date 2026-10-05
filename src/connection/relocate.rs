@@ -380,13 +380,13 @@ pub async fn relocate_with_candidates(
             tracing::error!(target: "bifrost::relocate", provider = %dev.provider_id, "relocate: encryption failed");
             continue;
         };
-        if let Err(e) = sqlx::query(
-            "UPDATE providers SET credentials = ?, updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(&encrypted)
-        .bind(&dev.provider_id)
-        .execute(&state.db)
-        .await
+        if let Err(e) =
+            sqlx::query("UPDATE providers SET credentials = ?, updated_at = ? WHERE id = ?")
+                .bind(&encrypted)
+                .bind(crate::clock::sql_now())
+                .bind(&dev.provider_id)
+                .execute(&state.db)
+                .await
         {
             tracing::error!(target: "bifrost::relocate", provider = %dev.provider_id, "relocate: db update failed: {e}");
             continue;

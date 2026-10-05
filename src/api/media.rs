@@ -674,9 +674,10 @@ pub(crate) async fn get_device_live(
             Ok(fresh) => {
                 let state_json = serde_json::to_string(&fresh).unwrap_or_default();
                 let _ = sqlx::query(
-                    "UPDATE media_devices SET last_state = ?, last_seen = datetime('now') WHERE id = ?",
+                    "UPDATE media_devices SET last_state = ?, last_seen = ? WHERE id = ?",
                 )
                 .bind(&state_json)
+                .bind(crate::clock::sql_now())
                 .bind(&device.id)
                 .execute(&state.db)
                 .await;
@@ -2309,7 +2310,7 @@ pub(crate) async fn discover_media_devices(
         };
         let _ = sqlx::query(
             "INSERT INTO media_devices (id, provider_id, device_id, name, provider_name, kind, capabilities, last_state, last_seen, hw_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (provider_id, device_id)
              DO UPDATE SET name         = CASE WHEN name = provider_name THEN excluded.name ELSE name END,
                            provider_name = excluded.provider_name,
@@ -2327,6 +2328,7 @@ pub(crate) async fn discover_media_devices(
         .bind(kind)
         .bind(&caps)
         .bind(&state_json)
+        .bind(crate::clock::sql_now())
         .bind(&device.hw_id)
         .execute(&mut *tx)
         .await;

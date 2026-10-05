@@ -68,7 +68,7 @@ it never event-fires, a macro also skips conditions; it's purely its actions.
 
 Pick **Timer** instead of **Trigger** at the top of the editor and the "when"
 becomes the same paintable 24-hour timeline the kiosk display plan uses, with
-two modes per hub-local hour: **On** and **Off**. The "then" is simply the
+two modes per hub-local hour (the zone set in Settings → Time, on the hub's NTP-corrected clock): **On** and **Off**. The "then" is simply the
 rooms, lights, and switches the timer powers — picked from one checklist, no
 verbs or clauses.
 
@@ -92,7 +92,7 @@ an hour.)
 
 Conditions are checked at the moment the trigger fires; all must hold.
 
-- **Time window** — `21:00`–`06:00` style, server-local. Overnight windows
+- **Time window** — `21:00`–`06:00` style, in the hub's time zone (Settings → Time). Overnight windows
   wrap midnight, and an optional **weekday filter** applies to the day the
   window *starts* (a Saturday-night window still covers Sunday 2 am).
 - **Another sensor's reading** — "only when the lux sensor is below 20",

@@ -46,19 +46,20 @@ struct EnrollmentToken {
 /// `POST /api/enrollment` (session) — mint a pairing token. Opportunistically
 /// prunes expired/used tokens so the table stays tiny.
 async fn create_token(State(state): State<Arc<AppState>>, _: Session) -> impl IntoResponse {
-    let _ = sqlx::query(
-        "DELETE FROM enrollment_tokens WHERE expires_at < datetime('now') OR used_at IS NOT NULL",
-    )
-    .execute(&state.db)
-    .await;
+    let _ =
+        sqlx::query("DELETE FROM enrollment_tokens WHERE expires_at < ? OR used_at IS NOT NULL")
+            .bind(crate::clock::sql_now())
+            .execute(&state.db)
+            .await;
 
     let token = generate_token();
     let row = sqlx::query(
         "INSERT INTO enrollment_tokens (token, expires_at)
-         VALUES (?, datetime('now', ?))
+         VALUES (?, datetime(?, ?))
          RETURNING expires_at",
     )
     .bind(&token)
+    .bind(crate::clock::sql_now())
     .bind(format!("+{TOKEN_TTL_SECS} seconds"))
     .fetch_one(&state.db)
     .await;
@@ -94,11 +95,13 @@ async fn redeem_token(
     Json(req): Json<RedeemRequest>,
 ) -> impl IntoResponse {
     let claimed = sqlx::query(
-        "UPDATE enrollment_tokens SET used_at = datetime('now')
-         WHERE token = ? AND used_at IS NULL AND expires_at > datetime('now')
+        "UPDATE enrollment_tokens SET used_at = ?
+         WHERE token = ? AND used_at IS NULL AND expires_at > ?
          RETURNING token",
     )
+    .bind(crate::clock::sql_now())
     .bind(req.token.trim())
+    .bind(crate::clock::sql_now())
     .fetch_optional(&state.db)
     .await;
 

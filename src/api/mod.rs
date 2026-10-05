@@ -321,6 +321,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .nest("/voice", voice::router())
         .route("/health", get(health))
         .route("/instance", get(instance))
+        .route("/time", get(time))
 }
 
 #[derive(Serialize)]
@@ -340,14 +341,33 @@ async fn instance(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     })
 }
 
+/// The hub's clock as a client needs it to show hub time: corrected now plus
+/// the zone. Unauthenticated and DB-free like [`instance`] — a board clock or a
+/// kiosk derives its skew from `now_ms` against its own clock.
+#[derive(Serialize)]
+struct TimeResponse {
+    now_ms: i64,
+    timezone: Option<String>,
+    utc_offset_min: i32,
+}
+
+async fn time() -> impl IntoResponse {
+    let r = crate::clock::clock().report();
+    Json(TimeResponse {
+        now_ms: r.now_ms,
+        timezone: r.timezone,
+        utc_offset_min: r.utc_offset_min,
+    })
+}
+
 #[derive(Serialize)]
 struct HealthResponse {
     ok: bool,
     version: &'static str,
     uptime_secs: u64,
-    /// The hub's local wall clock (RFC 3339 with offset). Time-of-day features
-    /// (kiosk hour plans, automation time gates) run on this clock — if it
-    /// disagrees with the household's, set `TZ` on the service.
+    /// The hub's local wall clock (RFC 3339 with offset) — NTP-corrected, in
+    /// the configured zone (Settings → General). Time-of-day features (kiosk
+    /// hour plans, automation timers and time gates) run on this clock.
     server_time: String,
     providers: Vec<ProviderHealth>,
 }
@@ -399,7 +419,7 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         ok: true,
         version: env!("CARGO_PKG_VERSION"),
         uptime_secs: state.started_at.elapsed().as_secs(),
-        server_time: chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
+        server_time: crate::clock::now_local().to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
         providers,
     })
 }

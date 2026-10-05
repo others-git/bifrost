@@ -7,7 +7,6 @@ use axum::{
     response::IntoResponse,
     routing::post,
 };
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::sync::Arc;
@@ -29,7 +28,7 @@ pub fn router() -> Router<Arc<AppState>> {
 /// the password login and the kiosk key exchange.
 async fn mint_session_cookie(state: &Arc<AppState>) -> String {
     let session_id = Uuid::new_v4().to_string();
-    let expires_at = (Utc::now() + chrono::Duration::hours(SESSION_TTL_HOURS))
+    let expires_at = (crate::clock::now_utc() + chrono::Duration::hours(SESSION_TTL_HOURS))
         .format("%Y-%m-%d %H:%M:%S")
         .to_string();
     let _ = sqlx::query("INSERT INTO sessions (id, expires_at) VALUES (?, ?)")
@@ -121,13 +120,14 @@ pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
 /// Returns the session id if the request carries a valid, non-expired session.
 pub async fn require_session(state: &Arc<AppState>, headers: &HeaderMap) -> Option<String> {
     let session_id = extract_session(headers)?;
-    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = crate::clock::sql_now();
 
     let row = sqlx::query(
-        "UPDATE sessions SET last_used = datetime('now')
+        "UPDATE sessions SET last_used = ?
          WHERE id = ? AND expires_at > ?
          RETURNING id",
     )
+    .bind(&now)
     .bind(&session_id)
     .bind(&now)
     .fetch_optional(&state.db)

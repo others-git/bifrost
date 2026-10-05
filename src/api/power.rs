@@ -260,13 +260,12 @@ pub(crate) async fn apply_power_state(state: &AppState, id: &str, on: bool) -> S
 
 async fn persist_state(state: &AppState, id: &str, power: &PowerState) {
     if let Ok(json) = serde_json::to_string(power) {
-        let _ = sqlx::query(
-            "UPDATE power_devices SET last_state = ?, last_seen = datetime('now') WHERE id = ?",
-        )
-        .bind(&json)
-        .bind(id)
-        .execute(&state.db)
-        .await;
+        let _ = sqlx::query("UPDATE power_devices SET last_state = ?, last_seen = ? WHERE id = ?")
+            .bind(&json)
+            .bind(crate::clock::sql_now())
+            .bind(id)
+            .execute(&state.db)
+            .await;
     }
 }
 
@@ -306,7 +305,7 @@ pub(crate) async fn discover_power_devices(
         let state_json = serde_json::to_string(&device.state).unwrap_or_default();
         let _ = sqlx::query(
             "INSERT INTO power_devices (id, provider_id, device_id, name, provider_name, kind, last_state, last_seen, hw_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (provider_id, device_id)
              DO UPDATE SET name       = CASE WHEN name = provider_name THEN excluded.name ELSE name END,
                            provider_name = excluded.provider_name,
@@ -322,6 +321,7 @@ pub(crate) async fn discover_power_devices(
         .bind(&device.name)
         .bind(kind_str(device.kind))
         .bind(&state_json)
+        .bind(crate::clock::sql_now())
         .bind(&device.hw_id)
         .execute(&mut *tx)
         .await;

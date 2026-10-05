@@ -17,7 +17,6 @@ use crate::models::{
 use crate::providers::{LightProvider, ProviderPalette, SensorProvider};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
-use chrono::Utc;
 use reqwest::{Client, header};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -548,7 +547,7 @@ fn hue_resource_to_light(r: HueLightResource, hw_id: Option<String>) -> Light {
             // Gradient lightstrips report `points_capable`; plain bulbs have none.
             segments,
         },
-        last_seen: Utc::now(),
+        last_seen: crate::clock::now_utc(),
         hw_id,
     }
 }

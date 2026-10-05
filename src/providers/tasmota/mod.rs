@@ -16,7 +16,6 @@ use crate::providers::discovery::{DeviceDiscovery, HttpSweepDiscovery};
 use crate::providers::{CredentialField, FieldKind, LightProvider, ProviderFactory};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use chrono::Utc;
 use reqwest::Client;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -183,7 +182,7 @@ impl LightProvider for TasmotaProvider {
                 effects: Vec::new(),
                 segments: None,
             },
-            last_seen: Utc::now(),
+            last_seen: crate::clock::now_utc(),
             hw_id: None,
         };
 

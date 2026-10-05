@@ -461,13 +461,13 @@ pub(crate) async fn apply_scene_entries(
         jobs.push(async move {
             match provider.set_state(&device_id, &light_state).await {
                 Ok(()) => {
-                    let _ = sqlx::query(
-                        "UPDATE lights SET last_state = ?, last_seen = datetime('now') WHERE id = ?",
-                    )
-                    .bind(&state_json)
-                    .bind(&light_id)
-                    .execute(&db)
-                    .await;
+                    let _ =
+                        sqlx::query("UPDATE lights SET last_state = ?, last_seen = ? WHERE id = ?")
+                            .bind(&state_json)
+                            .bind(crate::clock::sql_now())
+                            .bind(&light_id)
+                            .execute(&db)
+                            .await;
                     true
                 }
                 Err(e) => {
