@@ -1385,6 +1385,122 @@ async fn logout_clears_session() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+// ── Session renewal (sliding expiry) ─────────────────────────────────────────
+
+/// Log in and return `(cookie "name=value", session id)`.
+async fn session_of(app: &axum::Router) -> (String, String) {
+    let cookie = helpers::login(app, helpers::TEST_PASSWORD).await;
+    let pair = cookie.split(';').next().unwrap().to_string();
+    let id = pair.split_once('=').unwrap().1.to_string();
+    (pair, id)
+}
+
+async fn set_expiry(db: &sqlx::SqlitePool, id: &str, from_now: chrono::Duration) {
+    sqlx::query("UPDATE sessions SET expires_at = ? WHERE id = ?")
+        .bind(bifrost::clock::sql_ts(bifrost::clock::now_utc() + from_now))
+        .bind(id)
+        .execute(db)
+        .await
+        .unwrap();
+}
+
+async fn expiry_of(db: &sqlx::SqlitePool, id: &str) -> String {
+    sqlx::query_scalar("SELECT expires_at FROM sessions WHERE id = ?")
+        .bind(id)
+        .fetch_one(db)
+        .await
+        .unwrap()
+}
+
+fn session_set_cookies(resp: &axum::response::Response) -> Vec<String> {
+    resp.headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .filter(|v| v.starts_with("bifrost_session="))
+        .map(str::to_string)
+        .collect()
+}
+
+#[tokio::test]
+async fn active_session_is_renewed_row_and_cookie() {
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let (cookie, id) = session_of(&app).await;
+    set_expiry(&state.db, &id, chrono::Duration::days(2)).await;
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/lights", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let set = session_set_cookies(&resp);
+    assert_eq!(set.len(), 1, "the browser cookie must be re-issued too");
+    assert!(set[0].starts_with(&format!("bifrost_session={id};")));
+    assert!(set[0].contains(&format!("Max-Age={}", 7 * 24 * 3600)));
+
+    let floor = bifrost::clock::sql_ts(bifrost::clock::now_utc() + chrono::Duration::days(6));
+    assert!(
+        expiry_of(&state.db, &id).await > floor,
+        "row slid a full week"
+    );
+}
+
+#[tokio::test]
+async fn fresh_session_is_not_renewed_on_every_request() {
+    let (app, _state) = helpers::test_app_with_password_and_state().await;
+    let (cookie, _id) = session_of(&app).await;
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/lights", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(session_set_cookies(&resp).is_empty());
+}
+
+#[tokio::test]
+async fn expired_session_is_never_revived() {
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let (cookie, id) = session_of(&app).await;
+    set_expiry(&state.db, &id, chrono::Duration::hours(-1)).await;
+    let before = expiry_of(&state.db, &id).await;
+
+    let resp = app
+        .oneshot(helpers::authed_get("/api/lights", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert!(session_set_cookies(&resp).is_empty());
+    assert_eq!(expiry_of(&state.db, &id).await, before);
+}
+
+#[tokio::test]
+async fn login_cookie_is_not_shadowed_by_renewing_the_old_session() {
+    let (app, state) = helpers::test_app_with_password_and_state().await;
+    let (old_cookie, old_id) = session_of(&app).await;
+    set_expiry(&state.db, &old_id, chrono::Duration::days(2)).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, &old_cookie)
+                .body(Body::from(format!(
+                    r#"{{"password":"{}"}}"#,
+                    helpers::TEST_PASSWORD
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let set = session_set_cookies(&resp);
+    assert_eq!(set.len(), 1, "only the new session's cookie");
+    assert!(!set[0].starts_with(&format!("bifrost_session={old_id};")));
+}
+
 // ── Provider pairing (link-button style) ─────────────────────────────────────
 
 /// The pairing route is a thin map from what the bridge answers to an HTTP

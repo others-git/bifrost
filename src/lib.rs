@@ -123,7 +123,15 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         axum::http::HeaderValue::from_static("no-store"),
     );
     Router::new()
-        .nest("/api", api::router().layer(api_no_store))
+        .nest(
+            "/api",
+            api::router()
+                .layer(api_no_store)
+                .layer(axum::middleware::from_fn_with_state(
+                    Arc::clone(&state),
+                    api::auth::renew_session,
+                )),
+        )
         // MCP (Streamable HTTP, Bearer-gated) — the third surface over the
         // shared service layer, alongside /api (session) and /api/v1 (Bearer).
         .nest_service("/mcp", api::mcp::service(Arc::clone(&state)))

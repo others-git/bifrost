@@ -1,8 +1,8 @@
 // The kiosk session-recovery path in the api layer.
 //
-// A dashboard session is a 7-day absolute expiry that nothing renews, while a
-// wall tablet's WebView stays loaded for weeks — so a kiosk's session lapses
-// under a running page as a matter of course. Until this existed the exchange
+// A dashboard session is a 7-day sliding window, while a wall tablet's WebView
+// stays loaded for weeks — so a kiosk's session can still lapse under a
+// running page. Until this existed the exchange
 // happened only in the app's boot path, so the page could not re-authenticate
 // without being reloaded: the board froze, its buttons 401'd, and a reload was
 // the only cure. These pin the recovery so that can't regress into a silent

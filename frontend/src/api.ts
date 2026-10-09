@@ -61,10 +61,10 @@ function reauthKiosk(): Promise<boolean> {
 /**
  * Every call, with one retry after re-authenticating a kiosk.
  *
- * A dashboard session is a 7-DAY ABSOLUTE expiry that nothing renews, and a
- * wall tablet's WebView stays loaded for weeks — so its session lapses
- * underneath a running page as a matter of course, and every session-gated
- * call starts returning 401 with no one to notice. The exchange used to happen
+ * A dashboard session is a 7-day sliding window (renewed by use), and a wall
+ * tablet's WebView stays loaded for weeks — so its session can still lapse
+ * underneath a running page, and every session-gated call starts returning
+ * 401 with no one to notice. The exchange used to happen
  * only inside the app's boot path, which is why a reload was the sole cure:
  * the page had no way to re-authenticate without being born again. Doing it
  * here means any call can recover, which is what keeps the buttons working.

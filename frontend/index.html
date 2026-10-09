@@ -7,8 +7,13 @@
          for a control surface. `user-scalable=no`/`maximum-scale=1` stop the pinch
          gesture (honoured by the Android WebView kiosk + Chrome); the body's
          `touch-action: manipulation` kills double-tap-to-zoom; the small guard
-         below catches iOS Safari, which ignores `user-scalable=no`. -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+         below catches iOS Safari, which ignores `user-scalable=no`.
+         `viewport-fit=cover` is what makes `env(safe-area-inset-*)` non-zero:
+         without it iOS reports every inset as 0, so the installed PWA (whose
+         `black-translucent` status bar already draws the page edge to edge) put
+         the top bar under the clock and the bottom tabs in the rounded screen
+         corners / under the home indicator despite the chrome padding for them. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <title>Bifrost</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/icon-192.png" />
@@ -37,6 +42,9 @@
            entry opts back in below. */
         user-select: none;
         -webkit-user-select: none;
+        /* iOS's long-press callout (link/image preview, "Copy") — it fires over
+           the long-press quick power toggle on device glyphs. */
+        -webkit-touch-callout: none;
         font-family: "Inter Variable", system-ui, sans-serif;
         /* Slightly heavier than the usual 400 — easier on aging eyes at the
            small sizes used throughout the UI. */
@@ -60,6 +68,7 @@
       input, textarea, [contenteditable="true"] {
         user-select: text;
         -webkit-user-select: text;
+        -webkit-touch-callout: default;
       }
 
       /* Frameless board widgets (per-widget "hide border"): the plate's ring +

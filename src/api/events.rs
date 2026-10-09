@@ -257,9 +257,10 @@ const HEARTBEAT: Duration = Duration::from_secs(20);
 /// The live stream, gated by a session **or** a paired kiosk's `bfr_key`
 /// cookie — deliberately NOT session-only.
 ///
-/// A dashboard session is a 7-day absolute expiry that nothing renews, and a
-/// wall tablet's WebView stays loaded for weeks. Session-only gating therefore
-/// killed a kiosk's event stream on a timer: `EventSource` cannot see a status
+/// A dashboard session is a 7-day sliding window, and a wall tablet's WebView
+/// stays loaded for weeks — a session can still lapse under it (a week with no
+/// session-authenticated request renews nothing). Session-only gating killed a
+/// kiosk's event stream exactly then: `EventSource` cannot see a status
 /// code, so a 401 arrives as an indistinguishable `error`, and the client
 /// reconnects to the same refused endpoint forever while the hub never
 /// registers a subscriber at all. The board keeps rendering whatever it last

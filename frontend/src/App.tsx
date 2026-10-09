@@ -16,6 +16,7 @@ import { SettingsPage, type AddPrefill } from "./pages/Settings";
 import { S } from "./styles";
 import { color, font, navAurora as NAV_AURORA, alpha } from "./theme";
 import { useViewport } from "./useViewport";
+import { boardsAvailable as boardsOffered, useInstalled, usePhone } from "./pwa";
 import { useAutoReloadOnNewBuild } from "./useAutoReload";
 import { useKioskHealthReport } from "./kioskHealth";
 import { useEvents } from "./useEvents";
@@ -87,6 +88,11 @@ export function App() {
   // Fetched post-auth; the Settings toggle updates it live via onDevModeChange.
   const [devMode, setDevMode] = useState(false);
   const { isMobile, isCompact } = useViewport();
+  // Off on an installed phone app only (see `pwa.ts`) — gated at the route
+  // and nav both, like the Floor Plan flag. Tablets always keep Boards.
+  const installed = useInstalled();
+  const isPhone = usePhone();
+  const boardsAvailable = boardsOffered(installed, isPhone, IS_KIOSK);
 
   // Kiosk self-update: reload when a new frontend build is deployed.
   useAutoReloadOnNewBuild();
@@ -148,6 +154,7 @@ export function App() {
 
   const navigate = (p: NavPage) => {
     if (p === "plan" && !FEATURES.floorPlan) return;
+    if (p === "boards" && !boardsAvailable) return;
     if (p === "dashboard" || p === "scenes" || p === "plan")
       refreshLights().then(() => setPage(p));
     else setPage(p);
@@ -189,7 +196,7 @@ export function App() {
         {page === "dashboard" && (
           <DashboardPage lights={lights} onRefresh={refreshLights} onNavigate={(p) => setPage(p)} />
         )}
-        {page === "boards" && <BoardsPage />}
+        {page === "boards" && boardsAvailable && <BoardsPage />}
         {page === "media" && <MediaPage />}
         {page === "devices" && (
           <DevicesPage
@@ -221,7 +228,14 @@ export function App() {
         )}
       </main>
 
-      {isCompact && <BottomNav page={page} onNavigate={navigate} showPlan={FEATURES.floorPlan && !isMobile && devMode} />}
+      {isCompact && (
+        <BottomNav
+          page={page}
+          onNavigate={navigate}
+          showPlan={FEATURES.floorPlan && !isMobile && devMode}
+          showBoards={boardsAvailable}
+        />
+      )}
       {/* Dev-mode only, but rendered on EVERY client including the kiosks —
           turning dev mode on at the hub is what lights it up on a wall tablet
           that has no other way to report its own stream health. */}
@@ -259,7 +273,8 @@ function MobileTopBar({
         alignItems: "center",
         justifyContent: "flex-end",
         gap: "0.6rem",
-        padding: "calc(0.5rem + env(safe-area-inset-top)) 0.9rem 0.5rem",
+        padding:
+          "calc(0.5rem + env(safe-area-inset-top)) calc(0.9rem + env(safe-area-inset-right)) 0.5rem calc(0.9rem + env(safe-area-inset-left))",
         borderBottom: `1px solid ${color.hairline}`,
         backgroundImage: NAV_AURORA,
         position: "sticky",
@@ -303,10 +318,13 @@ function BottomNav({
   page,
   onNavigate,
   showPlan,
+  showBoards,
 }: {
   page: Page;
   onNavigate: (p: NavPage) => void;
   showPlan: boolean;
+  /** Off on an installed phone app — see `boardsAvailable`. */
+  showBoards: boolean;
 }) {
   return (
     <nav
@@ -321,12 +339,16 @@ function BottomNav({
         background: "rgba(13,8,16,0.86)",
         backdropFilter: "blur(12px)",
         WebkitBackdropFilter: "blur(12px)",
+        // Keep the end tabs out of the rounded corners and the landscape notch,
+        // and the row above the home indicator. All zero in a browser tab.
         paddingBottom: "env(safe-area-inset-bottom)",
+        paddingLeft: "env(safe-area-inset-left)",
+        paddingRight: "env(safe-area-inset-right)",
       }}
     >
       {/* Floor Plan needs room to draw — tablet fixtures yes, phones no. Off
           entirely at FEATURES.floorPlan today. */}
-      {NAV_ITEMS.filter((item) => item.id !== "plan" || showPlan).map((item) => {
+      {NAV_ITEMS.filter((item) => (item.id !== "plan" || showPlan) && (item.id !== "boards" || showBoards)).map((item) => {
         const active = page === item.id;
         return (
           <button

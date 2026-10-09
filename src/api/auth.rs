@@ -13,7 +13,14 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 const SESSION_COOKIE: &str = "bifrost_session";
+/// A session's lifetime since it was last renewed — a SLIDING window: any
+/// session-authenticated request extends it (see [`renew_session`]), so only a
+/// session left unused for this long expires.
 const SESSION_TTL_HOURS: i64 = 24 * 7;
+/// How often a live session is actually renewed. Renewing on every request
+/// would add a write and a `Set-Cookie` to each poll; once a day is plenty for
+/// a week-long window.
+const SESSION_RENEW_EVERY_HOURS: i64 = 24;
 
 const KIOSK_KEY_COOKIE: &str = "bfr_key";
 
@@ -28,18 +35,84 @@ pub fn router() -> Router<Arc<AppState>> {
 /// the password login and the kiosk key exchange.
 async fn mint_session_cookie(state: &Arc<AppState>) -> String {
     let session_id = Uuid::new_v4().to_string();
-    let expires_at = (crate::clock::now_utc() + chrono::Duration::hours(SESSION_TTL_HOURS))
-        .format("%Y-%m-%d %H:%M:%S")
-        .to_string();
     let _ = sqlx::query("INSERT INTO sessions (id, expires_at) VALUES (?, ?)")
         .bind(&session_id)
-        .bind(&expires_at)
+        .bind(session_expiry_from_now())
         .execute(&state.db)
         .await;
+    session_cookie(&session_id)
+}
+
+/// `expires_at` for a session minted or renewed now.
+fn session_expiry_from_now() -> String {
+    crate::clock::sql_ts(crate::clock::now_utc() + chrono::Duration::hours(SESSION_TTL_HOURS))
+}
+
+/// The `Set-Cookie` value carrying `session_id` for a full TTL.
+fn session_cookie(session_id: &str) -> String {
     format!(
         "{SESSION_COOKIE}={session_id}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
         SESSION_TTL_HOURS * 3600
     )
+}
+
+/// Middleware over `/api`: slide an ACTIVE session's expiry forward, both the
+/// row and the browser cookie (whose own `Max-Age` would otherwise drop it on
+/// day seven regardless of the row). Without it a session was a fixed week
+/// from login, so a phone's home-screen app — which keeps its own cookie jar
+/// and so can't borrow the browser's login — signed out weekly mid-use.
+///
+/// Runs AFTER the handler: logout has deleted the row by then (nothing to
+/// renew), and a response that already sets the session cookie (login, the
+/// kiosk exchange) is left alone so a renewal can't shadow the new session.
+/// Renews at most once per [`SESSION_RENEW_EVERY_HOURS`] per session, and
+/// never revives an expired one.
+pub async fn renew_session(
+    State(state): State<Arc<AppState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let session_id = extract_session(req.headers());
+    let mut resp = next.run(req).await;
+    let Some(session_id) = session_id else {
+        return resp;
+    };
+    let already_set = resp
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .any(|v| v.to_str().is_ok_and(|v| v.starts_with(SESSION_COOKIE)));
+    if already_set {
+        return resp;
+    }
+    let now = crate::clock::now_utc();
+    // Due once less than TTL − interval remains, i.e. the last renewal is at
+    // least one interval old.
+    let due_before = crate::clock::sql_ts(
+        now + chrono::Duration::hours(SESSION_TTL_HOURS - SESSION_RENEW_EVERY_HOURS),
+    );
+    let renewed = sqlx::query(
+        "UPDATE sessions SET expires_at = ?
+         WHERE id = ? AND expires_at > ? AND expires_at < ?
+         RETURNING id",
+    )
+    .bind(session_expiry_from_now())
+    .bind(&session_id)
+    .bind(crate::clock::sql_ts(now))
+    .bind(&due_before)
+    .fetch_optional(&state.db)
+    .await;
+    match renewed {
+        Ok(Some(_)) => {
+            tracing::debug!(target: "bifrost::auth", "session renewed");
+            if let Ok(v) = session_cookie(&session_id).parse() {
+                resp.headers_mut().append(header::SET_COOKIE, v);
+            }
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!(target: "bifrost::auth", error = %e, "session renewal failed"),
+    }
+    resp
 }
 
 /// `POST /api/auth/kiosk` — a paired kiosk trades its `bfr_` key (carried in the
