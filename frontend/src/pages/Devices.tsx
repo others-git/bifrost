@@ -29,6 +29,8 @@ import {
   setLightGlyph,
   setMediaGlyph,
   setPowerGlyph,
+  setLightHomeScene,
+  setPowerHomeScene,
   setLightName,
   setMediaName,
   setPowerName,
@@ -111,6 +113,8 @@ interface Item {
   receiverId?: string | null;
   /** Audio only (M22): the receiver input to select when this source plays. */
   receiverSource?: string | null;
+  /** Audio only: receiver inputs on which the receiver counts as this source. */
+  receiverMatchInputs?: string[];
   /** How a multi-transport provider (Govee) is reaching this device: "lan" |
    * "cloud". Undefined for single-transport providers. */
   transport?: string | null;
@@ -124,6 +128,9 @@ interface Item {
   sensorKind?: SensorDevice["kind"];
   /** Sensor only: when the reading last changed (RFC 3339 UTC), if reported. */
   changedAt?: string | null;
+  /** Lights + power only (the domains a scene holds): opted out of Home Scenes.
+   * Undefined for domains scenes never touch, which hides the setting. */
+  homeSceneExcluded?: boolean;
 }
 
 const POWER_KIND_LABEL: Record<PowerKind, string> = {
@@ -171,6 +178,7 @@ function lightItem(l: Light): Item {
     inheritedRoomId: l.inherited_room_id ?? null,
     transport: l.last_state?.transport ?? null,
     ip: l.last_state?.ip ?? null,
+    homeSceneExcluded: l.home_scene_excluded === true,
   };
 }
 
@@ -195,6 +203,7 @@ function mediaItem(a: MediaDevice): Item {
     mediaKind: a.kind,
     receiverId: a.receiver_id ?? null,
     receiverSource: a.receiver_source ?? null,
+    receiverMatchInputs: a.receiver_match_inputs ?? [],
     ip: a.state?.ip ?? null,
   };
 }
@@ -218,6 +227,7 @@ function powerItem(p: PowerDevice): Item {
     companionOf: null,
     roomId: p.room_id ?? null,
     inheritedRoomId: p.inherited_room_id ?? null,
+    homeSceneExcluded: p.home_scene_excluded === true,
   };
 }
 
@@ -256,6 +266,10 @@ const SET_ENABLED: Record<Domain, (id: string, enabled: boolean) => Promise<void
   media: setMediaEnabled,
   power: setPowerEnabled,
   sensor: setSensorEnabled,
+};
+const SET_HOME_SCENE: Partial<Record<Domain, (id: string, include: boolean) => Promise<void>>> = {
+  light: setLightHomeScene,
+  power: setPowerHomeScene,
 };
 const SET_GLYPH: Record<Domain, (id: string, glyph: string | null) => Promise<void>> = {
   light: setLightGlyph,
@@ -391,9 +405,12 @@ function RoomPicker({
 
 /// Bind a source audio device (TV / streamer / console) to a receiver (M22):
 /// its volume/mute then route to the receiver, and — if an input is chosen — the
-/// receiver switches to that input when the source plays. Two sections: pick the
+/// receiver switches to that input when the source plays. Three sections: pick the
 /// receiver, then (once bound, if the receiver enumerates inputs) the input to
-/// switch to. Anchored popover on desktop, bottom sheet on phones.
+/// switch to on power-on, and the inputs on which the receiver counts as this
+/// source — while it sits on one of those, room cards fold it into the source's
+/// control; on any other input it gets its own button. Anchored popover on
+/// desktop, bottom sheet on phones.
 function ReceiverPicker({
   anchor,
   isCompact,
@@ -401,6 +418,7 @@ function ReceiverPicker({
   devices,
   currentReceiver,
   currentSource,
+  currentMatches,
   onPick,
   onClose,
 }: {
@@ -410,7 +428,9 @@ function ReceiverPicker({
   devices: MediaDevice[];
   currentReceiver: string | null;
   currentSource: string | null;
-  onPick: (receiverId: string | null, receiverSource: string | null) => void;
+  currentMatches: string[];
+  /** `matchInputs` undefined = leave the stored list alone. */
+  onPick: (receiverId: string | null, receiverSource: string | null, matchInputs?: string[]) => void;
   onClose: () => void;
 }) {
   // Candidate receivers: receivers/zones, not the source itself, and not already
@@ -424,6 +444,21 @@ function ReceiverPicker({
   );
   const bound = currentReceiver ? devices.find((a) => a.id === currentReceiver) : null;
   const inputs = bound?.state?.source_list ?? [];
+  const sourceName = devices.find((a) => a.id === sourceId)?.name ?? "this device";
+  const isMatch = (src: string) => currentMatches.some((m) => m.toLowerCase() === src.toLowerCase());
+  const toggleMatch = (src: string) =>
+    onPick(
+      currentReceiver,
+      currentSource,
+      isMatch(src) ? currentMatches.filter((m) => m.toLowerCase() !== src.toLowerCase()) : [...currentMatches, src],
+    );
+  const sectionHead: React.CSSProperties = {
+    color: T.dim,
+    fontSize: "0.78rem",
+    padding: "0.5rem 0.6rem 0.4rem",
+    borderTop: `1px solid ${T.cardBorder}`,
+    marginTop: "0.3rem",
+  };
   const row = (active: boolean, label: React.ReactNode) => (
     <span style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
       <span style={{ width: 16, display: "grid", placeItems: "center", flexShrink: 0 }}>{active ? "✓" : ""}</span>
@@ -447,7 +482,7 @@ function ReceiverPicker({
           const active = currentReceiver === r.id;
           return (
             // Keep the chosen input only while staying on the same receiver.
-            <MenuItem key={r.id} active={active} compact={isCompact} onClick={() => onPick(r.id, active ? currentSource : null)}>
+            <MenuItem key={r.id} active={active} compact={isCompact} onClick={() => (active ? onPick(r.id, currentSource) : onPick(r.id, null, []))}>
               {row(active, r.name)}
             </MenuItem>
           );
@@ -455,17 +490,7 @@ function ReceiverPicker({
       )}
       {bound && inputs.length > 0 && (
         <>
-          <div
-            style={{
-              color: T.dim,
-              fontSize: "0.78rem",
-              padding: "0.5rem 0.6rem 0.4rem",
-              borderTop: `1px solid ${T.cardBorder}`,
-              marginTop: "0.3rem",
-            }}
-          >
-            Switch {bound.name} to
-          </div>
+          <div style={sectionHead}>Switch {bound.name} to on power-on</div>
           <MenuItem active={!currentSource} compact={isCompact} onClick={() => onPick(currentReceiver, null)}>
             {row(!currentSource, "Don’t switch input")}
           </MenuItem>
@@ -477,6 +502,21 @@ function ReceiverPicker({
               </MenuItem>
             );
           })}
+          <div style={sectionHead}>
+            {sourceName} is playing when {bound.name} is on
+            <div style={{ color: T.faint, fontSize: "0.72rem", marginTop: "0.2rem" }}>
+              {currentMatches.length > 0
+                ? "On these inputs the receiver folds into this device’s control."
+                : currentSource
+                  ? `None picked — uses the power-on input (${currentSource}).`
+                  : "None picked — the receiver always gets its own button."}
+            </div>
+          </div>
+          {inputs.map((src) => (
+            <MenuItem key={`m:${src}`} active={isMatch(src)} compact={isCompact} onClick={() => toggleMatch(src)}>
+              {row(isMatch(src), src)}
+            </MenuItem>
+          ))}
         </>
       )}
     </AnchoredPanel>
@@ -687,6 +727,7 @@ function DeviceCard({
   onSetGlyph,
   onSetName,
   onSetRoom,
+  onSetHomeScene,
   onSetReceiver,
   onMerge,
   devMode,
@@ -702,7 +743,9 @@ function DeviceCard({
   /** Set the friendly name (null/empty reverts to the provider name). */
   onSetName: (name: string | null) => void;
   onSetRoom: (roomId: string | null) => void;
-  onSetReceiver: (receiverId: string | null, receiverSource: string | null) => void;
+  /** Opt in/out of Home Scenes (lights + power only). */
+  onSetHomeScene: (include: boolean) => void;
+  onSetReceiver: (receiverId: string | null, receiverSource: string | null, matchInputs?: string[]) => void;
   onMerge: (primaryId: string) => void;
   /** Developer mode — surfaces the raw upstream device data in the details. */
   devMode: boolean;
@@ -993,6 +1036,19 @@ function DeviceCard({
               />
             )}
           </DetailRow>
+          {item.homeSceneExcluded !== undefined && (
+            <DetailRow label="Home scenes">
+              <span
+                style={{ display: "inline-flex", alignItems: "center", gap: "0.55rem" }}
+                title="Off = Home Scenes (incl. Restore Home) leave this device alone. Room Scenes still include it."
+              >
+                <Switch on={!item.homeSceneExcluded} onChange={onSetHomeScene} />
+                <span style={{ color: T.faint, fontSize: "0.74rem" }}>
+                  {item.homeSceneExcluded ? "Excluded — Restore Home leaves it alone" : "Included"}
+                </span>
+              </span>
+            </DetailRow>
+          )}
           {isMediaSource && (
             <DetailRow label="Receiver">
               <button ref={receiverBtnRef} onClick={() => setReceiverPicking((v) => !v)} style={detailBtnStyle}>
@@ -1006,8 +1062,9 @@ function DeviceCard({
                   devices={mediaDevices}
                   currentReceiver={item.receiverId ?? null}
                   currentSource={item.receiverSource ?? null}
-                  onPick={(rid, rsrc) => {
-                    onSetReceiver(rid, rsrc);
+                  currentMatches={item.receiverMatchInputs ?? []}
+                  onPick={(rid, rsrc, matches) => {
+                    onSetReceiver(rid, rsrc, matches);
                     if (!rid) setReceiverPicking(false);
                   }}
                   onClose={() => setReceiverPicking(false)}
@@ -1437,6 +1494,13 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
     if (!name) refresh();
   }
 
+  async function setHomeScene(item: Item, include: boolean) {
+    setItems((prev) =>
+      prev.map((d) => (d.id === item.id ? { ...d, homeSceneExcluded: !include } : d)),
+    );
+    await SET_HOME_SCENE[item.domain]?.(item.id, include);
+  }
+
   async function setRoom(item: Item, roomId: string | null) {
     setItems((prev) => prev.map((d) => (d.id === item.id ? { ...d, roomId } : d)));
     await SET_ROOM[item.domain](item.id, roomId);
@@ -1446,16 +1510,23 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
     item: Item,
     receiverId: string | null,
     receiverSource: string | null,
+    matchInputs?: string[],
   ) {
+    // Mirror the hub's rule: an omitted list survives only on the same receiver.
+    const receiverMatchInputs = !receiverId
+      ? []
+      : (matchInputs ?? (receiverId === item.receiverId ? (item.receiverMatchInputs ?? []) : []));
     setItems((prev) =>
-      prev.map((d) => (d.id === item.id ? { ...d, receiverId, receiverSource } : d)),
+      prev.map((d) => (d.id === item.id ? { ...d, receiverId, receiverSource, receiverMatchInputs } : d)),
     );
     setMediaDevices((prev) =>
       prev.map((a) =>
-        a.id === item.id ? { ...a, receiver_id: receiverId, receiver_source: receiverSource } : a,
+        a.id === item.id
+          ? { ...a, receiver_id: receiverId, receiver_source: receiverSource, receiver_match_inputs: receiverMatchInputs }
+          : a,
       ),
     );
-    await setMediaReceiver(item.id, receiverId, receiverSource);
+    await setMediaReceiver(item.id, receiverId, receiverSource, matchInputs);
   }
 
   // Clear a manual duplicate link so the device shows up on its own again.
@@ -1706,7 +1777,8 @@ export function DevicesPage({ onAddDetected }: { onAddDetected?: (p: AddPrefill)
               onSetGlyph={(g) => setGlyph(d, g)}
               onSetName={(n) => setName(d, n)}
               onSetRoom={(r) => setRoom(d, r)}
-              onSetReceiver={(rid, rsrc) => setReceiver(d, rid, rsrc)}
+              onSetHomeScene={(inc) => setHomeScene(d, inc)}
+              onSetReceiver={(rid, rsrc, matches) => setReceiver(d, rid, rsrc, matches)}
               onMerge={(primaryId) => setCompanion(d, primaryId)}
               devMode={devMode}
             />

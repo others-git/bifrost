@@ -34,6 +34,10 @@ pub fn router() -> Router<Arc<AppState>> {
             "room_power_devices",
             "power_device_id",
         ))
+        .merge(crate::api::scenes::home_scene_router(
+            "/devices",
+            "power_devices",
+        ))
 }
 
 /// Body for a power write — the whole command is a single bool.
@@ -66,6 +70,9 @@ pub(crate) struct PowerDeviceRow {
     pub shadowed_by: Option<String>,
     /// `true` if the shadow was set automatically by hw_id matching.
     pub shadow_auto: bool,
+    /// `true` = skipped by Home Scenes (capture and apply); Room Scenes still
+    /// include it.
+    pub home_scene_excluded: bool,
     /// The room this device is directly assigned to (Devices-page assignment),
     /// or `None`. Room *links* (synced provider groups) aren't reflected here.
     pub room_id: Option<String>,
@@ -112,6 +119,7 @@ fn row_to_device(r: sqlx::sqlite::SqliteRow) -> PowerDeviceRow {
         hw_id: r.get("hw_id"),
         shadowed_by: r.get("shadowed_by"),
         shadow_auto: r.get::<i64, _>("shadow_auto") != 0,
+        home_scene_excluded: r.get::<i64, _>("home_scene_excluded") != 0,
         room_id: r.get("room_id"),
         inherited_room_id: r.try_get("inherited_room_id").ok().flatten(),
     }
@@ -135,7 +143,7 @@ pub(crate) fn build_power_provider(
 
 pub(crate) async fn list_all_power_devices(state: &AppState) -> Result<Vec<PowerDeviceRow>, ()> {
     sqlx::query(
-        "SELECT id, provider_id, device_id, name, kind, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto,
+        "SELECT id, provider_id, device_id, name, kind, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto, home_scene_excluded,
                 (SELECT room_id FROM room_power_devices WHERE power_device_id = power_devices.id LIMIT 1) AS room_id,
                 (SELECT rl.room_id FROM room_links rl
                    JOIN provider_group_power_devices pgp ON pgp.provider_group_id = rl.provider_group_id
@@ -156,7 +164,7 @@ pub(crate) async fn get_power_device_live(
 ) -> Result<Option<PowerDeviceRow>, ()> {
     let row = sqlx::query(
         "SELECT pd.id, pd.provider_id, pd.device_id, pd.name, pd.kind, pd.last_state, pd.last_seen,
-                pd.enabled, pd.glyph, pd.hw_id, pd.shadowed_by, pd.shadow_auto,
+                pd.enabled, pd.glyph, pd.hw_id, pd.shadowed_by, pd.shadow_auto, pd.home_scene_excluded,
                 (SELECT room_id FROM room_power_devices WHERE power_device_id = pd.id LIMIT 1) AS room_id,
                 (SELECT rl.room_id FROM room_links rl
                    JOIN provider_group_power_devices pgp ON pgp.provider_group_id = rl.provider_group_id

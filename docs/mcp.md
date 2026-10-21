@@ -58,7 +58,7 @@ All tools below are served natively from `src/api/mcp.rs`.
 | `cast_media` | `cast_to_device` | cast media to a TV / media player by provider-native `content_id` + `content_type` (HA `media_player.play_media`). For launching a streaming app prefer the remote's `launch_app`; to switch input/app prefer `set_media`'s `source`. |
 | `group_speakers` | `group_devices` (per member) | join speakers under a coordinator. *"play the kitchen and living room together."* |
 | `ungroup_speaker` | `ungroup_device` | remove a speaker from its synced group |
-| `bind_receiver` | `set_media_receiver` | bind a source (TV/streamer) to a receiver that owns its volume + the input to switch to on power-on; omit `receiver` to unbind. *"route the living room TV's sound through the AV receiver on the Game input."* |
+| `bind_receiver` | `set_media_receiver` | bind a source (TV/streamer) to a receiver that owns its volume + the input to switch to on power-on, and optionally `receiver_match_inputs` (the inputs on which the receiver counts as this source); omit `receiver` to unbind. *"route the living room TV's sound through the AV receiver on the Game input."* |
 | `list_power_devices` | `list_all_power_devices` | switches / plugs / fans / toggles with on/off state + kind |
 | `set_power` | `apply_power_state` | turn a power device on/off, by id or name. *"turn off the porch switch."* |
 | `list_remotes` | `list_remotes` | TVs / streamers with on state + current foreground app |

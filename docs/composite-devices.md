@@ -151,6 +151,12 @@ owns its volume. Stored on the *source* (`media_devices.receiver_id` +
   cache is kept honest by the provider's **liveness heartbeat** (the Onkyo link
   re-queries on a timer and reconnects a silently half-open socket), so a frozen
   link can't surface a stale bound-source volume.
+- **Surfaces:** a room card folds the receiver into the source's control only
+  while the receiver sits on one of the binding's **match inputs**
+  (`receiver_match_inputs`, falling back to `receiver_source`) — the shared
+  `roomMembers` rule. On any other input the source's control can't reach the
+  receiver's input or now-playing, so it gets its own button; a binding that
+  names no input never hides it.
 - **Write:** `volume`/`mute` route to the receiver; `power`/`source`/`transport`
   stay on the source. The receiver **mirrors the source's power**: on wakes it
   and switches it to `receiver_source`, off takes it down too — the bound pair

@@ -6,6 +6,9 @@
 //! (`capture_scene`) and apply (`apply_scene_entries`) engine. One home scene can
 //! be the **default** — the one-tap "Restore Home" preset
 //! (`POST /restore-default`), handy after a power outage resets bulbs/switches.
+//! A light or power device can opt out of Home Scenes (`home_scene_excluded`,
+//! `PUT …/{id}/home-scene`): it is skipped when one is captured *and* when one is
+//! applied, so the flag governs scenes captured before it was set too.
 
 use crate::AppState;
 use crate::api::auth::Session;
@@ -38,6 +41,58 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/{id}/recapture", post(recapture_handler))
         .route("/{id}/activate", post(activate_scene))
         .route("/{id}/default", put(set_default))
+}
+
+/// Body for `PUT …/{id}/home-scene`: `include: false` opts the device out of
+/// every Home Scene.
+#[derive(Deserialize)]
+struct HomeSceneRequest {
+    include: bool,
+}
+
+/// The per-device Home Scene opt-out route, merged into the light and power
+/// routers (the two domains a scene holds). `table` is a fixed identifier.
+pub(crate) fn home_scene_router(prefix: &str, table: &'static str) -> Router<Arc<AppState>> {
+    Router::new().route(
+        &format!("{prefix}/{{id}}/home-scene"),
+        put(
+            move |State(state): State<Arc<AppState>>,
+                  _: Session,
+                  Path(id): Path<String>,
+                  Json(req): Json<HomeSceneRequest>| async move {
+                set_home_scene_excluded(&state, table, &id, !req.include).await
+            },
+        ),
+    )
+}
+
+/// Opt a device in or out of Home Scenes. `table` is `lights` or
+/// `power_devices` (fixed per router, so the formatted SQL is injection-free).
+pub(crate) async fn set_home_scene_excluded(
+    state: &AppState,
+    table: &str,
+    id: &str,
+    excluded: bool,
+) -> StatusCode {
+    match sqlx::query(&format!(
+        "UPDATE {table} SET home_scene_excluded = ? WHERE id = ?"
+    ))
+    .bind(i64::from(excluded))
+    .bind(id)
+    .execute(&state.db)
+    .await
+    {
+        Ok(r) if r.rows_affected() > 0 => {
+            tracing::debug!(target: "bifrost::scenes", %table, %id, excluded, "home scene opt-out");
+            crate::api::notify_inventory(state, table);
+            StatusCode::NO_CONTENT
+        }
+        Ok(_) => StatusCode::NOT_FOUND,
+        Err(e) => {
+            tracing::error!("db error setting {table} home_scene_excluded: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -193,7 +248,7 @@ async fn snapshot_into(
     room_id: Option<&str>,
 ) -> Result<SceneCapture, SceneCaptureError> {
     // A room scene is scoped to that room's effective members; a home scene to
-    // everything. We over-fetch all devices and filter by the membership set
+    // everything not opted out of Home Scenes. We over-fetch all devices and filter by the membership set
     // (avoids a dynamic `IN (…)` and reuses the shared room helpers).
     let (light_scope, power_scope) = match room_id {
         Some(rid) => (
@@ -216,18 +271,25 @@ async fn snapshot_into(
         scope.as_ref().is_none_or(|s| s.contains(id))
     };
 
-    let lights = sqlx::query("SELECT id, last_state FROM lights WHERE last_state IS NOT NULL")
-        .fetch_all(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("db error: {e}");
-            SceneCaptureError::Db
-        })?;
+    let home = room_id.is_none();
+    let lights = sqlx::query(
+        "SELECT id, last_state FROM lights
+         WHERE last_state IS NOT NULL AND (? = 0 OR home_scene_excluded = 0)",
+    )
+    .bind(home)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!("db error: {e}");
+        SceneCaptureError::Db
+    })?;
     // Enabled, non-shadowed power devices with a known state.
     let powers = sqlx::query(
         "SELECT id, last_state FROM power_devices
-         WHERE last_state IS NOT NULL AND enabled = 1 AND shadowed_by IS NULL",
+         WHERE last_state IS NOT NULL AND enabled = 1 AND shadowed_by IS NULL
+           AND (? = 0 OR home_scene_excluded = 0)",
     )
+    .bind(home)
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
@@ -381,7 +443,9 @@ pub(crate) async fn apply_scene_entries(
          FROM scene_entries e
          JOIN lights l ON l.id = e.light_id
          JOIN providers p ON p.id = l.provider_id
-         WHERE e.scene_id = ? AND p.enabled = 1",
+         JOIN scenes s ON s.id = e.scene_id
+         WHERE e.scene_id = ? AND p.enabled = 1
+           AND (s.room_id IS NOT NULL OR l.home_scene_excluded = 0)",
     )
     .bind(scene_id)
     .fetch_all(&state.db)
@@ -390,11 +454,19 @@ pub(crate) async fn apply_scene_entries(
 
     // Power entries only on an unscoped (whole-home) apply.
     let power_rows = if light_filter.is_none() {
-        sqlx::query("SELECT power_device_id, on_state FROM scene_power_entries WHERE scene_id = ?")
-            .bind(scene_id)
-            .fetch_all(&state.db)
-            .await
-            .unwrap_or_default()
+        // A Home Scene skips devices opted out since it was captured.
+        sqlx::query(
+            "SELECT e.power_device_id, e.on_state
+             FROM scene_power_entries e
+             JOIN scenes s ON s.id = e.scene_id
+             LEFT JOIN power_devices pd ON pd.id = e.power_device_id
+             WHERE e.scene_id = ?
+               AND (s.room_id IS NOT NULL OR COALESCE(pd.home_scene_excluded, 0) = 0)",
+        )
+        .bind(scene_id)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -403,13 +475,18 @@ pub(crate) async fn apply_scene_entries(
     // zero entries.
     if light_rows.is_empty() && power_rows.is_empty() {
         // Distinguish "no such scene / empty" from "filtered to nothing".
-        let exists = sqlx::query("SELECT 1 FROM scene_entries WHERE scene_id = ? LIMIT 1")
-            .bind(scene_id)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten()
-            .is_some();
+        // (Power entries count too: a Home Scene whose devices are all opted
+        // out is filtered to nothing, not missing.)
+        let exists = sqlx::query(
+            "SELECT 1 FROM scene_entries WHERE scene_id = ?1
+             UNION ALL SELECT 1 FROM scene_power_entries WHERE scene_id = ?1 LIMIT 1",
+        )
+        .bind(scene_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
         if !exists && light_filter.is_none() {
             return None;
         }

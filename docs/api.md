@@ -234,7 +234,8 @@ Responses: `204` success, `404` unknown device, `422` invalid command (e.g.
 unknown source — message in body), `502` device unreachable.
 
 A bound source's read (`GET …/{id}`) reports the **receiver's** volume/mute,
-and its `receiver_id` / `receiver_source` fields name the binding.
+and its `receiver_id` / `receiver_source` / `receiver_match_inputs` fields name
+the binding.
 
 A media device is returned as an **effective device** — composite links are
 resolved server-side. A companion's state and `capabilities` are merged into its
@@ -304,11 +305,20 @@ stay on the source. Powering the source **on** also wakes the receiver and (if
 `receiver_source` is set) switches it to that input. Many sources may share one
 receiver. Stored on the source.
 
+`receiver_match_inputs` names the receiver inputs on which the receiver counts
+as **serving this source** — a source can reach a receiver on several inputs
+(HDMI and ARC, say). While the receiver sits on one of them, control surfaces
+fold it into the source's control; on any other input (network audio, a
+turntable) it shows as its own device. With no list, `receiver_source` is the
+one match; with neither, the receiver always shows on its own.
+
 ```json
 // PUT …/{id}/receiver
 {
   "receiver_id": "<media device id>",  // null to unbind
-  "receiver_source": "Game"             // optional: receiver input to select on power-on
+  "receiver_source": "Game",            // optional: receiver input to select on power-on
+  "receiver_match_inputs": ["Game"]     // optional: omit to keep the stored list
+                                        // (dropped when the receiver changes); [] clears
 }
 ```
 

@@ -64,7 +64,16 @@ async fn set_receiver_handler(
     Path(id): Path<String>,
     Json(req): Json<crate::api::SetReceiverRequest>,
 ) -> impl IntoResponse {
-    set_receiver_status(set_media_receiver(&state, &id, req.receiver_id, req.receiver_source).await)
+    set_receiver_status(
+        set_media_receiver(
+            &state,
+            &id,
+            req.receiver_id,
+            req.receiver_source,
+            req.receiver_match_inputs,
+        )
+        .await,
+    )
 }
 
 async fn set_companion_handler(
@@ -139,6 +148,11 @@ pub(crate) struct MediaDeviceRow {
     /// The receiver input to select when this source becomes active; `None` =
     /// leave the receiver's input alone.
     pub receiver_source: Option<String>,
+    /// The receiver inputs on which the receiver counts as serving this source
+    /// (so surfaces fold it into the source's control). Empty = none named; a
+    /// client then falls back to `receiver_source`. Independent of
+    /// `receiver_source` because one source can reach a receiver on several inputs.
+    pub receiver_match_inputs: Vec<String>,
     /// **Derived** (not stored): the bound receiver's display name, resolved during
     /// read assembly wherever the receiver volume/mute overlay runs. Lets a client
     /// surface "Volume → <receiver>" straight from the device, instead of every
@@ -184,6 +198,12 @@ fn row_to_device(r: sqlx::sqlite::SqliteRow) -> MediaDeviceRow {
         inherited_room_id: r.try_get("inherited_room_id").ok().flatten(),
         receiver_id: r.get("receiver_id"),
         receiver_source: r.get("receiver_source"),
+        receiver_match_inputs: r
+            .try_get::<Option<String>, _>("receiver_match_inputs")
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default(),
         receiver_name: None, // derived later from receiver_id during the overlay
         group_id: r.try_get("group_id").ok().flatten(),
         companion_of: None, // derived later from group_id + surface selection
@@ -323,6 +343,9 @@ fn merge_companion_into(primary: &mut MediaDeviceRow, companion: &MediaDeviceRow
         primary
             .receiver_source
             .clone_from(&companion.receiver_source);
+        primary
+            .receiver_match_inputs
+            .clone_from(&companion.receiver_match_inputs);
     }
     primary.capabilities.transport |= companion.capabilities.transport;
     primary.capabilities.sources |= companion.capabilities.sources;
@@ -338,7 +361,7 @@ fn merge_companion_into(primary: &mut MediaDeviceRow, companion: &MediaDeviceRow
 /// effective device or feeding its power resolution.
 async fn load_companions(state: &AppState, id: &str) -> Vec<MediaDeviceRow> {
     sqlx::query(
-        "SELECT id, provider_id, device_id, name, kind, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto, receiver_id, receiver_source, group_id,
+        "SELECT id, provider_id, device_id, name, kind, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto, receiver_id, receiver_source, receiver_match_inputs, group_id,
                 (SELECT room_id FROM room_media_devices WHERE media_device_id = media_devices.id LIMIT 1) AS room_id
          FROM media_devices
          WHERE group_id IS NOT NULL
@@ -549,7 +572,7 @@ pub(crate) fn build_media_provider(
 
 pub(crate) async fn list_all_devices(state: &AppState) -> Result<Vec<MediaDeviceRow>, ()> {
     let mut devices: Vec<MediaDeviceRow> = sqlx::query(
-        "SELECT id, provider_id, device_id, name, kind, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto, receiver_id, receiver_source, group_id,
+        "SELECT id, provider_id, device_id, name, kind, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto, receiver_id, receiver_source, receiver_match_inputs, group_id,
                 (SELECT room_id FROM room_media_devices WHERE media_device_id = media_devices.id LIMIT 1) AS room_id,
                 (SELECT rl.room_id FROM room_links rl
                    JOIN provider_group_media_devices pga ON pga.provider_group_id = rl.provider_group_id
@@ -642,7 +665,7 @@ pub(crate) async fn list_all_devices(state: &AppState) -> Result<Vec<MediaDevice
 /// disagree about what a device row *is*.
 const DEVICE_READ_SQL: &str = "SELECT a.id, a.provider_id, a.device_id, a.name, a.kind, a.capabilities,
             a.last_state, a.last_seen, a.enabled, a.glyph, a.hw_id, a.shadowed_by, a.shadow_auto,
-            a.receiver_id, a.receiver_source, a.group_id,
+            a.receiver_id, a.receiver_source, a.receiver_match_inputs, a.group_id,
             (SELECT room_id FROM room_media_devices WHERE media_device_id = a.id LIMIT 1) AS room_id,
             (SELECT rl.room_id FROM room_links rl
                JOIN provider_group_media_devices pga ON pga.provider_group_id = rl.provider_group_id
@@ -945,15 +968,35 @@ pub(crate) enum SetReceiverOutcome {
     Db,
 }
 
+/// Normalize a binding's match-input list: trimmed, empties dropped, duplicates
+/// (case-insensitive, first spelling kept) removed. `None` when nothing is left,
+/// so an empty list is stored as NULL rather than `[]`.
+fn clean_match_inputs(inputs: Vec<String>) -> Option<Vec<String>> {
+    let mut seen = std::collections::HashSet::new();
+    let out: Vec<String> = inputs
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && seen.insert(s.to_lowercase()))
+        .collect();
+    (!out.is_empty()).then_some(out)
+}
+
 /// Bind (or, with `receiver_id = None`, unbind) a source media device to a
 /// receiver. Stored on the source — many sources may share one receiver. Rejects
 /// a missing source/receiver and self-binding; chaining (binding to a device
 /// that is itself bound) is rejected so volume can't route in a loop.
+///
+/// `match_inputs` names the receiver inputs on which the receiver counts as
+/// serving this source. `Some` replaces the list (`Some(vec![])` clears it);
+/// `None` keeps the stored list while the receiver stays the same, and drops it
+/// when the binding moves to another receiver or is cleared — another
+/// receiver's input names mean nothing here.
 pub(crate) async fn set_media_receiver(
     state: &AppState,
     id: &str,
     receiver_id: Option<String>,
     receiver_source: Option<String>,
+    match_inputs: Option<Vec<String>>,
 ) -> SetReceiverOutcome {
     if let Some(rid) = &receiver_id {
         if rid == id {
@@ -979,14 +1022,34 @@ pub(crate) async fn set_media_receiver(
             }
         }
     }
-    // Clearing the binding clears the input too; setting it stores both.
+    // Clearing the binding clears the inputs too; setting it stores both.
     let stored_source = receiver_id.as_ref().and(receiver_source);
-    match sqlx::query("UPDATE media_devices SET receiver_id = ?, receiver_source = ? WHERE id = ?")
-        .bind(&receiver_id)
-        .bind(&stored_source)
-        .bind(id)
-        .execute(&state.db)
-        .await
+    let provided = receiver_id.is_some() && match_inputs.is_some();
+    let stored_matches = receiver_id
+        .as_ref()
+        .and(match_inputs)
+        .and_then(clean_match_inputs)
+        .map(|v| serde_json::to_string(&v).unwrap_or_default());
+    // SET expressions read the row's OLD values, so `receiver_id IS ?` compares
+    // against the binding being replaced.
+    match sqlx::query(
+        "UPDATE media_devices SET
+            receiver_match_inputs = CASE
+                WHEN ? THEN ?
+                WHEN ? IS NOT NULL AND receiver_id IS ? THEN receiver_match_inputs
+                ELSE NULL END,
+            receiver_id = ?, receiver_source = ?
+         WHERE id = ?",
+    )
+    .bind(provided)
+    .bind(&stored_matches)
+    .bind(&receiver_id)
+    .bind(&receiver_id)
+    .bind(&receiver_id)
+    .bind(&stored_source)
+    .bind(id)
+    .execute(&state.db)
+    .await
     {
         Ok(r) if r.rows_affected() > 0 => SetReceiverOutcome::Ok,
         Ok(_) => SetReceiverOutcome::NotFound,
@@ -2440,6 +2503,23 @@ async fn ungroup_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clean_match_inputs_trims_dedupes_and_drops_blanks() {
+        let got = clean_match_inputs(vec![
+            " HDMI 1 ".into(),
+            "".into(),
+            "hdmi 1".into(),
+            "TV".into(),
+        ]);
+        assert_eq!(got, Some(vec!["HDMI 1".to_string(), "TV".to_string()]));
+    }
+
+    #[test]
+    fn clean_match_inputs_is_none_when_nothing_is_left() {
+        assert_eq!(clean_match_inputs(vec!["  ".into()]), None);
+        assert_eq!(clean_match_inputs(vec![]), None);
+    }
     use crate::models::media::TransportCmd;
 
     fn backing(

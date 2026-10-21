@@ -229,6 +229,11 @@ pub struct BindReceiverRequest {
     /// Optional receiver input to switch to when the source powers on (a name
     /// from the receiver's `source_list`, e.g. "Game", "BD/DVD").
     pub receiver_source: Option<String>,
+    /// Optional receiver inputs on which the receiver counts as serving this
+    /// source (e.g. ["HDMI 1", "TV/ARC"]), so control surfaces fold it into the
+    /// source's control while it's on one of them. Omit to keep the current list
+    /// (it is cleared when the receiver changes); `[]` clears it.
+    pub receiver_match_inputs: Option<Vec<String>>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -731,7 +736,15 @@ impl BifrostMcp {
                 Err(e) => return Ok(e),
             },
         };
-        match set_media_receiver(&self.state, &id, receiver_id, req.receiver_source).await {
+        match set_media_receiver(
+            &self.state,
+            &id,
+            receiver_id,
+            req.receiver_source,
+            req.receiver_match_inputs,
+        )
+        .await
+        {
             SetReceiverOutcome::Ok => Ok(ok_text("ok")),
             SetReceiverOutcome::NotFound => Ok(fail("media device not found")),
             SetReceiverOutcome::BadRequest(m) => Ok(fail(m)),

@@ -142,7 +142,7 @@ export function ScenesPage() {
       title: roomId ? "Save room scene" : "Save home scene",
       message: roomId
         ? "Snapshots this room's current lights (color/temperature/effect) and switches, to restore in one tap."
-        : "Snapshots every light and switch's current state, so you can restore it in one tap (e.g. after a power outage resets them).",
+        : "Snapshots every light and switch's current state (except devices excluded from Home scenes), so you can restore it in one tap (e.g. after a power outage resets them).",
       placeholder: roomId ? "e.g. Movie Night" : "e.g. Default",
       confirmLabel: "Save",
     });
@@ -165,7 +165,8 @@ export function ScenesPage() {
             <p style={{ color: "var(--bf-dim)", fontSize: "0.82rem", margin: "0 0 0.7rem", maxWidth: 620 }}>
               Whole-home snapshots — every light and switch — for one-tap restore (e.g. after a power
               outage resets them to factory state). Mark one as the default for the{" "}
-              <strong>Restore Home</strong> button on the dashboard.
+              <strong>Restore Home</strong> button on the dashboard. A device switched out of{" "}
+              <em>Home scenes</em> on the Devices page is left alone.
             </p>
             {/* Home-scene rows tile like the room-scene cards below. */}
             <div style={tileGrid(480, isMobile, "0.5rem 0.75rem")}>

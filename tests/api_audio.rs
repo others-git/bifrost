@@ -302,6 +302,180 @@ async fn audio_receiver_binding_crud_and_validation() {
     assert!(dev["receiver_source"].is_null());
 }
 
+/// PUT a receiver binding over the session API, asserting 204.
+async fn put_binding(app: &axum::Router, cookie: &str, source: &str, body: &str) {
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            &format!("/api/media/devices/{source}/receiver"),
+            cookie,
+            body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+async fn match_inputs(app: &axum::Router, cookie: &str, source: &str) -> serde_json::Value {
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get(
+            &format!("/api/media/devices/{source}"),
+            cookie,
+        ))
+        .await
+        .unwrap();
+    helpers::response_json(resp).await["receiver_match_inputs"].clone()
+}
+
+#[tokio::test]
+async fn receiver_match_inputs_are_stored_kept_and_cleared_with_the_binding() {
+    let (port_s, _) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let (port_r, _) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let (port_r2, _) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let source = add_onkyo_device(&app, &cookie, port_s, "Source", &[]).await;
+    let receiver = add_onkyo_device(
+        &app,
+        &cookie,
+        port_r,
+        "Receiver",
+        std::slice::from_ref(&source),
+    )
+    .await;
+    let other = add_onkyo_device(
+        &app,
+        &cookie,
+        port_r2,
+        "Other receiver",
+        &[source.clone(), receiver.clone()],
+    )
+    .await;
+
+    // Stored cleaned: trimmed, blanks dropped, case-insensitive duplicates folded.
+    put_binding(
+        &app,
+        &cookie,
+        &source,
+        &format!(
+            r#"{{"receiver_id":"{receiver}","receiver_source":"HDMI 1","receiver_match_inputs":[" HDMI 1 ","tv/arc","","hdmi 1"]}}"#
+        ),
+    )
+    .await;
+    assert_eq!(
+        match_inputs(&app, &cookie, &source).await,
+        serde_json::json!(["HDMI 1", "tv/arc"])
+    );
+
+    // Omitted on a re-bind to the SAME receiver: kept (e.g. only the power-on input changed).
+    put_binding(
+        &app,
+        &cookie,
+        &source,
+        &format!(r#"{{"receiver_id":"{receiver}","receiver_source":"tv/arc"}}"#),
+    )
+    .await;
+    assert_eq!(
+        match_inputs(&app, &cookie, &source).await,
+        serde_json::json!(["HDMI 1", "tv/arc"])
+    );
+
+    // An explicit empty list clears it.
+    put_binding(
+        &app,
+        &cookie,
+        &source,
+        &format!(r#"{{"receiver_id":"{receiver}","receiver_match_inputs":[]}}"#),
+    )
+    .await;
+    assert_eq!(
+        match_inputs(&app, &cookie, &source).await,
+        serde_json::json!([])
+    );
+
+    // Moving to another receiver drops the old receiver's input names.
+    put_binding(
+        &app,
+        &cookie,
+        &source,
+        &format!(r#"{{"receiver_id":"{receiver}","receiver_match_inputs":["game"]}}"#),
+    )
+    .await;
+    put_binding(
+        &app,
+        &cookie,
+        &source,
+        &format!(r#"{{"receiver_id":"{other}"}}"#),
+    )
+    .await;
+    assert_eq!(
+        match_inputs(&app, &cookie, &source).await,
+        serde_json::json!([])
+    );
+
+    // Unbinding clears the list even when one is sent.
+    put_binding(
+        &app,
+        &cookie,
+        &source,
+        r#"{"receiver_id":null,"receiver_match_inputs":["game"]}"#,
+    )
+    .await;
+    assert_eq!(
+        match_inputs(&app, &cookie, &source).await,
+        serde_json::json!([])
+    );
+}
+
+#[tokio::test]
+async fn v1_receiver_binding_accepts_match_inputs() {
+    let (port_s, _) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let (port_r, _) = audio_mock::spawn(audio_mock::receiver_state()).await;
+    let app = helpers::test_app_with_password().await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    let source = add_onkyo_device(&app, &cookie, port_s, "Source", &[]).await;
+    let receiver = add_onkyo_device(
+        &app,
+        &cookie,
+        port_r,
+        "Receiver",
+        std::slice::from_ref(&source),
+    )
+    .await;
+    let key = helpers::create_api_key(&app, &cookie, "binder").await;
+    let body = format!(r#"{{"receiver_id":"{receiver}","receiver_match_inputs":["game"]}}"#);
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::bearer_json(
+            "PUT",
+            &format!("/api/v1/media/devices/{source}/receiver"),
+            &key,
+            &body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        match_inputs(&app, &cookie, &source).await,
+        serde_json::json!(["game"])
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(helpers::bearer_json(
+            "PUT",
+            &format!("/api/v1/media/devices/{source}/receiver"),
+            "bfr_not_a_key",
+            &body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 #[tokio::test]
 async fn audio_companion_link_crud_and_validation() {
     let (port_a, _) = audio_mock::spawn(audio_mock::receiver_state()).await;

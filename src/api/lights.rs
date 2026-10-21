@@ -24,6 +24,7 @@ pub fn router() -> Router<Arc<AppState>> {
             "room_lights",
             "light_id",
         ))
+        .merge(crate::api::scenes::home_scene_router("", "lights"))
 }
 
 /// Body for a per-segment colour write: `{ "segments": [{"segment":0,"rgb":16711680}, …] }`.
@@ -55,6 +56,9 @@ pub(crate) struct LightRow {
     /// `true` when the shadow was set automatically by hw_id matching (native
     /// wins); `false` for a manual user link.
     shadow_auto: bool,
+    /// `true` = skipped by Home Scenes (capture and apply); Room Scenes still
+    /// include it.
+    home_scene_excluded: bool,
     /// The room this device is directly assigned to (Devices-page assignment),
     /// or `None`. Room *links* (synced provider groups) aren't reflected here.
     room_id: Option<String>,
@@ -83,6 +87,7 @@ fn row_to_light(r: sqlx::sqlite::SqliteRow) -> LightRow {
         hw_id: r.get("hw_id"),
         shadowed_by: r.get("shadowed_by"),
         shadow_auto: r.get::<i64, _>("shadow_auto") != 0,
+        home_scene_excluded: r.get::<i64, _>("home_scene_excluded") != 0,
         room_id: r.get("room_id"),
         // try_get: queries that don't compute it (live get-one, internal reads)
         // simply leave it None.
@@ -94,7 +99,7 @@ fn row_to_light(r: sqlx::sqlite::SqliteRow) -> LightRow {
 
 pub(crate) async fn list_all_lights(state: &AppState) -> Result<Vec<LightRow>, ()> {
     sqlx::query(
-        "SELECT id, provider_id, device_id, name, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto,
+        "SELECT id, provider_id, device_id, name, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto, home_scene_excluded,
                 (SELECT room_id FROM room_lights WHERE light_id = lights.id LIMIT 1) AS room_id,
                 (SELECT rl.room_id FROM room_links rl
                    JOIN provider_group_lights pgl ON pgl.provider_group_id = rl.provider_group_id
@@ -109,7 +114,7 @@ pub(crate) async fn list_all_lights(state: &AppState) -> Result<Vec<LightRow>, (
 
 pub(crate) async fn get_light_by_id(state: &AppState, id: &str) -> Result<Option<LightRow>, ()> {
     sqlx::query(
-        "SELECT id, provider_id, device_id, name, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto,
+        "SELECT id, provider_id, device_id, name, capabilities, last_state, last_seen, enabled, glyph, hw_id, shadowed_by, shadow_auto, home_scene_excluded,
                 (SELECT room_id FROM room_lights WHERE light_id = lights.id LIMIT 1) AS room_id,
                 (SELECT rl.room_id FROM room_links rl
                    JOIN provider_group_lights pgl ON pgl.provider_group_id = rl.provider_group_id

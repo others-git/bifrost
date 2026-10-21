@@ -2684,3 +2684,172 @@ async fn api_responses_are_no_store_except_content_addressed_media() {
         "no-store"
     );
 }
+
+// ── Home Scene opt-out ───────────────────────────────────────────────────────
+
+/// POST a scene and return its JSON body (`id`, `lights`, `power`).
+async fn create_scene_body(app: &Router, cookie: &str, body: &str) -> serde_json::Value {
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post("/api/scenes", cookie, body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    helpers::response_json(resp).await
+}
+
+async fn set_home_scene(app: &Router, cookie: &str, uri: &str, include: bool) -> StatusCode {
+    app.clone()
+        .oneshot(helpers::authed_json(
+            "PUT",
+            uri,
+            cookie,
+            &format!(r#"{{"include":{include}}}"#),
+        ))
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn home_scene_capture_skips_an_opted_out_light_but_room_scene_keeps_it() {
+    let bridge = wled_mock().await;
+    let (app, _a, b, _db) = helpers::test_app_with_two_lights_db(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    assert_eq!(
+        set_home_scene(&app, &cookie, &format!("/api/lights/{b}/home-scene"), false).await,
+        StatusCode::NO_CONTENT
+    );
+    // The flag reads back on the inventory row.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_get(&format!("/api/lights/{b}"), &cookie))
+        .await
+        .unwrap();
+    assert_eq!(
+        helpers::response_json(resp).await["home_scene_excluded"],
+        true
+    );
+
+    let home = create_scene_body(&app, &cookie, r#"{"name":"Home"}"#).await;
+    assert_eq!(home["lights"], 1, "the opted-out light is not captured");
+
+    // A Room Scene is not a Home Scene — the opt-out doesn't apply.
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            "/api/rooms",
+            &cookie,
+            &format!(r#"{{"name":"R","light_ids":["{b}"]}}"#),
+        ))
+        .await
+        .unwrap();
+    let room_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let room = create_scene_body(
+        &app,
+        &cookie,
+        &format!(r#"{{"name":"R","room_id":"{room_id}"}}"#),
+    )
+    .await;
+    assert_eq!(room["lights"], 1);
+}
+
+#[tokio::test]
+async fn home_scene_apply_skips_a_light_opted_out_after_capture() {
+    let bridge = wled_mock().await;
+    let (app, _a, b, _db) = helpers::test_app_with_two_lights_db(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let scene = create_scene_body(&app, &cookie, r#"{"name":"Home"}"#).await;
+    assert_eq!(scene["lights"], 2);
+    let scene_id = scene["id"].as_str().unwrap().to_string();
+
+    // Opting out after capture governs the existing scene — no recapture needed.
+    set_home_scene(&app, &cookie, &format!("/api/lights/{b}/home-scene"), false).await;
+    let resp = app
+        .clone()
+        .oneshot(helpers::authed_post(
+            &format!("/api/scenes/{scene_id}/activate"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let body = helpers::response_json(resp).await;
+    assert_eq!(body["applied"], 1);
+    assert_eq!(body["failed"], 0);
+
+    // Opting back in restores it.
+    set_home_scene(&app, &cookie, &format!("/api/lights/{b}/home-scene"), true).await;
+    let resp = app
+        .oneshot(helpers::authed_post(
+            &format!("/api/scenes/{scene_id}/activate"),
+            &cookie,
+            "{}",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(helpers::response_json(resp).await["applied"], 2);
+}
+
+#[tokio::test]
+async fn home_scene_skips_an_opted_out_power_device() {
+    let ha = wiremock::MockServer::start().await;
+    let (app, prov_id, db) = helpers::test_app_with_ha_db(&ha.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+    sqlx::query(
+        "INSERT INTO power_devices (id, provider_id, device_id, name, kind, last_state)
+         VALUES ('tv-plug', ?, 'switch.tv', 'TV plug', 'outlet', '{\"on\":true}')",
+    )
+    .bind(&prov_id)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    let uri = "/api/power/devices/tv-plug/home-scene";
+    assert_eq!(
+        create_scene_body(&app, &cookie, r#"{"name":"A"}"#).await["power"],
+        1
+    );
+    assert_eq!(
+        set_home_scene(&app, &cookie, uri, false).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        create_scene_body(&app, &cookie, r#"{"name":"B"}"#).await["power"],
+        0
+    );
+}
+
+#[tokio::test]
+async fn home_scene_opt_out_route_rejects_unauthenticated_and_unknown_ids() {
+    let bridge = wled_mock().await;
+    let (app, light_id) = helpers::test_app_with_light(&bridge.uri()).await;
+    let cookie = helpers::login(&app, helpers::TEST_PASSWORD).await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PUT")
+                .uri(format!("/api/lights/{light_id}/home-scene"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"include":false}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        set_home_scene(&app, &cookie, "/api/lights/nope/home-scene", false).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        set_home_scene(&app, &cookie, "/api/power/devices/nope/home-scene", false).await,
+        StatusCode::NOT_FOUND
+    );
+}

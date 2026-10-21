@@ -142,7 +142,12 @@ async fn mcp_bind_receiver_binds_and_unbinds() {
         .oneshot(mcp_tool_call(
             &key,
             "bind_receiver",
-            serde_json::json!({"device": source, "receiver": receiver, "receiver_source": "Game"}),
+            serde_json::json!({
+                "device": source,
+                "receiver": receiver,
+                "receiver_source": "Game",
+                "receiver_match_inputs": ["Game", "BD/DVD"],
+            }),
         ))
         .await
         .unwrap();
@@ -164,6 +169,10 @@ async fn mcp_bind_receiver_binds_and_unbinds() {
     let dev: serde_json::Value = serde_json::from_str(&mcp_result_text(&body)).unwrap();
     assert_eq!(dev["receiver_id"], receiver);
     assert_eq!(dev["receiver_source"], "Game");
+    assert_eq!(
+        dev["receiver_match_inputs"],
+        serde_json::json!(["Game", "BD/DVD"])
+    );
 
     // Omitting `receiver` unbinds.
     let resp = app

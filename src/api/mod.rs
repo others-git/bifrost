@@ -74,12 +74,16 @@ pub(crate) struct SetRoomRequest {
 
 /// Body for binding a source media device to a receiver (M22). `receiver_id`
 /// `null` clears the binding; `receiver_source` is the receiver input to select
-/// when the source becomes active (`null` = leave the input alone).
+/// when the source becomes active (`null` = leave the input alone);
+/// `receiver_match_inputs` names the inputs on which the receiver counts as
+/// serving this source (omitted = keep the stored list for the same receiver).
 #[derive(Deserialize)]
 pub(crate) struct SetReceiverRequest {
     pub receiver_id: Option<String>,
     #[serde(default)]
     pub receiver_source: Option<String>,
+    #[serde(default)]
+    pub receiver_match_inputs: Option<Vec<String>>,
 }
 
 /// M26 composite: merge this media entity into `primary_id` as its companion, or

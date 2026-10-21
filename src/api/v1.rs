@@ -291,7 +291,16 @@ async fn set_receiver_media(
     Path(id): Path<String>,
     Json(req): Json<crate::api::SetReceiverRequest>,
 ) -> impl IntoResponse {
-    set_receiver_status(set_media_receiver(&state, &id, req.receiver_id, req.receiver_source).await)
+    set_receiver_status(
+        set_media_receiver(
+            &state,
+            &id,
+            req.receiver_id,
+            req.receiver_source,
+            req.receiver_match_inputs,
+        )
+        .await,
+    )
 }
 
 async fn set_companion_media(

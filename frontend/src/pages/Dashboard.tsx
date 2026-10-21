@@ -248,7 +248,7 @@ function RoomGrid({
   const ultraWide = useMediaQuery("(min-width: 2400px)");
   const assigned = new Set<string>();
 
-  // Membership (enabled filter + bound-receiver fold) comes from the one shared
+  // Membership (enabled filter + bound-receiver fold while on the source's input) comes from the one shared
   // rule in `roomMembers` — the same lists every surface's room card renders.
   const roomSections = rooms
     .map((room) => {

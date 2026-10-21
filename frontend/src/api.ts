@@ -190,6 +190,8 @@ export interface Light {
   room_id?: string | null;
   /** Room via a synced provider-group link, when there's no direct room_id. */
   inherited_room_id?: string | null;
+  /** true = skipped by Home Scenes (capture + apply); Room Scenes still include it. */
+  home_scene_excluded?: boolean;
 }
 
 /** Enable/disable a device of any domain (lights / audio / power). Disabled =
@@ -213,6 +215,23 @@ export async function setPowerEnabled(id: string, enabled: boolean): Promise<voi
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ enabled }),
+  });
+}
+
+/** Opt a light / power device in or out of Home Scenes (whole-home snapshots,
+ * incl. the Restore Home default). Room Scenes are unaffected. */
+export async function setLightHomeScene(id: string, include: boolean): Promise<void> {
+  await timedFetch(`/api/lights/${id}/home-scene`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ include }),
+  });
+}
+export async function setPowerHomeScene(id: string, include: boolean): Promise<void> {
+  await timedFetch(`/api/power/devices/${id}/home-scene`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ include }),
   });
 }
 
@@ -324,16 +343,19 @@ export async function setPowerRoom(id: string, room_id: string | null): Promise<
 }
 /** M22: bind a source audio device to a receiver (volume/mute route to it), or
  * unbind with receiver_id = null. `receiver_source` is the receiver input to
- * select when the source becomes active. */
+ * select when the source becomes active. `receiver_match_inputs` names the
+ * inputs on which the receiver counts as serving this source; omit it to keep
+ * the stored list (the hub drops it when the receiver changes). */
 export async function setMediaReceiver(
   id: string,
   receiver_id: string | null,
   receiver_source: string | null,
+  receiver_match_inputs?: string[],
 ): Promise<void> {
   await timedFetch(`/api/media/devices/${id}/receiver`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ receiver_id, receiver_source }),
+    body: JSON.stringify({ receiver_id, receiver_source, receiver_match_inputs }),
   });
 }
 
@@ -785,6 +807,10 @@ export interface MediaDevice {
   receiver_id?: string | null;
   /** The receiver input to select when this source becomes active; null = none. */
   receiver_source?: string | null;
+  /** Receiver inputs on which the receiver counts as serving this source (so
+   * room cards fold it into this source's control). Empty = none named; the
+   * fold then falls back to `receiver_source`. */
+  receiver_match_inputs?: string[];
   /** The bound receiver's display name, resolved server-side wherever the receiver
    * volume/mute overlay runs — so the "Volume → <receiver>" overlay renders from
    * the device directly, with no per-surface receiver_id lookup. null = unbound. */
@@ -1030,6 +1056,8 @@ export interface PowerDevice {
   room_id?: string | null;
   /** Room via a synced provider-group link, when there's no direct room_id. */
   inherited_room_id?: string | null;
+  /** true = skipped by Home Scenes (capture + apply); Room Scenes still include it. */
+  home_scene_excluded?: boolean;
 }
 
 export async function getPowerDevices(): Promise<PowerDevice[]> {

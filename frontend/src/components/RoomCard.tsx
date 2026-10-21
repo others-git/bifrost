@@ -75,10 +75,36 @@ export function litHexes(lights: Light[]): string[] {
     .map((l) => (l.last_state!.color ? lightChromaHex(l) : EFFECT_ACCENT));
 }
 
+/** The receiver inputs on which a bound source counts as "what the receiver is
+ * playing": the binding's configured match list, or — when none is named — the
+ * input it switches the receiver to on power-on. Empty when the binding names
+ * neither. */
+export function bindingInputs(source: MediaDevice): string[] {
+  const listed = source.receiver_match_inputs ?? [];
+  if (listed.length > 0) return listed;
+  return source.receiver_source ? [source.receiver_source] : [];
+}
+
+/** Whether a bound receiver is currently serving one of its sources: it sits on
+ * one of the inputs some bound member names (`bindingInputs`). Only then does the
+ * source's control already cover it (volume/mute route there). A binding that
+ * names no input can't tell, so it never hides the receiver — a visible extra
+ * button beats an unreachable receiver playing its own music. */
+export function receiverOnBoundInput(receiver: MediaDevice, members: MediaDevice[]): boolean {
+  const norm = (s: string | null | undefined) => (s ?? "").trim().toLowerCase();
+  const current = norm(receiver.state.source);
+  if (!current) return false;
+  return members.some(
+    (d) => d.receiver_id === receiver.id && bindingInputs(d).some((i) => norm(i) === current),
+  );
+}
+
 /** A room's controllable members, by the one shared rule: disabled devices drop
  * out of room control (they keep membership — see the Devices page), and a
- * receiver that is the volume target of another member folds into that source's
- * control instead of showing on its own. Preserves the room's member order. */
+ * receiver bound to another member folds into that source's control while it is
+ * on the source's input (`receiverOnBoundInput`); on any other input it shows on
+ * its own, since the source's control can't reach its input or what it's
+ * playing. Preserves the room's member order. */
 export function roomMembers(
   room: Room,
   lights: Light[],
@@ -97,10 +123,11 @@ export function roomMembers(
   const members = room.media_devices
     .map((m) => mediaById.get(m.media_device_id))
     .filter((d): d is MediaDevice => !!d && d.enabled !== false);
-  const boundReceivers = new Set(
-    members.map((d) => d.receiver_id).filter((id): id is string => !!id),
-  );
-  return { lights: roomLights, power: roomPower, audio: members.filter((d) => !boundReceivers.has(d.id)) };
+  return {
+    lights: roomLights,
+    power: roomPower,
+    audio: members.filter((d) => !receiverOnBoundInput(d, members)),
+  };
 }
 
 /** Collapse a room's audio members into control entries: speakers playing in a
