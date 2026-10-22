@@ -122,7 +122,86 @@ const SOURCES: &[(&str, &str)] = &[
     ("2A", "usb-rear"),
     ("2B", "net"),
     ("2E", "bluetooth"),
+    ("22", "phono"),
+    // Zone 2 only: follow whatever the main zone is playing.
+    ("80", "main-source"),
 ];
+
+// ── Per-receiver input list ─────────────────────────────────────────────────
+
+/// Which zones an input is offered in — the `zone` bitmask on an `NRI`
+/// `<selector>` (1 = main, 2 = zone 2).
+fn zone_bit(device_id: &str) -> u8 {
+    if device_id == "zone2" { 2 } else { 1 }
+}
+
+/// The receiver's own input list from its `NRI` device-info XML: one
+/// `(selector code, zone bitmask)` per `<selector>` with `value="1"` (enabled).
+/// Shaped like `<selector id="2b" value="1" name="NET" zone="03" .../>`.
+/// Empty when the payload carries no selector list.
+fn parse_nri_selectors(xml: &str) -> Vec<(String, u8)> {
+    fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+        let key = format!(" {name}=\"");
+        let start = tag.find(&key)? + key.len();
+        let len = tag[start..].find('"')?;
+        Some(&tag[start..start + len])
+    }
+    xml.split("<selector ")
+        .skip(1)
+        .filter_map(|rest| {
+            let tag = format!(" {}", &rest[..rest.find('>').unwrap_or(rest.len())]);
+            if attr(&tag, "value") != Some("1") {
+                return None;
+            }
+            let code = attr(&tag, "id")?.to_ascii_uppercase();
+            let zones = u8::from_str_radix(attr(&tag, "zone").unwrap_or("01"), 16).unwrap_or(1);
+            Some((code, zones))
+        })
+        .collect()
+}
+
+/// The source names one zone offers, in the receiver's order. Falls back to
+/// the built-in table when the receiver didn't describe its inputs (no `NRI`,
+/// or an older model without a selector list) — a full list beats a hidden
+/// picker.
+fn zone_source_list(selectors: Option<&[(String, u8)]>, device_id: &str) -> Vec<String> {
+    let bit = zone_bit(device_id);
+    match selectors.filter(|s| !s.is_empty()) {
+        Some(sel) => sel
+            .iter()
+            .filter(|(_, zones)| zones & bit != 0)
+            .map(|(code, _)| source_name(code))
+            .collect(),
+        None => SOURCES
+            .iter()
+            .filter(|(code, _)| (*code == "80") == (device_id == "zone2"))
+            .map(|(_, name)| name.to_string())
+            .collect(),
+    }
+}
+
+/// Parsed `NRI` input lists per receiver host. The input set changes only when
+/// someone reconfigures the receiver, so one read per process is enough — a
+/// state read must not pay a multi-KB XML round trip every time.
+type SelectorCache = std::sync::Mutex<HashMap<String, Vec<(String, u8)>>>;
+
+fn selector_cache() -> &'static SelectorCache {
+    static C: OnceLock<SelectorCache> = OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+fn cached_selectors(key: &str) -> Option<Vec<(String, u8)>> {
+    selector_cache().lock().ok()?.get(key).cloned()
+}
+
+fn store_selectors(key: &str, selectors: Vec<(String, u8)>) {
+    if selectors.is_empty() {
+        return; // never cache "unknown" — let a later read try again
+    }
+    if let Ok(mut c) = selector_cache().lock() {
+        c.insert(key.to_string(), selectors);
+    }
+}
 
 /// NSV streaming service codes reachable while on the NET input.
 const NET_SERVICES: &[(&str, &str)] = &[
@@ -353,7 +432,26 @@ impl OnkyoProvider {
     /// receiver doesn't answer NRI, so discovery never fails on its account.
     async fn nri_hw_id(&self) -> Option<String> {
         let reply = self.exchange(&["NRIQSTN".into()], &["NRI"]).await.ok()?;
-        parse_nri_mac(reply.get("NRI")?)
+        let xml = reply.get("NRI")?;
+        store_selectors(&self.selector_key(), parse_nri_selectors(xml));
+        parse_nri_mac(xml)
+    }
+
+    /// Cache key for this receiver's input list — host AND port, since one
+    /// host can front several eISCP endpoints (every test mock is 127.0.0.1).
+    fn selector_key(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+
+    /// The receiver's enabled inputs, read once per process from `NRI` and
+    /// cached (see [`selector_cache`]). `None` when it doesn't answer.
+    async fn selectors(&self) -> Option<Vec<(String, u8)>> {
+        if let Some(s) = cached_selectors(&self.selector_key()) {
+            return Some(s);
+        }
+        let reply = self.exchange(&["NRIQSTN".into()], &["NRI"]).await.ok()?;
+        store_selectors(&self.selector_key(), parse_nri_selectors(reply.get("NRI")?));
+        cached_selectors(&self.selector_key())
     }
 
     /// Send `commands` over the shared link, then collect every code in `wanted`
@@ -741,12 +839,14 @@ impl MediaProvider for OnkyoProvider {
             None
         };
 
+        let source_list = zone_source_list(self.selectors().await.as_deref(), device_id);
+
         Ok(MediaState {
             power,
             volume,
             mute,
             source,
-            source_list: Vec::new(),
+            source_list,
             now_playing,
             reachable: Some(true),
             group_coordinator: None, // receiver zones aren't sync groups
@@ -803,17 +903,25 @@ impl MediaProvider for OnkyoProvider {
         for q in STATE_QUERIES {
             init.extend_from_slice(&encode_packet(q));
         }
+        // The input list rides the stream too (once, not on every heartbeat —
+        // it's a multi-KB XML reply that only changes on reconfiguration).
+        let known = cached_selectors(&self.selector_key());
+        if known.is_none() {
+            init.extend_from_slice(&encode_packet("NRIQSTN"));
+        }
         let _ = link.writes.send(init);
+        let host = self.selector_key();
 
         let (tx, out_rx) = tokio::sync::mpsc::channel::<MediaEvent>(64);
         tokio::spawn(async move {
             // One accumulator per zone; zone codes fold via their canonical form.
-            let fresh = || MediaState {
+            let fresh = |device_id: &str| MediaState {
                 reachable: Some(true),
+                source_list: zone_source_list(known.as_deref(), device_id),
                 ..Default::default()
             };
-            let mut main_state = fresh();
-            let mut zone2_state = fresh();
+            let mut main_state = fresh("main");
+            let mut zone2_state = fresh("zone2");
             // Last snapshot emitted per zone, so we forward only real changes: a
             // heartbeat re-query (or a duplicate push) of unchanged state stays
             // silent, while a push the link missed is corrected the instant the
@@ -858,6 +966,39 @@ impl MediaProvider for OnkyoProvider {
                 if data == "QSTN" || data == "N/A" {
                     // A query echo, or "command unsupported" (e.g. ZPW on a
                     // receiver with no zone 2) — not state.
+                    continue;
+                }
+                if code == "NRI" {
+                    // The receiver's own input list replaces the fallback on
+                    // both zones. Emit now — it can arrive after every state
+                    // reply, and nothing else would carry it out. Zone 2 only
+                    // once it has reported (a receiver may have none).
+                    let selectors = parse_nri_selectors(&data);
+                    if selectors.is_empty() {
+                        continue;
+                    }
+                    main_state.source_list = zone_source_list(Some(&selectors), "main");
+                    zone2_state.source_list = zone_source_list(Some(&selectors), "zone2");
+                    store_selectors(&host, selectors);
+                    for (device_id, state, last) in [
+                        ("main", &main_state, &mut last_main),
+                        ("zone2", &zone2_state, &mut last_zone2),
+                    ] {
+                        let Some(prev) = last.as_ref() else { continue };
+                        if prev != state {
+                            *last = Some(state.clone());
+                            if tx
+                                .send(MediaEvent {
+                                    device_id: device_id.to_string(),
+                                    state: state.clone(),
+                                })
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    }
                     continue;
                 }
                 let Some((device_id, canon)) = canonical(&code) else {
@@ -1272,6 +1413,93 @@ mod tests {
         });
 
         (port, recorded)
+    }
+
+    /// The live TX-RZ620's selector list (trimmed), as captured over eISCP.
+    const NRI_SELECTORS: &str = r#"<device><selectorlist count="5"><selector id="10" value="1" name="BD/DVD" zone="03" iconid="10" /><selector id="05" value="1" name="PC" zone="01" iconid="05" /><selector id="12" value="1" name="TV" zone="03" iconid="12" /><selector id="2b" value="0" name="NET" zone="03" iconid="2b" /><selector id="80" value="1" name="Source" zone="02" /></selectorlist></device>"#;
+
+    #[test]
+    fn nri_selectors_keep_enabled_inputs_with_their_zones() {
+        assert_eq!(
+            parse_nri_selectors(NRI_SELECTORS),
+            vec![
+                ("10".to_string(), 3),
+                ("05".to_string(), 1),
+                ("12".to_string(), 3),
+                // NET is value="0" (disabled) — dropped.
+                ("80".to_string(), 2),
+            ]
+        );
+        assert!(
+            parse_nri_selectors("<device><macaddress>0009B0E82343</macaddress></device>")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn zone_source_list_filters_by_zone_and_names_codes() {
+        let sel = parse_nri_selectors(NRI_SELECTORS);
+        assert_eq!(zone_source_list(Some(&sel), "main"), vec!["bd", "pc", "tv"]);
+        assert_eq!(
+            zone_source_list(Some(&sel), "zone2"),
+            vec!["bd", "tv", "main-source"]
+        );
+    }
+
+    #[test]
+    fn zone_source_list_falls_back_to_the_builtin_table() {
+        let main = zone_source_list(None, "main");
+        assert!(main.contains(&"tv".to_string()) && main.contains(&"phono".to_string()));
+        assert!(
+            !main.contains(&"main-source".to_string()),
+            "zone-2-only input"
+        );
+        assert!(zone_source_list(None, "zone2").contains(&"main-source".to_string()));
+        assert_eq!(
+            zone_source_list(Some(&[]), "main"),
+            main,
+            "empty list = unknown"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_state_lists_the_receivers_own_inputs() {
+        let mut scripted = baseline_scripted();
+        scripted.insert("NRI", NRI_SELECTORS.to_string());
+        let (port, _) = spawn_mock_receiver(scripted).await;
+        let p = OnkyoProvider::new_for_test("127.0.0.1", port);
+        assert_eq!(
+            p.get_state("main").await.unwrap().source_list,
+            vec!["bd", "pc", "tv"]
+        );
+    }
+
+    #[tokio::test]
+    async fn get_state_without_nri_offers_the_builtin_inputs() {
+        let (port, _) = spawn_mock_receiver(baseline_scripted()).await;
+        let p = OnkyoProvider::new_for_test("127.0.0.1", port);
+        let s = p.get_state("main").await.unwrap();
+        assert!(
+            s.source_list.contains(&"tv".to_string()),
+            "picker must never be empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn event_stream_carries_the_receivers_inputs() {
+        let mut scripted = baseline_scripted();
+        scripted.insert("NRI", NRI_SELECTORS.to_string());
+        let (port, _) = spawn_mock_receiver(scripted).await;
+        let p = OnkyoProvider::new_for_test("127.0.0.1", port);
+        let mut rx = p.event_stream().await.unwrap();
+        let mut last_main = None;
+        while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await {
+            if ev.device_id == "main" {
+                last_main = Some(ev);
+            }
+        }
+        let ev = last_main.expect("main events");
+        assert_eq!(ev.state.source_list, vec!["bd", "pc", "tv"]);
     }
 
     fn baseline_scripted() -> Scripted {

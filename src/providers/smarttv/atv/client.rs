@@ -424,9 +424,35 @@ pub async fn send_key(host: &str, identity: &Identity, key_code: u32) -> Result<
     send_message(host, identity, messages::remote_key_inject(key_code))
 }
 
+/// Apps that draw their own keyboard inside a render surface instead of using
+/// an Android text field (YouTube's Cobalt engine) — no text mechanism reaches
+/// them: not an IME edit, not ScalarWeb `setTextForm`, not even raw key events
+/// (verified with `adb shell input text` on a Bravia: nothing lands). For these,
+/// "send text" means "search for it": open the app's search-results link.
+/// `(package, results URL, query parameter)`.
+const SEARCH_LINK_APPS: &[(&str, &str, &str)] = &[(
+    "com.google.android.youtube.tv",
+    "https://www.youtube.com/results",
+    "search_query",
+)];
+
+/// The search-results deep link for `text` when `app` is one of
+/// [`SEARCH_LINK_APPS`], else `None`.
+fn search_link(app: Option<&str>, text: &str) -> Option<String> {
+    let (_, base, param) = SEARCH_LINK_APPS
+        .iter()
+        .find(|(pkg, _, _)| Some(*pkg) == app)?;
+    reqwest::Url::parse_with_params(base, &[(*param, text)])
+        .ok()
+        .map(String::from)
+}
+
 /// How `send_text` will deliver, given the link's cached keyboard state.
 #[derive(Debug, PartialEq)]
 enum TextPath {
+    /// The foreground app has no text field to type into — open its search
+    /// results for the text instead (see [`SEARCH_LINK_APPS`]).
+    SearchLink(String),
     /// One `RemoteImeBatchEdit` echoing the TV's keyboard counters — how the
     /// official remote app types; lands whole, any characters.
     BatchEdit {
@@ -439,7 +465,10 @@ enum TextPath {
     Keys,
 }
 
-fn text_path(cache: &AtvStateCache) -> TextPath {
+fn text_path(cache: &AtvStateCache, text: &str) -> TextPath {
+    if let Some(link) = search_link(cache.current_app.as_deref(), text) {
+        return TextPath::SearchLink(link);
+    }
     match cache.ime_field_counter {
         Some(field_counter) => TextPath::BatchEdit {
             ime_counter: cache.ime_counter.unwrap_or(0),
@@ -459,7 +488,16 @@ pub async fn send_text(host: &str, identity: &Identity, text: &str) -> Result<()
     if text.is_empty() {
         return Ok(());
     }
-    match text_path(&cached_state(host, identity)) {
+    match text_path(&cached_state(host, identity), text) {
+        TextPath::SearchLink(link) => {
+            tracing::debug!(
+                target: "bifrost::smarttv",
+                host,
+                link,
+                "ATV remote: type text (app has no text field — opening its search)"
+            );
+            send_message(host, identity, messages::remote_app_link_launch(&link))
+        }
         TextPath::BatchEdit {
             ime_counter,
             field_counter,
@@ -672,7 +710,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            text_path(&cache),
+            text_path(&cache, "x"),
             TextPath::BatchEdit {
                 ime_counter: 2,
                 field_counter: 6
@@ -684,7 +722,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            text_path(&shown),
+            text_path(&shown, "x"),
             TextPath::BatchEdit {
                 ime_counter: 0,
                 field_counter: 1
@@ -693,8 +731,30 @@ mod tests {
     }
 
     #[test]
+    fn text_in_youtube_becomes_a_search_link() {
+        let cache = AtvStateCache {
+            current_app: Some("com.google.android.youtube.tv".into()),
+            // Even with keyboard counters known: YouTube has no field to edit.
+            ime_field_counter: Some(4),
+            ..Default::default()
+        };
+        assert_eq!(
+            text_path(&cache, "bob's burgers & more"),
+            TextPath::SearchLink(
+                "https://www.youtube.com/results?search_query=bob%27s+burgers+%26+more".into()
+            )
+        );
+    }
+
+    #[test]
+    fn search_link_is_only_for_listed_apps() {
+        assert_eq!(search_link(Some("com.netflix.ninja"), "x"), None);
+        assert_eq!(search_link(None, "x"), None);
+    }
+
+    #[test]
     fn text_falls_back_to_keys_with_no_keyboard_seen() {
-        assert_eq!(text_path(&AtvStateCache::default()), TextPath::Keys);
+        assert_eq!(text_path(&AtvStateCache::default(), "x"), TextPath::Keys);
     }
 
     #[test]
@@ -980,6 +1040,111 @@ mod tests {
                 );
             }
             Err(e) => panic!("pairing handshake still rejected: {e:#}"),
+        }
+    }
+
+    /// Keyboard (IME) probe against a REAL paired TV:
+    ///   ATV_IME_HOST=192.168.1.250 ATV_IME_DB=data/bifrost.db \
+    ///   BIFROST_SECRET=... cargo test --lib atv_ime_probe -- --ignored --nocapture
+    /// Dumps every frame the TV sends for ATV_IME_SECS (default 60). Open a text
+    /// field (a search box) on the TV meanwhile: a TV that speaks the IME channel
+    /// pushes show-request / batch-edit frames carrying the counters a text edit
+    /// must echo. Halfway through it sends one batch edit ("bifrost") using the
+    /// counters seen so far (0/0 if none) — WATCH THE FIELD.
+    #[tokio::test]
+    #[ignore]
+    async fn atv_ime_probe() {
+        let Ok(host) = std::env::var("ATV_IME_HOST") else {
+            return;
+        };
+        let secs: u64 = std::env::var("ATV_IME_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60);
+        let db_path = std::env::var("ATV_IME_DB").unwrap_or("data/bifrost.db".into());
+        let secret = std::env::var("BIFROST_SECRET").expect("BIFROST_SECRET");
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect(&format!("sqlite://{db_path}?mode=ro"))
+            .await
+            .unwrap();
+        let rows: Vec<String> =
+            sqlx::query_scalar("SELECT credentials FROM providers WHERE provider_type = 'smarttv'")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        let state = crate::AppState::new(db, &secret, crate::providers::default_registry());
+        let creds: serde_json::Value = rows
+            .iter()
+            .filter_map(|e| state.decrypt_credentials(e).ok())
+            .filter_map(|j| serde_json::from_str::<serde_json::Value>(&j).ok())
+            .find(|c| c["host"].as_str().is_some_and(|h| h.contains(&host)))
+            .expect("no smarttv provider for that host");
+        let identity = Identity {
+            cert_pem: creds["atv_cert"].as_str().expect("paired atv_cert").into(),
+            key_pem: creds["atv_key"].as_str().unwrap().into(),
+        };
+        let mut stream = connect(&host, REMOTE_PORT, &identity).await.unwrap();
+        let mut reader = FrameReader::default();
+        loop {
+            let f = read_msg(&mut stream, &mut reader).await.unwrap();
+            dump("handshake", &f);
+            match messages::parse_remote(&f) {
+                RemoteIn::Configure => write_msg(&mut stream, &messages::remote_configure())
+                    .await
+                    .unwrap(),
+                RemoteIn::SetActive => {
+                    write_msg(&mut stream, &messages::remote_set_active())
+                        .await
+                        .unwrap();
+                    break;
+                }
+                RemoteIn::Ping(v) => write_msg(&mut stream, &messages::remote_ping_response(v))
+                    .await
+                    .unwrap(),
+                _ => {}
+            }
+        }
+        println!("=== session active; listening {secs}s — OPEN A TEXT FIELD ON THE TV ===");
+        let start = tokio::time::Instant::now();
+        let mut sent = false;
+        let (mut ime, mut field) = (0u32, 0u32);
+        while start.elapsed() < Duration::from_secs(secs) {
+            if !sent && start.elapsed() > Duration::from_secs(secs / 2) {
+                sent = true;
+                println!(">>> sending batch edit 'bifrost' (ime={ime}, field={field})");
+                write_msg(
+                    &mut stream,
+                    &messages::remote_ime_batch_edit(ime, field, "bifrost"),
+                )
+                .await
+                .unwrap();
+            }
+            match tokio::time::timeout(Duration::from_secs(1), read_msg(&mut stream, &mut reader))
+                .await
+            {
+                Ok(Ok(f)) => {
+                    let msg = messages::parse_remote(&f);
+                    match &msg {
+                        RemoteIn::Ping(v) => {
+                            write_msg(&mut stream, &messages::remote_ping_response(*v))
+                                .await
+                                .unwrap();
+                            continue;
+                        }
+                        RemoteIn::Ime {
+                            ime_counter,
+                            field_counter,
+                        } => {
+                            ime = ime_counter.unwrap_or(ime);
+                            field = field_counter.unwrap_or(field);
+                        }
+                        _ => {}
+                    }
+                    dump(&format!("t+{:>4.1}s", start.elapsed().as_secs_f32()), &f);
+                }
+                Ok(Err(e)) => panic!("read: {e:#}"),
+                Err(_) => {}
+            }
         }
     }
 
