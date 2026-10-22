@@ -79,13 +79,17 @@ fn parse_wav(bytes: &[u8]) -> Result<Pcm> {
     }
     let samples: Vec<i16> = match (audio_format, bits) {
         (1, 16) => data
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i16::from_le_bytes(*c))
             .collect(),
         (3, 32) => data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| {
-                let f = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                let f = f32::from_le_bytes(*c);
                 (f.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
             })
             .collect(),
@@ -180,8 +184,10 @@ mod tests {
         let wav = wav16(&samples, 8000, 1);
         let pcm = wav_to_atv_voice_pcm(&wav).unwrap();
         let back: Vec<i16> = pcm
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i16::from_le_bytes(*c))
             .collect();
         assert_eq!(back, samples);
     }
@@ -206,8 +212,10 @@ mod tests {
         let wav = wav16(&stereo, 8000, 2);
         let pcm = wav_to_atv_voice_pcm(&wav).unwrap();
         let back: Vec<i16> = pcm
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i16::from_le_bytes(*c))
             .collect();
         assert_eq!(back.len(), 10, "stereo frames collapse to mono samples");
         assert!(back.iter().all(|&s| s == 0), "L+R averaged to silence");
@@ -236,8 +244,10 @@ mod tests {
         w.extend_from_slice(&data);
         let pcm = wav_to_atv_voice_pcm(&w).unwrap();
         let back: Vec<i16> = pcm
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i16::from_le_bytes(*c))
             .collect();
         assert_eq!(back[0], 0);
         assert!(
@@ -266,8 +276,10 @@ mod tests {
         wav.splice(data_pos..data_pos, list);
         let pcm = wav_to_atv_voice_pcm(&wav).unwrap();
         let back: Vec<i16> = pcm
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i16::from_le_bytes(*c))
             .collect();
         assert_eq!(back, samples, "the data chunk is found past the LIST chunk");
     }

@@ -54,6 +54,16 @@ export function isClearEffect(effect: string): boolean {
   return ["", "no_effect", "off", "none"].includes(effect.trim().toLowerCase());
 }
 
+/** The lowest brightness a control ever sends. 0% while "on" is meaningless,
+ * and some controllers misread it — a Nanoleaf takes a 0 with `on: true` as
+ * full brightness — so a slider dragged to the end means "as dim as it goes". */
+export const MIN_BRIGHTNESS = 1;
+
+/** Clamp a control's brightness to [MIN_BRIGHTNESS, 100]. */
+export function clampBrightness(b: number): number {
+  return Math.max(MIN_BRIGHTNESS, Math.min(100, b));
+}
+
 /** The minimal patch to **send** for a control change — only the moved dimension
  * (always with `on: true`, since adjusting a light implies turning it on). The
  * backend applies mode mutual-exclusion and preserves everything else, so we
@@ -61,7 +71,7 @@ export function isClearEffect(effect: string): boolean {
 export function lightWrite(change: LightControlChange): LightState {
   switch (change.field) {
     case "brightness":
-      return { on: true, brightness: change.brightness };
+      return { on: true, brightness: clampBrightness(change.brightness) };
     case "color":
       return { on: true, color: rgbToXy(...hexToRgb(change.hex)) };
     case "temp":
@@ -159,7 +169,7 @@ export function lightOptimistic(
   const s: LightState = { ...(prev ?? { on: false }), on: true };
   switch (change.field) {
     case "brightness":
-      s.brightness = change.brightness;
+      s.brightness = clampBrightness(change.brightness);
       break;
     case "color":
       s.color = rgbToXy(...hexToRgb(change.hex));

@@ -111,7 +111,9 @@ fn default_true() -> bool {
 }
 
 pub(crate) enum SaveRuleOutcome {
-    Ok(Automation),
+    /// Boxed: the saved rule dwarfs the error variants, and `validate_body`
+    /// returns this type as its `Err`.
+    Ok(Box<Automation>),
     NotFound,
     BadRequest(String),
     Db,
@@ -351,7 +353,7 @@ async fn fetch_rule(state: &AppState, id: &str) -> SaveRuleOutcome {
         .fetch_optional(&state.db)
         .await
     {
-        Ok(Some(r)) => SaveRuleOutcome::Ok(row_to_automation(r)),
+        Ok(Some(r)) => SaveRuleOutcome::Ok(Box::new(row_to_automation(r))),
         Ok(None) => SaveRuleOutcome::NotFound,
         Err(e) => {
             tracing::error!("db error fetching sensor rule: {e}");
@@ -2460,7 +2462,7 @@ mod tests {
             let id = id.to_string();
             async move {
                 match fetch_rule(state, &id).await {
-                    SaveRuleOutcome::Ok(r) => r,
+                    SaveRuleOutcome::Ok(r) => *r,
                     _ => unreachable!(),
                 }
             }

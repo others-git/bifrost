@@ -1828,7 +1828,7 @@ function DeviceTile({
   // Write only after the drag stops (on release) — never spam mid-drag.
   const onCommit = (v: number) => {
     queueSlide(() => {
-      if (light) setLightState(light.id, { on: true, brightness: v });
+      if (light) setLightState(light.id, lightWrite({ field: "brightness", brightness: v }));
       else if (mediaDev) setMediaState(mediaDev.id, { volume: v });
     });
   };
@@ -1915,7 +1915,7 @@ function DeviceTile({
         )}
         {showSlider && (
           <div style={{ flex: hideHeader ? 1 : "0 0 60%", minHeight: 33, display: "flex" }}>
-            <InlineSlider fill value={sliderVal} accent={accent} unit={mediaDev ? "" : "%"} onChange={onSlide} onCommit={onCommit} />
+            <InlineSlider fill value={sliderVal} accent={accent} unit={mediaDev ? "" : "%"} min={mediaDev ? 0 : 1} onChange={onSlide} onCommit={onCommit} />
           </div>
         )}
       </div>
@@ -2130,7 +2130,7 @@ function GroupWidget({
     queueCascade(() => {
       // Brightness only — never re-send a member's colour/effect (shared rule).
       for (const l of tLights) {
-        if (l.capabilities.dimmable) setLightState(l.id, { on: true, brightness: v });
+        if (l.capabilities.dimmable) setLightState(l.id, lightWrite({ field: "brightness", brightness: v }));
       }
     });
   };
@@ -2270,7 +2270,7 @@ function GroupWidget({
           <div style={{ flex: hideHeader ? 1 : "0 0 60%", minHeight: 39, display: "flex" }}>
             {domain === "light" ? (
               // The brightness bar takes the bulb colour (like the dot), not the theme accent.
-              <InlineSlider fill value={initBrightness} accent={dotColor} unit="%" onChange={slideBrightnessChange} onCommit={slideBrightnessCommit} />
+              <InlineSlider fill value={initBrightness} accent={dotColor} unit="%" min={1} onChange={slideBrightnessChange} onCommit={slideBrightnessCommit} />
             ) : (
               <InlineSlider fill value={groupVolume} accent={accent} unit="" onChange={slideVolumeChange} onCommit={slideVolumeCommit} />
             )}

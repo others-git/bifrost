@@ -18,8 +18,8 @@ const WOL_PORT: u16 = 9;
 /// MAC repeated 16 times.
 pub fn magic_packet(mac: [u8; 6]) -> [u8; 102] {
     let mut packet = [0xFFu8; 102];
-    for chunk in packet[6..].chunks_exact_mut(6) {
-        chunk.copy_from_slice(&mac);
+    for chunk in packet[6..].as_chunks_mut::<6>().0 {
+        *chunk = mac;
     }
     packet
 }

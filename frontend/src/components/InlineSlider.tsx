@@ -16,6 +16,7 @@ export function InlineSlider({
   unit = "%",
   height = 20,
   fill = false,
+  min = 0,
   onChange,
   onCommit,
 }: {
@@ -26,6 +27,8 @@ export function InlineSlider({
   height?: number;
   /** Fill the parent's height (a tall bar) instead of a fixed height. */
   fill?: boolean;
+  /** Lowest value a drag reports (e.g. 1 for brightness — never 0% while on). */
+  min?: number;
   onChange: (v: number) => void;
   onCommit: (v: number) => void;
 }) {
@@ -34,7 +37,7 @@ export function InlineSlider({
   const dragging = useRef(false);
   const pct = (clientX: number) => {
     const r = ref.current!.getBoundingClientRect();
-    return Math.round(Math.max(0, Math.min(1, (clientX - r.left) / r.width)) * 100);
+    return Math.max(min, Math.round(Math.max(0, Math.min(1, (clientX - r.left) / r.width)) * 100));
   };
   const tall = fill || height >= 40;
   // Vertical-only halo: the bar is full-width, so only the grab height needs

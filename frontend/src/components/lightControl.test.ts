@@ -4,6 +4,7 @@ import {
   commonEffect,
   commonLightEffects,
   isClearEffect,
+  lightOptimistic,
   lightSupports,
   lightWrite,
   roomLightWrite,
@@ -162,5 +163,18 @@ describe("aggregateLightState", () => {
     ]);
     expect(agg.showColor).toBe(true);
     expect(agg.showBrightness).toBe(false);
+  });
+});
+
+describe("brightness floor", () => {
+  it("never sends or paints 0% — a slider at the end means as dim as it goes", () => {
+    expect(lightWrite({ field: "brightness", brightness: 0 })).toEqual({ on: true, brightness: 1 });
+    expect(roomLightWrite({ field: "brightness", brightness: 0 })).toEqual({ brightness: 1 });
+    expect(lightOptimistic({ on: true, brightness: 50 }, { field: "brightness", brightness: 0 }).brightness).toBe(1);
+  });
+
+  it("leaves in-range values alone and caps at 100", () => {
+    expect(lightWrite({ field: "brightness", brightness: 37 })).toEqual({ on: true, brightness: 37 });
+    expect(lightWrite({ field: "brightness", brightness: 140 })).toEqual({ on: true, brightness: 100 });
   });
 });

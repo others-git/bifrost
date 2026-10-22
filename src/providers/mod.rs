@@ -1519,7 +1519,8 @@ pub(crate) mod tests {
     fn hue_uses_sse_mode_all_others_poll() {
         let reg = default_registry();
         assert_eq!(reg.connection_mode("hue"), Some(ConnectionMode::Sse));
-        for t in ["govee"] {
+        {
+            let t = "govee";
             match reg.connection_mode(t) {
                 Some(ConnectionMode::Poll { interval_secs }) => {
                     assert!(interval_secs > 0, "{t}: zero poll interval")

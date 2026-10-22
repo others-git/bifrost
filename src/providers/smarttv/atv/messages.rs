@@ -194,6 +194,30 @@ pub fn remote_key_inject(key_code: u32) -> Vec<u8> {
     msg
 }
 
+/// `RemoteImeBatchEdit{ ime_counter, field_counter, edit_info=[RemoteEditInfo{
+/// insert=1, text_field_status=RemoteImeObject{start, end, value}}] }`
+/// (field 21) — replace the focused text field's contents with `text`, the
+/// way the official remote app types. The TV only applies an edit whose
+/// counters match its current keyboard session (learned from its own
+/// show-request / batch-edit pushes); the cursor lands after the last char.
+pub fn remote_ime_batch_edit(ime_counter: u32, field_counter: u32, text: &str) -> Vec<u8> {
+    let cursor = text.chars().count().saturating_sub(1) as u64;
+    let mut obj = Vec::new();
+    wire::put_varint_field(&mut obj, 1, cursor); // start
+    wire::put_varint_field(&mut obj, 2, cursor); // end
+    wire::put_bytes_field(&mut obj, 3, text.as_bytes()); // value
+    let mut edit = Vec::new();
+    wire::put_varint_field(&mut edit, 1, 1); // insert
+    wire::put_bytes_field(&mut edit, 2, &obj); // text_field_status
+    let mut body = Vec::new();
+    wire::put_varint_field(&mut body, 1, ime_counter as u64);
+    wire::put_varint_field(&mut body, 2, field_counter as u64);
+    wire::put_bytes_field(&mut body, 3, &edit);
+    let mut msg = Vec::new();
+    wire::put_bytes_field(&mut msg, 21, &body);
+    msg
+}
+
 /// What the TV sent on the remote channel (only the parts we react to).
 #[derive(Debug, PartialEq)]
 pub enum RemoteIn {
@@ -212,6 +236,15 @@ pub enum RemoteIn {
     },
     /// Screen state — `remote_start.started` (true = on, false = sleeping).
     Started(bool),
+    /// Keyboard session counters the TV announced — from
+    /// `remote_ime_batch_edit{ime_counter=1, field_counter=2}` (field 21) or
+    /// `remote_ime_show_request{remote_text_field_status=2{counter_field=1}}`
+    /// (field 22, which carries only the field counter). A text edit must echo
+    /// them or the TV ignores it.
+    Ime {
+        ime_counter: Option<u32>,
+        field_counter: Option<u32>,
+    },
     Other,
 }
 
@@ -237,6 +270,21 @@ pub fn parse_remote(body: &[u8]) -> RemoteIn {
         match app {
             Some(pkg) if !pkg.is_empty() => RemoteIn::CurrentApp(pkg),
             _ => RemoteIn::Other,
+        }
+    } else if let Some(edit) = wire::field_bytes(&fields, 21) {
+        let f = wire::parse_fields(edit);
+        // proto3 omits zero fields — an absent counter really is 0.
+        RemoteIn::Ime {
+            ime_counter: Some(wire::field_varint(&f, 1).unwrap_or(0) as u32),
+            field_counter: Some(wire::field_varint(&f, 2).unwrap_or(0) as u32),
+        }
+    } else if let Some(show) = wire::field_bytes(&fields, 22) {
+        let status = wire::field_bytes(&wire::parse_fields(show), 2)
+            .map(wire::parse_fields)
+            .unwrap_or_default();
+        RemoteIn::Ime {
+            ime_counter: None,
+            field_counter: Some(wire::field_varint(&status, 1).unwrap_or(0) as u32),
         }
     } else if let Some(start) = wire::field_bytes(&fields, 40) {
         let started = wire::field_varint(&wire::parse_fields(start), 1) == Some(1);
@@ -282,6 +330,58 @@ mod tests {
         let f = wire::parse_fields(&remote_voice_end(7));
         let end = wire::field_bytes(&f, 32).expect("voice_end");
         assert_eq!(wire::field_varint(&wire::parse_fields(end), 1), Some(7));
+    }
+
+    #[test]
+    fn ime_batch_edit_encodes_counters_and_whole_text() {
+        let body = remote_ime_batch_edit(3, 7, "Projectivity");
+        let f = wire::parse_fields(&body);
+        let edit = wire::parse_fields(wire::field_bytes(&f, 21).expect("field 21"));
+        assert_eq!(wire::field_varint(&edit, 1), Some(3)); // ime_counter
+        assert_eq!(wire::field_varint(&edit, 2), Some(7)); // field_counter
+        let info = wire::parse_fields(wire::field_bytes(&edit, 3).expect("edit_info"));
+        assert_eq!(wire::field_varint(&info, 1), Some(1)); // insert
+        let obj = wire::parse_fields(wire::field_bytes(&info, 2).expect("text_field_status"));
+        assert_eq!(wire::field_bytes(&obj, 3), Some(&b"Projectivity"[..]));
+        assert_eq!(wire::field_varint(&obj, 1), Some(11)); // cursor after the last char
+        assert_eq!(wire::field_varint(&obj, 2), Some(11));
+    }
+
+    #[test]
+    fn parse_ime_counters_from_batch_edit() {
+        let mut edit = Vec::new();
+        wire::put_varint_field(&mut edit, 1, 4);
+        wire::put_varint_field(&mut edit, 2, 9);
+        assert_eq!(
+            parse_remote(&msg(21, &edit)),
+            RemoteIn::Ime {
+                ime_counter: Some(4),
+                field_counter: Some(9)
+            }
+        );
+        // proto3 drops zero fields — an empty edit still names counters 0.
+        assert_eq!(
+            parse_remote(&msg(21, &[])),
+            RemoteIn::Ime {
+                ime_counter: Some(0),
+                field_counter: Some(0)
+            }
+        );
+    }
+
+    #[test]
+    fn parse_field_counter_from_show_request() {
+        let mut status = Vec::new();
+        wire::put_varint_field(&mut status, 1, 5); // counter_field
+        let mut show = Vec::new();
+        wire::put_bytes_field(&mut show, 2, &status);
+        assert_eq!(
+            parse_remote(&msg(22, &show)),
+            RemoteIn::Ime {
+                ime_counter: None,
+                field_counter: Some(5)
+            }
+        );
     }
 
     #[test]

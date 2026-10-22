@@ -265,6 +265,10 @@ pub struct AtvStateCache {
     pub volume_max: Option<u32>,
     pub muted: Option<bool>,
     pub current_app: Option<String>,
+    /// The TV's keyboard session counters (`RemoteIn::Ime`), echoed by a text
+    /// edit. `field_counter` set = the TV has shown a keyboard on this link.
+    pub ime_counter: Option<u32>,
+    pub ime_field_counter: Option<u32>,
 }
 
 struct RemoteLink {
@@ -420,21 +424,74 @@ pub async fn send_key(host: &str, identity: &Identity, key_code: u32) -> Result<
     send_message(host, identity, messages::remote_key_inject(key_code))
 }
 
-/// Type `text` into the TV's focused field by injecting one key event per
-/// character over the persistent remote channel (Android TVs expose no ScalarWeb
-/// text input). Unmappable characters are skipped. Requires a text field to be
-/// focused on the TV — there's no field-focus signal to check, so this is
-/// best-effort, mirroring how a hardware remote's keyboard behaves.
+/// How `send_text` will deliver, given the link's cached keyboard state.
+#[derive(Debug, PartialEq)]
+enum TextPath {
+    /// One `RemoteImeBatchEdit` echoing the TV's keyboard counters — how the
+    /// official remote app types; lands whole, any characters.
+    BatchEdit {
+        ime_counter: u32,
+        field_counter: u32,
+    },
+    /// One key event per mappable character — the fallback when the TV has
+    /// shown no keyboard on this link. The TV's on-screen keyboard generally
+    /// ignores these, so it only helps where a field takes raw key input.
+    Keys,
+}
+
+fn text_path(cache: &AtvStateCache) -> TextPath {
+    match cache.ime_field_counter {
+        Some(field_counter) => TextPath::BatchEdit {
+            ime_counter: cache.ime_counter.unwrap_or(0),
+            field_counter,
+        },
+        None => TextPath::Keys,
+    }
+}
+
+/// Type `text` into the TV's focused field over the persistent remote channel
+/// (Android TVs expose no ScalarWeb text input). Requires a text field to be
+/// focused — the TV announces its keyboard (with the counters an edit must
+/// echo) when one opens, and the text then goes as a single IME batch edit.
+/// With no keyboard seen, falls back to per-character key events (unmappable
+/// characters skipped). Best-effort either way: delivery is not acknowledged.
 pub async fn send_text(host: &str, identity: &Identity, text: &str) -> Result<()> {
-    let codes: Vec<u32> = text.chars().filter_map(super::char_keycode).collect();
-    if codes.is_empty() {
+    if text.is_empty() {
         return Ok(());
     }
-    tracing::debug!(target: "bifrost::smarttv", host, chars = codes.len(), "ATV remote: type text");
-    for code in codes {
-        send_key(host, identity, code).await?;
+    match text_path(&cached_state(host, identity)) {
+        TextPath::BatchEdit {
+            ime_counter,
+            field_counter,
+        } => {
+            tracing::debug!(
+                target: "bifrost::smarttv",
+                host,
+                chars = text.chars().count(),
+                ime_counter,
+                field_counter,
+                "ATV remote: type text (IME batch edit)"
+            );
+            send_message(
+                host,
+                identity,
+                messages::remote_ime_batch_edit(ime_counter, field_counter, text),
+            )
+        }
+        TextPath::Keys => {
+            let codes: Vec<u32> = text.chars().filter_map(super::char_keycode).collect();
+            tracing::debug!(
+                target: "bifrost::smarttv",
+                host,
+                chars = codes.len(),
+                "ATV remote: type text (key events — the TV has shown no keyboard on this link)"
+            );
+            for code in codes {
+                send_key(host, identity, code).await?;
+            }
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 /// Own the persistent connection: (re)connect, run a session until it drops,
@@ -496,6 +553,27 @@ async fn remote_link_actor(
 /// Fold a parsed push into the link's state cache and forward it onto the
 /// event channel (no subscribers = dropped; the cache keeps the latest).
 fn emit(events: &broadcast::Sender<AtvEvent>, state: &Mutex<AtvStateCache>, msg: &RemoteIn) {
+    // Keyboard counters are link state for `send_text`, not a device event.
+    if let RemoteIn::Ime {
+        ime_counter,
+        field_counter,
+    } = msg
+    {
+        let mut cache = state.lock().expect("atv state cache poisoned");
+        if ime_counter.is_some() {
+            cache.ime_counter = *ime_counter;
+        }
+        if field_counter.is_some() {
+            cache.ime_field_counter = *field_counter;
+        }
+        tracing::debug!(
+            target: "bifrost::smarttv",
+            ime_counter = ?cache.ime_counter,
+            field_counter = ?cache.ime_field_counter,
+            "ATV remote: keyboard state"
+        );
+        return;
+    }
     let ev = match msg {
         RemoteIn::CurrentApp(pkg) => AtvEvent::CurrentApp(pkg.clone()),
         RemoteIn::Volume { level, max, muted } => AtvEvent::Volume {
@@ -585,6 +663,71 @@ async fn run_session(
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+
+    #[test]
+    fn text_goes_as_batch_edit_once_the_tv_has_shown_a_keyboard() {
+        let cache = AtvStateCache {
+            ime_counter: Some(2),
+            ime_field_counter: Some(6),
+            ..Default::default()
+        };
+        assert_eq!(
+            text_path(&cache),
+            TextPath::BatchEdit {
+                ime_counter: 2,
+                field_counter: 6
+            }
+        );
+        // A show-request alone names only the field counter; ime defaults to 0.
+        let shown = AtvStateCache {
+            ime_field_counter: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(
+            text_path(&shown),
+            TextPath::BatchEdit {
+                ime_counter: 0,
+                field_counter: 1
+            }
+        );
+    }
+
+    #[test]
+    fn text_falls_back_to_keys_with_no_keyboard_seen() {
+        assert_eq!(text_path(&AtvStateCache::default()), TextPath::Keys);
+    }
+
+    #[test]
+    fn emit_folds_keyboard_counters_into_the_cache_without_an_event() {
+        let (events, mut rx) = broadcast::channel(4);
+        let state = Mutex::new(AtvStateCache::default());
+        emit(
+            &events,
+            &state,
+            &RemoteIn::Ime {
+                ime_counter: Some(3),
+                field_counter: Some(8),
+            },
+        );
+        // A later show-request updates the field counter and keeps the ime counter.
+        emit(
+            &events,
+            &state,
+            &RemoteIn::Ime {
+                ime_counter: None,
+                field_counter: Some(9),
+            },
+        );
+        let cache = state.lock().unwrap().clone();
+        assert_eq!(
+            (cache.ime_counter, cache.ime_field_counter),
+            (Some(3), Some(9))
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "keyboard state is not a device event"
+        );
+    }
 
     /// FULL end-to-end assistant probe: synthesize real speech via a live TTS
     /// endpoint, transcode, and stream it to a real paired TV.

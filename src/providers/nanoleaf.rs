@@ -356,9 +356,11 @@ impl LightProvider for NanoleafProvider {
                 .await;
         }
 
+        // Floor at 1: the controller reads a 0 sent alongside `on: true` as full
+        // brightness, so "as dim as it goes" would flash the panels to max.
         let brightness = state
             .brightness
-            .map(|b| json!({ "value": b.round().clamp(0.0, 100.0) as u32 }));
+            .map(|b| json!({ "value": b.round().clamp(1.0, 100.0) as u32 }));
 
         // Effect is its own endpoint AND Bifrost's third mode. Apply power +
         // brightness first (both stay valid while an effect plays — this is what
@@ -691,6 +693,30 @@ mod tests {
     }
 
     // ── Write mapping ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn set_state_floors_zero_brightness_at_one() {
+        // The controller reads 0 + on:true as FULL brightness — a slider dragged
+        // to the end must dim, never flash the panels to max.
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/tok/state"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let state = LightState {
+            on: true,
+            brightness: Some(0.0),
+            ..Default::default()
+        };
+        NanoleafProvider::new_for_test(server.uri(), "tok")
+            .set_state("main", &state)
+            .await
+            .unwrap();
+        let req = &server.received_requests().await.unwrap()[0];
+        let body: Value = serde_json::from_slice(&req.body).unwrap();
+        assert_eq!(body["brightness"]["value"], 1);
+    }
 
     #[tokio::test]
     async fn set_state_colour_writes_hue_and_sat() {
