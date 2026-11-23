@@ -26,14 +26,18 @@
 //! - `{"system":{"get_sysinfo":{}}}` — name, model, mac, relay state.
 //! - `{"system":{"set_relay_state":{"state":0|1}}}` — the only write.
 //!
-//! One provider row = one physical plug (`provider_id` is always `"main"`),
-//! matching the WLED/Tasmota/Shelly convention. Multi-outlet power strips
-//! (HS300/KP400, whose sysinfo carries a `children` array instead of a
-//! top-level `relay_state`) aren't modeled — flagged, not silently dropped:
-//! `discover` returns a single `PowerDevice` for the strip's overall relay
-//! reporting only if the top-level field is present, and simply won't surface
-//! individual outlets. Extend `Sysinfo`/`discover` with a `children` branch
-//! when a real multi-outlet device needs supporting.
+//! `{"system":{"set_relay_state":{"state":0|1}}}` with a top-level
+//! `"context":{"child_ids":[..]}` addresses one outlet of a multi-outlet strip.
+//!
+//! One provider row = one physical device (`device_ip`). A single-outlet plug
+//! surfaces one `PowerDevice` with `device_id` `"main"`. A **power strip**
+//! (HS300/KP303/KP400/EP40: sysinfo carries a `children` array instead of a
+//! top-level `relay_state`) surfaces one `PowerDevice` per child outlet —
+//! `device_id` is the child's own `id`, named from the child alias, with a
+//! per-outlet `hw_id` (`mac:<strip mac>#<index>`) so outlets don't collide on
+//! the strip's single MAC. On a strip, `"main"` still resolves (to the whole
+//! strip: reads "any outlet on", writes all outlets) so a row stored before
+//! outlets were modelled keeps working as a whole-strip switch.
 
 use crate::models::power::{PowerDevice, PowerKind, PowerState};
 use crate::providers::discovery::{
@@ -108,6 +112,17 @@ struct Sysinfo {
     /// of `mac` — a documented quirk across independent Kasa clients.
     mic_mac: Option<String>,
     relay_state: Option<i64>,
+    /// Present on multi-outlet strips; one entry per socket.
+    #[serde(default)]
+    children: Vec<Child>,
+}
+
+/// One outlet of a power strip.
+#[derive(Debug, Deserialize, Default, Clone)]
+struct Child {
+    id: String,
+    alias: Option<String>,
+    state: Option<i64>,
 }
 
 impl Sysinfo {
@@ -118,8 +133,31 @@ impl Sysinfo {
             .and_then(mac_hw_id)
     }
 
+    /// Whole-device on state: the plug's relay, or "any outlet on" for a strip.
     fn on(&self) -> bool {
-        self.relay_state.unwrap_or(0) != 0
+        if self.children.is_empty() {
+            self.relay_state.unwrap_or(0) != 0
+        } else {
+            self.children.iter().any(|c| c.state.unwrap_or(0) != 0)
+        }
+    }
+
+    /// Stable per-outlet hardware id: the strip MAC alone would collide
+    /// across its outlets, so the outlet index is appended.
+    fn child_hw_id(&self, index: usize) -> Option<String> {
+        self.hw_id().map(|h| format!("{h}#{index}"))
+    }
+
+    /// Every hardware id this device answers to: the device MAC plus each
+    /// outlet's. The identity proof accepts any of them.
+    fn hw_ids(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.hw_id().into_iter().collect();
+        out.extend((0..self.children.len()).filter_map(|i| self.child_hw_id(i)));
+        out
+    }
+
+    fn child(&self, device_id: &str) -> Option<&Child> {
+        self.children.iter().find(|c| c.id == device_id)
     }
 }
 
@@ -127,8 +165,14 @@ fn sysinfo_query() -> serde_json::Value {
     serde_json::json!({"system": {"get_sysinfo": {}}})
 }
 
-fn set_relay_query(on: bool) -> serde_json::Value {
-    serde_json::json!({"system": {"set_relay_state": {"state": i64::from(on)}}})
+/// `set_relay_state`; `child_id` adds the `context.child_ids` that scopes the
+/// write to one outlet of a strip (without it a strip switches every outlet).
+fn set_relay_query(on: bool, child_id: Option<&str>) -> serde_json::Value {
+    let mut q = serde_json::json!({"system": {"set_relay_state": {"state": i64::from(on)}}});
+    if let Some(id) = child_id {
+        q["context"] = serde_json::json!({"child_ids": [id]});
+    }
+    q
 }
 
 /// Send one command over a fresh TCP connection and return the decoded JSON
@@ -233,6 +277,29 @@ impl PowerProvider for KasaProvider {
 
     async fn discover(&self) -> Result<Vec<PowerDevice>> {
         let info = self.sysinfo().await?;
+        if !info.children.is_empty() {
+            let base = info.alias.clone().unwrap_or_else(|| "Kasa Strip".into());
+            return Ok(info
+                .children
+                .iter()
+                .enumerate()
+                .map(|(i, c)| PowerDevice {
+                    id: Uuid::new_v4(),
+                    provider_id: c.id.clone(),
+                    name: c
+                        .alias
+                        .clone()
+                        .filter(|a| !a.is_empty())
+                        .unwrap_or_else(|| format!("{base} {}", i + 1)),
+                    kind: PowerKind::Outlet,
+                    state: PowerState {
+                        on: c.state.unwrap_or(0) != 0,
+                        reachable: Some(true),
+                    },
+                    hw_id: info.child_hw_id(i),
+                })
+                .collect());
+        }
         Ok(vec![PowerDevice {
             id: Uuid::new_v4(),
             // One physical plug per provider entry; stable identifier is "main"
@@ -251,16 +318,24 @@ impl PowerProvider for KasaProvider {
         }])
     }
 
-    async fn get_state(&self, _device_id: &str) -> Result<PowerState> {
+    async fn get_state(&self, device_id: &str) -> Result<PowerState> {
         let info = self.sysinfo().await?;
+        let on = match info.child(device_id) {
+            Some(c) => c.state.unwrap_or(0) != 0,
+            None if device_id == "main" || info.children.is_empty() => info.on(),
+            None => bail!("Kasa outlet {device_id} not found on this strip"),
+        };
         Ok(PowerState {
-            on: info.on(),
+            on,
             reachable: Some(true),
         })
     }
 
-    async fn set_state(&self, _device_id: &str, on: bool) -> Result<()> {
-        let reply = tcp_query(self.addr, &set_relay_query(on), self.timeout).await?;
+    async fn set_state(&self, device_id: &str, on: bool) -> Result<()> {
+        // A plug (or the legacy whole-strip "main") takes an unscoped write;
+        // a strip outlet is addressed by child id.
+        let child = (device_id != "main").then_some(device_id);
+        let reply = tcp_query(self.addr, &set_relay_query(on, child), self.timeout).await?;
         let err_code = reply
             .pointer("/system/set_relay_state/err_code")
             .and_then(|v| v.as_i64());
@@ -477,7 +552,7 @@ impl LanBinding for KasaLanBinding {
             return false;
         };
         match KasaProvider::new_with_addr(addr).sysinfo().await {
-            Ok(info) => info.hw_id().is_some_and(|hw| known_hw.contains(&hw)),
+            Ok(info) => info.hw_ids().iter().any(|hw| known_hw.contains(hw)),
             Err(_) => false,
         }
     }
@@ -594,6 +669,7 @@ mod tests {
     struct MockPlug {
         addr: SocketAddr,
         relay_state: Arc<Mutex<i64>>,
+        kids: Arc<Mutex<[i64; 2]>>,
     }
 
     /// A loopback TCP responder speaking the real wire protocol (length
@@ -602,9 +678,20 @@ mod tests {
     /// and the current relay state, and applies `set_relay_state` for real so
     /// a follow-up `get_sysinfo` reflects it (proving the write took).
     async fn spawn_mock_plug(alias: &str, initial_on: bool) -> MockPlug {
+        spawn_mock(alias, initial_on, false).await
+    }
+
+    /// A 2-outlet strip (`child_ids` honoured; unscoped writes hit every outlet).
+    async fn spawn_mock_strip() -> MockPlug {
+        spawn_mock("Strip", false, true).await
+    }
+
+    async fn spawn_mock(alias: &str, initial_on: bool, strip: bool) -> MockPlug {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let relay_state = Arc::new(Mutex::new(i64::from(initial_on)));
+        let kids = Arc::new(Mutex::new([0i64, 0i64]));
+        let kids_out = kids.clone();
         let state = relay_state.clone();
         let alias = alias.to_string();
         tokio::spawn(async move {
@@ -613,6 +700,7 @@ mod tests {
                     break;
                 };
                 let state = state.clone();
+                let kids = kids.clone();
                 let alias = alias.clone();
                 tokio::spawn(async move {
                     let mut len_buf = [0u8; 4];
@@ -627,7 +715,29 @@ mod tests {
                     let decoded = xor_decode(&body);
                     let cmd: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
 
-                    let reply = if cmd.pointer("/system/get_sysinfo").is_some() {
+                    let reply = if strip && cmd.pointer("/system/get_sysinfo").is_some() {
+                        let k = *kids.lock().await;
+                        serde_json::json!({"system": {"get_sysinfo": {
+                            "alias": alias, "model": "KP400(US)", "mac": "1C:3B:F3:86:3D:8E",
+                            "children": [
+                                {"id": "DEV00", "state": k[0], "alias": "left"},
+                                {"id": "DEV01", "state": k[1], "alias": ""},
+                            ],
+                        }}})
+                    } else if strip && cmd.pointer("/system/set_relay_state").is_some() {
+                        let v = cmd
+                            .pointer("/system/set_relay_state/state")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
+                        let mut k = kids.lock().await;
+                        match cmd.pointer("/context/child_ids/0").and_then(|v| v.as_str()) {
+                            Some("DEV00") => k[0] = v,
+                            Some("DEV01") => k[1] = v,
+                            Some(_) => {}
+                            None => *k = [v, v],
+                        }
+                        serde_json::json!({"system": {"set_relay_state": {"err_code": 0}}})
+                    } else if cmd.pointer("/system/get_sysinfo").is_some() {
                         let on = *state.lock().await;
                         serde_json::json!({"system": {"get_sysinfo": {
                             "alias": alias,
@@ -650,7 +760,11 @@ mod tests {
                 });
             }
         });
-        MockPlug { addr, relay_state }
+        MockPlug {
+            addr,
+            relay_state,
+            kids: kids_out,
+        }
     }
 
     #[tokio::test]
@@ -692,6 +806,84 @@ mod tests {
         // The write is reflected on the NEXT read — not faked client-side.
         let state = provider.get_state("main").await.unwrap();
         assert!(state.on);
+    }
+
+    #[test]
+    fn set_relay_query_scopes_to_a_child_only_when_asked() {
+        let plain = set_relay_query(true, None);
+        assert!(plain.get("context").is_none());
+        let scoped = set_relay_query(false, Some("ABC01"));
+        assert_eq!(scoped["context"]["child_ids"][0], "ABC01");
+        assert_eq!(scoped["system"]["set_relay_state"]["state"], 0);
+    }
+
+    #[test]
+    fn sysinfo_parses_children_and_per_outlet_hw_ids() {
+        let info = parse_sysinfo_reply(serde_json::json!({"system": {"get_sysinfo": {
+            "mac": "1C:3B:F3:86:3D:8E",
+            "children": [{"id": "A00", "state": 0, "alias": "x"}, {"id": "A01", "state": 1}],
+        }}}))
+        .unwrap();
+        assert_eq!(info.children.len(), 2);
+        assert!(info.on(), "strip is on when any outlet is");
+        assert_eq!(info.child_hw_id(1).as_deref(), Some("mac:1c3bf3863d8e#1"));
+        assert_eq!(info.hw_ids().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn strip_discovers_one_device_per_outlet() {
+        let strip = spawn_mock_strip().await;
+        let devices = KasaProvider::new_for_test(strip.addr)
+            .discover()
+            .await
+            .unwrap();
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].provider_id, "DEV00");
+        assert_eq!(devices[0].name, "left");
+        assert_eq!(devices[1].name, "Strip 2", "blank alias falls back");
+        assert_ne!(devices[0].hw_id, devices[1].hw_id);
+        assert_eq!(devices[0].hw_id.as_deref(), Some("mac:1c3bf3863d8e#0"));
+    }
+
+    #[tokio::test]
+    async fn strip_set_state_targets_only_the_named_outlet() {
+        let strip = spawn_mock_strip().await;
+        let p = KasaProvider::new_for_test(strip.addr);
+        p.set_state("DEV01", true).await.unwrap();
+        assert_eq!(*strip.kids.lock().await, [0, 1]);
+        assert!(p.get_state("DEV01").await.unwrap().on);
+        assert!(!p.get_state("DEV00").await.unwrap().on);
+        assert!(p.get_state("nope").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn strip_main_is_the_whole_strip() {
+        let strip = spawn_mock_strip().await;
+        let p = KasaProvider::new_for_test(strip.addr);
+        p.set_state("main", true).await.unwrap();
+        assert_eq!(*strip.kids.lock().await, [1, 1]);
+        assert!(p.get_state("main").await.unwrap().on);
+    }
+
+    #[tokio::test]
+    async fn lan_binding_proves_a_strip_by_outlet_or_device_mac() {
+        use crate::providers::LanBinding as _;
+        let strip = spawn_mock_strip().await;
+        let host = strip.addr.to_string();
+        let creds = serde_json::Map::new();
+        let b = KasaLanBinding;
+        assert!(
+            b.is_same_device(&host, &creds, &["mac:1c3bf3863d8e#1".to_string()])
+                .await
+        );
+        assert!(
+            b.is_same_device(&host, &creds, &["mac:1c3bf3863d8e".to_string()])
+                .await
+        );
+        assert!(
+            !b.is_same_device(&host, &creds, &["mac:1c3bf3863d8f#1".to_string()])
+                .await
+        );
     }
 
     #[tokio::test]
